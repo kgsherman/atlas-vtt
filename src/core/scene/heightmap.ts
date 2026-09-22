@@ -1,7 +1,9 @@
-import type { GridSettings, Heightmap } from "./types"
-
-// Decoded arrays are cached per heightmap object (heightmaps are immutable once in the doc).
-const decodeCache = new WeakMap<Heightmap, Float32Array>()
+/**
+ * Chunked terrain heights (see Heightmap in ./types). One terrain surface definition is used
+ * everywhere (sampling, occlusion heightfields, render meshes): each lattice quad is split into
+ * two triangles along the diagonal from sample (sx, sz) to (sx+1, sz+1).
+ */
+import { HEIGHTMAP_CHUNK_CELLS, type GridSettings, type Heightmap, type Rect } from "./types"
 
 export function bytesToBase64(bytes: Uint8Array): string {
   let binary = ""
@@ -19,64 +21,177 @@ export function base64ToBytes(b64: string): Uint8Array {
   return out
 }
 
-export function encodeHeights(heights: Float32Array): string {
-  // Float32Array is little-endian on every platform browsers run on.
-  return bytesToBase64(new Uint8Array(heights.buffer, heights.byteOffset, heights.byteLength))
+/** Samples per chunk edge. */
+export function chunkSamples(resolution: number): number {
+  return HEIGHTMAP_CHUNK_CELLS * resolution
 }
 
-export function decodeHeights(hm: Heightmap): Float32Array {
-  let arr = decodeCache.get(hm)
-  if (!arr) {
-    const bytes = base64ToBytes(hm.data)
-    arr = new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4)
-    decodeCache.set(hm, arr)
+/** Feet between samples. */
+export function sampleSpacing(cellSize: number, resolution: number): number {
+  return cellSize / resolution
+}
+
+/** Sample counts covering the grid extent (inclusive of the far edge). */
+export function sampleCounts(grid: Pick<GridSettings, "width" | "depth">, resolution: number): { samplesX: number; samplesZ: number } {
+  return { samplesX: grid.width * resolution + 1, samplesZ: grid.depth * resolution + 1 }
+}
+
+// Decoded chunks are cached by their base64 string: identical strings decode identically, and
+// history keeps many heightmap objects alive, so keying by object identity would not help.
+const CHUNK_CACHE_LIMIT = 512
+const chunkCache = new Map<string, Float32Array>()
+
+export function decodeChunk(b64: string, resolution: number): Float32Array {
+  const hit = chunkCache.get(b64)
+  if (hit) {
+    chunkCache.delete(b64)
+    chunkCache.set(b64, hit)
+    return hit
+  }
+  const n = chunkSamples(resolution)
+  const bytes = base64ToBytes(b64)
+  const arr = bytes.byteLength === n * n * 4 ? new Float32Array(bytes.buffer, bytes.byteOffset, n * n) : new Float32Array(n * n)
+  chunkCache.set(b64, arr)
+  if (chunkCache.size > CHUNK_CACHE_LIMIT) {
+    const oldest = chunkCache.keys().next().value
+    if (oldest !== undefined) chunkCache.delete(oldest)
   }
   return arr
 }
 
-export function createHeightmap(grid: GridSettings, resolution = 2): Heightmap {
-  const samplesX = grid.width * resolution + 1
-  const samplesZ = grid.depth * resolution + 1
-  return {
-    resolution,
-    samplesX,
-    samplesZ,
-    data: encodeHeights(new Float32Array(samplesX * samplesZ)),
-  }
+export function encodeChunk(samples: Float32Array): string {
+  return bytesToBase64(new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength))
 }
 
-export function makeHeightmap(resolution: number, samplesX: number, samplesZ: number, heights: Float32Array): Heightmap {
-  return { resolution, samplesX, samplesZ, data: encodeHeights(heights) }
+export function chunkKey(ci: number, cj: number): string {
+  return `${ci},${cj}`
 }
 
-/** Bilinear sample of the heightmap at world x,z (feet, relative to level elevation). 0 outside. */
+export function parseChunkKey(key: string): { ci: number; cj: number } {
+  const [ci, cj] = key.split(",").map(Number)
+  return { ci, cj }
+}
+
+export function createHeightmap(resolution: Heightmap["resolution"] = 2): Heightmap {
+  return { resolution, chunks: {} }
+}
+
+/** Height (feet, relative to level elevation) of lattice sample (sx, sz). 0 for missing chunks. */
+export function getSample(hm: Heightmap, sx: number, sz: number): number {
+  const n = chunkSamples(hm.resolution)
+  const ci = Math.floor(sx / n)
+  const cj = Math.floor(sz / n)
+  const b64 = hm.chunks[chunkKey(ci, cj)]
+  if (!b64) return 0
+  const arr = decodeChunk(b64, hm.resolution)
+  return arr[(sz - cj * n) * n + (sx - ci * n)]
+}
+
+/**
+ * Terrain height at world x,z (relative to level elevation), interpolated on the triangle
+ * split described at the top of this file. 0 outside the lattice or with no heightmap.
+ */
 export function sampleHeight(hm: Heightmap | null, cellSize: number, x: number, z: number): number {
   if (!hm) return 0
-  const h = decodeHeights(hm)
-  const spacing = cellSize / hm.resolution
-  const fx = x / spacing
-  const fz = z / spacing
-  if (fx < 0 || fz < 0 || fx > hm.samplesX - 1 || fz > hm.samplesZ - 1) return 0
-  const x0 = Math.min(Math.floor(fx), hm.samplesX - 2)
-  const z0 = Math.min(Math.floor(fz), hm.samplesZ - 2)
-  const tx = fx - x0
-  const tz = fz - z0
-  const i00 = z0 * hm.samplesX + x0
-  const h00 = h[i00]
-  const h10 = h[i00 + 1]
-  const h01 = h[i00 + hm.samplesX]
-  const h11 = h[i00 + hm.samplesX + 1]
-  return (h00 * (1 - tx) + h10 * tx) * (1 - tz) + (h01 * (1 - tx) + h11 * tx) * tz
+  const s = sampleSpacing(cellSize, hm.resolution)
+  const fx = x / s
+  const fz = z / s
+  if (fx < 0 || fz < 0) return 0
+  const sx = Math.floor(fx)
+  const sz = Math.floor(fz)
+  const tx = fx - sx
+  const tz = fz - sz
+  const h00 = getSample(hm, sx, sz)
+  const h11 = getSample(hm, sx + 1, sz + 1)
+  if (tx >= tz) {
+    const h10 = getSample(hm, sx + 1, sz)
+    return h00 + tx * (h10 - h00) + tz * (h11 - h10)
+  }
+  const h01 = getSample(hm, sx, sz + 1)
+  return h00 + tz * (h01 - h00) + tx * (h11 - h01)
+}
+
+/** Dense copy of the whole lattice (samplesX × samplesZ, row-major by z). */
+export function denseHeights(hm: Heightmap, grid: Pick<GridSettings, "width" | "depth">): { samplesX: number; samplesZ: number; heights: Float32Array } {
+  const { samplesX, samplesZ } = sampleCounts(grid, hm.resolution)
+  const heights = new Float32Array(samplesX * samplesZ)
+  const n = chunkSamples(hm.resolution)
+  for (const [key, b64] of Object.entries(hm.chunks)) {
+    const { ci, cj } = parseChunkKey(key)
+    const arr = decodeChunk(b64, hm.resolution)
+    for (let lz = 0; lz < n; lz++) {
+      const sz = cj * n + lz
+      if (sz >= samplesZ) break
+      for (let lx = 0; lx < n; lx++) {
+        const sx = ci * n + lx
+        if (sx >= samplesX) break
+        heights[sz * samplesX + sx] = arr[lz * n + lx]
+      }
+    }
+  }
+  return { samplesX, samplesZ, heights }
+}
+
+/**
+ * Write a dense lattice back into chunks, re-encoding only the chunks overlapping `dirty`
+ * (a world-space rect; omit to rewrite everything). All-zero chunks are dropped.
+ */
+export function writeHeights(
+  hm: Heightmap,
+  grid: Pick<GridSettings, "width" | "depth" | "cellSize">,
+  dense: Float32Array,
+  dirty?: Rect
+): Heightmap {
+  const res = hm.resolution
+  const { samplesX, samplesZ } = sampleCounts(grid, res)
+  const n = chunkSamples(res)
+  const s = sampleSpacing(grid.cellSize, res)
+  const chunksX = Math.ceil(samplesX / n)
+  const chunksZ = Math.ceil(samplesZ / n)
+  let ci0 = 0
+  let cj0 = 0
+  let ci1 = chunksX - 1
+  let cj1 = chunksZ - 1
+  if (dirty) {
+    ci0 = Math.max(0, Math.floor(Math.floor(dirty.x / s) / n))
+    cj0 = Math.max(0, Math.floor(Math.floor(dirty.z / s) / n))
+    ci1 = Math.min(chunksX - 1, Math.floor(Math.ceil((dirty.x + dirty.w) / s) / n))
+    cj1 = Math.min(chunksZ - 1, Math.floor(Math.ceil((dirty.z + dirty.d) / s) / n))
+  }
+  const chunks = { ...hm.chunks }
+  for (let cj = cj0; cj <= cj1; cj++) {
+    for (let ci = ci0; ci <= ci1; ci++) {
+      const arr = new Float32Array(n * n)
+      let nonZero = false
+      for (let lz = 0; lz < n; lz++) {
+        const sz = cj * n + lz
+        if (sz >= samplesZ) break
+        for (let lx = 0; lx < n; lx++) {
+          const sx = ci * n + lx
+          if (sx >= samplesX) break
+          const v = dense[sz * samplesX + sx]
+          arr[lz * n + lx] = v
+          if (v !== 0) nonZero = true
+        }
+      }
+      const key = chunkKey(ci, cj)
+      if (nonZero) chunks[key] = encodeChunk(arr)
+      else delete chunks[key]
+    }
+  }
+  return { resolution: res, chunks }
 }
 
 export function heightRange(hm: Heightmap | null): { min: number; max: number } {
   if (!hm) return { min: 0, max: 0 }
-  const h = decodeHeights(hm)
-  let min = Infinity
-  let max = -Infinity
-  for (let k = 0; k < h.length; k++) {
-    if (h[k] < min) min = h[k]
-    if (h[k] > max) max = h[k]
+  let min = 0
+  let max = 0
+  for (const b64 of Object.values(hm.chunks)) {
+    const arr = decodeChunk(b64, hm.resolution)
+    for (let k = 0; k < arr.length; k++) {
+      if (arr[k] < min) min = arr[k]
+      if (arr[k] > max) max = arr[k]
+    }
   }
   return { min, max }
 }

@@ -42,6 +42,7 @@ export const newId = (): Id => nanoid(12)
 
 export function defaultEnvironment(): Environment {
   return {
+    skyLevel: "dark",
     ambientLevel: "dark",
     ambientColor: "#8090b0",
     ambientIntensity: 0.12,
@@ -52,7 +53,6 @@ export function defaultEnvironment(): Environment {
       elevation: Math.PI * 0.3,
       color: "#9fb4ff",
       intensity: 0.35,
-      castsShadows: true,
       grants: "dim",
     },
     backgroundColor: "#0b0d10",
@@ -71,26 +71,33 @@ export function createLevel(partial: Partial<Level> = {}): Level {
   }
 }
 
-export function createScene(partial: Partial<Pick<Scene, "name">> & { width?: number; depth?: number } = {}): Scene {
+/**
+ * A new scene has one ground level covered by a single floor (floors are what tokens stand on
+ * and what blocks sight between levels; there is no implicit ground).
+ */
+export function createScene(partial: Partial<Pick<Scene, "name">> & { width?: number; depth?: number; groundFloor?: boolean } = {}): Scene {
   const now = new Date().toISOString()
-  return {
+  const width = partial.width ?? 40
+  const depth = partial.depth ?? 30
+  const ground = createLevel()
+  const scene: Scene = {
     schemaVersion: SCENE_SCHEMA_VERSION,
     id: newId(),
     name: partial.name ?? "Untitled Scene",
     createdAt: now,
     updatedAt: now,
-    grid: {
-      cellSize: DEFAULT_CELL_SIZE,
-      width: partial.width ?? 40,
-      depth: partial.depth ?? 30,
-      diagonalRule: "5-5-5",
-    },
+    grid: { cellSize: DEFAULT_CELL_SIZE, width, depth, diagonalRule: "5-5-5" },
     environment: defaultEnvironment(),
-    levels: [createLevel()],
+    levels: { [ground.id]: ground },
     objects: {},
     tokens: {},
     meta: { description: "", author: "", tags: [] },
   }
+  if (partial.groundFloor !== false) {
+    const floor = createFloor(ground.id, { x: 0, z: 0, w: width * DEFAULT_CELL_SIZE, d: depth * DEFAULT_CELL_SIZE }, "grass")
+    scene.objects[floor.id] = floor
+  }
+  return scene
 }
 
 export function createFloor(levelId: Id, rect: Rect, material: FloorObject["material"] = "stone"): FloorObject {
@@ -122,6 +129,9 @@ export function createDoor(wall: WallObject, offset: number, partial: Partial<Do
     height: Math.min(DEFAULT_DOOR_HEIGHT, wall.height),
     state: "closed",
     style: "wood",
+    leaves: "single",
+    hinge: "start",
+    swing: 1,
     ...partial,
   }
 }
@@ -200,15 +210,15 @@ export function createToken(levelId: Id, position: Vec2, partial: Partial<Token>
   return {
     id: newId(),
     name: "Token",
+    label: null,
     kind: "pc",
     levelId,
     position,
     size,
     eyeHeight: body.eyeHeight,
     height: body.height,
-    vision: { type: "normal", range: 60 },
+    vision: { darkvision: 0, blindsight: 0, blind: false },
     speed: 30,
-    ownerIds: [],
     color: TOKEN_COLORS[tokenColorCursor++ % TOKEN_COLORS.length],
     imageUrl: null,
     hidden: false,

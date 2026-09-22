@@ -1,118 +1,206 @@
+import type { Patch } from "immer"
+
+import type { MoveRejectReason, PathStep } from "../movement/types"
 import type {
+  ConnectorObject,
+  DoorObject,
   DoorState,
+  DoorStyle,
   Environment,
+  FloorObject,
   GridSettings,
   Id,
-  Level,
+  LightObject,
+  PillarObject,
+  PropObject,
   Scene,
-  SceneObject,
   Token,
+  VisionSettings,
+  WallObject,
+  WindowObject,
 } from "../scene/types"
-import type { PathStep } from "../movement/types"
-import type { EncodedMask } from "../vision/types"
+import type { EncodedGrades, EncodedMask } from "../vision/types"
 
-// ---------------------------------------------------------------------------
-// Authoritative host state (lives only in the DM's browser + session_state table)
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// Player-facing (wire) types — ALLOWLISTS. Build them field by field in filter.ts, never by spread.
+// ===========================================================================
 
-export interface SessionPlayer {
-  userId: string
-  displayName: string
-  color: string
-  /** Tokens this player may move (mirrors token.ownerIds for convenience). */
-  tokenIds: Id[]
-  /** Per-player movement lock (in addition to the global lock). */
-  movementLocked: boolean
+export type PlayerFloor = Pick<FloorObject, "id" | "type" | "levelId" | "rect" | "material" | "thickness">
+export type PlayerWall = Pick<WallObject, "id" | "type" | "levelId" | "a" | "b" | "height" | "thickness" | "material">
+export type PlayerDoor = Pick<DoorObject, "id" | "type" | "levelId" | "wallId" | "offset" | "width" | "height" | "leaves" | "hinge" | "swing"> & {
+  /** "locked" is reported as "closed". */
+  state: Exclude<DoorState, "locked">
+  /** Secret doors are only ever sent once revealed, and then as "wood". */
+  style: Exclude<DoorStyle, "secret">
+}
+export type PlayerWindow = Pick<WindowObject, "id" | "type" | "levelId" | "wallId" | "offset" | "width" | "sillHeight" | "height">
+export type PlayerConnector = Pick<ConnectorObject, "id" | "type" | "levelId" | "style" | "toLevelId" | "rect" | "direction" | "material">
+export type PlayerPillar = Pick<PillarObject, "id" | "type" | "levelId" | "position" | "shape" | "size" | "height" | "material">
+export type PlayerProp = Pick<PropObject, "id" | "type" | "levelId" | "kind" | "position" | "rotationY" | "scale" | "color" | "blocksSight" | "castsShadows">
+/**
+ * Lights are always sent RESOLVED: levelId = the light's current level, position relative to that
+ * level's ground at (x, z) — attachment is never sent.
+ */
+export type PlayerLight = Pick<LightObject, "id" | "type" | "levelId" | "position" | "color" | "intensity" | "brightRadius" | "dimRadius" | "flicker" | "on" | "castsShadows"> & {
+  /** true: feeds the renderer's light list. false: memory fixture, drawn as a fixture only. */
+  emitting: boolean
 }
 
-export interface GameState {
-  sessionId: string
-  roomCode: string
-  /** Live working copy of the scene: tokens move, doors open, lights toggle. */
-  scene: Scene
-  players: Record<string, SessionPlayer>
-  movementLocked: boolean
-  /** When true, every player sees through every PC token owned by any player in the session. */
-  sharedVision: boolean
-  enforceSpeed: boolean
-  /** Persistent explored masks per player per level. */
-  explored: Record<string, Record<Id, EncodedMask>>
-  /** Last-seen (sanitised) state of objects per player, for fog-of-war memory. */
-  memory: Record<string, Record<Id, SceneObject>>
-  /** Monotonic state counter. */
-  seq: number
+export type PlayerObject =
+  | PlayerFloor
+  | PlayerWall
+  | PlayerDoor
+  | PlayerWindow
+  | PlayerConnector
+  | PlayerPillar
+  | PlayerProp
+  | PlayerLight
+
+export type PlayerToken = Pick<Token, "id" | "levelId" | "position" | "size" | "height" | "color" | "imageUrl"> & {
+  label: string | null
+  /** Only for tokens the player controls or sees through (visionTokenIds). */
+  name?: string
+  eyeHeight?: number
+  vision?: VisionSettings
+  speed?: number
 }
 
-// ---------------------------------------------------------------------------
-// What a player receives. Built ONLY by core/session/filter.ts.
-// ---------------------------------------------------------------------------
+export interface PlayerLevel {
+  id: Id
+  /** false = stub for a level referenced by a sent connector or own token but not explored. */
+  known: boolean
+  name: string | null
+  elevation: number
+  height: number
+  floorThickness: number
+  /** Heightmap resolution when the level has terrain (chunks travel in PlayerView.terrain). */
+  terrainResolution: 1 | 2 | 4 | null
+}
 
 export interface PlayerSceneInfo {
-  id: Id
   name: string
   grid: GridSettings
   environment: Environment
-  levels: Level[]
+  levels: Record<Id, PlayerLevel>
 }
 
 export interface PlayerLevelMasks {
-  visible: EncodedMask
+  perception: EncodedGrades
   explored: EncodedMask
+  sunlit: EncodedMask
 }
 
+export const PLAYER_VIEW_VERSION = 1 as const
+
 export interface PlayerView {
+  viewVersion: typeof PLAYER_VIEW_VERSION
   sessionId: string
   userId: string
-  seq: number
   scene: PlayerSceneInfo
-  objects: Record<Id, SceneObject>
-  tokens: Record<Id, Token>
+  /**
+   * Objects the player has observed, in their last-observed state, CLIPPED to explored cells.
+   * Wall and floor pieces have deterministic ids `${sourceId}@${x},${z}` (their first corner);
+   * openings reference the piece they sit on and their offset is rebased onto it.
+   */
+  objects: Record<Id, PlayerObject>
+  tokens: Record<Id, PlayerToken>
+  /** levelId → chunkKey → base64 Float32 chunk; samples touching no explored cell are zero. */
+  terrain: Record<Id, Record<string, string>>
   masks: Record<Id, PlayerLevelMasks>
   controlledTokenIds: Id[]
   /** Tokens whose eyes this player sees through (own + party when shared vision). */
   visionTokenIds: Id[]
   flags: {
+    /** Effective for this player (global lock OR per-player lock). */
     movementLocked: boolean
     sharedVision: boolean
     enforceSpeed: boolean
-    hostOnline: boolean
   }
 }
 
-// ---------------------------------------------------------------------------
-// Wire protocol
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// Authoritative host state (DM browser + session_state table)
+// ===========================================================================
+
+export interface SessionPlayer {
+  userId: string
+  displayName: string
+  color: string
+  /** Per-player movement lock (in addition to the global lock). */
+  movementLocked: boolean
+}
+
+export const GAME_STATE_VERSION = 1 as const
+
+export interface GameState {
+  stateVersion: typeof GAME_STATE_VERSION
+  sessionId: string
+  roomCode: string
+  /** THE live scene during a session (editor edits apply here as patches). */
+  scene: Scene
+  players: Record<string, SessionPlayer>
+  /** Single source of token control: tokenId → user ids. */
+  owners: Record<Id, string[]>
+  movementLocked: boolean
+  /** Party vision: players owning ≥ 1 PC token see through all PC tokens owned by such players. */
+  sharedVision: boolean
+  enforceSpeed: boolean
+  /** Persistent explored masks: userId → levelId → mask. */
+  explored: Record<string, Record<Id, EncodedMask>>
+  /** Last-observed sanitised objects (whole, unclipped): userId → objectId → object. */
+  memory: Record<string, Record<Id, PlayerObject>>
+  /** Secret doors revealed to a player: userId → door ids. */
+  revealed: Record<string, Id[]>
+  /** Internal monotonic counter (never on the wire). */
+  seq: number
+}
+
+// ===========================================================================
+// Wire protocol (see ARCHITECTURE §6)
+// ===========================================================================
 
 /** Path-based patch op produced by diffViews(); path segments index into PlayerView. */
-export type PatchOp =
-  | { op: "set"; path: string[]; value: unknown }
-  | { op: "del"; path: string[] }
+export type PatchOp = { op: "set"; path: string[]; value: unknown } | { op: "del"; path: string[] }
+
+export type DoorRejectReason = "cannot" | "locked"
+export type RejectReason = MoveRejectReason | DoorRejectReason | "rate-limited" | "invalid"
+
+export interface RequestResult {
+  reqId: string
+  ok: boolean
+  reason?: RejectReason
+  /** For moves: number of steps actually applied (legal prefix). */
+  applied?: number
+}
 
 /**
- * player → host, sent on topic `session:{sid}:req:{uid}`.
- * The host derives the sender from the topic (RLS guarantees only {uid} can send there),
- * never from the payload.
+ * player → host on topic `session:{sid}:req:{uid}`. The sender is the {uid} of the topic
+ * (RLS guarantees only that user can write there) — never a payload field.
  */
 export type ClientToHost =
-  | { t: "hello"; lastSeq: number | null }
+  | { t: "hello"; nonce: string; epoch: string | null; lastSeq: number | null }
   | { t: "move"; reqId: string; tokenId: Id; path: PathStep[] }
   | { t: "door"; reqId: string; doorId: Id; action: "open" | "close" }
-  | { t: "resync" }
 
-/** host → player, sent on topic `session:{sid}:view:{uid}`. */
+/**
+ * host → player on topic `session:{sid}:view:{uid}`. `epoch` changes on every host start;
+ * `seq` is a per-player view counter. A client applies a patch only if epoch matches and
+ * baseSeq === its current seq; otherwise it sends hello.
+ */
 export type HostToClient =
-  | { t: "snapshot"; seq: number; view: PlayerView }
-  | { t: "patch"; seq: number; baseSeq: number; ops: PatchOp[] }
-  | { t: "snapshot_ready"; seq: number }
-  | { t: "result"; reqId: string; ok: boolean; reason?: string }
+  | { t: "snapshot"; epoch: string; seq: number; view: PlayerView; nonce?: string; results?: RequestResult[] }
+  | { t: "snapshot_ready"; epoch: string; seq: number; nonce?: string }
+  | { t: "patch"; epoch: string; baseSeq: number; seq: number; ops: PatchOp[]; nonce?: string; results?: RequestResult[] }
+  | { t: "sync"; epoch: string; seq: number }
+  | { t: "result"; epoch: string; seq: number; result: RequestResult }
   | { t: "kicked"; reason: string }
 
-/** host → everyone, on topic `session:{sid}:lobby` (non-secret only). */
-export type LobbyMessage =
-  | { t: "status"; hostOnline: boolean; sceneName: string }
+/** host → everyone on topic `session:{sid}:host` (DM-only writers). Host liveness = DM presence there. */
+export type HostBroadcast =
+  | { t: "status"; epoch: string; sceneName: string }
   | { t: "ended" }
 
-/** Commands the DM issues directly to the host state (not over the wire). */
+/** Commands the DM issues directly to the host state (never over the wire). */
 export type DmCommand =
   | { t: "move-token"; tokenId: Id; levelId: Id; x: number; z: number }
   | { t: "set-door"; doorId: Id; state: DoorState }
@@ -121,10 +209,12 @@ export type DmCommand =
   | { t: "set-shared-vision"; enabled: boolean }
   | { t: "set-enforce-speed"; enabled: boolean }
   | { t: "assign-token"; tokenId: Id; userId: string; assigned: boolean }
-  | { t: "set-token-hidden"; tokenId: Id; hidden: boolean }
-  | { t: "upsert-token"; token: Token }
-  | { t: "remove-token"; tokenId: Id }
-  | { t: "replace-scene"; scene: Scene }
+  | { t: "reveal-object"; objectId: Id; userId?: string }
+  /** Editor edits during a live session (immer patches against GameState.scene). */
+  | { t: "apply-scene-patches"; patches: Patch[] }
+  /** Switch to a different map; resets explored/memory/revealed. */
+  | { t: "load-scene"; scene: Scene }
   | { t: "add-player"; userId: string; displayName: string }
   | { t: "remove-player"; userId: string }
+  | { t: "rebind-player"; fromUserId: string; toUserId: string }
   | { t: "reset-fog"; userId?: string }
