@@ -63,6 +63,8 @@ export interface ViewState {
   hostMasks: Record<Id, HostLevelMasks>
   /** Per-pixel GPU line-of-sight refinement inside host-perceived cells (off on the low tier). */
   gpuVisionRefine: boolean
+  /** Tokens drawn darkened (DM preview: not visible to the previewed token). */
+  dimmedTokenIds: Id[]
   /** Player camera tilt from vertical, radians (0 = straight down). */
   tilt: number
   /** Editor-only helpers (light radius gizmos, connector arrows, hidden objects outlined). */
