@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local battlemap images for testing (large, third-party art)
+test_maps/

@@ -29,15 +29,34 @@ export function levelById(scene: Levels, id: Id): Level | undefined {
   return Object.hasOwn(scene.levels, id) ? scene.levels[id] : undefined
 }
 
-const sortedCache = new WeakMap<object, Level[]>()
+interface SortedMemo {
+  out: Level[]
+  /** Elevation of each entry of `out` when memoised. */
+  elevations: number[]
+}
 
-/** Levels ordered by (elevation, id). Memoised on the identity of scene.levels. */
-export function sortedLevels(scene: Levels): Level[] {
-  let out = sortedCache.get(scene.levels)
-  if (!out) {
-    out = Object.values(scene.levels).sort((a, b) => a.elevation - b.elevation || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-    sortedCache.set(scene.levels, out)
+const sortedCache = new WeakMap<object, SortedMemo>()
+
+/**
+ * A memo is only trusted if scene.levels still holds exactly the same level objects with the same
+ * elevations: immer drafts and plain mutable scenes keep the identity of `levels` while levels are
+ * added, removed or moved, so identity alone would return a stale order. O(levels) per call.
+ */
+function memoValid(levels: Record<Id, Level>, memo: SortedMemo): boolean {
+  if (Object.keys(levels).length !== memo.out.length) return false
+  for (let k = 0; k < memo.out.length; k++) {
+    const l = memo.out[k]
+    if (!Object.hasOwn(levels, l.id) || levels[l.id] !== l || l.elevation !== memo.elevations[k]) return false
   }
+  return true
+}
+
+/** Levels ordered by (elevation, id). Memoised on the identity of scene.levels (validated, see memoValid). */
+export function sortedLevels(scene: Levels): Level[] {
+  const memo = sortedCache.get(scene.levels)
+  if (memo && memoValid(scene.levels, memo)) return memo.out
+  const out = Object.values(scene.levels).sort((a, b) => a.elevation - b.elevation || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  sortedCache.set(scene.levels, { out, elevations: out.map((l) => l.elevation) })
   return out
 }
 

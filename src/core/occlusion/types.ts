@@ -23,7 +23,11 @@ export interface OrientedBox extends PrimitiveBase {
   shape: "box"
   center: Vec3
   halfExtents: Vec3
-  /** Rotation about +Y, radians. */
+  /**
+   * Rotation about +Y, radians, in the three.js convention (`Object3D.rotation.y`,
+   * `Matrix4.makeRotationY`): local +X maps to world (cos yaw, 0, −sin yaw), local +Z to
+   * (sin yaw, 0, cos yaw). render/occluders builds its instance matrices the same way.
+   */
   yaw: number
 }
 
@@ -36,10 +40,12 @@ export interface VerticalCylinder extends PrimitiveBase {
 }
 
 /**
- * A floor slab with terrain on top, for one floor object (sourceId = floor id). Heights are world Y
- * of the top surface on the lattice (same triangle split as core/scene/heightmap). The solid is
- * [surface − thickness, surface] over the lattice cells flagged in `solid` (cells inside the floor's
- * effective rects), i.e. a closed volume.
+ * A floor slab with terrain on top, for one floor object (sourceId = floor id, sourceType "terrain";
+ * floors on levels without a heightmap are boxes with sourceType "floor"). Heights are world Y of the
+ * top surface on the lattice (same triangle split as core/scene/heightmap). The solid is
+ * [surface − thickness, surface] over the lattice cells flagged in `solid` (cells whose centre lies
+ * inside the floor's effective rects), i.e. a closed volume.
+ * Arrays are row-major by z then x: heights[sz·samplesX + sx], solid[cz·(samplesX − 1) + cx].
  */
 export interface Heightfield extends PrimitiveBase {
   shape: "heightfield"

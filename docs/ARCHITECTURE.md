@@ -37,6 +37,7 @@ src/
   net/                  Supabase client, auth, repositories, transports, host runner (+ vision worker), player client
   components/           React + shadcn UI (app shell, editor panels, play HUD, lobby)
   routes/               Page-level components
+  integration/          Cross-module consistency tests (render ↔ occlusion, vision ↔ movement, host → player, editor → session)
 supabase/migrations/    SQL: schema, RLS, RPCs, realtime policies
 ```
 
@@ -57,14 +58,24 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
   connectors. `createScene()` adds a full-grid floor to the first level.
 - **Ceiling** of level N = underside of the slabs of the level above (`levelCeilingY`).
 - Object Y values are relative to the ground at the object's anchor. Extended objects on terrain
-  (the "Terrain rule"):
+  (the "Terrain rule"). Here "ground" is the **terrain** ground `levelGround` = elevation + heightmap
+  (NOT `groundHeightAt`'s stairs interpolation, or a wall along a stair run would float):
   - Floor slab: top = ground surface (displaced by the heightmap), bottom = top − thickness.
   - Wall: base = ground at the wall midpoint; wall top, opening heights, sills and lintels measure from
-    that base. The box bottom extends down to the minimum ground along its footprint − 0.05 ft.
+    that base. The box bottom extends down to the minimum ground along its joint-extended footprint − 0.05 ft
+    (exact minimum over the terrain triangles).
   - Pillars/props resting on the ground (`y = 0`): top = ground(centre) + y + height; bottom = min ground
-    over the footprint. Lights follow the ground under their x,z.
+    over the footprint. Stairs/ramp occluder bottoms: min lower-level ground over the rect − 0.05 ft.
+  - Lights and tokens follow `groundHeightAt` (so a torch or token on a stair run rises with it).
+  `render/builders` (walls.ts, ground.ts) and `core/occlusion` (build.ts, terrain.ts) implement these rules
+  independently and identically; `src/integration` checks they agree on the sample scenes.
 - **Walls** are segments centred on a→b; at shared endpoints (within 1e-3 ft) both ends extend by
-  thickness/2 so corners have no notch (in both render and occlusion).
+  thickness/2 so corners have no notch (in both render and occlusion). Only endpoint–endpoint contacts form
+  joints (a T-junction stem is not extended; it already reaches the other wall's centreline).
+- **Cell rasterisation** (`core/grid`: `supercoverCells`, `segmentCellIntervals`, `cellsInCircle`,
+  `cellsInConvexPolygon`) treats cells as CLOSED with an eps tolerance: a segment on a grid line reports the
+  cells on both sides, and `t0 === t1` intervals are touch-only contacts. Anything that must not dilate
+  (the player filter's clipping) additionally requires positive-area overlap.
 - **Openings** (doors/windows) are hosted by a wall (`wallId`, `offset` centre along a→b, `width`).
   Deleting a wall deletes its openings; moving/flipping/splitting a wall reprojects them (`core/scene/integrity`).
 - **Connectors**: `rect` is cell-aligned. Stairs/ramps: tokens on the run stay on the lower level with
@@ -99,12 +110,24 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
 ## 3. Scene document & versioning
 
 - Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 1`.
-- `core/scene/schema.ts`: zod **strict** schemas for the current version with bounds (grid ≤ 200×200,
-  ≤ 20k objects, strings ≤ 2k, `dimRadius ≥ brightRadius`, wall thickness > 0, heightmap resolution ∈
-  {1,2,4}, chunk keys `^\d+,\d+$`, chunk byte length exact, coordinates within extent ± margin).
-- `core/scene/migrations.ts`: migrations operate on unknown JSON with frozen per-version schemas.
-  `parseScene(json)` → `{ok:true, scene}` | `{ok:false, error:'too-new'|'invalid', issues}`; `too-new` opens read-only.
-  `parseScene` also runs `validateReferences` (integrity).
+- `core/scene/schema.ts`: zod **strict** schemas (`z.strictObject` at every depth) for the current version,
+  with the bounds exported as `SCENE_LIMITS`:
+  - grid ≤ 200×200 integer cells, cell size 0.5–100 ft; 1–32 levels, ≤ 20k objects, ≤ 1000 tokens (counted
+    on the raw input before per-entry validation); strings ≤ 2k; every number finite;
+  - ids `^[A-Za-z0-9_-]{1,64}$` and never `"__proto__"` (every id generator must use this alphabet;
+    `factory.newId` / nanoid does); record keys must equal the entry's id;
+  - `dimRadius ≥ brightRadius`, wall thickness > 0 and length ≥ 0.01 ft, `#rrggbb` colours,
+    `imageUrl` http(s) or an absolute path, |elevation| and object y ≤ 1000 ft;
+  - points and rects within the grid extent ± 50 ft (`coordMargin`); connector rects cell-aligned, ladders
+    exactly 1×1 cell; attached-light offsets ≤ 50 ft;
+  - heightmap resolution ∈ {1,2,4}; chunk keys canonical `^(0|[1-9]\d*),(0|[1-9]\d*)$` and inside the grid's
+    chunk range; exact base64 / byte length; finite samples within ±500 ft.
+- `core/scene/migrations.ts`: migrations (`MIGRATIONS[v]`: vN → vN+1) operate on unknown JSON (deep-copied
+  first). `parseScene(json)` → `{ok:true, scene, migratedFrom}` | `{ok:false, error:'too-new'|'invalid', issues}`
+  (≤ 50 issues); `too-new` opens read-only. `parseScene` also runs `validateReferences` (integrity);
+  `parseSceneJson(text)` wraps JSON syntax errors as `invalid`.
+- The editor never commits a revision `parseScene` would refuse (`editor/validate.ts`, see §7), so every
+  saved version can be reopened.
 - Heightmaps are chunked (8×8 cells per chunk, base64 Float32) so edits, undo patches and network diffs touch
   only dirty chunks.
 - Storage: `scenes` + immutable `scene_versions` in Supabase; `.atlas.json` export/import; import regenerates `Scene.id`.
@@ -132,8 +155,9 @@ Per fragment, in one forward pass:
    Receiver rules for the GPU LOS test (surface class baked per vertex by builders, `aSurf`):
    - walkable (floors, terrain, connector tops): test point `p + (0, 0.25, 0)` (matches CPU samples);
    - vertical faces: require `dot(n, eye − p) > 0`; test point `p − n·0.05`;
-   - caps (tops of walls, doors, pillars, props with n.y > 0.7): test point `p − n·0.1 + horiz(eye − p)·0.1`,
-     and the host-mask lookup uses `p.xz + horiz(eye − p)·0.6` (the cell on the viewer's side);
+   - caps (tops of walls, doors, pillars, props with n.y > 0.7): test point `p − n·0.25 + horiz(eye − p)·0.1`
+     (0.25 keeps it clear of the top edge at the viewer atlas' texel size), and the host-mask lookup uses
+     `p.xz + horiz(eye − p)·0.6` (the cell on the viewer's side);
    - a fragment passes if `|q − eye| ≤ stored(q) + 0.05` with the normal-offset rule of §4.2.
    Host-mask lookups for non-walkable fragments use `p.xz + n.xz·0.3` (the cell a face faces).
 4. **Fog**: perceived → lit colour (grey/tinted per grade); else explored (host explored mask) → memory
@@ -154,12 +178,16 @@ direction D"), stored as octahedral linear-distance maps:
 - **Light atlas**: R32F 4096×2048, 512² tiles → 32 shadowed lights (low tier 2048×1024 / 256²).
 - **Viewer atlas**: R32F 4096×2048, 1024² tiles → `MAX_VIEWERS = 8` (low tier: GPU refinement off).
 - Render targets: `FloatType, RedFormat, depthBuffer:false, Nearest, no mipmaps`; each tile write sets
-  viewport + scissor (`scissorTest`), autoClear off. Cube pass: 256² R32F faces with depth, cleared to 1e6.
+  viewport + scissor (`scissorTest`), autoClear off. Cube pass: R32F faces with depth, cleared to 1e6
+  (256² for lights, 512² for viewers).
 - Encoding axis −Y (seams go to the upward hemisphere, hidden by cutaway); the re-encode pass fills a 1-texel
   guard ring with the octahedral wrap, and takes the MIN of 4 cube taps per texel (conservative).
 - Occluder proxies are rendered **BackSide** (second-depth) as closed volumes; camera near 0.05 ft.
   Compare `|q − src| ≤ stored(q) + 0.05` with receiver normal offset `q = p + n·k·d`,
   `k = 1.5·sqrt(4π)/(tileTexels − 2)`. Source-containing primitives are excluded via a per-instance key.
+  Exception, caps (SURF.CAP) for light / sky / sun tests: `q = p − n·0.03` (just inside their own solid) with a
+  strict comparison `|q − src| < stored(q) − 0.01`, because a cap touching the underside of the next storey's
+  slab lies exactly on that slab's stored back face and the outward offset would read it as lit.
 - Each tile stores its **capture origin**; the shader measures from it (a moving source lags until refreshed).
 - Update priority: (a) sources that moved (the locally controlled/selected token's tile always, even over
   budget), (b) dirty viewer tiles, (c) on-screen lights by coverage, (d) rest. Budget: `SHADOW_UPDATES_PER_FRAME`
@@ -167,6 +195,9 @@ direction D"), stored as octahedral linear-distance maps:
   or an `OcclusionWorld.update` dirty region intersects its sphere. Occluder proxies follow authoritative door
   state instantly (only the visual leaf animates). Lights beyond the tile budget are **not drawn** (never unshadowed).
 - Sun/moon: static cached `DepthTexture` (2048², ortho over the scene bounds), re-rendered on occluder or sun change.
+  A second vertical map (1024², looking down) gives sky exposure for the `skyLevel`/`ambientLevel` split. It
+  drives the visual fill only outside player fog mode (the player's scene lacks unexplored roofs); in fog mode
+  the GPU perception refinement reads it only as an upper bound, which can never remove perception wrongly.
 
 ### 4.3 Levels, cutaway, ghosts, draw order
 
@@ -175,7 +206,10 @@ direction D"), stored as octahedral linear-distance maps:
   `occluderScene` built from `OcclusionWorld.primitives` (instanced unit boxes / 16-sided prisms per
   (level, channel mask) + closed heightfield meshes; layers LIGHT=1, SIGHT=2), `matrixWorldAutoUpdate=false`.
 - **DM modes** use the full scene. **Player mode** has only the scene rebuilt from its PlayerView
-  (`viewToScene`); unexplored geometry is absent, which is why fog and sun are clamped by host masks.
+  (`viewToScene`); unexplored geometry is absent, which is why fog and sun are clamped by host masks, and why
+  the clear colour is black (not `environment.backgroundColor`) whenever vision is "fog".
+  `/dev/render.html?mode=player&pipeline=1` renders exactly what a player is sent (GameState → vision →
+  `updateKnowledge` → `filterForPlayer` → `viewToScene`).
 - Player / dm-play: levels above the active level are not drawn (cutaway). Sent tokens on levels above are
   drawn as faded outline markers. Draw order: `renderOrder` = rank by descending elevation (active level first)
   so lower storeys are early-Z rejected; nested containers are plain `Object3D`, not `Group`.
@@ -207,7 +241,21 @@ walls split around openings (window sill + lintel pieces; closed-door leaves per
 joints, floors as boxes (flat levels) or one `Heightfield` per floor (levels with a heightmap), stepped boxes
 under stairs/ramps, pillars (box/cylinder), prop parts (box/cylinder, scaled, rotated). A 2D uniform grid
 (5 ft) over XZ accelerates queries (DDA + mailboxing). `update(scene, changedIds)` and
-`updateTerrain(scene, levelId, rect)` rebuild incrementally and return dirty regions.
+`updateTerrain(scene, levelId, rect)` rebuild incrementally (a wall brings its openings and the neighbours
+whose joints change, an opening its host wall only if its span changed, a connector the floors it cuts) and
+return dirty regions only for primitives whose value changed; a change of levels/grid rebuilds everything.
+
+- Conventions shared with the GPU proxies (`render/occluders`): `OrientedBox.yaw` is three.js `rotation.y`
+  (`Matrix4.makeRotationY`): local +X maps to world `(cos yaw, 0, −sin yaw)`. Heightfield arrays are row-major
+  by z then x: `heights[sz·samplesX + sx]` (world Y), `solid[cz·(samplesX−1) + cx]`, same triangle split as
+  `core/scene/heightmap`.
+- Primitive keys (stable across rebuilds; `sourceType` in brackets): walls `${wallId}` (first full-height piece),
+  `${wallId}#after:${openingId}`, `${wallId}#lintel:${openingId}`, `${wallId}#sill:${openingId}` [wall]; closed door
+  leaf `${doorId}` [door]; window movement box `${windowId}` [window]; flat-level floor boxes `${floorId}`,
+  `${floorId}#k` [floor]; heightmap-level floor heightfield `${floorId}` [terrain]; stairs/ramp rows
+  `${connectorId}` / `${connectorId}#k` (row k from the bottom edge) [connector]; pillar `${pillarId}`; prop parts
+  `${propId}`, `${propId}#i` [prop]. On heightmap levels a lattice cell is solid when its centre lies in an
+  effective floor rect (exact for grid-aligned floors).
 
 ### 5.2 Vision (`core/vision`)
 
@@ -216,7 +264,11 @@ an upward sight raycast), then pushed out of any containing sight blocker it did
 
 **Samples**: per cell, centre + 4 points inset `VISION_SAMPLE_INSET` (0.75 ft) from the cell edges, at
 `groundHeightAt + 0.25`. A (level, cell) is **sampleable** only if an effective floor / heightfield / connector
-footprint covers the sample on that level. Samples inside a sight blocker P count as seen via a side probe (the
+footprint covers the sample on that level (stairs/ramps and ladders on their lower level; ladder cells and the
+top row of a stairs/ramp run also on the level they arrive at, at that level's ground, so the opening is seen
+from above). Every cell a token can stand on (`hasGroundAt`) is sampleable at the same height (checked in
+`src/integration`; on heightmap levels up to the floor's lattice rasterisation).
+Samples inside a sight blocker P count as seen via a side probe (the
 ray first hits P → its entry point, pulled back 0.1 ft, is the probe point) or a top probe
 (`top(P) + 0.25`, if below the next ceiling).
 
@@ -250,9 +302,13 @@ and memory, so corridors walked past are explored.
 
 A path is a list of `PathStep {cell (anchor), levelId}` starting at the token's current anchor. Each step is to
 an 8-neighbour anchor on the same level, a ladder switch in place, or a stairs top-edge crossing. The token's
-footprint square, shrunk by a 0.35 ft clearance (so a medium token fits a 4 ft door), is swept along the step
-against movement blockers on the relevant level; diagonals may not cut corners. Every target footprint needs
-ground (`hasGroundAt`). The host applies the **legal prefix** ("bump into a wall") and replies
+footprint square, shrunk by a 0.6 ft clearance per side (`MOVE_CLEARANCE`: a medium token sweeps 3.8 ft, so it
+fits the default 4 ft door and passes 0.5 ft walls on its cell edges; a large token does not fit a 4 ft door),
+is swept along the step against movement blockers on the relevant level (plus the upper level near a stair top)
+whose vertical extent overlaps [ground + 0.5 ft step-up, ground + body height]; diagonals may not cut corners.
+Blockers the token already overlaps at the start are ignored (like occlusion's entry rule). Every target
+footprint needs ground (`hasGroundAt` at every footprint cell centre). The host applies the **legal prefix**
+("bump into a wall") and replies
 `{ok:false, reason, applied}`; if the failing step's cell is not perceived by that player the reason is
 reported as `blocked`. Distances use `grid.diagonalRule`; speed only when the DM enforces it. Paths > 256 steps
 are rejected.
@@ -286,11 +342,13 @@ exists (or became hidden) are deleted. Everything else is unchanged — DM edits
 
 | Topic                        | INSERT (send)                          | SELECT (receive)          | Carries |
 |------------------------------|----------------------------------------|---------------------------|---------|
-| `session:{sid}:req:{uid}`    | that player (active member), broadcast | DM                        | ClientToHost |
+| `session:{sid}:req:{uid}`    | that player (active member), broadcast | DM + that player (active) | ClientToHost |
 | `session:{sid}:view:{uid}`   | DM, broadcast                          | that player (active) + DM | HostToClient |
 | `session:{sid}:host`         | DM, broadcast + presence               | active members + DM       | HostBroadcast; DM presence = host online |
 | `session:{sid}:lobby`        | active members, presence only          | active members + DM       | who's online (display only) |
 
+Realtime only lets a client join a private channel it may READ, so the player also has SELECT on its own
+req topic (it joins with `broadcast.self = false`; only it can write there, so nothing is exposed).
 The sender of a request is the `{uid}` in its topic, never a payload field. Membership comes from
 `session_members` (host re-reads it on start and on lobby presence changes), never from presence payloads.
 
@@ -319,6 +377,8 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
     `${id}@${x},${z}`; openings re-parented (`wallId` = piece, `offset` rebased). Connectors, pillars, props:
     whole or nothing. Secret doors are omitted unless `revealed[uid]` contains them (auto-revealed when observed
     open, or by `reveal-object`) and then sent as style "wood"; the host wall renders solid without them.
+    Props never carry `blocksMovement` (DM-only); `viewToScene` assumes the `PROP_LIBRARY` default, so a
+    client path preview can differ from the host's validation for props whose flag the DM changed.
   - **lights**: static lights from memory with `emitting = (in illuminatingLightIds)`; attached lights only while
     their carrier token is in the view (resolved position, `emitting = on`). Never `attachedTokenId`.
   - **tokens**: controlled + vision tokens always; others only while in `visibleTokenIds`; never hidden. Other
@@ -350,10 +410,11 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
   applied, on snapshot/epoch change, or after 5 s ("DM not responding").
 - Channel supervisor: CHANNEL_ERROR/TIMED_OUT → `realtime.setAuth()` then built-in rejoin; unexpected CLOSED →
   remove and recreate with backoff.
-- Persistence (fenced by epoch RPCs): `save_session_state(sid, epoch, state)` throttled ~5 s + immediately after
+- Persistence (fenced by epoch RPCs): `save_session_state(sid, host_epoch, state)` throttled ~5 s + immediately after
   DM commands that reduce what players may see (hide token, remove token, reset fog, scene edits) + best-effort on
-  `visibilitychange→hidden`; `upsert_player_view(sid, uid, epoch, seq, view)` throttled ≤ 5 s and awaited before
-  `snapshot_ready`.
+  `visibilitychange→hidden`; `upsert_player_view(sid, uid, host_epoch, epoch, seq, view)` throttled ≤ 5 s and awaited
+  before `snapshot_ready`. `host_epoch` (bigint, from `claim_host`) is the database fence (a stale host gets
+  `stale_epoch`); `epoch` (text) is the wire epoch stored with the view so a reloading client can match it.
 
 ### 6.4 Database & RLS (`supabase/migrations`)
 
@@ -371,10 +432,13 @@ Tables (RLS enabled on every table; default privileges revoke anon; functions re
 
 Helpers in schema `private` (`security definer`, `set search_path = ''`, stable): `topic_sid()`, `topic_kind()`,
 `topic_uid()` (regex-validated parsing of `realtime.topic()`), `is_session_dm(sid)` (from `sessions.dm_id` only),
-`is_active_member(sid)`. RPCs (`security definer`, `search_path=''`, execute granted to authenticated only; return
-ids/booleans, never whole rows): `create_session(scene_id)` (owner check, copies the scene into session_state,
+`is_active_member(sid)`. RPCs (`security definer` unless noted, `search_path=''`, execute granted to authenticated
+only; return ids/booleans/small records, never whole rows; errors carry a stable MESSAGE code mapped by
+`net/supabase.ts`): `create_scene`, `save_scene_version` (optimistic `p_base_version`), `set_scene_visibility`,
+`set_display_name` (`security invoker`: own profile row under RLS), `create_session(scene_id)` (owner check, copies the scene into session_state,
 generates an 8-char Crockford room code), `join_session(room_code, display_name)`, `session_info(sid)`,
-`list_session_members(sid)` (DM), `set_member_status(sid, uid, status)` (DM), `claim_host(sid)`,
+`list_session_members(sid)` (DM; `security invoker`: it reads only rows the DM's RLS already allows),
+`set_member_status(sid, uid, status)` (DM), `claim_host(sid)`,
 `save_session_state`, `upsert_player_view`, `end_session(sid)`, `get_shared_scene(slug)`.
 Realtime: `realtime.messages` policies per the §6.1 table, checking `extension` ('broadcast'/'presence').
 Dashboard settings (not SQL): enable anonymous sign-ins; disable Realtime "Allow public access".
@@ -392,8 +456,16 @@ Dashboard settings (not SQL): enable anonymous sign-ins; disable Realtime "Allow
 - Heightmap brush: decode dense heights on pointerdown, paint into a scratch array, preview via
   `engine.previewTerrain`, commit once on pointerup writing only dirty chunks (one undo step).
 - Integrity (`core/scene/integrity.ts`): `deleteWithDependents`, `copySelection` / `pasteClipboard` (fresh ids via
-  idMap, remap level, drop orphan openings or snap to the wall under the pointer, connector target = level above,
-  detach lights whose token wasn't copied), `reprojectOpenings`, `validateReferences`.
+  idMap, remap level by relative order (`AtlasClipboard.levelOffsets`), drop orphan openings or re-host them on
+  the wall under the pointer (`opts.hostWallId`, placed via `openingCenters`), connector target = level above,
+  detach lights whose token wasn't copied), `reprojectOpenings`, `splitWall(draft, wallId, distance)` (for a wall-splitting tool),
+  `validateReferences`. `deleteWithDependents` allows deleting the last level; `removeLevel` in the store keeps
+  at least one.
+- Document guard (`editor/validate.ts`): `apply()` validates what each edit's patches touched (touched objects /
+  tokens plus their host walls, openings and carriers, all levels without terrain; everything after a grid
+  change) with the strict schema and `validateReferences`, and refuses the edit (`[]` / `false`, reason in
+  `lastRejected`) if the document would no longer load: e.g. content dragged, nudged or pasted beyond the extent
+  ± 50 ft, a grid shrunk under objects, out-of-range numbers or strings.
 - Snapping: cell centre / vertex / half / free, plus wall endpoints and wall centrelines for the wall tool.
 - "Preview player view": pick a token → render mode player with masks computed locally by core/vision
   (explored = currently perceived, no memory).

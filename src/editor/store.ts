@@ -1,0 +1,1075 @@
+/**
+ * DM editor state (docs/ARCHITECTURE.md §7): the working Scene, selection, active level, tool and
+ * tool settings, snapping, view options, clipboard and undo/redo.
+ *
+ * Every document change goes through `apply(recipe, label)` → immer produceWithPatches → core/history.
+ * Undo/redo apply the recorded patches. Tools group gestures (drags, strokes) in transactions that
+ * commit as one undo step.
+ *
+ * Live sessions: `setPatchSink(fn)` forwards every document patch (apply, undo, redo, cancelled
+ * transactions) to the host, which applies it to GameState.scene (DmCommand "apply-scene-patches");
+ * the local scene is updated too, and `syncScene()` adopts the host's scene after play actions.
+ * `setPlaySink(fn)` routes play actions (door state, light on/off, token drags/nudges) to the host as
+ * DmCommands instead of document edits, so they never enter undo.
+ */
+import { applyPatches, current, produceWithPatches, type Draft, type Patch } from "immer"
+import { createStore, type StoreApi } from "zustand/vanilla"
+
+import type { SnapMode } from "@/core/grid/grid"
+import { createHistory, type HistoryOptions, type HistoryState } from "@/core/history"
+import { createLevel, createScene } from "@/core/scene/factory"
+import { chunkSamples, parseChunkKey, sampleCounts } from "@/core/scene/heightmap"
+import {
+  copySelection as copyItems,
+  deleteWithDependents,
+  openingFits,
+  pasteClipboard,
+  reprojectOpenings,
+  type AtlasClipboard,
+} from "@/core/scene/integrity"
+import { groundHeightAt, lightLevelId, lightWorldPosition, sortedLevels, wallLength } from "@/core/scene/queries"
+import { SCENE_LIMITS } from "@/core/scene/schema"
+import type {
+  DirectionalLightSettings,
+  DoorState,
+  Environment,
+  GridSettings,
+  Id,
+  Level,
+  Scene,
+  SceneMeta,
+  SceneObject,
+  Token,
+  Vec2,
+} from "@/core/scene/types"
+import type { DmCommand } from "@/core/session/types"
+import type { SceneChange, ViewState } from "@/render/contracts"
+
+import { browserClipboard, parseClipboardText, serializeClipboard, validatePastedItems, type SystemClipboard } from "./clipboard"
+import { sceneChangeFromPatches } from "./sceneChange"
+import {
+  BRUSH_RADIUS_MAX,
+  BRUSH_RADIUS_MIN,
+  DEFAULT_SNAP_MODE,
+  defaultToolSettings,
+  defaultViewOptions,
+  type EditorViewOptions,
+  type ToolSettings,
+} from "./settings"
+import { effectiveSnapMode } from "./snapping"
+import type { ToolId } from "./tools/types"
+import { alignDelta, applyMove, applyRotation, planMove, rotateQuarter, rotationPivot, type MovePlan } from "./transform"
+import { validateEdit } from "./validate"
+
+export type SceneRecipe = (draft: Draft<Scene>) => void
+
+export type PatchSource = "apply" | "undo" | "redo" | "cancel"
+export type PatchSink = (patches: Patch[], meta: { label: string; source: PatchSource }) => void
+export type PlaySink = (command: DmCommand) => void
+
+export type SelectMode = "replace" | "add" | "toggle" | "remove"
+
+/** Partial edit of any object type (id and type are immutable). */
+export type ObjectUpdate = {
+  [K in SceneObject["type"]]: Partial<Omit<Extract<SceneObject, { type: K }>, "id" | "type">>
+}[SceneObject["type"]]
+
+export type TokenUpdate = Partial<Omit<Token, "id">>
+export type LevelUpdate = Partial<Omit<Level, "id">>
+export type EnvironmentUpdate = Partial<Omit<Environment, "directional">> & { directional?: Partial<DirectionalLightSettings> }
+export type GridUpdate = Partial<Pick<GridSettings, "width" | "depth" | "diagonalRule">>
+
+export interface ApplyOptions {
+  /** Merge with the previous undo step when it has the same key (slider drags, repeated nudges). */
+  coalesceKey?: string
+}
+
+export interface PasteOptions {
+  /** Where the clipboard's origin lands (default: in place on another level, one cell down-right on the same level). */
+  at?: Vec2
+  /** Wall under the pointer: openings copied without their wall are re-hosted on it. */
+  hostWallId?: Id
+  /** Paste this clipboard instead of the stored one. */
+  clipboard?: AtlasClipboard
+}
+
+export type PasteTextResult = { ok: true; ids: Id[] } | { ok: false; issues: string[] }
+
+export interface EditorState {
+  // ---- document -----------------------------------------------------------
+  scene: Scene
+  /** A scene from a newer schema version is opened read-only: apply() is a no-op. */
+  readOnly: boolean
+  /** Increments on every document change (apply, undo, redo, load, sync). */
+  revision: number
+  /** What the last document change touched (null after load/sync: diff or rebuild everything). */
+  lastChange: SceneChange | null
+  /** Unsaved changes since load / markSaved(). */
+  dirty: boolean
+  /**
+   * The last edit that was refused because the document would no longer load (validateEdit: e.g.
+   * content moved outside the scene extent, a grid shrunk under objects). Cleared by the next change.
+   */
+  lastRejected: { label: string; issues: string[] } | null
+  history: HistoryState
+  /** A patch sink is attached (live session). */
+  live: boolean
+  /** A play sink is attached: door/light toggles and token moves are sent as DmCommands, not edits. */
+  playActions: boolean
+
+  // ---- editor UI state ----------------------------------------------------
+  selection: Id[]
+  activeLevelId: Id
+  tool: ToolId
+  toolSettings: ToolSettings
+  snapMode: SnapMode
+  /** Alt held: placement is free regardless of snapMode. */
+  altHeld: boolean
+  view: EditorViewOptions
+  clipboard: AtlasClipboard | null
+
+  // ---- document plumbing --------------------------------------------------
+  /**
+   * Run `recipe` on a draft and commit the result as one undo step. Returns the patches, or [] when
+   * nothing changed or the result was refused by validateEdit (see `lastRejected`). EditRejected
+   * errors thrown by the recipe itself propagate.
+   */
+  apply(recipe: SceneRecipe, label: string, opts?: ApplyOptions): Patch[]
+  /** Open a transaction (one undo step for a whole gesture). Returns its id (nested calls join). */
+  beginTransaction(label: string): number
+  commitTransaction(): void
+  /** Revert everything applied since beginTransaction and record nothing. */
+  cancelTransaction(): void
+  /** Undo (or, while a transaction is open, cancel it). Returns whether anything changed. */
+  undo(): boolean
+  redo(): boolean
+  loadScene(scene: Scene, opts?: { readOnly?: boolean }): void
+  newScene(opts?: Parameters<typeof createScene>[0]): void
+  /** Adopt a scene changed outside the editor (live host state) without touching history. */
+  syncScene(scene: Scene): void
+  markSaved(): void
+  setPatchSink(sink: PatchSink | null): void
+  setPlaySink(sink: PlaySink | null): void
+
+  // ---- levels -------------------------------------------------------------
+  addLevel(partial?: Partial<Level>, opts?: { activate?: boolean }): Id | null
+  updateLevel(id: Id, partial: LevelUpdate): boolean
+  removeLevel(id: Id): boolean
+  clearTerrain(levelId: Id): void
+  setActiveLevel(id: Id): void
+  /** +1 = the level above, −1 = the level below. */
+  stepActiveLevel(delta: number): void
+
+  // ---- objects / tokens ---------------------------------------------------
+  addObject(object: SceneObject, label?: string): Id
+  addToken(token: Token, label?: string): Id
+  /**
+   * Edit an object; returns false (and changes nothing) when the result would be invalid. Walls
+   * reproject their openings; lights keep their world position when detached from a token.
+   */
+  updateObject(id: Id, partial: ObjectUpdate, opts?: ApplyOptions): boolean
+  updateToken(id: Id, partial: TokenUpdate, opts?: ApplyOptions): boolean
+  /** Delete objects/tokens and their dependents (openings of walls, attached lights are detached). */
+  deleteIds(ids: Id[], label?: string): void
+  setDoorState(id: Id, state: DoorState): void
+  toggleLight(id: Id): void
+  setLightOn(id: Id, on: boolean): void
+  updateEnvironment(partial: EnvironmentUpdate, opts?: ApplyOptions): void
+  updateGrid(partial: GridUpdate): void
+  updateSceneInfo(partial: { name?: string; meta?: Partial<SceneMeta> }): void
+
+  // ---- selection ----------------------------------------------------------
+  select(ids: Id[], mode?: SelectMode): void
+  toggleSelected(id: Id): void
+  clearSelection(): void
+  /** Everything on the active level that is not editor-locked. */
+  selectAll(): void
+  deleteSelection(): number
+  duplicateSelection(): Id[]
+  copySelection(): AtlasClipboard | null
+  cutSelection(): AtlasClipboard | null
+  paste(opts?: PasteOptions): Id[]
+  /** Paste untrusted clipboard text (system clipboard / paste event); validated before it is committed. */
+  pasteText(text: string, opts?: Omit<PasteOptions, "clipboard">): PasteTextResult
+  /** Read the system clipboard (when available) and paste it; falls back to the in-memory clipboard. */
+  pasteFromSystem(opts?: Omit<PasteOptions, "clipboard">): Promise<PasteTextResult>
+  nudgeSelection(dx: number, dz: number): void
+  /** Rotate the selection by quarter turns (+90° about +Y each; negative = the other way). */
+  rotateSelection(quarterTurns?: number): void
+  /**
+   * Move tokens as a play action when a play sink is attached (DmCommand "move-token"), else as a
+   * document edit. Used by token drags so live sessions never put token moves in undo.
+   */
+  moveTokens(moves: { id: Id; position: Vec2; levelId?: Id }[], label?: string): void
+
+  // ---- tools, snapping, view ----------------------------------------------
+  setTool(tool: ToolId): void
+  setToolSettings<K extends keyof ToolSettings>(tool: K, partial: Partial<ToolSettings[K]>): void
+  /** Multiply the brush radius (clamped). */
+  scaleBrushRadius(factor: number): void
+  setSnapMode(mode: SnapMode): void
+  setAltHeld(held: boolean): void
+  setView(partial: Partial<EditorViewOptions>): void
+  toggleGrid(): void
+  toggleHelpers(): void
+  toggleGhostAdjacent(): void
+  setLevelVisibility(id: Id, visible: boolean): void
+  toggleLevelVisibility(id: Id): void
+}
+
+export type EditorStore = StoreApi<EditorState>
+
+export interface CreateEditorStoreOptions {
+  scene?: Scene
+  history?: HistoryOptions
+  /** System clipboard (default: navigator.clipboard when available; null disables it). */
+  systemClipboard?: SystemClipboard | null
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const hasOwn = (o: object, k: string) => Object.hasOwn(o, k)
+
+export function itemExists(scene: Scene, id: Id): boolean {
+  return hasOwn(scene.objects, id) || hasOwn(scene.tokens, id)
+}
+
+/** The level an object or token is on (attached lights: their carrier's level). */
+export function itemLevelId(scene: Scene, id: Id): Id | null {
+  if (hasOwn(scene.tokens, id)) return scene.tokens[id].levelId
+  if (!hasOwn(scene.objects, id)) return null
+  const o = scene.objects[id]
+  return o.type === "light" ? lightLevelId(scene, o) : o.levelId
+}
+
+/** The ground-ish level: elevation closest to 0 (ties → the lower one). */
+export function defaultActiveLevel(scene: Scene): Id {
+  const levels = sortedLevels(scene)
+  let best = levels[0]
+  for (const l of levels) if (Math.abs(l.elevation) < Math.abs(best.elevation)) best = l
+  return best?.id ?? ""
+}
+
+/** Keep `id` if it exists in `next`, else the level of `next` nearest in elevation to where it was. */
+function resolveActiveLevel(next: Scene, id: Id, prev: Scene): Id {
+  if (hasOwn(next.levels, id)) return id
+  const levels = sortedLevels(next)
+  if (levels.length === 0) return ""
+  const elevation = hasOwn(prev.levels, id) ? prev.levels[id].elevation : 0
+  let best = levels[0]
+  for (const l of levels) if (Math.abs(l.elevation - elevation) < Math.abs(best.elevation - elevation)) best = l
+  return best.id
+}
+
+const sameIds = (a: readonly Id[], b: readonly Id[]) => a.length === b.length && a.every((id, k) => id === b[k])
+
+/**
+ * Connectors must lead to an existing, higher level. After level edits, retarget broken ones to the
+ * level directly above their own, or delete them when there is none.
+ */
+export function repairConnectors(draft: Scene): void {
+  const levels = sortedLevels(draft)
+  for (const o of Object.values(draft.objects)) {
+    if (o.type !== "connector") continue
+    const from = hasOwn(draft.levels, o.levelId) ? draft.levels[o.levelId] : undefined
+    const to = hasOwn(draft.levels, o.toLevelId) ? draft.levels[o.toLevelId] : undefined
+    if (from && to && to.elevation > from.elevation) continue
+    const k = levels.findIndex((l) => l.id === o.levelId)
+    const above = k >= 0 ? levels[k + 1] : undefined
+    if (from && above && above.elevation > from.elevation) o.toLevelId = above.id
+    else delete draft.objects[o.id]
+  }
+}
+
+class EditRejected extends Error {
+  readonly issues: string[]
+  constructor(issues: string[]) {
+    super(issues.join("; "))
+    this.issues = issues
+  }
+}
+
+/**
+ * Enforce per-type invariants after an edit (inside a recipe). Throws EditRejected when the edit
+ * cannot be made valid (the recipe is then discarded by immer).
+ */
+function normalizeObject(draft: Scene, o: SceneObject): void {
+  if (!hasOwn(draft.levels, o.levelId)) throw new EditRejected([`level "${o.levelId}" does not exist`])
+  const s = draft.grid.cellSize
+  switch (o.type) {
+    case "wall":
+      if (!(o.thickness > 0)) throw new EditRejected(["wall thickness must be > 0"])
+      if (wallLength(o) < 0.01) throw new EditRejected(["wall is too short"])
+      break
+    case "door":
+    case "window": {
+      const host = hasOwn(draft.objects, o.wallId) ? draft.objects[o.wallId] : undefined
+      if (!host || host.type !== "wall") throw new EditRejected(["opening has no host wall"])
+      const len = wallLength(host)
+      if (o.width > len + 1e-9) throw new EditRejected(["opening is wider than its wall"])
+      o.offset = Math.min(Math.max(o.offset, o.width / 2), len - o.width / 2)
+      if (!openingFits(len, o.offset, o.width)) throw new EditRejected(["opening does not fit its wall"])
+      o.levelId = host.levelId
+      break
+    }
+    case "connector": {
+      const r = o.rect
+      const snap = (v: number) => Math.round(v / s) * s
+      o.rect = o.style === "ladder" ? { x: snap(r.x), z: snap(r.z), w: s, d: s } : { x: snap(r.x), z: snap(r.z), w: Math.max(s, snap(r.w)), d: Math.max(s, snap(r.d)) }
+      const from = draft.levels[o.levelId]
+      const to = hasOwn(draft.levels, o.toLevelId) ? draft.levels[o.toLevelId] : undefined
+      if (!to || to.elevation <= from.elevation) throw new EditRejected(["connector must lead to a higher level"])
+      break
+    }
+    case "light":
+      if (o.dimRadius < o.brightRadius) o.dimRadius = o.brightRadius
+      if (o.attachedTokenId) {
+        if (!hasOwn(draft.tokens, o.attachedTokenId)) throw new EditRejected([`token "${o.attachedTokenId}" does not exist`])
+        o.levelId = draft.tokens[o.attachedTokenId].levelId
+      }
+      break
+    default:
+      break
+  }
+}
+
+const OBJECT_LABELS: Record<SceneObject["type"], string> = {
+  floor: "floor",
+  wall: "wall",
+  door: "door",
+  window: "window",
+  connector: "connector",
+  pillar: "pillar",
+  prop: "prop",
+  light: "light",
+}
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
+
+// ---------------------------------------------------------------------------
+// Store
+// ---------------------------------------------------------------------------
+
+export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorStore {
+  const history = createHistory(opts.history)
+  const systemClipboard = opts.systemClipboard === undefined ? browserClipboard() : opts.systemClipboard
+  let patchSink: PatchSink | null = null
+  let playSink: PlaySink | null = null
+  let savedHead = history.state().head
+  /** The open transaction has applied at least one change (for the dirty flag). */
+  let txnChanged = false
+
+  const initialScene = opts.scene ?? createScene()
+
+  return createStore<EditorState>()((set, get) => {
+    const isDirty = () => history.state().head !== savedHead || (history.inTransaction && txnChanged)
+
+    /** Publish a new document revision produced by `patches`, and forward the patches to a live host. */
+    const commitDoc = (next: Scene, patches: Patch[], label: string, source: PatchSource) => {
+      const s = get()
+      const selection = s.selection.filter((id) => itemExists(next, id))
+      set({
+        scene: next,
+        revision: s.revision + 1,
+        lastChange: sceneChangeFromPatches(patches),
+        lastRejected: null,
+        selection: sameIds(selection, s.selection) ? s.selection : selection,
+        activeLevelId: resolveActiveLevel(next, s.activeLevelId, s.scene),
+        history: history.state(),
+        dirty: isDirty(),
+      })
+      patchSink?.(patches, { label, source })
+    }
+
+    /**
+     * Produce, validate and commit an edit. `rejected` is true when validateEdit refused the result
+     * (the document is left unchanged and `lastRejected` explains why).
+     */
+    const applyChecked = (recipe: SceneRecipe, label: string, applyOpts: ApplyOptions = {}): { patches: Patch[]; rejected: boolean } => {
+      const s = get()
+      if (s.readOnly) return { patches: [], rejected: false }
+      const [next, patches, inversePatches] = produceWithPatches(s.scene, (draft) => {
+        recipe(draft)
+      })
+      if (patches.length === 0) return { patches: [], rejected: false }
+      // Never commit a revision that parseScene would refuse: it could be saved but not reopened.
+      const issues = validateEdit(next, patches)
+      if (issues.length > 0) {
+        set({ lastRejected: { label, issues } })
+        return { patches: [], rejected: true }
+      }
+      if (history.inTransaction) txnChanged = true
+      history.push({ label, patches, inversePatches }, { coalesceKey: applyOpts.coalesceKey })
+      commitDoc(next, patches, label, "apply")
+      return { patches, rejected: false }
+    }
+
+    const apply: EditorState["apply"] = (recipe, label, applyOpts = {}) => applyChecked(recipe, label, applyOpts).patches
+
+    /** apply() that reports refusals (EditRejected from the recipe, or validateEdit) as `false`. */
+    const tryApply = (recipe: SceneRecipe, label: string, applyOpts?: ApplyOptions): boolean => {
+      try {
+        return !applyChecked(recipe, label, applyOpts).rejected
+      } catch (err) {
+        if (err instanceof EditRejected) {
+          set({ lastRejected: { label, issues: err.issues } })
+          return false
+        }
+        throw err
+      }
+    }
+
+    const writeSystemClipboard = (clip: AtlasClipboard) => {
+      if (!systemClipboard) return
+      systemClipboard.writeText(serializeClipboard(clip)).catch(() => {
+        // Permission denied / document not focused: the in-memory clipboard still works.
+      })
+    }
+
+    const defaultPasteAt = (clip: AtlasClipboard): Vec2 => {
+      const s = get()
+      const c = s.scene.grid.cellSize
+      return s.activeLevelId === clip.sourceLevelId ? { x: clip.origin.x + c, z: clip.origin.z + c } : { ...clip.origin }
+    }
+
+    /** Emit move-token commands for tokens in a plan (live) and drop them from the document edit. */
+    const routeTokenMoves = (plan: MovePlan, positionOf: (t: Token) => Vec2): MovePlan => {
+      if (!playSink || plan.tokens.length === 0) return plan
+      for (const t of plan.tokens) {
+        const p = positionOf(t)
+        playSink({ t: "move-token", tokenId: t.id, levelId: t.levelId, x: p.x, z: p.z })
+      }
+      return { ...plan, tokens: [] }
+    }
+
+    const setLight = (id: Id, on: boolean | "toggle") => {
+      const s = get()
+      const o = hasOwn(s.scene.objects, id) ? s.scene.objects[id] : undefined
+      if (!o || o.type !== "light") return
+      const next = on === "toggle" ? !o.on : on
+      if (next === o.on) return
+      if (playSink) {
+        playSink({ t: "set-light", lightId: id, on: next })
+        return
+      }
+      apply((d) => {
+        const light = d.objects[id]
+        if (light.type === "light") light.on = next
+      }, next ? "Turn light on" : "Turn light off")
+    }
+
+    return {
+      scene: initialScene,
+      readOnly: false,
+      revision: 0,
+      lastChange: null,
+      dirty: false,
+      lastRejected: null,
+      history: history.state(),
+      live: false,
+      playActions: false,
+
+      selection: [],
+      activeLevelId: defaultActiveLevel(initialScene),
+      tool: "select",
+      toolSettings: defaultToolSettings(),
+      snapMode: DEFAULT_SNAP_MODE,
+      altHeld: false,
+      view: defaultViewOptions(),
+      clipboard: null,
+
+      // ---- document plumbing ------------------------------------------------
+
+      apply,
+
+      beginTransaction(label) {
+        const wasOpen = history.inTransaction
+        const id = history.begin(label, get().scene)
+        if (!wasOpen) txnChanged = false
+        set({ history: history.state() })
+        return id
+      },
+
+      commitTransaction() {
+        if (!history.inTransaction) return
+        history.commit()
+        if (!history.inTransaction) txnChanged = false
+        set({ history: history.state(), dirty: isDirty() })
+      },
+
+      cancelTransaction() {
+        if (!history.inTransaction) return
+        const label = history.state().transaction?.label ?? "Cancel"
+        const inverse = history.cancel()
+        txnChanged = false
+        if (inverse.length === 0) {
+          set({ history: history.state(), dirty: isDirty() })
+          return
+        }
+        let next: Scene
+        try {
+          next = applyPatches(get().scene, inverse)
+        } catch {
+          // The document was replaced underneath the gesture (live host sync): nothing to revert onto.
+          set({ history: history.state(), dirty: isDirty() })
+          return
+        }
+        commitDoc(next, inverse, label, "cancel")
+      },
+
+      undo() {
+        if (history.inTransaction) {
+          get().cancelTransaction()
+          return true
+        }
+        const step = history.undo()
+        if (!step) return false
+        let next: Scene
+        try {
+          next = applyPatches(get().scene, step.patches)
+        } catch {
+          // The document changed underneath (live host edits): this step can no longer be undone.
+          history.discard("redo")
+          set({ history: history.state() })
+          return false
+        }
+        commitDoc(next, step.patches, step.label, "undo")
+        return true
+      },
+
+      redo() {
+        if (history.inTransaction) return false
+        const step = history.redo()
+        if (!step) return false
+        let next: Scene
+        try {
+          next = applyPatches(get().scene, step.patches)
+        } catch {
+          history.discard("undo")
+          set({ history: history.state() })
+          return false
+        }
+        commitDoc(next, step.patches, step.label, "redo")
+        return true
+      },
+
+      loadScene(scene, loadOpts = {}) {
+        history.clear()
+        savedHead = history.state().head
+        txnChanged = false
+        const s = get()
+        set({
+          scene,
+          readOnly: loadOpts.readOnly ?? false,
+          revision: s.revision + 1,
+          lastChange: null,
+          dirty: false,
+          history: history.state(),
+          selection: [],
+          activeLevelId: defaultActiveLevel(scene),
+          view: { ...s.view, levelVisibility: {} },
+        })
+      },
+
+      newScene(sceneOpts) {
+        get().loadScene(createScene(sceneOpts))
+      },
+
+      syncScene(scene) {
+        const s = get()
+        if (scene === s.scene) return
+        const selection = s.selection.filter((id) => itemExists(scene, id))
+        set({
+          scene,
+          revision: s.revision + 1,
+          lastChange: null,
+          selection: sameIds(selection, s.selection) ? s.selection : selection,
+          activeLevelId: resolveActiveLevel(scene, s.activeLevelId, s.scene),
+        })
+      },
+
+      markSaved() {
+        savedHead = history.state().head
+        set({ dirty: isDirty() })
+      },
+
+      setPatchSink(sink) {
+        patchSink = sink
+        set({ live: sink !== null })
+      },
+
+      setPlaySink(sink) {
+        playSink = sink
+        set({ playActions: sink !== null })
+      },
+
+      // ---- levels -------------------------------------------------------------
+
+      addLevel(partial = {}, levelOpts = {}) {
+        const s = get()
+        const levels = sortedLevels(s.scene)
+        if (levels.length >= SCENE_LIMITS.maxLevels) return null
+        const top = levels[levels.length - 1]
+        const level = createLevel({
+          name: `Level ${levels.length + 1}`,
+          elevation: top ? top.elevation + top.height : 0,
+          ...partial,
+        })
+        apply((d) => {
+          d.levels[level.id] = level
+        }, "Add level")
+        if (levelOpts.activate !== false && hasOwn(get().scene.levels, level.id)) set({ activeLevelId: level.id, selection: [] })
+        return level.id
+      },
+
+      updateLevel(id, partial) {
+        if (!hasOwn(get().scene.levels, id)) return false
+        const rest: LevelUpdate & { id?: unknown } = { ...partial }
+        delete rest.id
+        return tryApply(
+          (d) => {
+            Object.assign(d.levels[id], rest)
+            repairConnectors(d)
+          },
+          "Edit level",
+          { coalesceKey: `level:${id}:${Object.keys(rest).sort().join(",")}` }
+        )
+      },
+
+      removeLevel(id) {
+        const s = get()
+        if (!hasOwn(s.scene.levels, id) || Object.keys(s.scene.levels).length <= 1) return false
+        apply((d) => deleteWithDependents(d, [id]), `Delete level "${s.scene.levels[id].name}"`)
+        return true
+      },
+
+      clearTerrain(levelId) {
+        if (!hasOwn(get().scene.levels, levelId)) return
+        apply((d) => {
+          d.levels[levelId].heightmap = null
+        }, "Clear terrain")
+      },
+
+      setActiveLevel(id) {
+        if (hasOwn(get().scene.levels, id) && get().activeLevelId !== id) set({ activeLevelId: id })
+      },
+
+      stepActiveLevel(delta) {
+        const s = get()
+        const levels = sortedLevels(s.scene)
+        const k = levels.findIndex((l) => l.id === s.activeLevelId)
+        const next = levels[Math.min(levels.length - 1, Math.max(0, (k < 0 ? 0 : k) + Math.sign(delta)))]
+        if (next) get().setActiveLevel(next.id)
+      },
+
+      // ---- objects / tokens ---------------------------------------------------
+
+      addObject(object, label) {
+        apply((d) => {
+          d.objects[object.id] = object
+        }, label ?? `Add ${OBJECT_LABELS[object.type]}`)
+        return object.id
+      },
+
+      addToken(token, label) {
+        apply((d) => {
+          d.tokens[token.id] = token
+        }, label ?? "Add token")
+        return token.id
+      },
+
+      updateObject(id, partial, applyOpts) {
+        const s = get()
+        if (!hasOwn(s.scene.objects, id)) return false
+        const rest: Record<string, unknown> = { ...partial }
+        delete rest.id
+        delete rest.type
+        const type = s.scene.objects[id].type
+        const original = s.scene.objects[id]
+        return tryApply(
+          (d) => {
+            const target = d.objects[id]
+            const before = target.type === "wall" ? { a: { ...target.a }, b: { ...target.b } } : null
+            Object.assign(target, rest)
+            if (original.type === "light" && target.type === "light" && rest.position === undefined) {
+              if (original.attachedTokenId && !target.attachedTokenId) {
+                // Detached: keep the light where it was in the world (its position was an offset).
+                const levelId = lightLevelId(s.scene, original)
+                const world = lightWorldPosition(s.scene, original)
+                target.levelId = levelId
+                target.position = { x: world.x, y: world.y - groundHeightAt(d, levelId, world), z: world.z }
+              } else if (!original.attachedTokenId && target.attachedTokenId) {
+                // Attached: carried at the token's centre at the same height.
+                target.position = { x: 0, y: original.position.y, z: 0 }
+              }
+            }
+            normalizeObject(d, target)
+            // Openings keep their distance from the endpoint that stayed put and follow the wall's level.
+            if (target.type === "wall" && before) reprojectOpenings(d, id, before)
+          },
+          `Edit ${OBJECT_LABELS[type]}`,
+          applyOpts ?? { coalesceKey: `object:${id}:${Object.keys(rest).sort().join(",")}` }
+        )
+      },
+
+      updateToken(id, partial, applyOpts) {
+        const s = get()
+        if (!hasOwn(s.scene.tokens, id)) return false
+        const rest: TokenUpdate & { id?: unknown } = { ...partial }
+        delete rest.id
+        if (rest.levelId !== undefined && !hasOwn(s.scene.levels, rest.levelId)) return false
+        return tryApply(
+          (d) => {
+            const t = d.tokens[id]
+            Object.assign(t, rest)
+            // Attached lights keep their stored level aligned with their carrier's.
+            for (const o of Object.values(d.objects)) {
+              if (o.type === "light" && o.attachedTokenId === id && o.levelId !== t.levelId) o.levelId = t.levelId
+            }
+          },
+          "Edit token",
+          applyOpts ?? { coalesceKey: `token:${id}:${Object.keys(rest).sort().join(",")}` }
+        )
+      },
+
+      deleteIds(ids, label) {
+        const s = get()
+        // Objects and tokens only: levels go through removeLevel (which keeps at least one).
+        const present = ids.filter((id) => itemExists(s.scene, id))
+        if (present.length === 0) return
+        apply((d) => deleteWithDependents(d, present), label ?? `Delete ${plural(present.length, "item")}`)
+      },
+
+      setDoorState(id, state) {
+        const s = get()
+        const o = hasOwn(s.scene.objects, id) ? s.scene.objects[id] : undefined
+        if (!o || o.type !== "door" || o.state === state) return
+        if (playSink) {
+          playSink({ t: "set-door", doorId: id, state })
+          return
+        }
+        const verb = state === "open" ? "Open" : state === "closed" ? "Close" : "Lock"
+        apply((d) => {
+          const door = d.objects[id]
+          if (door.type === "door") door.state = state
+        }, `${verb} door`)
+      },
+
+      toggleLight(id) {
+        setLight(id, "toggle")
+      },
+
+      setLightOn(id, on) {
+        setLight(id, on)
+      },
+
+      updateEnvironment(partial, applyOpts) {
+        const { directional, ...rest } = partial
+        apply(
+          (d) => {
+            Object.assign(d.environment, rest)
+            if (directional) Object.assign(d.environment.directional, directional)
+            const dir = d.environment.directional
+            dir.elevation = Math.min(Math.PI / 2, Math.max(0.1, dir.elevation))
+          },
+          "Edit environment",
+          applyOpts ?? { coalesceKey: `env:${Object.keys(rest).sort().join(",")}:${Object.keys(directional ?? {}).sort().join(",")}` }
+        )
+      },
+
+      updateGrid(partial) {
+        const clampCells = (v: number) => Math.min(SCENE_LIMITS.maxGridCells, Math.max(1, Math.round(v)))
+        apply((d) => {
+          if (partial.width !== undefined) d.grid.width = clampCells(partial.width)
+          if (partial.depth !== undefined) d.grid.depth = clampCells(partial.depth)
+          if (partial.diagonalRule !== undefined) d.grid.diagonalRule = partial.diagonalRule
+          // Drop heightmap chunks that fall outside the (possibly smaller) lattice.
+          for (const level of Object.values(d.levels)) {
+            const hm = level.heightmap
+            if (!hm) continue
+            const n = chunkSamples(hm.resolution)
+            const { samplesX, samplesZ } = sampleCounts(d.grid, hm.resolution)
+            for (const key of Object.keys(hm.chunks)) {
+              const { ci, cj } = parseChunkKey(key)
+              if (ci * n >= samplesX || cj * n >= samplesZ) delete hm.chunks[key]
+            }
+          }
+        }, "Edit grid")
+      },
+
+      updateSceneInfo(partial) {
+        apply(
+          (d) => {
+            if (partial.name !== undefined) d.name = partial.name
+            if (partial.meta) Object.assign(d.meta, partial.meta)
+          },
+          "Edit scene info",
+          { coalesceKey: `info:${partial.name !== undefined ? "name" : ""}:${Object.keys(partial.meta ?? {}).sort().join(",")}` }
+        )
+      },
+
+      // ---- selection ----------------------------------------------------------
+
+      select(ids, mode = "replace") {
+        const s = get()
+        const valid = ids.filter((id) => itemExists(s.scene, id))
+        let next: Id[]
+        switch (mode) {
+          case "replace":
+            next = [...new Set(valid)]
+            break
+          case "add":
+            next = [...new Set([...s.selection, ...valid])]
+            break
+          case "remove": {
+            const drop = new Set(valid)
+            next = s.selection.filter((id) => !drop.has(id))
+            break
+          }
+          case "toggle": {
+            const out = new Set(s.selection)
+            for (const id of new Set(valid)) {
+              if (out.has(id)) out.delete(id)
+              else out.add(id)
+            }
+            next = [...out]
+            break
+          }
+        }
+        if (!sameIds(next, s.selection)) set({ selection: next })
+      },
+
+      toggleSelected(id) {
+        get().select([id], "toggle")
+      },
+
+      clearSelection() {
+        if (get().selection.length > 0) set({ selection: [] })
+      },
+
+      selectAll() {
+        const s = get()
+        const ids: Id[] = []
+        for (const o of Object.values(s.scene.objects)) {
+          if (!o.editorLocked && itemLevelId(s.scene, o.id) === s.activeLevelId) ids.push(o.id)
+        }
+        for (const t of Object.values(s.scene.tokens)) if (t.levelId === s.activeLevelId) ids.push(t.id)
+        ids.sort()
+        if (!sameIds(ids, s.selection)) set({ selection: ids })
+      },
+
+      deleteSelection() {
+        const ids = get().selection
+        if (ids.length === 0) return 0
+        get().deleteIds(ids)
+        if (get().selection.length > 0) set({ selection: [] })
+        return ids.length
+      },
+
+      duplicateSelection() {
+        const s = get()
+        if (s.selection.length === 0) return []
+        const clip = copyItems(s.scene, s.selection)
+        const c = s.scene.grid.cellSize
+        let ids: Id[] = []
+        const patches = apply((d) => {
+          ids = pasteClipboard(d, clip, { targetLevelId: clip.sourceLevelId, at: { x: clip.origin.x + c, z: clip.origin.z + c } })
+        }, `Duplicate ${plural(s.selection.length, "item")}`)
+        // A refused edit (validateEdit) created nothing.
+        if (patches.length === 0) return []
+        if (ids.length > 0) set({ selection: ids })
+        return ids
+      },
+
+      copySelection() {
+        const s = get()
+        if (s.selection.length === 0) return null
+        const clip = copyItems(s.scene, s.selection)
+        set({ clipboard: clip })
+        writeSystemClipboard(clip)
+        return clip
+      },
+
+      cutSelection() {
+        const clip = get().copySelection()
+        if (!clip) return null
+        get().deleteIds([...get().selection], `Cut ${plural(get().selection.length, "item")}`)
+        set({ selection: [] })
+        return clip
+      },
+
+      paste(pasteOpts = {}) {
+        const s = get()
+        const clip = pasteOpts.clipboard ?? s.clipboard
+        if (!clip || !hasOwn(s.scene.levels, s.activeLevelId)) return []
+        const at = pasteOpts.at ?? defaultPasteAt(clip)
+        let ids: Id[] = []
+        const patches = apply((d) => {
+          ids = pasteClipboard(d, clip, { targetLevelId: s.activeLevelId, at, hostWallId: pasteOpts.hostWallId })
+        }, "Paste")
+        if (patches.length === 0) return []
+        if (ids.length > 0) set({ selection: ids })
+        return ids
+      },
+
+      pasteText(text, pasteOpts = {}) {
+        const clip = parseClipboardText(text)
+        if (!clip) return { ok: false, issues: ["the clipboard does not contain Atlas objects"] }
+        const s = get()
+        const at = pasteOpts.at ?? defaultPasteAt(clip)
+        let ids: Id[] = []
+        let patches: Patch[]
+        try {
+          patches = apply((d) => {
+            ids = pasteClipboard(d, clip, { targetLevelId: s.activeLevelId, at, hostWallId: pasteOpts.hostWallId })
+            const issues = validatePastedItems(current(d), ids)
+            if (issues.length > 0) throw new EditRejected(issues)
+          }, "Paste")
+        } catch (err) {
+          if (err instanceof EditRejected) return { ok: false, issues: err.issues }
+          // Structurally broken items can make pasteClipboard itself throw.
+          return { ok: false, issues: [err instanceof Error ? err.message : String(err)] }
+        }
+        // Valid items can still be refused as a whole (e.g. too many objects for one scene).
+        if (patches.length === 0 && ids.length > 0) return { ok: false, issues: get().lastRejected?.issues ?? ["the paste was refused"] }
+        if (ids.length > 0) set({ selection: ids, clipboard: clip })
+        return { ok: true, ids }
+      },
+
+      async pasteFromSystem(pasteOpts = {}) {
+        if (systemClipboard) {
+          try {
+            const text = await systemClipboard.readText()
+            const result = get().pasteText(text, pasteOpts)
+            if (result.ok || !get().clipboard) return result
+          } catch {
+            // Permission denied: fall back to the in-memory clipboard.
+          }
+        }
+        if (!get().clipboard) return { ok: false, issues: ["the clipboard is empty"] }
+        return { ok: true, ids: get().paste(pasteOpts) }
+      },
+
+      nudgeSelection(dx, dz) {
+        const s = get()
+        if (s.selection.length === 0) return
+        const plan = planMove(s.scene, s.selection)
+        const d = alignDelta(plan, s.scene.grid.cellSize, dx, dz)
+        if (d.x === 0 && d.z === 0) return
+        const docPlan = routeTokenMoves(plan, (t) => ({ x: t.position.x + d.x, z: t.position.z + d.z }))
+        if (docPlan.objects.length + docPlan.tokens.length === 0) return
+        apply((draft) => applyMove(draft, docPlan, d.x, d.z), "Nudge", { coalesceKey: `nudge:${s.selection.join(",")}` })
+      },
+
+      rotateSelection(quarterTurns = 1) {
+        const s = get()
+        if (s.selection.length === 0 || Math.round(quarterTurns) % 4 === 0) return
+        const plan = planMove(s.scene, s.selection)
+        const pivot = rotationPivot(s.scene, plan, effectiveSnapMode(s.snapMode, s.altHeld))
+        if (!pivot) return
+        const docPlan = routeTokenMoves(plan, (t) => rotateQuarter(t.position, pivot, quarterTurns))
+        apply((d) => applyRotation(d, docPlan, pivot, quarterTurns), "Rotate")
+      },
+
+      moveTokens(moves, label) {
+        const s = get()
+        const valid = moves.filter((m) => hasOwn(s.scene.tokens, m.id) && (m.levelId === undefined || hasOwn(s.scene.levels, m.levelId)))
+        if (valid.length === 0) return
+        if (playSink) {
+          for (const m of valid) {
+            playSink({ t: "move-token", tokenId: m.id, levelId: m.levelId ?? s.scene.tokens[m.id].levelId, x: m.position.x, z: m.position.z })
+          }
+          return
+        }
+        apply((d) => {
+          for (const m of valid) {
+            const t = d.tokens[m.id]
+            t.position = { x: m.position.x, z: m.position.z }
+            if (m.levelId !== undefined && m.levelId !== t.levelId) {
+              t.levelId = m.levelId
+              for (const o of Object.values(d.objects)) {
+                if (o.type === "light" && o.attachedTokenId === m.id) o.levelId = m.levelId
+              }
+            }
+          }
+        }, label ?? `Move ${plural(valid.length, "token")}`)
+      },
+
+      // ---- tools, snapping, view ----------------------------------------------
+
+      setTool(tool) {
+        if (get().tool !== tool) set({ tool })
+      },
+
+      setToolSettings(tool, partial) {
+        const s = get()
+        set({ toolSettings: { ...s.toolSettings, [tool]: { ...s.toolSettings[tool], ...partial } } })
+      },
+
+      scaleBrushRadius(factor) {
+        const s = get()
+        const r = Math.round(s.toolSettings.brush.radius * factor * 2) / 2
+        get().setToolSettings("brush", { radius: Math.min(BRUSH_RADIUS_MAX, Math.max(BRUSH_RADIUS_MIN, r)) })
+      },
+
+      setSnapMode(mode) {
+        set({ snapMode: mode })
+      },
+
+      setAltHeld(held) {
+        if (get().altHeld !== held) set({ altHeld: held })
+      },
+
+      setView(partial) {
+        set({ view: { ...get().view, ...partial } })
+      },
+
+      toggleGrid() {
+        get().setView({ showGrid: !get().view.showGrid })
+      },
+
+      toggleHelpers() {
+        get().setView({ showHelpers: !get().view.showHelpers })
+      },
+
+      toggleGhostAdjacent() {
+        get().setView({ ghostAdjacent: !get().view.ghostAdjacent })
+      },
+
+      setLevelVisibility(id, visible) {
+        const v = get().view
+        set({ view: { ...v, levelVisibility: { ...v.levelVisibility, [id]: visible } } })
+      },
+
+      toggleLevelVisibility(id) {
+        const v = get().view
+        get().setLevelVisibility(id, v.levelVisibility[id] === false)
+      },
+    }
+  })
+}
+
+/** Editor view options as an engine ViewState patch (render mode "editor", no fog). */
+export function editorViewState(state: Pick<EditorState, "view" | "activeLevelId">): Partial<ViewState> {
+  return {
+    mode: "editor",
+    camera: state.view.camera,
+    activeLevelId: state.activeLevelId,
+    levelVisibility: state.view.levelVisibility,
+    ghostAdjacent: state.view.ghostAdjacent,
+    showGrid: state.view.showGrid,
+    showHelpers: state.view.showHelpers,
+    cutaway: false,
+    vision: "off",
+  }
+}
+
+/** Snap mode currently in effect (Alt held → free). */
+export function currentSnapMode(state: Pick<EditorState, "snapMode" | "altHeld">, alt = false): SnapMode {
+  return effectiveSnapMode(state.snapMode, alt || state.altHeld)
+}
+
+/** The app-wide editor store. Tests and embedded editors create their own with createEditorStore(). */
+export const editorStore: EditorStore = createEditorStore()

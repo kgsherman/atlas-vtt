@@ -49,6 +49,11 @@ export interface LightingSystem {
   createWorldMaterial(opts: WorldMaterialOptions): THREE.ShaderMaterial
   /** Token material: lit by the same lights (no shadows needed), perception-aware tint, never discards. */
   createTokenMaterial(opts: { instanced: boolean }): THREE.ShaderMaterial
+  /**
+   * Unlit overlay material for window glass / fixture flames: never lit, but masked by perception like
+   * the world (the host-mask layer comes from `object.userData.levelId`).
+   */
+  createOverlayMaterial(opts: { kind: "glass" | "flame" }): THREE.ShaderMaterial
   /** Full rebuild: occluder proxies from world.primitives, light list, sun map, mask layers, level uniforms. */
   setScene(scene: SceneLike, world: OcclusionWorld): void
   /** Incremental update after the engine called world.update()/updateTerrain(). */

@@ -1,0 +1,149 @@
+/**
+ * Light manager, CPU side (PERFORMANCE §2): resolve scene lights into world space, cull them
+ * (off / hidden, dim sphere outside the frustum, above the cutaway) and rank the survivors by screen
+ * contribution so the top MAX_LIGHTS go into uniform slots.
+ */
+import * as THREE from "three"
+
+import { adjacentLevels, levelById, lightEffectivelyHidden, lightLevelId, lightWorldPosition } from "@/core/scene/queries"
+import type { FlickerSettings, Id, LightObject, SceneLike, Vec3 } from "@/core/scene/types"
+
+import { flickerSeed } from "./flicker"
+
+export interface ResolvedLight {
+  id: Id
+  levelId: Id
+  position: Vec3
+  /** Linear RGB (not multiplied by intensity). */
+  color: [number, number, number]
+  intensity: number
+  bright: number
+  dim: number
+  flicker: FlickerSettings
+  seed: number
+  castsShadows: boolean
+}
+
+const colorCache = new Map<string, [number, number, number]>()
+const scratchColor = new THREE.Color()
+
+/** "#rrggbb" (sRGB) → linear RGB, cached. */
+export function linearColor(hex: string): [number, number, number] {
+  let c = colorCache.get(hex)
+  if (!c) {
+    try {
+      scratchColor.set(hex)
+    } catch {
+      scratchColor.setRGB(1, 1, 1)
+    }
+    c = [scratchColor.r, scratchColor.g, scratchColor.b]
+    colorCache.set(hex, c)
+  }
+  return c
+}
+
+/**
+ * Lights that emit: `on`, and not effectively hidden unless `includeHidden` (the DM with vision "off"
+ * sees hidden lights; previews and players never do). Sorted by id for determinism.
+ */
+export function resolveLights(scene: SceneLike, opts: { includeHidden: boolean }): ResolvedLight[] {
+  const out: ResolvedLight[] = []
+  for (const o of Object.values(scene.objects)) {
+    if (o.type !== "light" || !o.on) continue
+    if (!opts.includeHidden && lightEffectivelyHidden(scene, o)) continue
+    const dim = Math.max(0, o.dimRadius)
+    if (!(dim > 0) || !(o.intensity > 0)) continue
+    const l = resolveLight(scene, o, dim)
+    // Non-finite values would corrupt the packed uniform array (and three's array upload).
+    if (!Number.isFinite(l.position.x + l.position.y + l.position.z + l.dim + l.bright + l.intensity)) continue
+    out.push(l)
+  }
+  return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+}
+
+function resolveLight(scene: SceneLike, o: LightObject, dim: number): ResolvedLight {
+  return {
+    id: o.id,
+    levelId: lightLevelId(scene, o),
+    position: lightWorldPosition(scene, o),
+    color: linearColor(o.color),
+    intensity: o.intensity,
+    bright: Math.min(Math.max(0, o.brightRadius), dim),
+    dim,
+    flicker: o.flicker,
+    seed: flickerSeed(o.id),
+    castsShadows: o.castsShadows,
+  }
+}
+
+/**
+ * World Y of the cutaway plane: the underside of the slab of the level above the active one. Lights
+ * whose dim sphere lies entirely above it cannot reach any drawn geometry. null = no cutaway.
+ */
+export function cutawayPlaneY(scene: Pick<SceneLike, "levels">, activeLevelId: Id | null): number | null {
+  if (!activeLevelId || !levelById(scene, activeLevelId)) return null
+  const { above } = adjacentLevels(scene, activeLevelId)
+  return above ? above.elevation - above.floorThickness : null
+}
+
+const _center = new THREE.Vector3()
+const _ndc = new THREE.Vector3()
+const _camPos = new THREE.Vector3()
+
+/**
+ * Rough fraction of the screen covered by a light's dim sphere (projected disc clipped to the NDC
+ * square). 1 when the camera is inside the sphere; 0 when entirely off screen.
+ */
+export function screenCoverage(center: Vec3, radius: number, camera: THREE.Camera): number {
+  _center.set(center.x, center.y, center.z)
+  camera.getWorldPosition(_camPos)
+  const dist = _camPos.distanceTo(_center)
+  if (dist <= radius) return 1
+  let rNdc: number
+  if ((camera as THREE.OrthographicCamera).isOrthographicCamera) {
+    const c = camera as THREE.OrthographicCamera
+    const halfH = (c.top - c.bottom) / (2 * c.zoom)
+    rNdc = radius / Math.max(halfH, 1e-6)
+  } else if ((camera as THREE.PerspectiveCamera).isPerspectiveCamera) {
+    const c = camera as THREE.PerspectiveCamera
+    const t = Math.tan(THREE.MathUtils.degToRad(c.getEffectiveFOV()) / 2)
+    rNdc = radius / Math.max(Math.sqrt(Math.max(dist * dist - radius * radius, 1e-6)) * t, 1e-6)
+  } else {
+    return 0.5
+  }
+  _ndc.copy(_center).project(camera)
+  if (!Number.isFinite(_ndc.x) || !Number.isFinite(_ndc.y)) return 0.5
+  const w = Math.max(0, Math.min(1, _ndc.x + rNdc) - Math.max(-1, _ndc.x - rNdc))
+  const h = Math.max(0, Math.min(1, _ndc.y + rNdc) - Math.max(-1, _ndc.y - rNdc))
+  // Clipped bounding square × π/4 (disc in its square), over the NDC area of 4.
+  return Math.min(1, (w * h * Math.PI) / 16)
+}
+
+export interface RankedLight extends ResolvedLight {
+  coverage: number
+  score: number
+}
+
+export interface LightCullOptions {
+  frustum: THREE.Frustum
+  camera: THREE.Camera
+  cutawayY: number | null
+  maxLights: number
+}
+
+const _sphere = new THREE.Sphere()
+
+/** Frustum ∩ dim sphere and cutaway culling, then the top `maxLights` by coverage × intensity. */
+export function cullAndRankLights(lights: ResolvedLight[], opts: LightCullOptions): RankedLight[] {
+  const out: RankedLight[] = []
+  for (const l of lights) {
+    if (opts.cutawayY !== null && l.position.y - l.dim > opts.cutawayY) continue
+    _sphere.center.set(l.position.x, l.position.y, l.position.z)
+    _sphere.radius = l.dim
+    if (!opts.frustum.intersectsSphere(_sphere)) continue
+    const coverage = screenCoverage(l.position, l.dim, opts.camera)
+    out.push({ ...l, coverage, score: coverage * Math.max(l.intensity, 1e-3) })
+  }
+  out.sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+  return out.slice(0, opts.maxLights)
+}
