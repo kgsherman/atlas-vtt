@@ -32,6 +32,21 @@ export function axisTicks(lo: number, hi: number, target = 6): number[] {
 }
 
 /**
+ * Minor ticks every `step` feet in [lo, hi], leaving out the major `ticks`. None when they would sit
+ * closer than `minPx` pixels at `pxPerFoot` (tall stacks), so they never smear into a solid bar.
+ */
+export function minorTicks(lo: number, hi: number, ticks: readonly number[], pxPerFoot: number, step = 5, minPx = 3): number[] {
+  if (!(hi > lo) || step * pxPerFoot < minPx) return []
+  const major = new Set(ticks)
+  const out: number[] = []
+  for (let k = Math.ceil(lo / step); k * step <= hi + 1e-9; k++) {
+    const v = Math.round(k * step * 1e6) / 1e6
+    if (!major.has(v)) out.push(v)
+  }
+  return out
+}
+
+/**
  * Label positions for ascending `targets`: the least-squares closest positions that are at least `gap`
  * apart and inside [lo, hi]. Substituting wᵢ = zᵢ − i·gap turns the gap constraint into wᵢ ≤ wᵢ₊₁, so this
  * is an isotonic regression (pool adjacent violators) of tᵢ − i·gap, clipped to the shifted bounds, which

@@ -20,7 +20,7 @@ import { cn } from "@/lib/utils"
 import { useEditorActions, useEditorContext, useEditorShallow, useEditorState } from "./context"
 import { SelectInput } from "./fields"
 import { clockTime, formatElevation, relativeTime, tokenLabel } from "./lib/format"
-import { axisTicks, levelAxisBounds, spreadLabels } from "./lib/levelAxis"
+import { axisTicks, levelAxisBounds, minorTicks, spreadLabels } from "./lib/levelAxis"
 import { previewCandidates, type PreviewResult } from "./lib/preview"
 import type { SceneDocument } from "./useSceneDocument"
 
@@ -125,7 +125,7 @@ function LevelAxis() {
     activeLevelId: s.activeLevelId,
     visibility: s.view.levelVisibility,
   }))
-  const { height, top, bottom, ticks, rows } = React.useMemo(() => {
+  const { height, top, bottom, ticks, minor, rows } = React.useMemo(() => {
     const ordered = sortedLevels({ levels })
     const { lo, hi } = levelAxisBounds(ordered.map((l) => l.elevation))
     const height = Math.max(AXIS.minHeight, (ordered.length - 1) * AXIS.row + 2 * AXIS.pad)
@@ -138,11 +138,13 @@ function LevelAxis() {
       height - 2 * AXIS.pad
     )
     const y = (u: number) => height - AXIS.pad - u
+    const major = axisTicks(lo, hi)
     return {
       height,
       top: y(up(hi)),
       bottom: y(0),
-      ticks: axisTicks(lo, hi).map((v) => ({ v, y: y(up(v)) })),
+      ticks: major.map((v) => ({ v, y: y(up(v)) })),
+      minor: minorTicks(lo, hi, major, (height - 2 * AXIS.pad) / (hi - lo)).map((v) => y(up(v))),
       rows: ordered.map((level, i) => ({ level, y: y(up(level.elevation)), labelY: y(labels[i]) })),
     }
   }, [levels])
@@ -151,9 +153,12 @@ function LevelAxis() {
     <div className="relative mt-1 border-t" style={{ height, width: AXIS.width }}>
       <svg className="absolute inset-0 size-full" aria-hidden>
         <line x1={AXIS.x} x2={AXIS.x} y1={top} y2={bottom} className="stroke-muted-foreground/60" />
+        {minor.map((my) => (
+          <line key={my} x1={AXIS.x - 2} x2={AXIS.x} y1={my} y2={my} className="stroke-muted-foreground/40" />
+        ))}
         {ticks.map((t) => (
           <g key={t.v}>
-            <line x1={AXIS.x - 3} x2={AXIS.x} y1={t.y} y2={t.y} className="stroke-muted-foreground/60" />
+            <line x1={AXIS.x - 4} x2={AXIS.x} y1={t.y} y2={t.y} className="stroke-muted-foreground/60" />
             <text x={AXIS.x - 6} y={t.y} dominantBaseline="middle" textAnchor="end" className="fill-muted-foreground text-[0.5625rem] tabular-nums">
               {t.v < 0 ? `−${-t.v}` : t.v}
             </text>

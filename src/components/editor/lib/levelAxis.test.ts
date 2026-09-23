@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { axisTicks, levelAxisBounds, spreadLabels } from "./levelAxis"
+import { axisTicks, levelAxisBounds, minorTicks, spreadLabels } from "./levelAxis"
 
 describe("level axis bounds", () => {
   it("shows at least −10 → 50 ft", () => {
@@ -18,6 +18,17 @@ describe("axis ticks", () => {
     expect(axisTicks(-10, 50)).toEqual([-10, 0, 10, 20, 30, 40, 50])
     expect(axisTicks(-40, 65)).toEqual([-40, -20, 0, 20, 40, 60])
     expect(axisTicks(0, 1000)).toEqual([0, 200, 400, 600, 800, 1000])
+  })
+})
+
+describe("minor ticks", () => {
+  it("marks every 5 ft between the major ticks", () => {
+    expect(minorTicks(-10, 50, [0, 20, 40], 3)).toEqual([-10, -5, 5, 10, 15, 25, 30, 35, 45, 50])
+    expect(minorTicks(-22, 12, [-20, 0], 3)).toEqual([-15, -10, -5, 5, 10])
+  })
+
+  it("drops them when they would be packed tighter than a few pixels", () => {
+    expect(minorTicks(0, 1000, [0, 200, 400], 0.5)).toEqual([])
   })
 })
 
