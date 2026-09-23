@@ -25,3 +25,11 @@ Architecture and module contracts: `docs/ARCHITECTURE.md` (read it before changi
 - Players must never receive data they cannot see: anything sent to a player goes through
   `src/core/session/filter.ts`. Never trust identity fields in network payloads.
 - Match the surrounding code style: no semicolons, double quotes, 2-space indent (Prettier config in repo).
+
+## Git workflow
+
+- There are no live users yet; two developers work on this repo. Commit and push to `master` whenever a
+  piece of work is done and `tsc`, `vitest` and `eslint` pass. No need to ask first or open a PR, and no
+  feature branches unless a change is risky or unfinished.
+- The other developer pushes too: `git pull --rebase` before pushing, and never force-push `master`.
+- The repo is public: never commit `.env*` files, `test_maps/` (third-party art) or screenshots of it.
