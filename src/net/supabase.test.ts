@@ -1,7 +1,7 @@
 import { AuthApiError, AuthRetryableFetchError } from "@supabase/supabase-js"
 import { describe, expect, it } from "vitest"
 
-import { localIdentity, mapAuthError, normalizeDisplayName, setLocalDisplayName } from "./auth"
+import { accountFromUser, localIdentity, mapAuthError, normalizeDisplayName, parseAuthCallback, setLocalDisplayName } from "./auth"
 import { readSupabaseEnv } from "./env"
 import { describeNetError, NetError, SERVER_ERROR_CODES, toNetError, unwrap } from "./supabase"
 
@@ -89,5 +89,47 @@ describe("auth helpers", () => {
     expect(localIdentity().userId).toBe(a.userId)
     setLocalDisplayName("  Tabby ")
     expect(localIdentity().displayName).toBe("Tabby")
+  })
+})
+
+describe("permanent accounts", () => {
+  it("maps linking and OAuth errors", () => {
+    expect(mapAuthError({ code: "manual_linking_disabled", status: 404 }).code).toBe("linking_disabled")
+    expect(mapAuthError({ code: "identity_already_exists", status: 422 }).code).toBe("identity_exists")
+    expect(mapAuthError({ code: "provider_disabled" }).code).toBe("provider_disabled")
+    expect(mapAuthError({ code: "access_denied" }).code).toBe("auth_cancelled")
+    expect(describeNetError("linking_disabled")).toMatch(/manual linking/)
+  })
+
+  it("parses OAuth callbacks", () => {
+    expect(parseAuthCallback("https://a.test/auth/callback?code=abc")).toEqual({ kind: "code", code: "abc" })
+    const exists = parseAuthCallback("https://a.test/auth/callback?error=server_error&error_code=identity_already_exists&error_description=x")
+    expect(exists?.kind === "error" && exists.error.code).toBe("identity_exists")
+    const denied = parseAuthCallback("https://a.test/auth/callback#error=access_denied&error_description=denied")
+    expect(denied?.kind === "error" && denied.error.code).toBe("auth_cancelled")
+    expect(parseAuthCallback("https://a.test/auth/callback")).toBeNull()
+  })
+
+  it("reads the Discord account of a permanent user, never of a guest", () => {
+    const discord = {
+      is_anonymous: false,
+      email: "morgana@example.com",
+      user_metadata: { full_name: "Meta Name" },
+      identities: [
+        {
+          provider: "discord",
+          identity_data: {
+            name: "morgana_42",
+            full_name: "Morgana",
+            custom_claims: { global_name: "Morgana" },
+            avatar_url: "https://cdn.discordapp.com/avatars/1/a.png",
+          },
+        },
+      ],
+    }
+    expect(accountFromUser(discord)).toEqual({ provider: "discord", name: "Morgana", avatarUrl: "https://cdn.discordapp.com/avatars/1/a.png" })
+    expect(accountFromUser({ ...discord, is_anonymous: true })).toBeUndefined()
+    const plainHttp = { ...discord, identities: [{ provider: "discord", identity_data: { avatar_url: "http://x.test/a.png" } }] }
+    expect(accountFromUser(plainHttp)).toEqual({ provider: "discord", name: "Meta Name", avatarUrl: null })
   })
 })

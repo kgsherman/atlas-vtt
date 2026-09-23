@@ -3,7 +3,7 @@
  * duplicate, export, share, delete), sample scenes, and "My sessions" (resume hosting, rejoin).
  */
 import * as React from "react"
-import { FileUpIcon, HardDriveIcon, LibraryBigIcon, PlusIcon, SearchIcon, UploadIcon, XIcon } from "lucide-react"
+import { FileUpIcon, HardDriveIcon, LibraryBigIcon, PlusIcon, SearchIcon, UploadIcon, UserRoundIcon, XIcon } from "lucide-react"
 import { toast } from "sonner"
 import { useLocation } from "wouter"
 
@@ -16,6 +16,7 @@ import { paths, preloadRoute } from "@/app/routes"
 import { useServices } from "@/app/services"
 import { useAsync, useOnFocus } from "@/app/useAsync"
 import { AppHeader } from "@/components/app/AppHeader"
+import { DiscordIcon } from "@/components/app/DiscordIcon"
 import { HomeHero } from "@/components/app/HomeHero"
 import { SampleSceneCard } from "@/components/app/SampleSceneCard"
 import { SceneCard, SceneCardSkeleton, type SceneAction } from "@/components/app/SceneCard"
@@ -269,6 +270,7 @@ export default function HomePage() {
 
         <div className="mx-auto flex w-full max-w-7xl flex-col gap-8 px-4 py-8 sm:px-6 lg:py-10">
           {services.mode === "local" && <LocalModeNotice />}
+          {services.mode === "supabase" && services.identity.isAnonymous && scenes.length > 0 && <GuestAccountNotice />}
 
           {/* Narrow: scenes, sessions, samples. Wide: scenes and samples beside a sticky sessions column. */}
           <div className="grid grid-cols-1 gap-10 [grid-template-areas:'scenes'_'sessions'_'samples'] xl:grid-cols-[minmax(0,1fr)_22rem] xl:grid-rows-[auto_1fr] xl:gap-x-8 xl:[grid-template-areas:'scenes_sessions'_'samples_sessions']">
@@ -280,7 +282,13 @@ export default function HomePage() {
                     {scenes.length > 0 && <span className="text-sm font-normal text-muted-foreground tabular-nums">{scenes.length}</span>}
                     {scenesQ.refreshing && <Spinner className="size-3.5 text-muted-foreground" />}
                   </h2>
-                  <p className="text-xs text-muted-foreground">{services.mode === "supabase" ? "Saved to your Atlas account." : "Stored in this browser."}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {services.mode === "local"
+                      ? "Stored in this browser."
+                      : services.identity.isAnonymous
+                        ? "Saved to your guest account in this browser."
+                        : "Saved to your Atlas account."}
+                  </p>
                 </div>
                 <div className="flex w-full items-center gap-2 sm:w-auto">
                   {scenes.length > 3 && (
@@ -478,6 +486,58 @@ function LocalModeNotice() {
           </Button>
         </AlertAction>
       )}
+    </Alert>
+  )
+}
+
+const GUEST_NOTICE_KEY = "atlas-vtt:guest-notice-dismissed"
+
+/** Cloud guests with scenes: nudge towards a permanent account (dismissible per browser). */
+function GuestAccountNotice() {
+  const services = useServices()
+  const [dismissed, setDismissed] = React.useState(() => {
+    try {
+      return localStorage.getItem(GUEST_NOTICE_KEY) === "1"
+    } catch {
+      return false
+    }
+  })
+  const [busy, setBusy] = React.useState(false)
+  if (dismissed) return null
+
+  const dismiss = () => {
+    setDismissed(true)
+    try {
+      localStorage.setItem(GUEST_NOTICE_KEY, "1")
+    } catch {
+      // Storage blocked: hidden for this page only.
+    }
+  }
+
+  const signIn = async () => {
+    setBusy(true)
+    try {
+      await services.signIn("discord")
+    } catch (err) {
+      setBusy(false)
+      toast.error("Couldn't reach Discord", { description: userMessage(err) })
+    }
+  }
+
+  return (
+    <Alert>
+      <UserRoundIcon />
+      <AlertTitle>Keep your scenes</AlertTitle>
+      <AlertDescription>You're a guest: your scenes live in this browser only. Create an account to keep them and open them anywhere.</AlertDescription>
+      <AlertAction className="flex gap-1">
+        <Button size="xs" variant="ghost" onClick={dismiss}>
+          Not now
+        </Button>
+        <Button size="xs" variant="outline" onClick={signIn} disabled={busy}>
+          {busy ? <Spinner data-icon="inline-start" /> : <DiscordIcon data-icon="inline-start" />}
+          Continue with Discord
+        </Button>
+      </AlertAction>
     </Alert>
   )
 }

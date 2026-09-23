@@ -625,6 +625,20 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
 
 ### 6.4 Database & RLS (`supabase/migrations`)
 
+Identity (`net/auth.ts`, `app/account.ts`): every Cloud user is a Supabase user. Visitors start as
+anonymous guests (`signInAnonymously`, session in localStorage). "Continue with Discord" first links
+Discord to the guest (`linkIdentity`, needs "Allow manual linking"): the user id is unchanged, so every row
+keyed by it (scenes, sessions, memberships, Storage folders) stays and the guest becomes permanent. If the
+Discord account already belongs to another user, the callback carries `identity_already_exists`, and the
+app switches to that account (`signInWithOAuth`, Discord `prompt=none`): straight away when the guest owns
+no scenes and hosts no active game, otherwise after a confirmation, because the guest's data stays with the
+orphaned guest user (there is no merge; exporting and re-importing scenes is the workaround). OAuth uses
+PKCE: the provider returns to `/auth/callback`, which `ServicesProvider` finishes before services start
+(code exchange, then `history.replaceState` to the path saved in sessionStorage, same-origin paths only),
+so the callback never signs in a new guest first. Signing out (`scope: "local"`) restarts the app as a new
+guest. RLS treats guests and permanent users alike. The display name (`profiles`) belongs to Atlas: a new
+account starts with its Discord name if it has none, and after that the two are independent.
+
 Tables (RLS enabled on every table; default privileges revoke anon; functions revoke PUBLIC/anon execute):
 - `profiles(id → auth.users, display_name)` — own row only.
 - `scenes(id, owner_id, name, visibility 'private'|'link', share_slug (≥128-bit random), latest_version, …)` and
@@ -676,15 +690,16 @@ advisory lock). Sizes are `pg_column_size` (on-disk, compressed). Over a limit, 
 - `scene-assets`: ≤ 300 objects and ≤ 1 GiB per owner (storage insert policy; 50 MB per object);
 - `session-tiles`: a chunk's `{userId}` must be a member of the session, and a session holds ≤ 20,000
   objects.
-The limits are per anonymous account: abuse spread over many accounts is bounded only by Supabase's per-IP
-anonymous sign-in rate limit (README).
+The limits are per account (guest or permanent): abuse spread over many accounts is bounded only by
+Supabase's per-IP anonymous sign-in rate limit (README).
 Realtime: `realtime.messages` policies per the §6.1 table, checking `extension` ('broadcast'/'presence').
 Realtime evaluates them when a channel is joined and again when the client sends a new JWT (`access_token`,
 e.g. on a token refresh), and caches them in between. So a member kicked while subscribed keeps receiving
 the host and lobby topics until their client sends a new JWT, or is disconnected when that JWT expires
 (1 h by default); the host stops sending on their view topic at once, and the host topic carries only
 `status` (wire epoch, scene name) and `ended`, the lobby only presence. A new join is refused at once.
-Dashboard settings (not SQL): enable anonymous sign-ins; disable Realtime "Allow public access"; keep the
+Dashboard settings (not SQL): enable anonymous sign-ins; for permanent accounts enable the Discord provider
+and "Allow manual linking" and allow-list each origin's `/auth/callback`; disable Realtime "Allow public access"; keep the
 anonymous sign-in rate limit low for public deployments (Authentication → Rate Limits, default 30 per hour
 per IP). Realtime keeps a topic's public and private channels apart (a public subscriber to a session topic
 receives none of its private broadcasts, checked by `e2e/multiplayer-supabase.mjs`), so the public-access
@@ -1049,7 +1064,7 @@ Known gaps and deliberate limits:
 
 **Security**
 
-- Quotas (§6.4) are per anonymous account. Abuse spread over many accounts is bounded only by Supabase's
+- Quotas (§6.4) are per account, and guests are free to create. Abuse spread over many accounts is bounded only by Supabase's
   per-IP rate limit on anonymous sign-ins (keep it low for public deployments, README), and CAPTCHA is not
   supported yet (`describeNetError("captcha_required")` explains the error, but the app has no widget).
 - Token portraits are the DM-supplied http(s) `imageUrl`, sent to players who see the token and loaded by

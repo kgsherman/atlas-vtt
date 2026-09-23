@@ -63,7 +63,9 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
 
 **Multiplayer**
 - The DM hosts a session and players join with an 8-character room code. No accounts are needed: the app
-  signs in anonymously.
+  signs everyone in as an anonymous guest. A guest can create a permanent account with Discord (from the
+  name chip in the header) to keep their scenes and games across browsers; the display name stays
+  Atlas's own and can be changed at any time.
 - The DM is authoritative. Players send move and door requests; the DM's tab validates them, computes
   visibility in a Web Worker, and sends each player a per-player diff of their filtered view.
 - Players never receive data they cannot see. Hidden tokens, the lights attached to them, secret doors, DM
@@ -115,7 +117,13 @@ with `?local=0`.
      authorised by the Realtime policies, can be joined.
    - **Authentication → Rate Limits → anonymous sign-ins**: keep it low for a public deployment (the
      default is 30 per hour per IP). Scene, version-history, session and asset quotas are enforced per
-     anonymous account, so this rate limit is what bounds abuse from many accounts.
+     account, so this rate limit is what bounds abuse from many anonymous accounts.
+   - Permanent accounts (optional): **Authentication → Sign In / Providers → Discord** (on, with the
+     client id and secret of a Discord application whose OAuth2 redirect is
+     `https://<project-ref>.supabase.co/auth/v1/callback`), **Allow manual linking** (on: a guest becomes
+     permanent by linking Discord to the same user), and under **Authentication → URL Configuration** add
+     every origin's `/auth/callback` to the redirect URLs (e.g. `http://localhost:5173/auth/callback` and
+     your deployment's).
 3. Create `.env.local` next to `package.json` (see `.env.example`):
 
    ```bash

@@ -4,7 +4,7 @@
  */
 import * as React from "react"
 
-import type { AtlasIdentity } from "@/net/auth"
+import type { AccountProvider, AtlasIdentity } from "@/net/auth"
 import type { AssetStore, BackdropTileSource } from "@/net/assets/types"
 import type { ScenesRepo } from "@/net/scenesRepo"
 import type { SessionsRepo } from "@/net/sessionsRepo"
@@ -22,6 +22,13 @@ export interface AppServices {
   tilesFor(sessionId: string): BackdropTileSource
   /** Update the display name (profiles / local identity); returns the normalised name. */
   setDisplayName(name: string): Promise<string>
+  /**
+   * Cloud only (else unsupported_offline): leave for the provider to make this guest a permanent
+   * account (`link`, same user id) or to switch to an existing account (`sign_in`). See app/account.ts.
+   */
+  signIn(provider: AccountProvider, opts?: { intent?: "link" | "sign_in"; silent?: boolean }): Promise<void>
+  /** Cloud only: sign out of this browser; the app restarts as a new guest. */
+  signOut(): Promise<void>
 }
 
 export const ServicesContext = React.createContext<AppServices | null>(null)

@@ -27,6 +27,7 @@ export function createAtlasClient(env: SupabaseEnv, opts: AtlasClientOptions = {
       persistSession: opts.persistSession ?? true,
       autoRefreshToken: true,
       detectSessionInUrl: false,
+      flowType: "pkce",
       ...(opts.storageKey ? { storageKey: opts.storageKey } : {}),
     },
     realtime: { worker },
@@ -87,6 +88,10 @@ export type NetErrorCode =
   | ServerErrorCode
   | "not_configured"
   | "anonymous_disabled"
+  | "linking_disabled"
+  | "identity_exists"
+  | "provider_disabled"
+  | "auth_cancelled"
   | "rate_limited"
   | "captcha_required"
   | "network"
@@ -150,6 +155,14 @@ export function describeNetError(code: NetErrorCode): string {
       return "Online features are unavailable: Supabase is not configured, so Atlas is running in local-only mode."
     case "anonymous_disabled":
       return "Anonymous sign-ins are disabled for this Supabase project. Enable them in the dashboard (Authentication → Sign In / Providers → Anonymous)."
+    case "linking_disabled":
+      return "Accounts can't be created yet: this Supabase project doesn't allow linking. Enable it in the dashboard (Authentication → Sign In / Providers → Allow manual linking)."
+    case "identity_exists":
+      return "That account already belongs to another Atlas user."
+    case "provider_disabled":
+      return "This sign-in method is not enabled for this Supabase project."
+    case "auth_cancelled":
+      return "Sign-in was cancelled."
     case "rate_limited":
       return "Too many requests. Please wait a moment and try again."
     case "captcha_required":

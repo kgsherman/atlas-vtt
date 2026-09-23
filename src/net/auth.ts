@@ -1,12 +1,18 @@
 /**
  * Identity. Online, every user (DM or player) is a Supabase user; people who have not signed up are
- * anonymous users (`signInAnonymously`), persisted in localStorage so a reload keeps the identity
- * (and with it session membership). Display names live in `profiles` (own row only).
+ * anonymous users ("guests", `signInAnonymously`), persisted in localStorage so a reload keeps the
+ * identity (and with it session membership). Display names live in `profiles` (own row only) and are
+ * Atlas's own: they never follow the name of a linked sign-in account.
+ *
+ * Permanent accounts: a guest links a provider identity (`linkAccount`, Discord) and keeps its user id,
+ * so everything it owns stays. Someone who already has an account signs in to it instead
+ * (`signInWithProvider`). Both leave the page for the provider and come back through the PKCE code
+ * handled by `parseAuthCallback` / `exchangeAuthCode` (orchestrated by app/account.ts).
  *
  * Local-only mode has no server identity: `localIdentity()` hands out a random per-TAB id so two
  * tabs of one browser can play DM and player over the (insecure, dev-only) LocalTransport.
  */
-import { isAuthApiError, isAuthRetryableFetchError, type User } from "@supabase/supabase-js"
+import { isAuthApiError, isAuthRetryableFetchError, type User, type UserIdentity } from "@supabase/supabase-js"
 
 import { isSupabaseConfigured } from "./env"
 import { getSupabase, NetError, unwrap, type AtlasClient } from "./supabase"
@@ -16,6 +22,21 @@ export interface AtlasIdentity {
   isAnonymous: boolean
   displayName: string | null
   mode: "supabase" | "local"
+  /** The sign-in account of a permanent user; absent for guests and in local mode. */
+  account?: AtlasAccount
+}
+
+/** OAuth providers Atlas offers for permanent accounts. */
+export const ACCOUNT_PROVIDERS = ["discord"] as const
+export type AccountProvider = (typeof ACCOUNT_PROVIDERS)[number]
+
+export interface AtlasAccount {
+  /** "discord", or another Supabase provider ("email", …) for accounts made outside the app. */
+  provider: string
+  /** The provider's name for the user. Shown only as "signed in as"; players see `displayName`. */
+  name: string | null
+  /** https avatar from the provider, if any. */
+  avatarUrl: string | null
 }
 
 export const DISPLAY_NAME_MAX = 32
@@ -46,6 +67,10 @@ export function mapAuthError(err: unknown): NetError {
       { cause: err }
     )
   }
+  if (code === "manual_linking_disabled") return new NetError("linking_disabled", message, { cause: err })
+  if (code === "identity_already_exists") return new NetError("identity_exists", message, { cause: err })
+  if (code === "provider_disabled" || code === "oauth_provider_not_supported") return new NetError("provider_disabled", message, { cause: err })
+  if (code === "access_denied") return new NetError("auth_cancelled", message, { cause: err })
   if (code === "over_request_rate_limit" || status === 429) return new NetError("rate_limited", message, { cause: err })
   if (code === "captcha_failed") return new NetError("captcha_required", message, { cause: err })
   if (isAuthRetryableFetchError(err) || status === 0) return new NetError("network", message, { cause: err })
@@ -90,6 +115,41 @@ async function ensureSessionOnce(client: AtlasClient): Promise<AtlasIdentity> {
     isAnonymous: user.is_anonymous ?? false,
     displayName: await fetchDisplayName(client, user.id),
     mode: "supabase",
+    ...withAccount(accountFromUser(user)),
+  }
+}
+
+function withAccount(account: AtlasAccount | undefined): { account?: AtlasAccount } {
+  return account ? { account } : {}
+}
+
+type AccountUser = Pick<User, "is_anonymous" | "email" | "user_metadata"> & { identities?: Pick<UserIdentity, "provider" | "identity_data">[] }
+
+function firstText(...values: unknown[]): string | null {
+  for (const v of values) if (typeof v === "string" && v.trim()) return v.trim()
+  return null
+}
+
+function httpsUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null
+  try {
+    return new URL(value).protocol === "https:" ? value : null
+  } catch {
+    return null
+  }
+}
+
+/** The sign-in account of a Supabase user; undefined for anonymous users. */
+export function accountFromUser(user: AccountUser): AtlasAccount | undefined {
+  if (user.is_anonymous) return undefined
+  const identity = user.identities?.find((i) => i.provider !== "anonymous")
+  const data: Record<string, unknown> = { ...user.user_metadata, ...identity?.identity_data }
+  const claims = data.custom_claims && typeof data.custom_claims === "object" ? (data.custom_claims as Record<string, unknown>) : {}
+  return {
+    provider: identity?.provider ?? "email",
+    // Discord: custom_claims.global_name / full_name is the display name, name the unique username.
+    name: firstText(claims.global_name, data.full_name, data.name, data.user_name, user.email),
+    avatarUrl: httpsUrl(data.avatar_url ?? data.picture),
   }
 }
 
@@ -112,10 +172,65 @@ export async function signOut(client: AtlasClient = getSupabase()): Promise<void
   if (error) throw mapAuthError(error)
 }
 
-/** Subscribe to sign-in/out. The callback receives the user id or null. */
-export function onAuthChange(cb: (userId: string | null) => void, client: AtlasClient = getSupabase()): () => void {
-  const { data } = client.auth.onAuthStateChange((_event, session) => cb(session?.user.id ?? null))
+/** Subscribe to sign-in/out and account changes (a guest linking an account in another tab). */
+export function onAuthChange(cb: (user: { id: string; isAnonymous: boolean } | null) => void, client: AtlasClient = getSupabase()): () => void {
+  const { data } = client.auth.onAuthStateChange((_event, session) =>
+    cb(session ? { id: session.user.id, isAnonymous: session.user.is_anonymous ?? false } : null)
+  )
   return () => data.subscription.unsubscribe()
+}
+
+// ---------------------------------------------------------------------------
+// Permanent accounts (OAuth)
+// ---------------------------------------------------------------------------
+
+export interface OAuthRedirectOptions {
+  /** Absolute URL the provider returns to (must be in the project's redirect allow list). */
+  redirectTo: string
+  /** Skip the provider's consent screen when the user has already authorised Atlas (Discord `prompt=none`). */
+  silent?: boolean
+}
+
+/**
+ * Link a provider identity to the current (guest) user, making it permanent under the same user id.
+ * Navigates to the provider. Needs "Allow manual linking" in the project (else `linking_disabled`); if
+ * the provider account already belongs to another user, the callback carries `identity_already_exists`.
+ */
+export async function linkAccount(provider: AccountProvider, opts: OAuthRedirectOptions, client: AtlasClient = getSupabase()): Promise<void> {
+  const { error } = await client.auth.linkIdentity({ provider, options: { redirectTo: opts.redirectTo } })
+  if (error) throw mapAuthError(error)
+}
+
+/** Sign in to (or sign up with) a provider account, replacing the current session. Navigates away. */
+export async function signInWithProvider(provider: AccountProvider, opts: OAuthRedirectOptions, client: AtlasClient = getSupabase()): Promise<void> {
+  const { error } = await client.auth.signInWithOAuth({
+    provider,
+    options: { redirectTo: opts.redirectTo, ...(opts.silent ? { queryParams: { prompt: "none" } } : {}) },
+  })
+  if (error) throw mapAuthError(error)
+}
+
+export type AuthCallback = { kind: "code"; code: string } | { kind: "error"; error: NetError }
+
+/**
+ * Read an OAuth redirect URL: a PKCE `code`, or an error (`error_code` / `error` +
+ * `error_description`, in the query or, for some failures, the fragment). null when neither.
+ */
+export function parseAuthCallback(href: string): AuthCallback | null {
+  const url = new URL(href)
+  const query = url.searchParams
+  const hash = new URLSearchParams(url.hash.replace(/^#/, ""))
+  const get = (key: string) => query.get(key) ?? hash.get(key)
+  const errorCode = get("error_code") ?? get("error")
+  if (errorCode) return { kind: "error", error: mapAuthError({ code: errorCode, message: get("error_description") ?? errorCode }) }
+  const code = query.get("code")
+  return code ? { kind: "code", code } : null
+}
+
+/** Exchange a PKCE code (from /auth/callback) for a session in this browser. */
+export async function exchangeAuthCode(code: string, client: AtlasClient = getSupabase()): Promise<void> {
+  const { error } = await client.auth.exchangeCodeForSession(code)
+  if (error) throw mapAuthError(error)
 }
 
 // ---------------------------------------------------------------------------

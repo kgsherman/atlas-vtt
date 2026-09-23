@@ -1,7 +1,8 @@
 /**
  * createServices(): the app-wide services, created once at startup (ServicesProvider).
  *
- * Cloud ("supabase"): anonymous Supabase identity (ensureIdentity), remote repositories, private
+ * Cloud ("supabase"): Supabase identity (ensureIdentity: the signed-in account, else an anonymous
+ * guest), remote repositories, private
  * Realtime channels, Supabase Storage assets. Local ("local", no configuration or `?local=1`):
  * per-tab identity, IndexedDB library, BroadcastChannel transport (dev/testing only, NOT secure).
  *
@@ -10,7 +11,14 @@
  */
 import { createAssetStore, createTileSource } from "@/net/assets"
 import type { AssetStore, BackdropTileSource } from "@/net/assets/types"
-import { ensureIdentity, localIdentity, setDisplayName as setProfileDisplayName, setLocalDisplayName, type AtlasIdentity } from "@/net/auth"
+import {
+  ensureIdentity,
+  localIdentity,
+  setDisplayName as setProfileDisplayName,
+  setLocalDisplayName,
+  signOut as authSignOut,
+  type AtlasIdentity,
+} from "@/net/auth"
 import { getLocalStore, type LocalStore } from "@/net/localStore"
 import { createLocalTransport } from "@/net/localTransport"
 import { createLocalScenesRepo, createRemoteScenesRepo } from "@/net/scenesRepo"
@@ -18,6 +26,7 @@ import { createLocalSessionsRepo, createRemoteSessionsRepo } from "@/net/session
 import { getSupabase, NetError, type AtlasClient } from "@/net/supabase"
 import { createSupabaseTransport } from "@/net/supabaseTransport"
 
+import { beginAccountRedirect } from "./account"
 import { currentMode, type AppMode } from "./mode"
 import type { AppServices } from "./services"
 
@@ -83,6 +92,14 @@ export async function createServices(opts: CreateServicesOptions = {}): Promise<
       if (!client) writeTabName(stored)
       identity.displayName = stored
       return stored
+    },
+    async signIn(provider, opts = {}) {
+      if (!client) throw new NetError("unsupported_offline", "accounts need Cloud mode")
+      await beginAccountRedirect(client, opts.intent ?? (identity.isAnonymous ? "link" : "sign_in"), provider, { silent: opts.silent })
+    },
+    async signOut() {
+      if (!client) throw new NetError("unsupported_offline", "accounts need Cloud mode")
+      await authSignOut(client)
     },
   }
 }

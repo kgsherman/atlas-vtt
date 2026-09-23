@@ -1,0 +1,104 @@
+import { describe, expect, it, vi } from "vitest"
+
+import type { AtlasClient } from "@/net/supabase"
+
+import { AUTH_CALLBACK_PATH, finishAuthRedirect, safeReturnPath, type FinishAuthRedirectEnv } from "./account"
+import type { KeyValueStorage } from "./mode"
+
+function memoryStorage(entries: Record<string, string> = {}): KeyValueStorage & { data: Map<string, string> } {
+  const data = new Map(Object.entries(entries))
+  return {
+    data,
+    getItem: (k) => data.get(k) ?? null,
+    setItem: (k, v) => void data.set(k, v),
+    removeItem: (k) => void data.delete(k),
+  }
+}
+
+function fakeClient(result: { error: unknown } = { error: null }) {
+  const exchangeCodeForSession = vi.fn(async () => ({ data: {}, ...result }))
+  return { client: { auth: { exchangeCodeForSession } } as unknown as AtlasClient, exchangeCodeForSession }
+}
+
+const pending = (intent: "link" | "sign_in", returnTo = "/join/ABCD1234") =>
+  memoryStorage({ "atlas-vtt:auth-pending": JSON.stringify({ intent, provider: "discord", returnTo }) })
+
+function env(query: string, storage: KeyValueStorage | null): FinishAuthRedirectEnv & { replaced: string[] } {
+  const replaced: string[] = []
+  return { href: `https://atlas.test${AUTH_CALLBACK_PATH}${query}`, replaceUrl: (p) => void replaced.push(p), storage, replaced }
+}
+
+describe("safeReturnPath", () => {
+  it.each([
+    ["/", "/"],
+    ["/editor/abc?import=1", "/editor/abc?import=1"],
+    ["/play/x#frag", "/play/x#frag"],
+  ])("keeps in-app path %s", (input, expected) => {
+    expect(safeReturnPath(input)).toBe(expected)
+  })
+
+  it.each([
+    null,
+    undefined,
+    "",
+    "editor",
+    "//evil.test/x",
+    "/\\evil.test",
+    "https://evil.test/",
+    "javascript:alert(1)",
+    AUTH_CALLBACK_PATH,
+    `${AUTH_CALLBACK_PATH}?code=1`,
+  ])("falls back to / for %j", (input) => {
+    expect(safeReturnPath(input)).toBe("/")
+  })
+})
+
+describe("finishAuthRedirect", () => {
+  it("ignores other pages", async () => {
+    const { client, exchangeCodeForSession } = fakeClient()
+    const e = { ...env("", null), href: "https://atlas.test/join?code=abc" }
+    expect(await finishAuthRedirect(client, e)).toBeNull()
+    expect(exchangeCodeForSession).not.toHaveBeenCalled()
+  })
+
+  it("exchanges the code of a link and returns to where the user was", async () => {
+    const { client, exchangeCodeForSession } = fakeClient()
+    const storage = pending("link")
+    const e = env("?code=the-code", storage)
+    expect(await finishAuthRedirect(client, e)).toEqual({ kind: "linked", provider: "discord" })
+    expect(exchangeCodeForSession).toHaveBeenCalledWith("the-code")
+    expect(e.replaced).toEqual(["/join/ABCD1234"])
+    expect(storage.data.size).toBe(0)
+  })
+
+  it("reports a sign-in, and returns home without a pending record", async () => {
+    const { client } = fakeClient()
+    const e = env("?code=c", memoryStorage())
+    expect(await finishAuthRedirect(client, e)).toEqual({ kind: "signed_in", provider: "discord" })
+    expect(e.replaced).toEqual(["/"])
+  })
+
+  it("reports an identity that belongs to another user without exchanging anything", async () => {
+    const { client, exchangeCodeForSession } = fakeClient()
+    const e = env("?error=server_error&error_code=identity_already_exists&error_description=Identity+is+already+linked", pending("link", "/"))
+    const outcome = await finishAuthRedirect(client, e)
+    expect(outcome).toMatchObject({ kind: "error", intent: "link", provider: "discord" })
+    expect(outcome?.kind === "error" && outcome.error.code).toBe("identity_exists")
+    expect(exchangeCodeForSession).not.toHaveBeenCalled()
+    expect(e.replaced).toEqual(["/"])
+  })
+
+  it("turns a failed exchange into an error outcome", async () => {
+    const { client } = fakeClient({ error: { code: "bad_code_verifier", status: 400, message: "code verifier missing" } })
+    const outcome = await finishAuthRedirect(client, env("?code=c", pending("sign_in")))
+    expect(outcome).toMatchObject({ kind: "error", intent: "sign_in" })
+  })
+
+  it("ignores a tampered pending record", async () => {
+    const { client } = fakeClient()
+    const storage = memoryStorage({ "atlas-vtt:auth-pending": JSON.stringify({ intent: "link", provider: "discord", returnTo: "//evil.test" }) })
+    const e = env("?code=c", storage)
+    await finishAuthRedirect(client, e)
+    expect(e.replaced).toEqual(["/"])
+  })
+})
