@@ -6,7 +6,7 @@ import type { PathStep } from "@/core/movement/types"
 import type { Id, Rect, SceneLike, Vec2, Vec3 } from "@/core/scene/types"
 import type { EncodedGrades, EncodedMask } from "@/core/vision/types"
 
-export type Quality = "low" | "medium" | "high"
+export type Quality = "low" | "medium" | "high" | "ultra"
 
 export type RenderMode =
   /** DM building: orbit camera, all levels per visibility toggles, no fog. */
@@ -65,6 +65,11 @@ export interface ViewState {
   gpuVisionRefine: boolean
   /** Tokens drawn darkened (DM preview: not visible to the previewed token). */
   dimmedTokenIds: Id[]
+  /**
+   * The locally controlled / selected viewer: its vision tile is refreshed every frame it moves, even over
+   * the shadow update budget. Defaults to viewerTokenIds[0].
+   */
+  primaryViewerId: Id | null
   /** Player camera tilt from vertical, radians (0 = straight down). */
   tilt: number
   /** Editor-only helpers (light radius gizmos, connector arrows, hidden objects outlined). */
@@ -119,6 +124,8 @@ export interface PickResult {
   tokenId: Id | null
   /** World point of the object hit, when any. */
   hitPoint: Vec3 | null
+  /** World-space surface normal at hitPoint, when any (the light tool mounts at hitPoint + 0.3·normal). */
+  hitNormal?: Vec3 | null
 }
 
 // ---------------------------------------------------------------------------
@@ -164,6 +171,15 @@ export interface Engine {
    * core/scene/heightmap denseHeights) inside `dirty` without touching the document. null clears the preview.
    */
   previewTerrain(levelId: Id, heights: Float32Array | null, dirty: Rect | null): void
+  /**
+   * Battlemap image for a level (ARCHITECTURE §9), draped over its walkable surfaces within `rect`
+   * (the level's backdrop rect). DM modes pass the whole decoded image; player mode passes a canvas the
+   * player client composites explored-cell tiles into (unfilled texels are transparent), then calls
+   * updateLevelImage() after drawing more tiles. null removes the image.
+   */
+  setLevelImage(levelId: Id, image: TexImageSource | null, rect: Rect | null): void
+  /** Re-upload a level image after its canvas changed (optionally only `dirty`, world rect). */
+  updateLevelImage(levelId: Id, dirty?: Rect): void
   setView(view: Partial<ViewState>): void
   getView(): ViewState
   setOverlays(overlays: Partial<OverlayState>): void

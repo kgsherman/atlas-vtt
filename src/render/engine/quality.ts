@@ -11,6 +11,8 @@ export const PIXEL_BUDGET: Record<Quality, number> = {
   low: 1.3e6,
   medium: 2.1e6,
   high: 2.1e6,
+  // Ultra renders at native resolution up to 2× DPR (the budget only guards absurd displays).
+  ultra: 8.3e6,
 }
 
 /** Lowest render scale (fraction of CSS pixels) the budget may impose. */

@@ -1,8 +1,10 @@
 import { SIZE_FOOTPRINT } from "./defaults"
-import { sampleHeight } from "./heightmap"
+import { base64ToBytes, sampleHeight } from "./heightmap"
 import type {
   ConnectorObject,
   DoorObject,
+  FloorMask,
+  FloorObject,
   Id,
   Level,
   LightObject,
@@ -278,11 +280,73 @@ export interface EffectiveFloor {
 }
 
 /** Floor rects of a level with connector cutouts subtracted. Single source for render, occlusion and movement. */
+// Greedy-merged rects per (mask, rect origin); masks are immutable once in a document.
+const maskRectCache = new Map<string, Rect[]>()
+const MASK_CACHE_LIMIT = 256
+
+/** Decode a floor mask into a byte-per-cell array (1 = covered). */
+export function decodeFloorMask(mask: FloorMask): Uint8Array {
+  const bytes = base64ToBytes(mask.b64)
+  const out = new Uint8Array(mask.cols * mask.rows)
+  for (let k = 0; k < out.length; k++) out[k] = (bytes[k >> 3] >> (k & 7)) & 1
+  return out
+}
+
+/** Merge covered mask cells into few axis-aligned rects (row runs, then vertical merge of equal runs). */
+export function maskToRects(originX: number, originZ: number, mask: FloorMask): Rect[] {
+  const cells = decodeFloorMask(mask)
+  const s = mask.spacing
+  const out: Rect[] = []
+  // Open runs from the previous row keyed by "u0,u1" so identical runs stack vertically.
+  let open = new Map<string, Rect>()
+  for (let v = 0; v < mask.rows; v++) {
+    const next = new Map<string, Rect>()
+    let u = 0
+    while (u < mask.cols) {
+      if (!cells[v * mask.cols + u]) {
+        u++
+        continue
+      }
+      const u0 = u
+      while (u < mask.cols && cells[v * mask.cols + u]) u++
+      const key = `${u0},${u}`
+      const prev = open.get(key)
+      if (prev) {
+        prev.d += s
+        next.set(key, prev)
+        open.delete(key)
+      } else {
+        next.set(key, { x: originX + u0 * s, z: originZ + v * s, w: (u - u0) * s, d: s })
+      }
+    }
+    for (const r of open.values()) out.push(r)
+    open = next
+  }
+  for (const r of open.values()) out.push(r)
+  return out
+}
+
+/** The rects a floor covers before connector cutouts: its rect, or its mask's merged cells. */
+export function floorRects(floor: Pick<FloorObject, "rect" | "mask">): Rect[] {
+  if (!floor.mask) return [floor.rect]
+  const key = `${floor.rect.x},${floor.rect.z},${floor.mask.spacing},${floor.mask.cols},${floor.mask.rows},${floor.mask.b64}`
+  let rects = maskRectCache.get(key)
+  if (!rects) {
+    rects = maskToRects(floor.rect.x, floor.rect.z, floor.mask)
+    maskRectCache.set(key, rects)
+    if (maskRectCache.size > MASK_CACHE_LIMIT) {
+      const oldest = maskRectCache.keys().next().value
+      if (oldest !== undefined) maskRectCache.delete(oldest)
+    }
+  }
+  return rects.map((r) => ({ ...r }))
+}
+
 export function effectiveFloorRects(scene: Pick<SceneLike, "levels" | "objects">, levelId: Id): EffectiveFloor[] {
   const cutouts = floorCutouts(scene, levelId)
   const out: EffectiveFloor[] = []
   for (const f of objectsOfType(scene, "floor", levelId)) {
-    let pieces: Rect[] = [f.rect]
+    let pieces: Rect[] = floorRects(f)
     for (const c of cutouts) pieces = pieces.flatMap((p) => rectSubtract(p, c))
     for (const rect of pieces) out.push({ floorId: f.id, rect })
   }

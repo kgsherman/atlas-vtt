@@ -528,6 +528,12 @@ export function validateReferences(scene: Scene): string[] {
   for (const [key, level] of Object.entries(scene.levels)) {
     if (level.id !== key) issues.push(`levels["${key}"]: id "${level.id}" does not match its key`)
     claim(level.id, "level")
+    if (level.backdrop && !(scene.assets && hasOwn(scene.assets, level.backdrop.assetId))) {
+      issues.push(`level "${level.id}": backdrop asset "${level.backdrop.assetId}" does not exist`)
+    }
+  }
+  for (const [key, asset] of Object.entries(scene.assets ?? {})) {
+    if (asset.id !== key) issues.push(`assets["${key}"]: id "${asset.id}" does not match its key`)
   }
 
   for (const [key, o] of Object.entries(scene.objects)) {

@@ -158,6 +158,13 @@ const heightmapSchema = z
     }
   })
 
+const backdropSchema = z.strictObject({
+  assetId: idSchema,
+  rect: rectSchema,
+  opacity: z.number().min(0).max(1),
+  tintWalls: z.boolean(),
+})
+
 const levelSchema = z.strictObject({
   id: idSchema,
   name: text,
@@ -165,6 +172,7 @@ const levelSchema = z.strictObject({
   height: positive(SCENE_LIMITS.maxLength),
   floorThickness: positive(SCENE_LIMITS.maxLength),
   heightmap: heightmapSchema.nullable(),
+  backdrop: backdropSchema.nullable().optional(),
 })
 
 // ---------------------------------------------------------------------------
@@ -180,12 +188,48 @@ const baseFields = {
   hidden: z.boolean().optional(),
 }
 
-const floorSchema = z.strictObject({
-  ...baseFields,
-  type: z.literal("floor"),
-  rect: rectSchema,
-  material: materialSchema,
-  thickness: positive(SCENE_LIMITS.maxLength).optional(),
+/** Max mask cells per floor (e.g. a 200×200-cell map at 4 mask cells per grid cell = 640k). */
+const MAX_FLOOR_MASK_CELLS = 800 * 800
+
+const floorMaskSchema = z
+  .strictObject({
+    spacing: positive(SCENE_LIMITS.maxCellSize),
+    cols: z.number().int().min(1).max(4096),
+    rows: z.number().int().min(1).max(4096),
+    b64: z.string().max(Math.ceil(MAX_FLOOR_MASK_CELLS / 8 / 3) * 4 + 4).regex(/^[A-Za-z0-9+/]*={0,2}$/, "expected base64"),
+  })
+  .superRefine((m, ctx) => {
+    if (m.cols * m.rows > MAX_FLOOR_MASK_CELLS) ctx.addIssue({ code: "custom", message: "floor mask too large" })
+    const expected = Math.ceil((m.cols * m.rows) / 8)
+    const decoded = Math.floor((m.b64.length * 3) / 4) - (m.b64.endsWith("==") ? 2 : m.b64.endsWith("=") ? 1 : 0)
+    if (decoded !== expected) ctx.addIssue({ code: "custom", message: `floor mask must decode to ${expected} bytes` })
+  })
+
+const floorSchema = z
+  .strictObject({
+    ...baseFields,
+    type: z.literal("floor"),
+    rect: rectSchema,
+    mask: floorMaskSchema.optional(),
+    material: materialSchema,
+    thickness: positive(SCENE_LIMITS.maxLength).optional(),
+  })
+  .superRefine((f, ctx) => {
+    if (!f.mask) return
+    const s = f.mask.spacing
+    if (Math.abs(f.mask.cols * s - f.rect.w) > s + 1e-6 || Math.abs(f.mask.rows * s - f.rect.d) > s + 1e-6) {
+      ctx.addIssue({ code: "custom", message: "floor mask dimensions must cover the floor rect", path: ["mask"] })
+    }
+  })
+
+const assetSchema = z.strictObject({
+  id: idSchema,
+  kind: z.literal("image"),
+  name: text,
+  mime: z.enum(["image/webp", "image/png", "image/jpeg"]),
+  width: z.number().int().min(1).max(32768),
+  height: z.number().int().min(1).max(32768),
+  bytes: z.number().int().min(0).max(512 * 1024 * 1024),
 })
 
 const wallSchema = z
@@ -387,6 +431,7 @@ const sceneShape = z.strictObject({
   levels: z.record(idSchema, levelSchema),
   objects: z.record(idSchema, objectSchema),
   tokens: z.record(idSchema, tokenSchema),
+  assets: z.record(idSchema, assetSchema).optional(),
   meta: z.strictObject({
     description: text,
     author: text,

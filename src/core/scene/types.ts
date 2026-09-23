@@ -114,6 +114,21 @@ export interface Heightmap {
   chunks: Record<string, string>
 }
 
+/**
+ * A battlemap image draped over a level's walkable surfaces (floors/terrain) as their albedo, so the
+ * 3D lighting, shadows and fog apply to it. The image bytes live in the asset store (Scene.assets[assetId]);
+ * players only ever receive per-cell tiles of explored cells (ARCHITECTURE §9).
+ */
+export interface LevelBackdrop {
+  assetId: Id
+  /** World rect the image covers (feet). Usually the whole grid. */
+  rect: Rect
+  /** 0..1 blend of the image over the floor material colour. */
+  opacity: number
+  /** Also tint wall caps/faces standing on the image with the image colour under them ("extruded map" look). */
+  tintWalls: boolean
+}
+
 export interface Level {
   id: Id
   name: string
@@ -124,6 +139,8 @@ export interface Level {
   /** Thickness of floor slabs on this level; the slab occupies [surface − thickness, surface]. */
   floorThickness: number
   heightmap: Heightmap | null
+  /** Optional battlemap image for this level. */
+  backdrop?: LevelBackdrop | null
 }
 
 // ---------------------------------------------------------------------------
@@ -158,13 +175,29 @@ export interface BaseObject {
 }
 
 /**
- * Floor slab over an axis-aligned rect. Its top surface is the level ground
+ * Fine-grained coverage for floors that are not rectangles (rotated houses, caves, floors traced from a
+ * map image's alpha). Mask cell (u, v) covers [rect.x + u·spacing, +spacing) × [rect.z + v·spacing, +spacing).
+ */
+export interface FloorMask {
+  /** Mask cell size in feet (typically cellSize / 4). */
+  spacing: number
+  cols: number
+  rows: number
+  /** base64 bitset, LSB-first, bit index v·cols + u. */
+  b64: string
+}
+
+/**
+ * Floor slab over an axis-aligned rect (optionally masked). Its top surface is the level ground
  * (elevation + heightmap). Floors of level N are the ceiling of level N−1.
  * Connector footprints cut holes through the floors of the levels they rise through.
  */
 export interface FloorObject extends BaseObject {
   type: "floor"
+  /** Bounds of the floor. Without a mask the floor covers the whole rect. */
   rect: Rect
+  /** When present, the floor covers only the set mask cells inside `rect` (see floorRects()). */
+  mask?: FloorMask
   material: MaterialId
   /** Overrides level.floorThickness when set. */
   thickness?: number
@@ -367,6 +400,18 @@ export interface Token {
 // Scene document
 // ---------------------------------------------------------------------------
 
+/** Metadata of a binary asset stored outside the document (Supabase Storage / IndexedDB). */
+export interface SceneAsset {
+  id: Id
+  kind: "image"
+  name: string
+  mime: "image/webp" | "image/png" | "image/jpeg"
+  /** Stored pixel size. */
+  width: number
+  height: number
+  bytes: number
+}
+
 export interface SceneMeta {
   description: string
   author: string
@@ -385,6 +430,8 @@ export interface Scene {
   levels: Record<Id, Level>
   objects: Record<Id, SceneObject>
   tokens: Record<Id, Token>
+  /** Binary assets referenced by the document (map images). Bytes are stored separately. */
+  assets?: Record<Id, SceneAsset>
   meta: SceneMeta
 }
 

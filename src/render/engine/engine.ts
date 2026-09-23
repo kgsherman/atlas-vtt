@@ -324,6 +324,15 @@ export class AtlasEngine implements Engine {
     this.root.background = new THREE.Color(this.view.vision === "fog" ? "#000000" : scene.environment.backgroundColor)
   }
 
+  /** Battlemap images: implemented by the map-image work (ARCHITECTURE §9). */
+  setLevelImage(_levelId: Id, _image: TexImageSource | null, _rect: { x: number; z: number; w: number; d: number } | null): void {
+    // Not yet supported: images are ignored until the backdrop pipeline lands.
+  }
+
+  updateLevelImage(_levelId: Id, _dirty?: { x: number; z: number; w: number; d: number }): void {
+    // See setLevelImage.
+  }
+
   previewTerrain(levelId: Id, heights: Float32Array | null, dirty: { x: number; z: number; w: number; d: number } | null): void {
     const scene = this.scene
     const lv = this.levels.get(levelId)

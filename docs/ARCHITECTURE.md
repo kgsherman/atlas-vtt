@@ -481,3 +481,57 @@ Dashboard settings (not SQL): enable anonymous sign-ins; disable Realtime "Allow
 - DM play controls: lock/unlock movement (global and per player), shared vision toggle, enforce speed, door and
   light toggles, sun/moon on/off (scene patch), move any token, hide/reveal tokens, reveal secret doors, assign
   tokens to players, preview any token's vision, kick players.
+
+---
+
+## 9. Map images (battlemap backdrops)
+
+DMs usually start from a battlemap image (e.g. Forgotten Adventures maps: 140 px per 5 ft cell, one image
+per storey, transparent outside the drawn area on upper floors/basements).
+
+- **Import** (`net/assets/import.ts`): decode with `createImageBitmap(blob, {resizeWidth, resizeHeight,
+  resizeQuality:"high"})` (plain `Image.decode()` fails on 100+ MP images), normalise to ≤ 140 px per cell and
+  ≤ 8192 px per side, encode WebP (quality ≈ 0.9; PNG fallback) and store via `AssetStore.putImage`.
+  Calibration: the DM enters the grid size in cells (e.g. 27×47) or px-per-cell and an optional offset; a
+  new scene can be created "from map images" (grid sized from the first image, one level per image).
+- **Document**: `Scene.assets[id]` (metadata only) + `Level.backdrop {assetId, rect, opacity, tintWalls}`.
+- **Rendering**: the world material samples the level's backdrop texture (planar XZ projection over
+  `rect`) as the albedo of WALKABLE fragments (and of wall/prop caps/faces when `tintWalls`), blended by
+  `opacity` × image alpha over the material colour. Lighting, shadows, perception and fog apply as usual
+  (explored memory = desaturated image). Textures use anisotropic filtering and mipmaps.
+- **From image**: `core/scene/imageTrace.ts` (pure, on `{width, height, data: Uint8ClampedArray}`):
+  - `floorMaskFromAlpha(img, calib, spacing = cellSize/4, threshold)` → `FloorMask` (+ bounds) for a floor that
+    covers exactly the opaque part (rotated upper storeys, caves).
+  - `wallsFromAlpha(img, calib, opts)` → marching-squares contour of the alpha boundary, simplified
+    (Douglas–Peucker, tolerance ≈ 0.75 ft), merged into wall segments (cave walls, building outlines).
+  Editor commands expose both ("Floor from image", "Walls from image outline").
+- **Mask floors** (`FloorObject.mask`): coverage at `spacing` resolution inside `rect`. Every consumer goes
+  through `floorRects()` / `effectiveFloorRects()` (greedy-merged rects), so occlusion, vision, movement and
+  render need no special cases. Player views never contain masks: the filter clips `floorRects()` to explored
+  cells and sends rect pieces.
+- **Players never receive a whole image.** During a session the host cuts each backdrop into one tile per
+  grid cell (`tilePx` = stored px per cell) and publishes a tile only when a player has explored that cell:
+  - Supabase: private bucket `session-tiles`, object path `{sessionId}/{levelId}/{i}_{j}.webp`, uploaded by
+    the DM (storage policy: `is_session_dm(sid)`), readable by a player only if a row exists in
+    `player_tiles(session_id, user_id, level_id, i, j)` for them (storage RLS); the host inserts grants via the
+    fenced RPC `grant_tiles(sid, host_epoch, uid, level_id, cells jsonb)`. DM assets live in the private bucket
+    `scene-assets` under `{ownerId}/{sceneId}/{assetId}.webp` (owner-only policies).
+  - Local mode: the tile source crops from the locally stored asset (dev only, insecure like LocalTransport).
+  - `PlayerView.backdrops[levelId] = {rect, opacity, tintWalls, tilePx}`; the player client composites
+    fetched tiles into a per-level canvas (transparent where missing) → `engine.setLevelImage/updateLevelImage`.
+- Export: `.atlas.json` embeds assets as data URLs (`assetsData: Record<id, dataUrl>`) so a file is portable.
+
+## 10. Quality tiers
+
+`Quality = "low" | "medium" | "high" | "ultra"`. The default is picked by a startup micro-benchmark
+(GPU renderer string + a 30-frame timed render of a synthetic scene) and adapted at runtime (§4.5).
+
+| Tier   | Pixel budget | MSAA | Light atlas tile | PCF | GPU LOS refine | Post |
+|--------|--------------|------|------------------|-----|----------------|------|
+| low    | 1.3 MP       | off  | 256²             | 1 tap | off          | none |
+| medium | 2.1 MP       | 4×   | 512²             | 2×2 (3×3 for 8 strongest) | on | none |
+| high   | native ≤ 2× DPR | 4× | 512²            | 3×3 all | on           | bloom (fixtures), vignette |
+| ultra  | native ≤ 2× DPR | 4× | 1024² (16 lights) + 512² | PCSS-style soft shadows (blocker search) | on | GTAO ambient occlusion, bloom, filmic tone mapping, subtle film grain |
+
+Post-processing runs through a small composer that renders the main pass into a half-float MSAA target;
+the world material is compiled once per tier (a tier change is a deliberate one-time recompile).

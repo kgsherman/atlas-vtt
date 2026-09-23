@@ -73,6 +73,12 @@ export const QUALITY_CONFIG: Record<Quality, QualityConfig> = {
     viewerAtlas: { width: 4096, height: 2048, tileSize: 1024, cubeSize: 512 },
     widePcfLights: 32,
   },
+  // Placeholder until the ultra pipeline (soft shadows, larger tiles, post) lands: same as high.
+  ultra: {
+    lightAtlas: { width: 4096, height: 2048, tileSize: 512, cubeSize: 256 },
+    viewerAtlas: { width: 4096, height: 2048, tileSize: 1024, cubeSize: 512 },
+    widePcfLights: 32,
+  },
 }
 
 export const SUN_MAP_SIZE = 2048
@@ -98,6 +104,7 @@ export const DEFAULT_VIEW_STATE: ViewState = {
   hostMasks: {},
   gpuVisionRefine: false,
   dimmedTokenIds: [],
+  primaryViewerId: null,
   tilt: 0,
   showHelpers: false,
 }

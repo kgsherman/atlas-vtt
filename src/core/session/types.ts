@@ -13,6 +13,7 @@ import type {
   LightObject,
   PillarObject,
   PropObject,
+  Rect,
   Scene,
   Token,
   VisionSettings,
@@ -84,6 +85,18 @@ export interface PlayerSceneInfo {
   levels: Record<Id, PlayerLevel>
 }
 
+/**
+ * A level's battlemap image as a player sees it: only its placement. Pixels arrive as one tile per
+ * grid cell, and only for cells in this player's explored mask (net/assets BackdropTileSource).
+ */
+export interface PlayerBackdrop {
+  rect: Rect
+  opacity: number
+  tintWalls: boolean
+  /** Tile edge length in pixels (one tile per grid cell). */
+  tilePx: number
+}
+
 export interface PlayerLevelMasks {
   perception: EncodedGrades
   explored: EncodedMask
@@ -107,6 +120,8 @@ export interface PlayerView {
   /** levelId → chunkKey → base64 Float32 chunk; samples touching no explored cell are zero. */
   terrain: Record<Id, Record<string, string>>
   masks: Record<Id, PlayerLevelMasks>
+  /** Backdrop placement per known level (no pixels; see PlayerBackdrop). */
+  backdrops?: Record<Id, PlayerBackdrop>
   controlledTokenIds: Id[]
   /** Tokens whose eyes this player sees through (own + party when shared vision). */
   visionTokenIds: Id[]

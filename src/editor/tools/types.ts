@@ -33,6 +33,8 @@ export interface ToolPointerEvent {
   ctrl: boolean
   clientX: number
   clientY: number
+  /** Click count from the DOM event (2 = double click). */
+  detail?: number
 }
 
 export interface ToolKeyEvent {

@@ -14,6 +14,7 @@ export const DEFAULT_VIEW: ViewState = {
   hostMasks: {},
   gpuVisionRefine: true,
   dimmedTokenIds: [],
+  primaryViewerId: null,
   tilt: (15 * Math.PI) / 180,
   showHelpers: true,
 }
