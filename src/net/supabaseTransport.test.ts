@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import type { AtlasClient } from "./supabase"
-import { SupabaseTransport } from "./supabaseTransport"
+import { NetworkMonitor, SupabaseTransport } from "./supabaseTransport"
 import { MAX_BROADCAST_BYTES } from "./transport"
 
 const SID = "5d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
@@ -267,5 +267,43 @@ describe("SupabaseTransport", () => {
     for (const ch of fake.all) ch.emit("SUBSCRIBED")
     await transport.dispose()
     expect(fake.getChannels()).toEqual([])
+  })
+})
+
+describe("NetworkMonitor", () => {
+  it("reports this device offline from navigator.onLine at once and from the socket after two failed polls", () => {
+    let navOnline = true
+    let socket = false
+    const handlers = new Map<string, () => void>()
+    const events = {
+      addEventListener: (type: "online" | "offline", cb: () => void) => void handlers.set(type, cb),
+      removeEventListener: (type: "online" | "offline") => void handlers.delete(type),
+    }
+    const mon = new NetworkMonitor(() => socket, { pollMs: 60_000, navigatorOnline: () => navOnline, events })
+    const seen: boolean[] = []
+    const off = mon.onChange((online) => seen.push(online))
+    // Not connected yet (still joining): that is not "offline".
+    mon.poll()
+    expect(mon.online()).toBe(true)
+    socket = true
+    mon.poll()
+    // The socket drops: one failed poll may be a quick reconnect, two are an outage.
+    socket = false
+    mon.poll()
+    expect(mon.online()).toBe(true)
+    mon.poll()
+    expect(mon.online()).toBe(false)
+    socket = true
+    mon.poll()
+    expect(mon.online()).toBe(true)
+    // The browser says offline: reported on its event, no poll needed.
+    navOnline = false
+    handlers.get("offline")?.()
+    expect(mon.online()).toBe(false)
+    navOnline = true
+    handlers.get("online")?.()
+    expect(seen).toEqual([false, true, false, true])
+    off()
+    expect(handlers.size).toBe(0)
   })
 })

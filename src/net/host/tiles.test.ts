@@ -7,9 +7,44 @@ import type { EncodedMask } from "@/core/vision/types"
 
 import type { ChunkEntry } from "../assets/chunks"
 import type { AssetStore } from "../assets/types"
-import { backdropCellRange, BackdropTiler, tileCrop, tilePxFor, type ChunkPart, type TileCodec, type TileImage } from "./tiles"
+import { backdropCellRange, BackdropTiler, chunkRev, subcellClipRects, tileCrop, tilePxFor, type ChunkPart, type TileCodec, type TileImage } from "./tiles"
 
 const GRID = { cellSize: 5, width: 27, depth: 47 }
+
+describe("sub-cell clips", () => {
+  it("covers set sub-cells with one rect per run, merging identical runs of consecutive rows", () => {
+    expect(subcellClipRects(0b1, 0, 0, 40)).toEqual([{ x: 0, y: 0, w: 10, h: 10 }])
+    // Row 0: sub-cells 0-1; row 1: 0-1 (merged); row 3: sub-cell 3.
+    const mask = 0b11 | (0b11 << 4) | (0b1000 << 12)
+    expect(subcellClipRects(mask, 100, 200, 40)).toEqual([
+      { x: 100, y: 200, w: 20, h: 20 },
+      { x: 130, y: 230, w: 10, h: 10 },
+    ])
+    // Two runs in one row.
+    expect(subcellClipRects(0b1001, 0, 0, 40)).toEqual([
+      { x: 0, y: 0, w: 10, h: 10 },
+      { x: 30, y: 0, w: 10, h: 10 },
+    ])
+    // Non-integer sub-cell size: rounded on absolute coordinates, so neighbours abut exactly.
+    const odd = subcellClipRects(0xffff & ~0b10, 10, 0, 10)
+    const xs = odd.flatMap((r) => [r.x, r.x + r.w])
+    expect(xs.every(Number.isInteger)).toBe(true)
+    expect(subcellClipRects(0xffff, 10, 0, 10)).toEqual([{ x: 10, y: 0, w: 10, h: 10 }])
+    expect(subcellClipRects(0, 0, 0, 40)).toEqual([])
+  })
+
+  it("chunk revs are non-zero and change with any sub-cell", () => {
+    const a = new Array(16).fill(0)
+    const b = [...a]
+    b[5] = 0b1
+    const c = [...a]
+    c[5] = 0b11
+    expect(chunkRev(a)).toBeGreaterThan(0)
+    expect(new Set([chunkRev(a), chunkRev(b), chunkRev(c)]).size).toBe(3)
+    expect(chunkRev(b)).toBe(chunkRev([...b]))
+    expect(Number.isInteger(chunkRev(c)) && chunkRev(c) < 2 ** 32).toBe(true)
+  })
+})
 
 describe("tile geometry", () => {
   it("cell ranges cover cells overlapping the rect with positive area", () => {
@@ -71,8 +106,6 @@ function fakeAssets(mode: "supabase" | "local", opts: { fail?: (u: Upload) => un
       for (const c of chunks) deletes.push(`${uid}:${levelId}:${c.ci},${c.cj}`)
     },
     removeSessionTiles: async () => 0,
-    publishTiles: async () => {},
-    grantTiles: async () => {},
   }
   return { store, uploads, deletes }
 }
@@ -98,10 +131,10 @@ function backdropScene(): { scene: Scene; levelId: Id } {
   return { scene, levelId }
 }
 
-function explored(levelId: Id, cells: Array<[number, number]>, partial: Array<[number, number]> = []): Record<Id, EncodedMask> {
+function explored(levelId: Id, cells: Array<[number, number]>, partial: Array<[number, number] | [number, number, number]> = []): Record<Id, EncodedMask> {
   const m = createCellMask(27, 47)
   for (const [i, j] of cells) setCell(m, j * 27 + i, true)
-  for (const [i, j] of partial) setSubcells(m, j * 27 + i, 0b1)
+  for (const [i, j, sub] of partial) setSubcells(m, j * 27 + i, sub ?? 0b1)
   return { [levelId]: encodeMask(m) }
 }
 
@@ -135,7 +168,16 @@ describe("BackdropTiler", () => {
     await t.sync("p1", explored(levelId, [[0, 0], [1, 0], [5, 0]], [[4, 5]]))
     expect(uploads.map((u) => `${u.uid}:${u.ci},${u.cj}:${u.parts}`).sort()).toEqual(["p1:0,0:2", "p1:1,0:1", "p1:1,1:1"])
     expect(chunks[0].size).toBe(40)
-    expect(notices.flatMap((n) => n.entries).sort()).toEqual([[0, 0, bit(0, 0) | bit(1, 0)], [1, 0, bit(5, 0)], [1, 1, bit(4, 5)]].sort())
+    const withoutRev = (e: ChunkEntry) => e.slice(0, 3)
+    expect(notices.flatMap((n) => n.entries).map(withoutRev).sort()).toEqual([[0, 0, bit(0, 0) | bit(1, 0)], [1, 0, bit(5, 0)], [1, 1, bit(4, 5)]].sort())
+    // Every uploaded chunk is announced with its content rev.
+    expect(notices.flatMap((n) => n.entries).every((e) => e.length === 4 && e[3] > 0)).toBe(true)
+    // The partly explored cell (4, 5) — sub-cell (0, 0) only — is clipped to that sub-cell: 10 px per
+    // cell, so 2.5 px per sub-cell (edges rounded on absolute coordinates). Full cells are not clipped.
+    const partialChunk = chunks.find((c) => c.parts.some((p) => p.clip))!
+    expect(partialChunk.parts).toHaveLength(1)
+    expect(partialChunk.parts[0]).toMatchObject({ ox: 0, oy: 10, clip: [{ x: 0, y: 10, w: 3, h: 3 }] })
+    expect(chunks.filter((c) => c !== partialChunk).every((c) => c.parts.every((p) => p.clip === undefined))).toBe(true)
     // The same explored mask again: nothing to do.
     const before = uploads.length
     const same = explored(levelId, [[0, 0]])
@@ -146,8 +188,12 @@ describe("BackdropTiler", () => {
     // Chunk (0,0) is re-cut with one cell; (1,0) and (1,1) are deleted and announced with mask 0.
     expect(n).toBe(before + 1)
     expect(deletes.sort()).toEqual([`p1:${levelId}:1,0`, `p1:${levelId}:1,1`])
-    expect(notices.slice(-3).flatMap((x) => x.entries).sort()).toEqual([[0, 0, bit(0, 0)], [1, 0, 0], [1, 1, 0]].sort())
-    expect(t.table("p1")).toEqual([{ levelId, entries: [[0, 0, bit(0, 0)]] }])
+    expect(notices.slice(-3).flatMap((x) => x.entries).map(withoutRev).sort()).toEqual([[0, 0, bit(0, 0)], [1, 0, 0], [1, 1, 0]].sort())
+    // Removals carry no rev.
+    expect(notices.slice(-3).flatMap((x) => x.entries).filter((e) => e[2] === 0).every((e) => e.length === 3)).toBe(true)
+    const full = new Array(16).fill(0)
+    full[0] = 0xffff
+    expect(t.table("p1")).toEqual([{ levelId, entries: [[0, 0, bit(0, 0), chunkRev(full)]] }])
     // Another player gets their own chunks.
     await t.sync("p2", explored(levelId, [[0, 0]]))
     expect(uploads.filter((u) => u.uid === "p2")).toHaveLength(1)
@@ -164,6 +210,35 @@ describe("BackdropTiler", () => {
     expect(deletes).toEqual([`p1:${levelId}:2,2`])
     expect(notices.at(-1)?.entries).toEqual([[2, 2, 0]])
     expect(t.table("p1")).toEqual([{ levelId, entries: [] }])
+  })
+
+  it("re-cuts a chunk under a new rev when a partly explored cell grows or shrinks", async () => {
+    const { scene, levelId } = backdropScene()
+    const { store, uploads } = fakeAssets("supabase")
+    const { codec, chunks } = fakeCodec()
+    const { t, notices } = tiler(store, codec)
+    t.setScene(scene)
+    await t.sync("p1", explored(levelId, [], [[4, 5, 0b1]]))
+    expect(uploads).toHaveLength(1)
+    const rev1 = notices.at(-1)!.entries[0][3]
+    // Grows by the sub-cell to its right: re-uploaded with a larger clip and a new rev.
+    await t.sync("p1", explored(levelId, [], [[4, 5, 0b11]]))
+    expect(uploads).toHaveLength(2)
+    expect(chunks.at(-1)!.parts[0].clip).toEqual([{ x: 0, y: 10, w: 5, h: 3 }])
+    const e2 = notices.at(-1)!.entries[0]
+    expect(e2.slice(0, 3)).toEqual([1, 1, bit(4, 5)])
+    expect(e2[3]).not.toBe(rev1)
+    // Becomes fully explored: no clip.
+    await t.sync("p1", explored(levelId, [[4, 5]]))
+    expect(uploads).toHaveLength(3)
+    expect(chunks.at(-1)!.parts[0].clip).toBeUndefined()
+    // Shrinks back to a partial cell (fog reset): re-uploaded too.
+    await t.sync("p1", explored(levelId, [], [[4, 5, 0b1000]]))
+    expect(uploads).toHaveLength(4)
+    expect(chunks.at(-1)!.parts[0].clip).toEqual([{ x: 8, y: 10, w: 2, h: 3 }])
+    // The same content again (a new mask object): nothing to do.
+    await t.sync("p1", explored(levelId, [], [[4, 5, 0b1000]]))
+    expect(uploads).toHaveLength(4)
   })
 
   it("uploads nearest the player's tokens first, a few at a time", async () => {

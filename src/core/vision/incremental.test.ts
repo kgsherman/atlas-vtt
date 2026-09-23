@@ -9,6 +9,7 @@ import {
   createConnector,
   createDoor,
   createLight,
+  createPillar,
   createProp,
   createWall,
   createWindow,
@@ -151,6 +152,205 @@ describe("incremental updates", () => {
       }
       engine.update(scene, { objects: ids })
       expectSame(engine, scene, viewers, `iteration ${it}`)
+    }
+  })
+})
+
+/** Every sample's light / sun / layout on two engines is identical. */
+function expectSameSamples(a: VisionEngineImpl, b: VisionEngineImpl, scene: Scene, label: string): void {
+  for (const levelId of Object.keys(scene.levels)) {
+    for (let j = 0; j < scene.grid.depth; j++) {
+      for (let i = 0; i < scene.grid.width; i++) {
+        for (let k = 0; k < 5; k++) expect(a.inspectSample(levelId, i, j, k), `${label} (${i}, ${j}) #${k}`).toEqual(b.inspectSample(levelId, i, j, k))
+      }
+    }
+  }
+}
+
+/** Dark scene with a low sun (grants bright) from azimuth `az`. */
+function sunScene(width: number, depth: number, az: number, el: number): { scene: Scene; ground: Id } {
+  const t = flat(width, depth, "dark")
+  t.scene.environment.directional = { ...t.scene.environment.directional, enabled: true, grants: "bright", azimuth: az, elevation: el }
+  return t
+}
+
+/** Brute-force sun test: a 1000 ft light-channel ray toward the sun from the sample (or its top probe). */
+function bruteSunlit(engine: VisionEngineImpl, scene: Scene, levelId: Id, i: number, j: number, k: number): boolean | null {
+  const s = engine.inspectSample(levelId, i, j, k)
+  if (!s || !s.valid) return null
+  const d = scene.environment.directional
+  const el = Math.min(Math.PI / 2, Math.max(0.1, d.elevation))
+  const dir = { x: Math.sin(d.azimuth) * Math.cos(el), y: Math.sin(el), z: Math.cos(d.azimuth) * Math.cos(el) }
+  const far = (p: { x: number; y: number; z: number }) => ({ x: p.x + dir.x * 1000, y: p.y + dir.y * 1000, z: p.z + dir.z * 1000 })
+  const world = engine.world
+  if (!world.segmentBlocked(s.position, far(s.position), { channel: "light" })) return true
+  return s.topProbe !== null && !world.segmentBlocked(s.topProbe, far(s.topProbe), { channel: "light" })
+}
+
+function expectBruteSun(engine: VisionEngineImpl, scene: Scene, label: string): number {
+  let shadowed = 0
+  for (const levelId of Object.keys(scene.levels)) {
+    for (let j = 0; j < scene.grid.depth; j++) {
+      for (let i = 0; i < scene.grid.width; i++) {
+        for (let k = 0; k < 5; k++) {
+          const want = bruteSunlit(engine, scene, levelId, i, j, k)
+          if (want === null) continue
+          if (!want) shadowed++
+          expect(engine.inspectSample(levelId, i, j, k)!.sunlit, `${label} (${i}, ${j}) #${k}`).toBe(want)
+        }
+      }
+    }
+  }
+  return shadowed
+}
+
+describe("sun rays and geometry outside the grid", () => {
+  it("a wall just outside the grid shadows the cells next to it", () => {
+    const { scene, ground } = sunScene(8, 8, -Math.PI / 2, 0.3)
+    add(scene, createWall(ground, { x: -3, z: -10 }, { x: -3, z: 50 }, { height: 20 }))
+    const viewer = addToken(scene, ground, 20, 20)
+    const engine = new VisionEngineImpl(scene)
+    const s = engine.inspectSample(ground, 0, 4, 0)!
+    expect(s.sunlit).toBe(false)
+    expect(s.light).toBe(0)
+    const res = engine.compute([engine.viewerFor(viewer)])
+    expect(res.perception[ground].grades[4 * 8 + 0]).toBe(0)
+    // (The wall shadows the whole 40 ft grid: its top is 12 ft above the ray from the far column.)
+    expect(expectBruteSun(engine, scene, "fresh")).toBe(8 * 8 * 5)
+  })
+
+  it("an incremental engine agrees with a fresh one after the out-of-grid wall is nudged", () => {
+    const { scene: s0, ground } = sunScene(8, 8, -Math.PI / 2, 0.3)
+    const wall = add(s0, createWall(ground, { x: -3, z: -10 }, { x: -3, z: 50 }, { height: 20 }))
+    const viewer = addToken(s0, ground, 20, 20)
+    const engine = new VisionEngineImpl(s0)
+    const s1 = setObject(s0, { ...wall, a: { x: -3.1, z: -10 } })
+    engine.update(s1, { objects: [wall.id] })
+    expectSameSamples(engine, new VisionEngineImpl(s1), s1, "nudged")
+    expectSame(engine, s1, [viewer], "nudged")
+  })
+
+  it("a tree outside the grid shadows exactly what brute-force rays say", () => {
+    const { scene, ground } = sunScene(8, 8, -Math.PI / 2, 0.3)
+    add(scene, createProp(ground, "tree", { x: -5, y: 0, z: 20 }))
+    const engine = new VisionEngineImpl(scene)
+    expect(expectBruteSun(engine, scene, "tree")).toBeGreaterThan(0)
+  })
+
+  it("adding a crate far outside the grid keeps incremental = fresh = brute force", () => {
+    const { scene: s0, ground } = sunScene(8, 8, -Math.PI / 2, 0.3)
+    add(s0, createWall(ground, { x: -3, z: 0 }, { x: -3, z: 20 }, { height: 20 }))
+    const viewer = addToken(s0, ground, 20, 20)
+    const engine = new VisionEngineImpl(s0)
+    const crate = { ...createProp(ground, "crate", { x: -30, y: 0, z: 30 }), scale: { x: 1, y: 6, z: 8 } }
+    const s1 = setObject(s0, crate)
+    engine.update(s1, { objects: [crate.id] })
+    expectSameSamples(engine, new VisionEngineImpl(s1), s1, "crate added")
+    expectBruteSun(engine, s1, "crate added")
+    expectSame(engine, s1, [viewer], "crate added")
+  })
+
+  it("a tall wall 8 ft west of the grid: fresh engine and one given the wall by update agree", () => {
+    const { scene: withWall, ground } = sunScene(10, 10, (3 * Math.PI) / 2, 0.3)
+    const without: Scene = { ...withWall, objects: { ...withWall.objects } }
+    const wall = add(withWall, createWall(ground, { x: -8, z: -10 }, { x: -8, z: 60 }, { height: 40 }))
+    const fresh = new VisionEngineImpl(withWall)
+    const s = fresh.inspectSample(ground, 0, 5, 0)!
+    expect(s.sunlit).toBe(false)
+    expect(s.light).toBe(0)
+    const incremental = new VisionEngineImpl(without)
+    expect(incremental.inspectSample(ground, 0, 5, 0)!.sunlit).toBe(true)
+    incremental.update(withWall, { objects: [wall.id] })
+    expectSameSamples(incremental, fresh, withWall, "wall added")
+  })
+})
+
+describe("sub-cell light after sun / occluder changes that move a shadow edge between sub-cells", () => {
+  // Sun from +X. The shadow of the 10 ft wall at x = 35 ends at x = 34.75 − 9.75 / tan(el): 16.5
+  // here, 17.2 after either edit. No sample of cell (3, 2) changes (x = 15.75, 17.5, 19.25), but the
+  // sub-cell centre at x = 16.875 does.
+  const el1 = Math.atan(9.75 / 18.25)
+  const el2 = Math.atan(9.75 / 17.55)
+  const setup = () => {
+    const { scene, ground } = sunScene(8, 6, Math.PI / 2, el1)
+    const wall = add(scene, createWall(ground, { x: 35, z: 0 }, { x: 35, z: 30 }, { height: 10, thickness: 0.5 }))
+    const viewer = addToken(scene, ground, 2.5, 12.5)
+    const engine = new VisionEngineImpl(scene)
+    expectSame(engine, scene, [viewer], "initial")
+    return { scene, ground, wall, viewer, engine }
+  }
+  const cell = 2 * 8 + 3
+
+  it("sun elevation change", () => {
+    const { scene: s0, ground, viewer, engine } = setup()
+    const s1: Scene = { ...s0, environment: { ...s0.environment, directional: { ...s0.environment.directional, elevation: el2 } } }
+    engine.update(s1, { structure: true })
+    expectSame(engine, s1, [viewer], "elevation changed")
+    const res = engine.compute([engine.viewerFor(viewer)])
+    expect(res.perception[ground].partial.get(cell)).toBe(0x3333)
+  })
+
+  it("wall height change far from the shadow edge, then a viewer move (LightField sub-cell cache)", () => {
+    const { scene: s0, ground, wall, viewer, engine } = setup()
+    const s1 = setObject(s0, { ...wall, height: 0.25 + 17.55 * Math.tan(el1) })
+    engine.update(s1, { objects: [wall.id] })
+    expectSame(engine, s1, [viewer], "wall raised")
+    expect(engine.compute([engine.viewerFor(viewer)]).perception[ground].partial.get(cell)).toBe(0x3333)
+    const s2 = setToken(s1, { ...viewer, position: { x: 7.5, z: 12.5 } })
+    engine.update(s2, { tokens: [viewer.id] })
+    expectSame(engine, s2, [viewer], "viewer moved")
+  })
+})
+
+describe("coplanar nearest-hit ties do not depend on ids or edit history", () => {
+  // Wall P (box x ∈ [24, 50], z ∈ [19, 21]) and wall Q (box x ∈ [24, 26]) share the x = 24 face, so rays
+  // to samples buried in P enter P and Q at the same t. A thin pole makes cell (5, 4) partial; a tree
+  // canopy over the eye makes the side probe (first hit = a blocker containing the sample) decide.
+  function tieScene(qId: string, lit: boolean): { scene: Scene; ground: Id; viewer: Token } {
+    const { scene, ground } = flat(12, 8, lit ? "bright" : "dark")
+    const put = <T extends SceneObject>(o: T, id: string): T => add(scene, { ...o, id })
+    put(createWall(ground, { x: 24, z: 20 }, { x: 50, z: 20 }, { height: 10, thickness: 2 }), "P")
+    put(createWall(ground, { x: 25, z: 20.92 }, { x: 25, z: 23.92 }, { height: 3, thickness: 2 }), qId)
+    put(createPillar(ground, { x: 14, z: 23.37 }, { size: 0.4, height: 20, shape: "round" }), "pole")
+    put(createProp(ground, "tree", { x: 20, y: 0, z: 18.2 }), "tree")
+    let viewer: Token
+    if (lit) {
+      viewer = addToken(scene, ground, 2.5, 22.5, { eyeHeight: 9 })
+    } else {
+      scene.environment.directional = { ...scene.environment.directional, enabled: false }
+      const light = put(createLight(ground, "torch", { x: 2.5, z: 22.5 }, { brightRadius: 60, dimRadius: 80, castsShadows: true }), "light")
+      light.position.y = 9
+      viewer = addToken(scene, ground, 28.125, 2.5, { eyeHeight: 9 })
+    }
+    return { scene, ground, viewer }
+  }
+  const cell = 4 * 12 + 5
+  const partialOf = (scene: Scene, ground: Id, viewer: Token, engine = new VisionEngineImpl(scene)) =>
+    engine.compute([engine.viewerFor(scene.tokens[viewer.id])]).perception[ground].partial.get(cell)
+
+  it("line of sight: the same partial mask whatever the second wall is called", () => {
+    for (const id of ["Q", "A"]) {
+      const { scene, ground, viewer } = tieScene(id, true)
+      expect(partialOf(scene, ground, viewer), id).toBe(287)
+    }
+  })
+
+  it("line of sight: an edit round trip on P leaves the incremental engine equal to a fresh one", () => {
+    const { scene: s0, ground, viewer } = tieScene("Q", true)
+    const engine = new VisionEngineImpl(s0)
+    expectSame(engine, s0, [viewer], "initial")
+    const P = s0.objects.P
+    if (P.type !== "wall") throw new Error("P")
+    engine.update(setObject(s0, { ...P, height: 10.5 }), { objects: ["P"] })
+    engine.update(s0, { objects: ["P"] })
+    expectSame(engine, s0, [viewer], "P raised and restored")
+    expect(partialOf(s0, ground, viewer, engine)).toBe(287)
+  })
+
+  it("light: a buried sample's light does not depend on which tied wall the ray reports", () => {
+    for (const id of ["Q", "A"]) {
+      const { scene, ground, viewer } = tieScene(id, false)
+      expect(partialOf(scene, ground, viewer), id).toBe(15)
     }
   })
 })

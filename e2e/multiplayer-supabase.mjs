@@ -212,7 +212,7 @@ try {
         const level = Object.keys(snap.view.backdrops ?? {})[0]
         const ex = snap.view.masks[level].explored
         const mask = decodeMask(ex)
-        // Fully or partly explored (a partly explored cell's whole tile is sent).
+        // Fully or partly explored (a partly explored cell ships only its explored sub-cells).
         const explored = (i, j) => cellTouched(mask, j * ex.width + i)
         // A chunk with no explored cell: the host never uploads it.
         let hidden = null
@@ -271,6 +271,119 @@ try {
       0,
       "the DM's full map images are not listable by the player"
     )
+    // A partly explored cell ships only its explored 4×4 sub-cells: download the player's chunks that
+    // hold such cells and decode them in the page (the canvas codec does not exist in Node).
+    const clip = await pl.evaluate(
+      async ({ sid, uid }) => {
+        const { getSupabase } = await import("/src/net/supabase.ts")
+        const { chunkOfCell, chunkPath, TILE_CHUNK } =
+          await import("/src/net/assets/index.ts")
+        const { decodeMask } = await import("/src/core/vision/mask.ts")
+        const SUB = 4
+        const INSET = 3 // px kept clear of sub-cell edges (antialiasing at the clip edge is allowed)
+        const snap = window.__atlasPlayer.client.getSnapshot()
+        const cs = snap.scene.grid.cellSize
+        const out = {
+          chunks: 0,
+          partialCells: 0,
+          unexplored: 0,
+          leaking: [],
+          explored: 0,
+          opaque: 0,
+          errors: [],
+        }
+        for (const [levelId, bd] of Object.entries(snap.view.backdrops ?? {})) {
+          const ex = snap.view.masks[levelId]?.explored
+          if (!ex) continue
+          const mask = decodeMask(ex)
+          // Partly explored cells lying wholly inside the image, grouped by chunk.
+          const byChunk = new Map()
+          for (const [index, sub] of mask.partial) {
+            const i = index % ex.width
+            const j = Math.floor(index / ex.width)
+            const inside =
+              i * cs >= bd.rect.x &&
+              (i + 1) * cs <= bd.rect.x + bd.rect.w &&
+              j * cs >= bd.rect.z &&
+              (j + 1) * cs <= bd.rect.z + bd.rect.d
+            if (!inside) continue
+            const { ci, cj } = chunkOfCell(i, j)
+            const key = `${ci},${cj}`
+            if (!byChunk.has(key)) byChunk.set(key, { ci, cj, cells: [] })
+            byChunk.get(key).cells.push({ i, j, sub })
+          }
+          for (const { ci, cj, cells } of [...byChunk.values()].slice(0, 4)) {
+            const r = await getSupabase()
+              .storage.from("session-tiles")
+              .download(chunkPath(sid, uid, levelId, ci, cj), {
+                cacheNonce: String(Date.now()),
+              })
+            if (!r.data) {
+              out.errors.push(`${ci}_${cj}: ${r.error?.message ?? "no data"}`)
+              continue
+            }
+            const bmp = await createImageBitmap(r.data, {
+              premultiplyAlpha: "none",
+            })
+            const canvas = new OffscreenCanvas(bmp.width, bmp.height)
+            const g = canvas.getContext("2d", { willReadFrequently: true })
+            g.drawImage(bmp, 0, 0)
+            const px = bmp.width / TILE_CHUNK
+            out.chunks++
+            for (const { i, j, sub } of cells) {
+              out.partialCells++
+              const ox = (i - ci * TILE_CHUNK) * px
+              const oy = (j - cj * TILE_CHUNK) * px
+              for (let sz = 0; sz < SUB; sz++) {
+                for (let sx = 0; sx < SUB; sx++) {
+                  const x0 = Math.ceil(ox + (sx * px) / SUB) + INSET
+                  const y0 = Math.ceil(oy + (sz * px) / SUB) + INSET
+                  const x1 = Math.floor(ox + ((sx + 1) * px) / SUB) - INSET
+                  const y1 = Math.floor(oy + ((sz + 1) * px) / SUB) - INSET
+                  if (x1 <= x0 || y1 <= y0) continue
+                  const data = g.getImageData(x0, y0, x1 - x0, y1 - y0).data
+                  let maxA = 0
+                  for (let k = 3; k < data.length; k += 4)
+                    maxA = Math.max(maxA, data[k])
+                  if (sub & (1 << (sz * SUB + sx))) {
+                    out.explored++
+                    if (maxA > 0) out.opaque++
+                  } else {
+                    out.unexplored++
+                    if (maxA > 0)
+                      out.leaking.push(
+                        `${levelId.slice(0, 6)} ${i},${j} sub ${sx},${sz} α${maxA}`
+                      )
+                  }
+                }
+              }
+            }
+          }
+        }
+        return out
+      },
+      { sid: sessionId, uid }
+    )
+    console.log(
+      `   sub-cell clipping: ${clip.chunks} chunks, ${clip.partialCells} partly explored cells, ${clip.unexplored} unexplored / ${clip.explored} explored sub-cells (${clip.opaque} opaque)`
+    )
+    if (clip.partialCells === 0)
+      console.log(
+        "   (no partly explored cell inside a backdrop: nothing to check)"
+      )
+    else {
+      checks.ok(
+        clip.errors.length === 0,
+        "the player can download its own chunks that hold partly explored cells",
+        clip.errors.slice(0, 3)
+      )
+      checks.eq(
+        clip.leaking.slice(0, 5),
+        [],
+        "partly explored cells ship no art in their unexplored sub-cells (alpha 0)"
+      )
+      checks.ok(clip.opaque > 0, "their explored sub-cells carry the art", clip)
+    }
   }
   await sleep(1500)
   await shot(pl, OUT, "01-player-initial")
@@ -370,6 +483,9 @@ try {
   const beforeHost = await playerView(pl)
   const epochBefore = await pl.evaluate(
     () => window.__atlasPlayer.client.getSnapshot().epoch
+  )
+  const tilesBefore = await dm.evaluate(
+    () => window.__atlasHost.runner.tiler?.stats ?? null
   )
   await dm.reload({ waitUntil: "domcontentloaded" })
   await waitHosting(dm, 60000)
@@ -521,6 +637,16 @@ try {
     0,
     "the refused joins delivered no broadcast or presence data"
   )
+
+  if (Object.values(scene0.levels).some((l) => l.backdrop)) {
+    // Chunk traffic of the whole run (initial view, moves, reloads, host restart).
+    const tiler = await dm.evaluate(
+      () => window.__atlasHost.runner.tiler?.stats ?? null
+    )
+    console.log(
+      `   host tile uploads: first host run ${JSON.stringify(tilesBefore)}, after the DM's reload ${JSON.stringify(tiler)} (browser-logged 429s: ${rateLimited(logs)})`
+    )
+  }
 
   checks.step("DM ends the session")
   await dm.getByRole("button", { name: "End session" }).click()

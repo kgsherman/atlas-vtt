@@ -1,13 +1,8 @@
 import { describe, expect, it } from "vitest"
 
 import { createScene } from "@/core/scene/factory"
-import type { Cell } from "@/core/scene/types"
-import { createCellMask, encodeMask, setCell } from "@/core/vision/mask"
 
-import { createMemoryStore } from "../localStore"
-import { createAssetStore } from "./index"
-import { backdropCanvasSize, backdropCells, createBackdropPublisher, tileDestRect, tileSourceRect } from "./tiles"
-import type { AssetStore } from "./types"
+import { backdropCanvasSize, backdropCells, backdropTilePx, tileDestRect, tileSourceRect } from "./tiles"
 
 describe("tile geometry", () => {
   const grid = { cellSize: 5, width: 27, depth: 47 }
@@ -40,88 +35,15 @@ describe("tile geometry", () => {
   })
 })
 
-describe("backdrop publisher", () => {
-  function fixture() {
-    const scene = createScene({ width: 10, depth: 10 })
+describe("backdrop tile size", () => {
+  it("is the stored px per cell, like the player filter's placement", () => {
+    const scene = createScene({ width: 27, depth: 47 })
     const levelId = Object.keys(scene.levels)[0]
-    scene.assets = { img: { id: "img", kind: "image", name: "map.webp", mime: "image/webp", width: 700, height: 700, bytes: 1 } }
-    scene.levels[levelId].backdrop = { assetId: "img", rect: { x: 0, z: 0, w: 50, d: 50 }, opacity: 1, tintWalls: false }
-    const published: Cell[] = []
-    const granted: { user: string; epoch: number; cells: Cell[] }[] = []
-    const assets: AssetStore = {
-      mode: "supabase",
-      putImage: () => Promise.reject(new Error("unused")),
-      getImage: async () => new Blob([]),
-      deleteImage: async () => {},
-      copyImages: async () => {},
-      putTileChunk: async () => {},
-      deleteTileChunks: async () => {},
-      removeSessionTiles: async () => 0,
-      async publishTiles(_sid, _level, tiles) {
-        published.push(...tiles.map((t) => t.cell))
-      },
-      async grantTiles(_sid, epoch, user, _level, cells) {
-        granted.push({ user, epoch, cells: [...cells] })
-      },
-    }
-    const cutCalls: Cell[][] = []
-    const publisher = createBackdropPublisher({
-      sessionId: "s",
-      assets,
-      loadImage: async () => ({ width: 700, height: 700, close() {} }) as unknown as ImageBitmap,
-      cut: async (_img, size, rect, cellSize, tilePx, cells) => {
-        expect(size).toMatchObject({ width: 700, height: 700 })
-        expect(rect).toEqual({ x: 0, z: 0, w: 50, d: 50 })
-        expect(cellSize).toBe(5)
-        expect(tilePx).toBe(70)
-        cutCalls.push([...cells])
-        // Pretend the first cell is transparent (no tile).
-        return cells.slice(1).map((cell) => ({ cell, blob: new Blob([]) }))
-      },
-    })
-    const explored = (cells: [number, number][]) => {
-      const m = createCellMask(10, 10)
-      for (const [i, j] of cells) setCell(m, j * 10 + i, true)
-      return { [levelId]: encodeMask(m) }
-    }
-    return { scene, levelId, publisher, published, granted, cutCalls, explored }
-  }
-
-  it("cuts, publishes and grants only new explored cells", async () => {
-    const f = fixture()
-    await f.publisher.sync(f.scene, "u1", 3, f.explored([[0, 0], [1, 0], [2, 0]]))
-    expect(f.cutCalls).toEqual([[{ i: 0, j: 0 }, { i: 1, j: 0 }, { i: 2, j: 0 }]])
-    expect(f.published).toEqual([{ i: 1, j: 0 }, { i: 2, j: 0 }])
-    expect(f.granted).toEqual([{ user: "u1", epoch: 3, cells: [{ i: 0, j: 0 }, { i: 1, j: 0 }, { i: 2, j: 0 }] }])
-    // Same explored set: nothing to do. One more cell: only that one.
-    await f.publisher.sync(f.scene, "u1", 3, f.explored([[0, 0], [1, 0], [2, 0]]))
-    await f.publisher.sync(f.scene, "u1", 3, f.explored([[0, 0], [1, 0], [2, 0], [0, 1]]))
-    expect(f.cutCalls).toHaveLength(2)
-    expect(f.cutCalls[1]).toEqual([{ i: 0, j: 1 }])
-    expect(f.granted[1].cells).toEqual([{ i: 0, j: 1 }])
-    // Another player exploring published cells: granted without re-cutting.
-    await f.publisher.sync(f.scene, "u2", 3, f.explored([[1, 0]]))
-    expect(f.cutCalls).toHaveLength(2)
-    expect(f.granted[2]).toEqual({ user: "u2", epoch: 3, cells: [{ i: 1, j: 0 }] })
-  })
-
-  it("re-cuts after the backdrop changes and skips levels without one", async () => {
-    const f = fixture()
-    await f.publisher.sync(f.scene, "u1", 1, f.explored([[4, 4]]))
-    f.scene.levels[f.levelId].backdrop = { ...f.scene.levels[f.levelId].backdrop!, rect: { x: 0, z: 0, w: 50, d: 50 }, assetId: "img" }
-    f.scene.assets!.img2 = { ...f.scene.assets!.img, id: "img2" }
-    f.scene.levels[f.levelId].backdrop!.assetId = "img2"
-    await f.publisher.sync(f.scene, "u1", 1, f.explored([[4, 4]]))
-    expect(f.cutCalls).toHaveLength(2)
-    f.scene.levels[f.levelId].backdrop = null
-    await f.publisher.sync(f.scene, "u1", 1, f.explored([[5, 5]]))
-    expect(f.cutCalls).toHaveLength(2)
-  })
-
-  it("does nothing for local asset stores", async () => {
-    const f = fixture()
-    const local = createAssetStore({ client: null, store: createMemoryStore(), userId: "u" })
-    const p = createBackdropPublisher({ sessionId: "s", assets: local, cut: async () => Promise.reject(new Error("must not cut")) })
-    await expect(p.sync(f.scene, "u1", 1, f.explored([[0, 0]]))).resolves.toBeUndefined()
+    expect(backdropTilePx(scene, levelId)).toBeNull()
+    scene.assets = { map: { id: "map", kind: "image", name: "m", mime: "image/webp", width: 3780, height: 6580, bytes: 1 } }
+    scene.levels[levelId].backdrop = { assetId: "map", rect: { x: 0, z: 0, w: 135, d: 235 }, opacity: 1, tintWalls: false }
+    expect(backdropTilePx(scene, levelId)).toBe(140)
+    scene.assets.map.width = 1_000_000
+    expect(backdropTilePx(scene, levelId)).toBe(1024)
   })
 })

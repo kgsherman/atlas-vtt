@@ -33,16 +33,6 @@ import {
   lineVerticalCylinder,
 } from "./ray"
 import { clipSegmentToBox2, closestParamOnSegment2, distancePointSegment2, segmentIntersection2 } from "./segment"
-import { cross2, distance3, normalize2, perp2 } from "./vec"
-
-describe("vec", () => {
-  it("perp2 is the +90° (left) normal used by walls", () => {
-    expect(perp2({ x: 1, z: 0 })).toEqual({ x: -0, z: 1 })
-    expect(cross2({ x: 1, z: 0 }, { x: 0, z: 1 })).toBe(1)
-    expect(normalize2({ x: 3, z: 4 })).toEqual({ x: 0.6, z: 0.8 })
-    expect(distance3({ x: 0, y: 0, z: 0 }, { x: 1, y: 2, z: 2 })).toBe(3)
-  })
-})
 
 describe("yaw frames", () => {
   it("follows three.js rotation.y: local +X maps to (cos, −sin)", () => {

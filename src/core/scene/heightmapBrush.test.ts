@@ -145,3 +145,38 @@ describe("strokes", () => {
     expect(unionRect({ x: 0, z: 0, w: 1, d: 1 }, { x: 2, z: -1, w: 1, d: 1 })).toEqual({ x: 0, z: -1, w: 3, d: 2 })
   })
 })
+
+describe("applyDab with non-finite input", () => {
+  it("changes nothing for non-finite centres, radii or strengths, and never throws", () => {
+    for (const mode of ["raise", "lower", "smooth", "flatten"] as const) {
+      for (const bad of [Number.NaN, Infinity, -Infinity]) {
+        const cases = [
+          { center: { x: bad, z: 5 }, radius: 3, strength: 1 },
+          { center: { x: 5, z: bad }, radius: 3, strength: 1 },
+          { center: { x: 5, z: 5 }, radius: bad, strength: 1 },
+          { center: { x: 5, z: 5 }, radius: 3, strength: bad },
+          { center: { x: bad, z: 5 }, radius: bad, strength: 1 },
+        ]
+        for (const c of cases) {
+          const lat = lattice(1)
+          expect(applyDab(lat, c.center, { mode, radius: c.radius, strength: c.strength }), `${mode} ${JSON.stringify(c)}`).toBeNull()
+          expect(lat.heights.every((h) => h === 1)).toBe(true)
+        }
+      }
+    }
+  })
+
+  it("a non-finite flatten target flattens to the height under the centre", () => {
+    for (const target of [Number.NaN, Infinity, -Infinity]) {
+      const lat = lattice(0)
+      lat.heights[4 * lat.samplesX + 4] = 2
+      const ref = lattice(0)
+      ref.heights[4 * ref.samplesX + 4] = 2
+      const a = applyDab(lat, { x: 10, z: 10 }, { mode: "flatten", radius: 6, strength: 1, target })
+      const b = applyDab(ref, { x: 10, z: 10 }, { mode: "flatten", radius: 6, strength: 1 })
+      expect(a).toEqual(b)
+      expect(lat.heights).toEqual(ref.heights)
+      expect(lat.heights.every((h) => Number.isFinite(h))).toBe(true)
+    }
+  })
+})

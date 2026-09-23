@@ -4,6 +4,7 @@
  */
 import * as THREE from "three"
 
+import { trackShared } from "../engine/sharedResources"
 import { MeshWriter } from "./writer"
 
 const unitCache = new Map<string, THREE.BufferGeometry>()
@@ -18,6 +19,8 @@ export function sharedGeometry(key: string, build: (w: MeshWriter) => void): THR
     g.userData.shared = true
     g.name = key
     unitCache.set(key, g)
+    // Outlives engines: released (GPU side only) when an engine is disposed.
+    trackShared(g)
   }
   return g
 }

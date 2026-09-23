@@ -9,9 +9,9 @@ import type { AABB3 } from "../geometry/box"
 import { buildOcclusionWorld } from "../occlusion"
 import type { DirtyRegion, OcclusionWorld } from "../occlusion/types"
 import { chunkSamples, parseChunkKey, sampleSpacing } from "../scene/heightmap"
-import { tokenRect } from "../scene/queries"
+import { structureSignature, tokenRect } from "../scene/queries"
 import type { Id, Level, LightObject, Rect, SceneLike, SceneObject, SceneObjectType, Token, Vec3 } from "../scene/types"
-import { eyeAtGround, tokenPointsAtGround } from "./eye"
+import { eyeAtGround, resolveLightOrigin, tokenPointsAtGround } from "./eye"
 import { SampleLayout, type InsideInfo } from "./layout"
 import { environmentSignature, expandBounds, LightField, sceneBounds, type LightSource } from "./lightField"
 import { createCellMask, createGradeMask, FULL_SUBMASK, setCell } from "./mask"
@@ -32,15 +32,6 @@ import { Evaluator, ViewerState } from "./viewer"
 /** Viewer caches kept between computes (least recently used beyond this are dropped). */
 const MAX_VIEWER_CACHES = 32
 const EMPTY_KEYS: ReadonlySet<string> = new Set()
-
-/** Signature of the grid and levels: a change means a full rebuild. */
-function structureSignature(scene: SceneLike): string {
-  const g = scene.grid
-  const levels = Object.values(scene.levels)
-    .map((l) => `${l.id}:${l.elevation}:${l.height}:${l.floorThickness}:${l.heightmap ? l.heightmap.resolution : "-"}`)
-    .sort()
-  return `${g.cellSize}|${g.width}|${g.depth}|${levels.join(",")}`
-}
 
 const own = <T>(rec: Record<Id, T>, id: Id): T | undefined => (Object.hasOwn(rec, id) ? rec[id] : undefined)
 
@@ -135,7 +126,11 @@ export class VisionEngineImpl implements VisionEngine {
     for (const id of this.lightIds) this.light.setLight(id, this.resolveLight(id))
   }
 
-  /** A light as vision sees it, or null when it is off, hidden (or its carrier is) or gone. */
+  /**
+   * A light as vision sees it, or null when it is off, hidden (or its carrier is) or gone. The origin
+   * is pushed out of containing light blockers (resolveLightOrigin), so a torch inside a wall or a
+   * candle on a slab cannot shine through it; update() re-resolves every light after occluder edits.
+   */
   private resolveLight(id: Id): LightSource | null {
     const o = own(this.scene.objects, id)
     if (!o || o.type !== "light" || !o.on || o.hidden) return null
@@ -146,7 +141,7 @@ export class VisionEngineImpl implements VisionEngine {
       return {
         id,
         levelId: token.levelId,
-        pos: { x: token.position.x + o.position.x, y: ground + o.position.y, z: token.position.z + o.position.z },
+        pos: resolveLightOrigin(this.worldImpl, { x: token.position.x + o.position.x, y: ground + o.position.y, z: token.position.z + o.position.z }, ground),
         bright: o.brightRadius,
         dim: o.dimRadius,
         castsShadows: o.castsShadows,
@@ -156,7 +151,7 @@ export class VisionEngineImpl implements VisionEngine {
     return {
       id,
       levelId: o.levelId,
-      pos: { x: o.position.x, y: ground + o.position.y, z: o.position.z },
+      pos: resolveLightOrigin(this.worldImpl, { x: o.position.x, y: ground + o.position.y, z: o.position.z }, ground),
       bright: o.brightRadius,
       dim: o.dimRadius,
       castsShadows: o.castsShadows,
@@ -431,7 +426,7 @@ export class VisionEngineImpl implements VisionEngine {
         const rec = lf.lightRecord(l.id)
         if (rec) return rec.pos
         const ground = this.index.groundAtLevel(l.levelId, l.position.x, l.position.z)
-        return { x: l.position.x, y: ground + l.position.y, z: l.position.z }
+        return resolveLightOrigin(this.worldImpl, { x: l.position.x, y: ground + l.position.y, z: l.position.z }, ground)
       },
     })
     return { perception, sunlit, visibleTokenIds, observedObjectIds: observed, illuminatingLightIds }

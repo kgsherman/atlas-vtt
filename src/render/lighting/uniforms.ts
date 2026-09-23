@@ -152,6 +152,8 @@ export interface SharedUniforms {
   uTime: THREE.IUniform<number>
   /** x = emissive scale (flames, glows), y = glow sprite strength, z = HDR post target (0/1). */
   uRenderParams: THREE.IUniform<THREE.Vector4>
+  /** World Y of the cutaway plane (underside of the slab above the active level); 1e9 = no cutaway. */
+  uCutawayY: THREE.IUniform<number>
 }
 
 /** Sampler uniforms start on real placeholder textures (see materials/placeholders), never null. */
@@ -181,5 +183,6 @@ export function createSharedUniforms(): SharedUniforms {
     uMaskGrid: { value: new THREE.Vector4(0, 0, 1, 1) },
     uTime: { value: 0 },
     uRenderParams: { value: new THREE.Vector4(1, 0.5, 0, 0) },
+    uCutawayY: { value: 1e9 },
   }
 }

@@ -93,7 +93,7 @@ export interface OcclusionWorld {
   readonly version: number
   readonly primitives: ReadonlyArray<OccluderPrimitive>
   segmentBlocked(from: Vec3, to: Vec3, opts: SegmentQueryOptions): boolean
-  /** Nearest entry hit along from→to, or null. */
+  /** Nearest entry hit along from→to, or null. Exact ties (coplanar faces) → the smallest key. */
   raycast(from: Vec3, to: Vec3, opts: SegmentQueryOptions): RayHit | null
   /** Primitives containing p (optionally filtered by channel). */
   containing(p: Vec3, channel?: BlockChannel): OccluderPrimitive[]

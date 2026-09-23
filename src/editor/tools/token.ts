@@ -4,7 +4,7 @@
  */
 import { SIZE_FOOTPRINT } from "@/core/scene/defaults"
 import { createToken } from "@/core/scene/factory"
-import { hasGroundAt } from "@/core/scene/queries"
+import { groundIndex } from "@/core/scene/queries"
 import type { Scene, TokenKind, Vec2 } from "@/core/scene/types"
 import type { ToolPreview } from "@/render/contracts"
 
@@ -44,7 +44,8 @@ export function createTokenTool(deps: ToolDeps): Tool {
     const s = store.getState()
     const radius = (SIZE_FOOTPRINT[s.toolSettings.token.size] * s.scene.grid.cellSize) / 2
     // Tokens need ground: warn (but still allow) where there is no floor yet.
-    const ok = insideExtent(s.scene.grid, hover) && hasGroundAt(s.scene, s.activeLevelId, hover)
+    // The committed scene's memoised index: this runs on every pointer move.
+    const ok = insideExtent(s.scene.grid, hover) && groundIndex(s.scene).hasGroundAt(s.activeLevelId, hover)
     return { kind: "point", levelId: s.activeLevelId, position: { x: hover.x, y: 0, z: hover.z }, radius, color: ok ? PREVIEW_COLOR : INVALID_COLOR }
   })
 

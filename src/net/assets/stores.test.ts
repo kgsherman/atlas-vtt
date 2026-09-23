@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { createMemoryStore } from "../localStore"
+import { createMemoryStore, saveDraft, type LocalStore } from "../localStore"
 import type { AtlasClient } from "../supabase"
 import { createAssetStore, createTileSource } from "./index"
 import { LOCAL_ASSET_STORE, localAssetKey } from "./localAssets"
 import { chunkPath } from "./chunks"
-import { assetPath, GRANT_BATCH, storageStatus, tilePath } from "./supabaseAssets"
+import { assetPath, storageStatus } from "./supabaseAssets"
 
 const SID = "0b0e9c1c-43b1-4e1b-9a53-0d1f5a0f0c11"
 const UID = "5f7e3c1a-2b4d-4c6e-8f10-1a2b3c4d5e6f"
@@ -40,10 +40,32 @@ describe("local asset store", () => {
     await expect(assets.putImage("s1", blob, { id: "a/b", name: "a", kind: "image", mime: "image/png", width: 1, height: 1 })).rejects.toMatchObject({ code: "invalid_argument" })
   })
 
-  it("treats tile publishing and grants as no-ops (players crop locally)", async () => {
+  it("treats tile chunks as no-ops (players crop locally)", async () => {
     const assets = createAssetStore({ client: null, store: createMemoryStore(), userId: "u" })
-    await expect(assets.publishTiles(SID, "L1", [{ cell: { i: 0, j: 0 }, blob: new Blob([]) }])).resolves.toBeUndefined()
-    await expect(assets.grantTiles(SID, 1, UID, "L1", [{ i: 0, j: 0 }])).resolves.toBeUndefined()
+    await expect(assets.putTileChunk(SID, UID, "L1", 0, 0, new Blob([]))).resolves.toBeUndefined()
+    expect(await assets.removeSessionTiles(SID)).toBe(0)
+  })
+
+  it("deletes a scene's image folder and sweeps images nothing references", async () => {
+    const store = createMemoryStore()
+    const assets = createAssetStore({ client: null, store, userId: "u" })
+    const blob = new Blob([new Uint8Array([1, 2, 3])], { type: "image/webp" })
+    const put = (doc: string, id: string) => assets.putImage(doc, blob, { id, name: id, kind: "image", mime: "image/webp", width: 1, height: 1 })
+    for (const [doc, id] of [["docA", "a1"], ["docA", "a2"], ["docB", "b1"], ["docC", "c1"], ["docD", "d1"], ["docE", "e1"]]) await put(doc, id)
+    // docA v1 uses a1 (a2 is an orphan); docB is in an active session; docC only in an ended one;
+    // docD only in an editor draft; docE nowhere.
+    await store.put("sceneVersions", "row1:000000001", { version: 1, schemaVersion: 1, createdAt: "", data: { id: "docA", assets: { a1: {} } } })
+    await store.put("sessions", "s:sess1", { id: "sess1", status: "active", sceneId: "row2" })
+    await store.put("sessions", "state:sess1", { epoch: 0, state: { kind: "seed", scene: { id: "docB", assets: { b1: {} } } } })
+    await store.put("sessions", "s:sess2", { id: "sess2", status: "ended", sceneId: "row3" })
+    await store.put("sessions", "state:sess2", { epoch: 0, state: { scene: { id: "docC", assets: { c1: {} } } } })
+    await saveDraft(store, "editor:unsaved:docD", { scene: { id: "docD", assets: {} }, libraryId: null, baseVersion: null })
+    expect(await assets.sweepUnreferencedImages!()).toEqual({ removed: 3, bytes: 9 })
+    const left = async (s: LocalStore) => (await s.keys(LOCAL_ASSET_STORE, "asset:")).map((k) => k.slice(6)).sort()
+    expect(await left(store)).toEqual(["docA:a1", "docB:b1", "docD:d1"])
+    expect(await assets.deleteSceneImages!("docA")).toBe(1)
+    expect(await left(store)).toEqual(["docB:b1", "docD:d1"])
+    await expect(assets.deleteSceneImages!("../x")).rejects.toMatchObject({ code: "invalid_argument" })
   })
 
   it("local tile source returns null without a session state", async () => {
@@ -63,7 +85,7 @@ interface Call {
   args: unknown[]
 }
 
-function fakeClient(objects: Map<string, Blob>, opts: { rpcError?: unknown } = {}) {
+function fakeClient(objects: Map<string, Blob>, opts: { rpcError?: unknown; rpcData?: (fn: string, args: Record<string, unknown>) => unknown; uploadError?: unknown } = {}) {
   const calls: Call[] = []
   const rpcCalls: { fn: string; args: Record<string, unknown> }[] = []
   const missing = { status: 400, statusCode: "404", message: "Object not found", __isStorageError: true }
@@ -74,21 +96,24 @@ function fakeClient(objects: Map<string, Blob>, opts: { rpcError?: unknown } = {
         return {
           async upload(path: string, blob: Blob, o: unknown) {
             calls.push({ bucket, op: "upload", args: [path, o] })
+            if (opts.uploadError) return { data: null, error: opts.uploadError }
             objects.set(key(path), blob)
             return { data: { path }, error: null }
           },
-          async list(folder: string) {
+          async list(folder: string, o?: { limit?: number; offset?: number }) {
             calls.push({ bucket, op: "list", args: [folder] })
             const prefix = `${bucket}:${folder}/`
-            const names = new Map<string, boolean>()
-            for (const k of objects.keys()) {
+            const names = new Map<string, number | null>()
+            for (const [k, b] of objects) {
               if (!k.startsWith(prefix)) continue
               const rest = k.slice(prefix.length)
               const slash = rest.indexOf("/")
-              if (slash < 0) names.set(rest, true)
-              else names.set(rest.slice(0, slash), false)
+              if (slash < 0) names.set(rest, b.size)
+              else names.set(rest.slice(0, slash), null)
             }
-            return { data: [...names].map(([name, file]) => ({ name, id: file ? `id-${name}` : null })), error: null }
+            const all = [...names].map(([name, size]) => (size === null ? { name, id: null, metadata: null } : { name, id: `id-${name}`, metadata: { size } }))
+            const from = o?.offset ?? 0
+            return { data: all.slice(from, from + (o?.limit ?? 100)), error: null }
           },
           async download(path: string, o?: unknown) {
             calls.push({ bucket, op: "download", args: [path, o] })
@@ -112,7 +137,7 @@ function fakeClient(objects: Map<string, Blob>, opts: { rpcError?: unknown } = {
     },
     async rpc(fn: string, args: Record<string, unknown>) {
       rpcCalls.push({ fn, args })
-      return opts.rpcError ? { data: null, error: opts.rpcError } : { data: null, error: null }
+      return opts.rpcError ? { data: null, error: opts.rpcError } : { data: opts.rpcData?.(fn, args) ?? null, error: null }
     },
   }
   return { client: client as unknown as AtlasClient, calls, rpcCalls }
@@ -139,33 +164,41 @@ describe("supabase asset store", () => {
     expect(objects.has(`scene-assets:${UID}/scene1/img1.png`)).toBe(false)
   })
 
-  it("publishes each tile once per session and batches grants", async () => {
+  it("deletes a document's image folder in pages", async () => {
     const objects = new Map<string, Blob>()
-    const { client, calls, rpcCalls } = fakeClient(objects)
+    for (let k = 0; k < 1003; k++) objects.set(`scene-assets:${UID}/docA/img${k}.webp`, new Blob([new Uint8Array([k % 7])]))
+    objects.set(`scene-assets:${UID}/docB/keep.webp`, new Blob([new Uint8Array([1])]))
+    const { client, calls } = fakeClient(objects)
     const assets = createAssetStore({ client, store: createMemoryStore(), userId: UID })
-    const tile = new Blob([new Uint8Array([1])], { type: "image/webp" })
-    await assets.publishTiles(SID, "L1", [
-      { cell: { i: 1, j: 2 }, blob: tile },
-      { cell: { i: 3, j: 4 }, blob: tile },
-    ])
-    await assets.publishTiles(SID, "L1", [{ cell: { i: 1, j: 2 }, blob: tile }])
-    const uploads = calls.filter((c) => c.op === "upload").map((c) => c.args[0])
-    expect(uploads.sort()).toEqual([tilePath(SID, "L1", { i: 1, j: 2 }), tilePath(SID, "L1", { i: 3, j: 4 })].sort())
-    expect(uploads[0]).toMatch(new RegExp(`^${SID}/L1/\\d+_\\d+\\.webp$`))
-
-    const cells = Array.from({ length: GRANT_BATCH + 5 }, (_, k) => ({ i: k % 200, j: Math.floor(k / 200) }))
-    await assets.grantTiles(SID, 7, UID, "L1", cells)
-    expect(rpcCalls).toHaveLength(2)
-    expect(rpcCalls[0]).toMatchObject({ fn: "grant_tiles", args: { p_session_id: SID, p_host_epoch: 7, p_user_id: UID, p_level_id: "L1" } })
-    expect((rpcCalls[0].args.p_cells as unknown[]).length).toBe(GRANT_BATCH)
-    expect(rpcCalls[1].args.p_cells).toEqual(cells.slice(GRANT_BATCH).map((c) => [c.i, c.j]))
+    expect(await assets.deleteSceneImages!("docA")).toBe(1003)
+    expect([...objects.keys()]).toEqual([`scene-assets:${UID}/docB/keep.webp`])
+    expect(calls.filter((c) => c.op === "remove").map((c) => (c.args[0] as string[]).length)).toEqual([1000, 3])
   })
 
-  it("maps a fenced grant failure to a NetError", async () => {
-    const { client } = fakeClient(new Map(), { rpcError: { message: "stale_epoch", code: "P0001" } })
+  it("sweeps the images the server names, except this browser's drafts, and reports their size", async () => {
+    const objects = new Map<string, Blob>([
+      [`scene-assets:${UID}/docA/old.webp`, new Blob([new Uint8Array(5)])],
+      [`scene-assets:${UID}/docA/used.webp`, new Blob([new Uint8Array(7)])],
+      [`scene-assets:${UID}/draft/new.webp`, new Blob([new Uint8Array(9)])],
+    ])
+    const store = createMemoryStore()
+    await saveDraft(store, "editor:unsaved:draft", { scene: { id: "draft", assets: {} }, libraryId: null, baseVersion: null })
+    const { client, rpcCalls } = fakeClient(objects, {
+      rpcData: (fn) => (fn === "unreferenced_scene_assets" ? [`${UID}/docA/old.webp`, `${UID}/draft/new.webp`, "someone-else/x/y.webp"] : null),
+    })
+    const assets = createAssetStore({ client, store, userId: UID })
+    expect(await assets.sweepUnreferencedImages!({ minAgeMs: 3_600_000 })).toEqual({ removed: 1, bytes: 5 })
+    expect(rpcCalls.at(-1)).toEqual({ fn: "unreferenced_scene_assets", args: { p_min_age: "3600 seconds" } })
+    expect([...objects.keys()].sort()).toEqual([`scene-assets:${UID}/docA/used.webp`, `scene-assets:${UID}/draft/new.webp`])
+  })
+
+  it("reports a refused image upload as the storage quota", async () => {
+    const { client } = fakeClient(new Map(), { uploadError: { status: 403, message: "new row violates row-level security policy" } })
     const assets = createAssetStore({ client, store: createMemoryStore(), userId: UID })
-    await expect(assets.grantTiles(SID, 1, UID, "L1", [{ i: 0, j: 0 }])).rejects.toMatchObject({ code: "stale_epoch" })
-    await expect(assets.grantTiles("not-a-uuid", 1, UID, "L1", [])).rejects.toMatchObject({ code: "invalid_argument" })
+    await expect(assets.putImage("scene1", new Blob([new Uint8Array([1])], { type: "image/png" }), { name: "a", kind: "image", mime: "image/png", width: 1, height: 1 })).rejects.toMatchObject({
+      code: "quota_exceeded",
+    })
+    await expect(assets.putTileChunk(SID, UID, "L1", 0, 0, new Blob([new Uint8Array([1])]))).rejects.toMatchObject({ code: "permission_denied" })
   })
 
   it("tile source returns null for tiles the player may not read", async () => {
@@ -217,7 +250,7 @@ describe("supabase asset store", () => {
       expect(decoded.at(-1)?.slice(1)).toEqual([140, 140, 140, 140])
       const downloads = calls.filter((c) => c.op === "download")
       expect(downloads).toHaveLength(1)
-      expect(downloads[0].args).toEqual([chunkPath(SID, UID, "L1", 1, 2), { cacheNonce: String(1 << 5) }])
+      expect(downloads[0].args).toEqual([chunkPath(SID, UID, "L1", 1, 2), { cacheNonce: `${1 << 5}.0` }])
       // More cells in the same chunk: a new version (new nonce) is downloaded once.
       tiles.setChunks?.("L1", [[1, 2, (1 << 5) | 1]], false)
       await tiles.getTile("L1", { i: 4, j: 8 })
@@ -226,6 +259,28 @@ describe("supabase asset store", () => {
       // A reset forgets the level's chunks.
       tiles.setChunks?.("L1", [], true)
       expect(await tiles.getTile("L1", { i: 5, j: 9 })).toBeNull()
+      tiles.dispose()
+    })
+
+    it("downloads a re-cut chunk (new rev) under a new nonce and reports the cells whose tile changed", async () => {
+      vi.stubGlobal("createImageBitmap", async (...args: unknown[]) => ({ width: args.length > 1 ? (args[3] as number) : 560, height: args.length > 1 ? (args[4] as number) : 560, close() {} }))
+      const objects = new Map<string, Blob>([[`session-tiles:${chunkPath(SID, UID, "L1", 1, 2)}`, new Blob([new Uint8Array([5])])]])
+      const { client, calls } = fakeClient(objects)
+      const tiles = createTileSource({ sessionId: SID, userId: UID, client, store: createMemoryStore() })
+      const nonces = () => calls.filter((c) => c.op === "download").map((c) => (c.args[1] as { cacheNonce: string }).cacheNonce)
+      expect(tiles.setChunks?.("L1", [[1, 2, 1 << 5, 111]], false)).toEqual([])
+      await tiles.getTile("L1", { i: 5, j: 9 })
+      expect(nonces()).toEqual([`${1 << 5}.111`])
+      // Same cells, new content (a partly explored cell grew): new nonce, and cell (5, 9) is reported.
+      expect(tiles.setChunks?.("L1", [[1, 2, 1 << 5, 222]], false)).toEqual([{ i: 5, j: 9 }])
+      await tiles.getTile("L1", { i: 5, j: 9 })
+      expect(nonces()).toEqual([`${1 << 5}.111`, `${1 << 5}.222`])
+      // A cell added to the chunk: only the cells that were already in it are reported.
+      expect(tiles.setChunks?.("L1", [[1, 2, (1 << 5) | 1, 333]], false)).toEqual([{ i: 5, j: 9 }])
+      // The same version again (e.g. the table after a snapshot): nothing to redraw.
+      expect(tiles.setChunks?.("L1", [[1, 2, (1 << 5) | 1, 333]], true)).toEqual([])
+      // A removal reports nothing (the compositor clears cells that stop being explored itself).
+      expect(tiles.setChunks?.("L1", [[1, 2, 0]], false)).toEqual([])
       tiles.dispose()
     })
   })

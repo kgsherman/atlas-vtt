@@ -181,12 +181,21 @@ export interface Engine {
    * "premultiply". Oversized images are downscaled to the tier's texel budget (≤ 8192 px per side).
    */
   setLevelImage(levelId: Id, image: TexImageSource | null, rect: Rect | null, opts?: { opacity?: number; tintWalls?: boolean }): void
-  /** Re-upload a level image after its canvas changed (optionally only `dirty`, world rect). */
-  updateLevelImage(levelId: Id, dirty?: Rect): void
+  /**
+   * Re-upload a level image after its canvas changed: all of it when `dirty` is omitted, else only the
+   * dirty world rect(s). A list means independent regions that are uploaded separately (pass the changed
+   * cells or chunks, not their bounding box: a box around two distant cells re-uploads everything between).
+   */
+  updateLevelImage(levelId: Id, dirty?: Rect | readonly Rect[]): void
   setView(view: Partial<ViewState>): void
   getView(): ViewState
   setOverlays(overlays: Partial<OverlayState>): void
   setQuality(q: Quality): void
+  /**
+   * The quality ceiling (the tier given to createEngine / setQuality / benchmarkQuality; adaptive quality
+   * never goes above it). Level image budgets follow it (`backdropTexelBudget` in render/index.ts).
+   */
+  getQualityCeiling(): Quality
   /**
    * Pick the quality tier for this device (renderer heuristics + a short synthetic benchmark, cached per
    * GPU; see render/engine/autoQuality.ts), apply it as the quality ceiling and return it. Optional:

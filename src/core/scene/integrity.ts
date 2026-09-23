@@ -2,18 +2,20 @@
  * Referential integrity for the scene document (docs/ARCHITECTURE.md §7). All mutators operate on
  * an immer draft or a plain mutable Scene; nothing here keeps references into the document.
  */
-import { PROP_LIBRARY } from "./defaults"
+import { MIN_WALL_LENGTH, PROP_LIBRARY } from "./defaults"
 import { newId } from "./factory"
 import {
   groundHeightAt,
   lightLevelId,
   lightWorldPosition,
   openingSegment,
+  openingsByWall,
   sortedLevels,
   tokenRect,
   wallDirection,
   wallLength,
   wallOpenings,
+  type Opening,
 } from "./queries"
 import type { Id, LightObject, Rect, Scene, SceneObject, Token, Vec2, WallObject } from "./types"
 
@@ -216,11 +218,14 @@ export function copySelection(scene: Scene, ids: Id[], opts: { sourceLevelId?: I
     taken.add(o.id)
     objects.push(clone(o))
   }
+  // One pass over the scene for every selected wall's openings (not one scan per wall).
+  let byWall: Map<Id, Opening[]> | null = null
+  const openingsOf = (wallId: Id): Opening[] => (byWall ??= openingsByWall(scene)).get(wallId) ?? []
   for (const id of ids) {
     if (hasOwn(scene.objects, id)) {
       const o = scene.objects[id]
       addObject(o)
-      if (o.type === "wall") for (const opening of wallOpenings(scene, o.id)) addObject(opening)
+      if (o.type === "wall") for (const opening of openingsOf(o.id)) addObject(opening)
     } else if (hasOwn(scene.tokens, id) && !taken.has(id)) {
       taken.add(id)
       tokens.push(clone(scene.tokens[id]))
@@ -478,15 +483,18 @@ export function reprojectOpenings(draft: Scene, wallId: Id, before: Pick<WallObj
 /**
  * Split a wall at `distance` feet from a: the original keeps [a, p], a new wall (same properties)
  * gets [p, b]. Openings entirely past the split move to the new wall (offsets rebased); openings
- * straddling it are deleted. Returns the new wall's id, or null if the split point is not inside.
+ * straddling it are deleted. Returns the new wall's id, or null if the split point is not inside
+ * with both halves at least MIN_WALL_LENGTH long (so the document stays valid).
  */
 export function splitWall(draft: Scene, wallId: Id, distance: number): Id | null {
   const wall = hasOwn(draft.objects, wallId) ? draft.objects[wallId] : undefined
   if (!wall || wall.type !== "wall") return null
   const len = wallLength(wall)
-  if (!(distance > POINT_EPS && distance < len - POINT_EPS)) return null
+  if (!(distance >= MIN_WALL_LENGTH && distance <= len - MIN_WALL_LENGTH)) return null
   const dir = wallDirection(wall)
   const p = { x: wall.a.x + dir.x * distance, z: wall.a.z + dir.z * distance }
+  // The schema's own test on the rounded halves.
+  if (Math.hypot(p.x - wall.a.x, p.z - wall.a.z) < MIN_WALL_LENGTH || Math.hypot(wall.b.x - p.x, wall.b.z - p.z) < MIN_WALL_LENGTH) return null
   const second: WallObject = { ...clone(wall), id: newId(), a: { ...p }, b: { ...wall.b } }
   draft.objects[second.id] = second
   for (const o of wallOpenings(draft, wallId)) {

@@ -31,6 +31,19 @@ export function levelById(scene: Levels, id: Id): Level | undefined {
   return Object.hasOwn(scene.levels, id) ? scene.levels[id] : undefined
 }
 
+/**
+ * Signature of the grid and the levels' structural fields (elevation, height, floor thickness,
+ * heightmap resolution). A change means the occlusion world and the vision engine rebuild from
+ * scratch instead of updating incrementally; both use this one function so they always agree.
+ */
+export function structureSignature(scene: Pick<SceneLike, "grid" | "levels">): string {
+  const g = scene.grid
+  const levels = Object.values(scene.levels)
+    .map((l) => `${l.id}:${l.elevation}:${l.height}:${l.floorThickness}:${l.heightmap ? l.heightmap.resolution : "-"}`)
+    .sort()
+  return `${g.cellSize}|${g.width}|${g.depth}|${levels.join(",")}`
+}
+
 interface SortedMemo {
   out: Level[]
   /** Elevation of each entry of `out` when memoised. */
@@ -113,6 +126,22 @@ export function wallOpenings(scene: Pick<SceneLike, "objects">, wallId: Id): Ope
   return out.sort((a, b) => a.offset - b.offset)
 }
 
+/**
+ * Openings of every wall in one pass (wallOpenings for all walls at once): wall id → its doors and
+ * windows sorted by offset (stable, so equal offsets keep Object.values order, like wallOpenings).
+ */
+export function openingsByWall(scene: Pick<SceneLike, "objects">): Map<Id, Opening[]> {
+  const out = new Map<Id, Opening[]>()
+  for (const o of Object.values(scene.objects)) {
+    if (o.type !== "door" && o.type !== "window") continue
+    const list = out.get(o.wallId)
+    if (list) list.push(o)
+    else out.set(o.wallId, [o])
+  }
+  for (const list of out.values()) list.sort((a, b) => a.offset - b.offset)
+  return out
+}
+
 export function wallLength(wall: Pick<WallObject, "a" | "b">): number {
   return Math.hypot(wall.b.x - wall.a.x, wall.b.z - wall.a.z)
 }
@@ -183,7 +212,7 @@ export function rectSubtract(a: Rect, b: Rect): Rect[] {
 export function levelGround(scene: Pick<SceneLike, "levels" | "grid">, levelId: Id, x: number, z: number): number {
   const level = levelById(scene, levelId)
   if (!level) return 0
-  return level.elevation + sampleHeight(level.heightmap, scene.grid.cellSize, x, z)
+  return level.elevation + sampleHeight(level.heightmap, scene.grid.cellSize, x, z, scene.grid)
 }
 
 /** 0 at the bottom edge of a connector's run, 1 at the top edge. */
@@ -279,7 +308,6 @@ export interface EffectiveFloor {
   rect: Rect
 }
 
-/** Floor rects of a level with connector cutouts subtracted. Single source for render, occlusion and movement. */
 // Greedy-merged rects per (mask, rect origin); masks are immutable once in a document.
 const maskRectCache = new Map<string, Rect[]>()
 const MASK_CACHE_LIMIT = 256
@@ -342,6 +370,15 @@ export function floorRects(floor: Pick<FloorObject, "rect" | "mask">): Rect[] {
   return rects.map((r) => ({ ...r }))
 }
 
+/**
+ * Slab thickness of a floor: its own, else its level's (0 when the level is missing). The single rule
+ * for render and occlusion; callers skip floors whose thickness is not positive.
+ */
+export function floorThickness(scene: Pick<SceneLike, "levels">, floor: Pick<FloorObject, "thickness" | "levelId">): number {
+  return floor.thickness ?? levelById(scene, floor.levelId)?.floorThickness ?? 0
+}
+
+/** Floor rects of a level with connector cutouts subtracted. Single source for render, occlusion and movement. */
 export function effectiveFloorRects(scene: Pick<SceneLike, "levels" | "objects">, levelId: Id): EffectiveFloor[] {
   const cutouts = floorCutouts(scene, levelId)
   const out: EffectiveFloor[] = []
@@ -359,6 +396,82 @@ export function hasGroundAt(scene: Pick<SceneLike, "levels" | "objects">, levelI
   return effectiveFloorRects(scene, levelId).some((f) => rectContains(f.rect, p))
 }
 
+type GroundScene = Pick<SceneLike, "levels" | "grid" | "objects">
+
+const groundIndexMemo = new WeakMap<object, GroundIndex>()
+
+function pushTo<K, V>(map: Map<K, V[]>, key: K, value: V): void {
+  const list = map.get(key)
+  if (list) list.push(value)
+  else map.set(key, [value])
+}
+
+/**
+ * groundHeightAt / hasGroundAt / effectiveFloorRects without the O(objects) scan per call: one pass
+ * over the objects indexes the connectors, and each level's effective floors are computed once.
+ * Results are identical to the free functions.
+ *
+ * Use it ONLY on scenes that are never changed after creation (committed store scenes, engine, planner
+ * and player scenes): it is memoised on the identity of `scene.objects` (plus `levels` and `grid`).
+ * Never use it on immer drafts or scenes mutated in place; the free functions stay uncached for those.
+ */
+export class GroundIndex {
+  readonly scene: GroundScene
+  /** Stairs / ramps by their lower level, sorted by id (the runs groundHeightAt interpolates). */
+  private readonly runs = new Map<Id, ConnectorObject[]>()
+  /** Connectors a token on the level may stand on (connectorsAt): runs on their lower level, ladders on both. */
+  private readonly usable = new Map<Id, ConnectorObject[]>()
+  private readonly floors = new Map<Id, EffectiveFloor[]>()
+
+  constructor(scene: GroundScene) {
+    this.scene = scene
+    const connectors: ConnectorObject[] = []
+    for (const o of Object.values(scene.objects)) if (o.type === "connector") connectors.push(o)
+    connectors.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    for (const c of connectors) {
+      pushTo(this.usable, c.levelId, c)
+      if (c.style === "ladder") {
+        if (c.toLevelId !== c.levelId) pushTo(this.usable, c.toLevelId, c)
+      } else {
+        pushTo(this.runs, c.levelId, c)
+      }
+    }
+  }
+
+  /** effectiveFloorRects(scene, levelId), computed once per level. */
+  effectiveFloors(levelId: Id): EffectiveFloor[] {
+    let out = this.floors.get(levelId)
+    if (!out) this.floors.set(levelId, (out = effectiveFloorRects(this.scene, levelId)))
+    return out
+  }
+
+  /** Same as groundHeightAt(scene, levelId, p). */
+  groundHeightAt(levelId: Id, p: Vec2): number {
+    const runs = this.runs.get(levelId)
+    if (runs) for (const c of runs) if (rectContains(c.rect, p)) return connectorGround(this.scene, c, p)
+    return levelGround(this.scene, levelId, p.x, p.z)
+  }
+
+  /** Same as hasGroundAt(scene, levelId, p). */
+  hasGroundAt(levelId: Id, p: Vec2): boolean {
+    const usable = this.usable.get(levelId)
+    if (usable) for (const c of usable) if (rectContains(c.rect, p)) return true
+    return this.effectiveFloors(levelId).some((f) => rectContains(f.rect, p))
+  }
+}
+
+/**
+ * The GroundIndex of a scene that is never changed after creation (see GroundIndex), memoised on
+ * `scene.objects`; a different `levels` or `grid` (level elevations, heightmaps, cell size) rebuilds it.
+ */
+export function groundIndex(scene: GroundScene): GroundIndex {
+  const memo = groundIndexMemo.get(scene.objects)
+  if (memo && memo.scene.levels === scene.levels && memo.scene.grid === scene.grid) return memo
+  const index = new GroundIndex(scene)
+  groundIndexMemo.set(scene.objects, index)
+  return index
+}
+
 // ---------------------------------------------------------------------------
 // Tokens and lights
 // ---------------------------------------------------------------------------
@@ -373,6 +486,20 @@ export function tokenGroundY(scene: Pick<SceneLike, "levels" | "grid" | "objects
  */
 export function nominalTokenEye(scene: Pick<SceneLike, "levels" | "grid" | "objects">, token: Pick<Token, "levelId" | "position" | "eyeHeight">): Vec3 {
   return { x: token.position.x, y: tokenGroundY(scene, token) + token.eyeHeight, z: token.position.z }
+}
+
+/**
+ * The level a top-down player view of this token should cut away at. Normally the token's own level;
+ * on a stairs/ramp run whose nominal eye (run ground + eyeHeight) is above the arrival level's floor,
+ * the arrival level: its slab hides most of the lower level from that eye, and the token effectively
+ * stands in the upper room. The nominal eye (not resolveViewerEye) is right here: the stairwell is cut
+ * out of the upper floor, so no slab clamps the eye on the run. Ladders never switch the view.
+ */
+export function tokenViewLevelId(scene: Pick<SceneLike, "levels" | "grid" | "objects">, token: Pick<Token, "levelId" | "position" | "eyeHeight">): Id {
+  const c = connectorsAt(scene, token.levelId, token.position).find((o) => o.style !== "ladder")
+  if (!c || !levelById(scene, c.toLevelId)) return token.levelId
+  const eye = connectorGround(scene, c, token.position) + token.eyeHeight
+  return eye > levelGround(scene, c.toLevelId, token.position.x, token.position.z) ? c.toLevelId : token.levelId
 }
 
 /** Footprint rect of a token on the ground plane (tiny = half a cell). */

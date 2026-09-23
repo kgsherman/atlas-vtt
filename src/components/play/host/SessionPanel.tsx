@@ -22,6 +22,7 @@ import {
   ScanEye,
   Sun,
   Swords,
+  TriangleAlert,
   UserMinus,
   UserPlus,
   Users,
@@ -74,6 +75,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import { initials } from "@/app/format"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import { sortedLevels } from "@/core/scene/queries"
 import type { Id, Token } from "@/core/scene/types"
 import type { GameState, SessionPlayer } from "@/core/session/types"
@@ -85,6 +87,7 @@ import { TOKEN_KIND_LABELS, tokenDisplayName } from "@/play"
 import { StatusDot } from "../hud"
 import { TokenAvatar } from "../TokenAvatar"
 import type { HostActions } from "./hostActions"
+import { duplicateNames, playerLabels } from "./playerLabels"
 
 export type SessionTab = "players" | "tokens" | "table"
 
@@ -297,9 +300,13 @@ function PlayersTab({ snap, state, actions, onKick }: SessionPanelProps) {
     )
   }
   const tokens = sortTokensForAssignment(Object.values(state.scene.tokens))
+  // Display names are free text: repeats get "(2)", "(3)" so the DM can tell players apart.
+  const labels = playerLabels([...Object.values(state.players), ...members])
+  const label = (m: HostMember) => labels.get(m.userId) ?? m.displayName
+  const duplicates = duplicateNames(members)
   const kick = async (m: HostMember) => {
     const ok = await confirm({
-      title: `Remove ${m.displayName}?`,
+      title: `Remove ${label(m)}?`,
       description:
         "They are disconnected, lose their characters and can't rejoin this session with the room code.",
       confirmLabel: "Remove player",
@@ -308,15 +315,26 @@ function PlayersTab({ snap, state, actions, onKick }: SessionPanelProps) {
     if (!ok) return
     try {
       await onKick(m.userId)
-      toast.success(`${m.displayName} was removed`)
+      toast.success(`${label(m)} was removed`)
     } catch (err) {
-      toast.error(`Couldn't remove ${m.displayName}`, {
+      toast.error(`Couldn't remove ${label(m)}`, {
         description: err instanceof Error ? err.message : String(err),
       })
     }
   }
   return (
     <div className="flex flex-col gap-1.5 p-2">
+      {duplicates.length > 0 ? (
+        <Alert className="py-2 text-xs">
+          <TriangleAlert />
+          <AlertDescription className="text-xs">
+            {duplicates.map((n) => `“${n}”`).join(", ")}{" "}
+            {duplicates.length === 1 ? "is" : "are"} used by more than one
+            player: they are numbered here in join order. Ask one to rejoin with
+            another name to avoid mix-ups.
+          </AlertDescription>
+        </Alert>
+      ) : null}
       {members.map((m) => {
         const p = state.players[m.userId] as SessionPlayer | undefined
         const owned = tokens.filter((t) =>
@@ -348,9 +366,7 @@ function PlayersTab({ snap, state, actions, onKick }: SessionPanelProps) {
                 />
               </Avatar>
               <div className="flex min-w-0 flex-1 flex-col leading-tight">
-                <span className="truncate text-xs font-medium">
-                  {m.displayName}
-                </span>
+                <span className="truncate text-xs font-medium">{label(m)}</span>
                 <span className="flex items-center gap-1.5 text-[0.6875rem] text-muted-foreground">
                   <StatusDot
                     tone={m.linked ? "ok" : m.online ? "warn" : "off"}
@@ -405,7 +421,7 @@ function PlayersTab({ snap, state, actions, onKick }: SessionPanelProps) {
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      aria-label={`More for ${m.displayName}`}
+                      aria-label={`More for ${label(m)}`}
                     />
                   }
                 >
@@ -467,7 +483,7 @@ function PlayersTab({ snap, state, actions, onKick }: SessionPanelProps) {
                 <DropdownMenuContent align="start" className="max-h-72 w-60">
                   <DropdownMenuGroup>
                     <DropdownMenuLabel>
-                      Characters {m.displayName} controls
+                      Characters {label(m)} controls
                     </DropdownMenuLabel>
                     {tokens.map((t) => (
                       <DropdownMenuCheckboxItem
@@ -531,8 +547,8 @@ function TokensTab({
     list.push(t)
     byLevel.set(t.levelId, list)
   }
-  const playerName = (uid: string) =>
-    state.players[uid]?.displayName ?? "Player"
+  const labels = playerLabels(Object.values(state.players))
+  const playerName = (uid: string) => labels.get(uid) ?? "Player"
   if (Object.keys(scene.tokens).length === 0) {
     return (
       <Empty className="m-3 border border-dashed">

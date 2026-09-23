@@ -15,6 +15,7 @@ import { isTextEntryTarget } from "@/components/editor/lib/pointer"
 import { createToolExtrasStore } from "@/components/editor/lib/toolExtras"
 import type { Id, Scene } from "@/core/scene/types"
 import { createEditorController } from "@/editor/controller"
+import type { EditorViewOptions } from "@/editor/settings"
 import { createEditorStore } from "@/editor/store"
 import type { HostRunnerImpl } from "@/net/host"
 import type { CameraKind } from "@/render/contracts"
@@ -26,15 +27,30 @@ export interface HostEditor {
   dispose(): void
 }
 
-/** Editor store + controller bound to the live session. */
+/** View options the DM's choices carry over between "Edit map" sessions. */
+export type HostEditorView = Partial<
+  Pick<EditorViewOptions, "ghostAdjacent" | "levelVisibility">
+>
+
+/**
+ * Editor store + controller bound to the live session. The view starts from the editor defaults
+ * (adjacent levels ghosted, like the standalone editor, so an upper storey never covers the level
+ * being edited), then `opts.view` (the DM's choices from the previous edit).
+ */
 export function createHostEditor(
   runner: HostRunnerImpl,
   scene: Scene,
-  opts: { camera: CameraKind; activeLevelId: Id | null }
+  opts: {
+    camera: CameraKind
+    activeLevelId: Id | null
+    view?: HostEditorView
+    /** An edit reached the live session (the map now differs from the library scene). */
+    onEdit?: () => void
+  }
 ): HostEditor {
   const store = createEditorStore({ scene })
   const s = store.getState()
-  s.setView({ camera: opts.camera, ghostAdjacent: false })
+  s.setView({ camera: opts.camera, ...opts.view })
   if (opts.activeLevelId && Object.hasOwn(scene.levels, opts.activeLevelId))
     s.setActiveLevel(opts.activeLevelId)
   s.markSaved()
@@ -50,7 +66,9 @@ export function createHostEditor(
         description: r?.error ?? "This tab is not hosting the session.",
       })
       resync()
+      return
     }
+    opts.onEdit?.()
   })
   store.getState().setPlaySink((cmd) => {
     const r = runner.dispatch(cmd)
@@ -92,14 +110,20 @@ export function useAdoptHostScene(
   }, [editor, scene])
 }
 
-/** Editor keyboard shortcuts while editing (capture phase, like the editor page). */
+/**
+ * Editor keyboard shortcuts while editing (capture phase, like the editor page). Ctrl+S saves the live
+ * map to the library (`onSave`).
+ */
 export function useHostEditKeys(
   editor: HostEditor | null,
-  onExit: () => void
+  onExit: () => void,
+  onSave: () => void
 ): void {
   const exitRef = React.useRef(onExit)
+  const saveRef = React.useRef(onSave)
   React.useEffect(() => {
     exitRef.current = onExit
+    saveRef.current = onSave
   })
   React.useEffect(() => {
     if (!editor) return
@@ -110,11 +134,7 @@ export function useHostEditKeys(
       const key = e.key.length === 1 ? e.key.toLowerCase() : e.key
       if (ctrl && !e.altKey && key === "s") {
         e.preventDefault()
-        toast.info("Edits apply to the live session", {
-          id: "live-save",
-          description:
-            "The session saves automatically; your library scene is unchanged.",
-        })
+        saveRef.current()
         return
       }
       if (isTextEntryTarget(e.target) || overlayOpen()) return

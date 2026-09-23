@@ -45,10 +45,23 @@ export function PanelSection({
   )
 }
 
+/**
+ * Id of the enclosing FieldRow's label: the controls below name themselves after it (aria-labelledby),
+ * so screen readers announce "Elevation" rather than an unnamed textbox. No call site has to wire it.
+ */
+const FieldLabelContext = React.createContext<string | undefined>(undefined)
+
+/** aria-labelledby for a control: the row label, unless the control has its own aria-label (which wins). */
+function useLabelledBy(ariaLabel?: string): string | undefined {
+  const id = React.useContext(FieldLabelContext)
+  return ariaLabel ? undefined : id
+}
+
 /** Label on the left, control on the right. */
 export function FieldRow({ label, htmlFor, hint, children, className }: { label: React.ReactNode; htmlFor?: string; hint?: string; children: React.ReactNode; className?: string }) {
+  const labelId = React.useId()
   const labelEl = (
-    <Label htmlFor={htmlFor} className="min-w-0 truncate text-xs font-normal text-muted-foreground">
+    <Label id={labelId} htmlFor={htmlFor} className="min-w-0 truncate text-xs font-normal text-muted-foreground">
       {label}
     </Label>
   )
@@ -62,7 +75,9 @@ export function FieldRow({ label, htmlFor, hint, children, className }: { label:
       ) : (
         labelEl
       )}
-      <div className="flex min-w-0 items-center gap-1.5">{children}</div>
+      <div className="flex min-w-0 items-center gap-1.5">
+        <FieldLabelContext.Provider value={labelId}>{children}</FieldLabelContext.Provider>
+      </div>
     </div>
   )
 }
@@ -107,6 +122,7 @@ export function NumberInput({ value, onCommit, min, max, step = 1, precision = 2
   const format = (v: number | null) => (v === null ? "" : trimNumber(v, precision))
   const { text, draft, setDraft } = useDraft(value, format)
   const clamp = (v: number) => Math.min(max ?? Infinity, Math.max(min ?? -Infinity, v))
+  const labelledBy = useLabelledBy(rest["aria-label"])
 
   const commit = (raw: string) => {
     setDraft(null)
@@ -124,6 +140,7 @@ export function NumberInput({ value, onCommit, min, max, step = 1, precision = 2
       <InputGroupInput
         id={id}
         aria-label={rest["aria-label"]}
+        aria-labelledby={labelledBy}
         inputMode="decimal"
         className="h-full px-2 text-xs tabular-nums"
         value={text}
@@ -165,6 +182,7 @@ export function TextInput({
   id,
   disabled,
   autoFocus,
+  "aria-label": ariaLabel,
 }: {
   value: string
   onCommit(value: string): void
@@ -174,8 +192,10 @@ export function TextInput({
   id?: string
   disabled?: boolean
   autoFocus?: boolean
+  "aria-label"?: string
 }) {
   const { text, draft, setDraft } = useDraft(value, (v) => v)
+  const labelledBy = useLabelledBy(ariaLabel)
   const commit = (raw: string) => {
     setDraft(null)
     if (raw !== value) onCommit(raw)
@@ -183,6 +203,8 @@ export function TextInput({
   return (
     <Input
       id={id}
+      aria-label={ariaLabel}
+      aria-labelledby={labelledBy}
       className={cn("h-7 text-xs", className)}
       value={text}
       placeholder={placeholder}
@@ -232,8 +254,22 @@ export function NotesInput({ value, onCommit, placeholder }: { value: string; on
 const HEX_RE = /^#[0-9a-f]{6}$/i
 
 /** Swatch (native colour picker) + hex text. */
-export function ColorInput({ value, onChange, disabled, className }: { value: string; onChange(value: string): void; disabled?: boolean; className?: string }) {
+export function ColorInput({
+  value,
+  onChange,
+  disabled,
+  className,
+  "aria-label": ariaLabel,
+}: {
+  value: string
+  onChange(value: string): void
+  disabled?: boolean
+  className?: string
+  "aria-label"?: string
+}) {
   const { text, setDraft } = useDraft(value, (v) => v)
+  const labelledBy = useLabelledBy(ariaLabel)
+  const swatchId = React.useId()
   const commit = (raw: string) => {
     setDraft(null)
     const v = raw.startsWith("#") ? raw : `#${raw}`
@@ -243,9 +279,13 @@ export function ColorInput({ value, onChange, disabled, className }: { value: st
     <InputGroup className={cn("h-7 min-w-0", className)} data-disabled={disabled || undefined}>
       <InputGroupAddon className="pr-0 pl-1">
         <label className="relative block size-5 cursor-pointer overflow-hidden rounded-sm border border-border shadow-inner" style={{ backgroundColor: value }}>
-          <span className="sr-only">Pick colour</span>
+          <span id={swatchId} className="sr-only">
+            Pick colour
+          </span>
           <input
             type="color"
+            aria-label={ariaLabel ? `${ariaLabel}: pick colour` : undefined}
+            aria-labelledby={labelledBy ? `${labelledBy} ${swatchId}` : undefined}
             className="absolute inset-0 cursor-pointer opacity-0"
             value={HEX_RE.test(value) ? value : "#000000"}
             disabled={disabled}
@@ -254,6 +294,8 @@ export function ColorInput({ value, onChange, disabled, className }: { value: st
         </label>
       </InputGroupAddon>
       <InputGroupInput
+        aria-label={ariaLabel}
+        aria-labelledby={labelledBy}
         className="h-full px-2 font-mono text-[0.6875rem] uppercase"
         value={text}
         disabled={disabled}
@@ -283,6 +325,7 @@ export function SliderInput({
   format = (v) => trimNumber(v, 2),
   disabled,
   className,
+  "aria-label": ariaLabel,
 }: {
   value: number
   onChange(value: number): void
@@ -293,10 +336,20 @@ export function SliderInput({
   format?: (v: number) => string
   disabled?: boolean
   className?: string
+  "aria-label"?: string
 }) {
+  const rowLabel = useLabelledBy(ariaLabel)
+  // Base UI's Slider.Root forwards aria-labelledby (not aria-label) to the thumb's range input.
+  const ownLabelId = React.useId()
   return (
     <div className={cn("flex min-w-0 flex-1 items-center gap-2", className)}>
+      {ariaLabel ? (
+        <span id={ownLabelId} className="sr-only">
+          {ariaLabel}
+        </span>
+      ) : null}
       <Slider
+        aria-labelledby={ariaLabel ? ownLabelId : rowLabel}
         className="min-w-0 flex-1"
         value={[value]}
         min={min}
@@ -367,9 +420,11 @@ export function Segmented<V extends string>({
   disabled?: boolean
   "aria-label"?: string
 }) {
+  const labelledBy = useLabelledBy(ariaLabel)
   return (
     <ToggleGroup
       aria-label={ariaLabel}
+      aria-labelledby={labelledBy}
       variant="outline"
       size={size}
       spacing={0}
@@ -419,9 +474,10 @@ export function SelectInput<V extends string>({
   "aria-label"?: string
 }) {
   const current = options.find((o) => o.value === value)
+  const labelledBy = useLabelledBy(ariaLabel)
   return (
     <Select<V> value={value} disabled={disabled} onValueChange={(v) => v !== null && onValueChange(v as V)}>
-      <SelectTrigger size="sm" aria-label={ariaLabel} className={cn("h-7 w-full min-w-0 text-xs", className)}>
+      <SelectTrigger size="sm" aria-label={ariaLabel} aria-labelledby={labelledBy} className={cn("h-7 w-full min-w-0 text-xs", className)}>
         <SelectValue placeholder={placeholder}>
           {() =>
             current ? (

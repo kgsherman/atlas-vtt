@@ -9,6 +9,7 @@ import type { DmCommand, GameState } from "@/core/session/types"
 import type { Id } from "@/core/scene/types"
 import type { VisibilityResult } from "@/core/vision/types"
 import type { AtlasIdentity } from "../auth"
+import type { ScenesRepo } from "../scenesRepo"
 import type { SessionsRepo } from "../sessionsRepo"
 import type { Transport } from "../transport"
 import type { AssetStore } from "../assets/types"
@@ -56,6 +57,12 @@ export interface HostSnapshot {
   state: GameState | null
   members: HostMember[]
   stats: HostStats
+  /**
+   * The library scene the live map comes from (GameState.origin): its row id, the version the map is
+   * based on (null = unknown, e.g. a game saved before this was recorded) and whether the map was
+   * edited since. null: none (started from a file, or the library scene was deleted).
+   */
+  library: { sceneId: string; version: number | null; dirty: boolean } | null
 }
 
 export interface HostRunnerOptions {
@@ -66,6 +73,8 @@ export interface HostRunnerOptions {
   identity: AtlasIdentity
   /** Map image assets (backdrop tiles for players). */
   assets: AssetStore
+  /** The DM's scene library (saveMapToLibrary). Without it the live map cannot be saved back. */
+  scenes?: ScenesRepo
   /** Create the vision worker (injectable for tests; default spawns src/net/host/visionWorker.ts). */
   createVisionClient?: () => VisionClient
 }
@@ -76,6 +85,16 @@ export interface VisionClient {
   update(scene: GameState["scene"], change: { objects?: Id[]; tokens?: Id[]; structure?: boolean; terrain?: Id[] }, stateSeq: number): Promise<void>
   /** Visibility for a set of viewer token ids against the scene at stateSeq. */
   compute(viewerTokenIds: Id[], stateSeq: number): Promise<{ stateSeq: number; result: VisibilityResult }>
+  /**
+   * Low-priority "what if": visibility of each viewer set on the current revision with `change` taken
+   * from `scene` (e.g. a moving token at an intermediate step of its path), without adopting it (the
+   * client's revision and tag stay as they are). Probes wait until no setScene/update/compute is
+   * outstanding and run one at a time, so a foreground call waits for at most one probe. `stateSeq`
+   * is the tag of the revision the probe was applied to.
+   */
+  probe(scene: GameState["scene"], change: { objects?: Id[]; tokens?: Id[] }, viewerSets: Id[][]): Promise<{ stateSeq: number; results: VisibilityResult[] }>
+  /** Probes queued or running. */
+  readonly pendingProbes: number
   dispose(): void
 }
 
@@ -101,6 +120,13 @@ export interface HostRunner {
   kick(userId: string): Promise<void>
   /** Persist immediately (fenced). */
   save(): Promise<void>
+  /**
+   * Save the live map (as it is now, edits made during the session included) as a new version of the
+   * library scene the session was started from. Rejects with NetError("version_conflict") when that
+   * scene got another version meanwhile (retry with `force` to overwrite), and with "not_found" when it
+   * was deleted. Works after endSession() too. Resolves with the new version number.
+   */
+  saveMapToLibrary(opts?: { force?: boolean }): Promise<number>
   /** End the session for everyone. */
   endSession(): Promise<void>
 }

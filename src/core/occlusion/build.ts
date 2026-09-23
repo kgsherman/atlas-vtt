@@ -16,6 +16,7 @@ import { DOOR_STYLES, PROP_LIBRARY } from "../scene/defaults"
 import {
   connectorGround,
   effectiveFloorRects,
+  floorThickness,
   levelCeilingY,
   openingSegment,
   type EffectiveFloor,
@@ -359,12 +360,8 @@ function buildOpening(ctx: BuildContext, o: DoorObject | WindowObject): Occluder
 // Floors
 // ---------------------------------------------------------------------------
 
-function floorThickness(ctx: BuildContext, floor: FloorObject): number {
-  return floor.thickness ?? ctx.scene.levels[floor.levelId].floorThickness
-}
-
 function buildFloor(ctx: BuildContext, floor: FloorObject): OccluderPrimitive[] {
-  const th = floorThickness(ctx, floor)
+  const th = floorThickness(ctx.scene, floor)
   if (!(th > 0)) return []
   const rects = ctx.effectiveFloors(floor.levelId).filter((e) => e.floorId === floor.id)
   if (rects.length === 0) return []

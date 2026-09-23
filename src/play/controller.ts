@@ -6,7 +6,8 @@
  *  - Move tool: press a token to select it; drag it to preview the move — players get an A* path over
  *    legal steps with a ruler in feet (diagonal rule) and a ghost at the drop cell; the DM gets a free
  *    drop on the token's level with a straight ruler. Release commits (player: requestMove with the
- *    previewed path; DM: move-token). A click on a door (leaf or within reach of its segment) toggles it.
+ *    previewed path; DM: move-token). A click on a door (leaf or within reach of its segment) toggles it;
+ *    hovering there highlights it (hoveredId), so doors in walls seen edge-on still show feedback.
  *  - Measure tool: press-drag measures from cell centre to cell centre; Shift-press adds a leg.
  */
 import { anchorPosition } from "@/core/movement"
@@ -270,16 +271,18 @@ export class PlayController {
       return
     }
     if (this.pressed) return
-    // Hover feedback: selectable tokens, and doors for players.
-    let hovered: Id | null = null
-    if (e.pick.tokenId && this.host.canSelect(e.pick.tokenId))
-      hovered = e.pick.tokenId
-    else if (
-      e.pick.objectId &&
-      Object.hasOwn(scene.objects, e.pick.objectId) &&
-      scene.objects[e.pick.objectId].type === "door"
-    )
-      hovered = e.pick.objectId
+    // Hover feedback: selectable tokens first, else the door a click here would toggle (the same
+    // doorAt rule as pointerUp: its leaf, or ground within reach of its segment — a door in a wall
+    // seen edge-on from above is a thin line, so an exact leaf pick is rare).
+    const hovered: Id | null =
+      e.pick.tokenId && this.host.canSelect(e.pick.tokenId)
+        ? e.pick.tokenId
+        : (doorAt(
+            scene,
+            this.host.activeLevelId(),
+            e.pick.objectId,
+            e.pick.ground ? { x: e.pick.ground.x, z: e.pick.ground.z } : null
+          )?.door.id ?? null)
     if (hovered !== this.hovered) {
       this.hovered = hovered
       this.emit()

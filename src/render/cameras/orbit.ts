@@ -24,8 +24,11 @@ export class OrbitCameraController implements CameraController {
   private goalDistance: number | null = null
   private goalAzimuth: number | null = null
   private cssHeight = 1
+  /** Where OrbitControls registered its capture-phase key listeners (the document while attached). */
+  private readonly keyRoot: Node
 
   constructor(domElement: HTMLElement) {
+    this.keyRoot = domElement.getRootNode()
     this.camera = new THREE.PerspectiveCamera(FOV, 1, 0.5, 4000)
     this.camera.position.set(60, 80, 140)
     this.controls = new OrbitControls(this.camera, domElement)
@@ -209,5 +212,12 @@ export class OrbitCameraController implements CameraController {
 
   dispose(): void {
     this.controls.dispose()
+    // three's OrbitControls.disconnect() removes its capture-phase key listeners from
+    // domElement.getRootNode(), which is no longer the document once the canvas has been detached, and
+    // React removes the DOM before running effect cleanups. The listeners left on the document keep the
+    // controls, the canvas and the whole WebGL context reachable, so remove them from the recorded root.
+    const c = this.controls as unknown as { _interceptControlDown?: EventListener; _interceptControlUp?: EventListener }
+    if (c._interceptControlDown) this.keyRoot.removeEventListener("keydown", c._interceptControlDown, { capture: true })
+    if (c._interceptControlUp) this.keyRoot.removeEventListener("keyup", c._interceptControlUp, { capture: true })
   }
 }

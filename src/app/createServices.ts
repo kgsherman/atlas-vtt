@@ -28,12 +28,35 @@ export interface CreateServicesOptions {
   store?: LocalStore
 }
 
+/**
+ * Local mode keeps the display name per tab, like its per-tab user id: tabs that play different
+ * players must not all be pre-filled with the name last used in any tab.
+ */
+const TAB_NAME_KEY = "atlas-vtt:tab-display-name"
+
+function readTabName(): string | null {
+  try {
+    return globalThis.sessionStorage?.getItem(TAB_NAME_KEY) ?? null
+  } catch {
+    return null
+  }
+}
+
+function writeTabName(name: string): void {
+  try {
+    globalThis.sessionStorage?.setItem(TAB_NAME_KEY, name)
+  } catch {
+    // Storage blocked: the name lasts for this page.
+  }
+}
+
 export async function createServices(opts: CreateServicesOptions = {}): Promise<AppServices> {
   const mode = opts.mode ?? currentMode().mode
   const client: AtlasClient | null = mode === "supabase" ? getSupabase() : null
   const [base, store] = await Promise.all([mode === "supabase" ? ensureIdentity() : Promise.resolve(localIdentity()), opts.store ?? getLocalStore()])
   // A private copy: setDisplayName keeps it current for non-React consumers.
   const identity: AtlasIdentity = { ...base, mode }
+  if (!client) identity.displayName = readTabName()
 
   const scenes = client ? createRemoteScenesRepo(client) : createLocalScenesRepo(store)
   const sessions = client ? createRemoteSessionsRepo(client) : createLocalSessionsRepo({ store, scenes, userId: () => identity.userId })
@@ -57,6 +80,7 @@ export async function createServices(opts: CreateServicesOptions = {}): Promise<
     },
     async setDisplayName(name: string): Promise<string> {
       const stored = client ? await setProfileDisplayName(name, client) : setLocalDisplayName(name)
+      if (!client) writeTabName(stored)
       identity.displayName = stored
       return stored
     },

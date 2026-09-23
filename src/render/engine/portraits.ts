@@ -95,6 +95,8 @@ export class PortraitAtlas {
     this.byUrl.set(url, slot)
     const img = new Image()
     img.crossOrigin = "anonymous"
+    // Third-party image hosts learn nothing about the page (a session URL, a room code) from the request.
+    img.referrerPolicy = "no-referrer"
     img.decoding = "async"
     img.src = url
     img

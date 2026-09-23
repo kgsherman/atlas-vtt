@@ -99,6 +99,19 @@ function DoorOptions() {
       <Opt label="Style">
         <SelectInput className="w-32" value={s.style} options={DOOR_STYLE_OPTIONS} onValueChange={(style) => set({ style })} aria-label="Door style" />
       </Opt>
+      <Opt label="Starts">
+        <SelectInput
+          className="w-24"
+          value={door.state}
+          onValueChange={(state) => setExtras({ door: { ...door, state } })}
+          options={[
+            { value: "closed", label: "Closed" },
+            { value: "open", label: "Open" },
+            { value: "locked", label: "Locked" },
+          ]}
+          aria-label="Initial door state"
+        />
+      </Opt>
       <Opt label="Leaves">
         <Segmented
           value={s.leaves}
@@ -134,19 +147,6 @@ function DoorOptions() {
             { value: "left", label: "Left", tooltip: "Opens to the left of the wall direction" },
             { value: "right", label: "Right", tooltip: "Opens to the right of the wall direction" },
           ]}
-        />
-      </Opt>
-      <Opt label="Starts">
-        <SelectInput
-          className="w-24"
-          value={door.state}
-          onValueChange={(state) => setExtras({ door: { ...door, state } })}
-          options={[
-            { value: "closed", label: "Closed" },
-            { value: "open", label: "Open" },
-            { value: "locked", label: "Locked" },
-          ]}
-          aria-label="Initial door state"
         />
       </Opt>
     </>
@@ -321,15 +321,15 @@ function TerrainOptions() {
   const hasTerrain = useEditorState((st) => Boolean(st.scene.levels[st.activeLevelId]?.heightmap))
   return (
     <>
-      <Segmented value={s.mode} onValueChange={(mode) => set({ mode })} options={BRUSH_OPTIONS} aria-label="Brush mode" />
+      <Segmented className="shrink-0" value={s.mode} onValueChange={(mode) => set({ mode })} options={BRUSH_OPTIONS} aria-label="Brush mode" />
       <Opt label="Radius">
         <SliderInput className="w-36" value={s.radius} min={BRUSH_RADIUS_MIN} max={BRUSH_RADIUS_MAX} step={0.5} onChange={(radius) => set({ radius })} format={(v) => formatFeet(v, 1)} />
       </Opt>
       <Opt label="Strength">
         <SliderInput className="w-32" value={s.strength} min={0.05} max={s.mode === "raise" || s.mode === "lower" ? 5 : 1} step={0.05} onChange={(strength) => set({ strength })} />
       </Opt>
-      <SelectInput className="w-32" value={s.falloff} options={FALLOFF_OPTIONS} onValueChange={(falloff) => set({ falloff })} aria-label="Brush falloff" />
-      {!hasTerrain ? <span className="text-[0.6875rem] text-muted-foreground">Painting enables terrain on this level</span> : null}
+      <SelectInput className="w-32 shrink-0" value={s.falloff} options={FALLOFF_OPTIONS} onValueChange={(falloff) => set({ falloff })} aria-label="Brush falloff" />
+      {!hasTerrain ? <span className="text-[0.6875rem] whitespace-nowrap text-muted-foreground">Painting enables terrain on this level</span> : null}
     </>
   )
 }
@@ -341,7 +341,7 @@ function TokenOptions() {
   const vision = token.vision
   return (
     <>
-      <Segmented value={s.kind} onValueChange={(kind) => set({ kind })} options={KIND_OPTIONS} aria-label="Token kind" />
+      <Segmented className="shrink-0" value={s.kind} onValueChange={(kind) => set({ kind })} options={KIND_OPTIONS} aria-label="Token kind" />
       <Opt label="Size">
         <SelectInput className="w-36" value={s.size} options={SIZE_OPTIONS} onValueChange={(size) => set({ size })} aria-label="Token size" />
       </Opt>
@@ -407,14 +407,15 @@ export function ToolOptionsBar() {
   const Icon = meta.icon
 
   return (
-    <div className="flex h-10 shrink-0 items-center gap-2 border-b bg-card/40 px-3">
+    <div className="flex min-h-10 shrink-0 items-center gap-2 border-b bg-card/40 px-3 py-1">
       <div className="flex shrink-0 items-center gap-1.5 pr-1 text-xs font-medium">
         <Icon className="size-3.5 text-primary" />
         {meta.label}
       </div>
       <Sep />
-      <div className="flex min-w-0 flex-1 items-center gap-3 overflow-x-auto [scrollbar-width:none]">
-        {Body ? <Body /> : <span className="truncate text-[0.6875rem] text-muted-foreground">{meta.hint}</span>}
+      {/* Wraps onto a second row when narrow (a hidden-scrollbar overflow hid controls with no hint). */}
+      <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 *:shrink-0">
+        {Body ? <Body /> : <span className="min-w-0 shrink! truncate text-[0.6875rem] text-muted-foreground">{meta.hint}</span>}
       </div>
       <Tooltip>
         <TooltipTrigger render={<div className="flex shrink-0 items-center gap-1.5" />}>

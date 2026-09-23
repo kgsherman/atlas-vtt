@@ -1,11 +1,12 @@
 /**
  * Floating HUD building blocks shared by the player view and the DM's live view: glass panels, icon
- * buttons with tooltips + shortcuts, the camera dock (rotate, zoom, tilt, grid, recentre), the tool
+ * buttons with tooltips + shortcuts, the camera dock (rotate, zoom, tilt, grid, recentre, render quality), the tool
  * switch (move / measure) and the keyboard help popover.
  */
 import * as React from "react"
 import {
   Crosshair,
+  Gauge,
   Grid3x3,
   Keyboard,
   Minus,
@@ -17,6 +18,8 @@ import {
   SunMedium,
 } from "lucide-react"
 
+import { QualitySelect } from "@/components/canvas/QualitySelect"
+import type { QualityChoice } from "@/components/canvas/qualityChoice"
 import { Button } from "@/components/ui/button"
 import { Kbd } from "@/components/ui/kbd"
 import {
@@ -37,6 +40,7 @@ import {
 } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import { PLAY_SHORTCUTS, type PlayTool } from "@/play"
+import type { Quality } from "@/render/contracts"
 
 /** Frosted panel look for everything floating over the map. */
 export const glass =
@@ -107,6 +111,13 @@ export interface CameraDockProps {
   onTilt(degrees: number): void
   grid: boolean
   onGrid(show: boolean): void
+  /** Render-quality picker (Auto or a fixed tier); omitted = no picker. */
+  quality?: {
+    value: QualityChoice
+    onChange(q: QualityChoice): void
+    /** The tier the engine runs at now (shown after "Auto"). */
+    current?: Quality | null
+  }
   className?: string
   side?: "top" | "bottom"
 }
@@ -121,6 +132,7 @@ export function CameraDock({
   onTilt,
   grid,
   onGrid,
+  quality,
   className,
   side = "top",
 }: CameraDockProps) {
@@ -207,6 +219,51 @@ export function CameraDock({
         active={grid}
         onClick={() => onGrid(!grid)}
       />
+      {quality ? (
+        <Popover>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <PopoverTrigger
+                  render={
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label="Render quality"
+                    />
+                  }
+                />
+              }
+            >
+              <Gauge />
+            </TooltipTrigger>
+            <TooltipContent side={side}>
+              Render quality ·{" "}
+              {quality.value === "auto"
+                ? `Auto${quality.current ? ` (${quality.current})` : ""}`
+                : quality.value}
+            </TooltipContent>
+          </Tooltip>
+          <PopoverContent side={side} className="w-60 gap-3">
+            <PopoverHeader>
+              <PopoverTitle>Render quality</PopoverTitle>
+              <PopoverDescription>
+                Auto picks a tier for this device and steps down when frames get
+                slow.
+              </PopoverDescription>
+            </PopoverHeader>
+            <QualitySelect
+              value={quality.value}
+              onValueChange={quality.onChange}
+              current={quality.current}
+              side={side}
+              align="start"
+              size="default"
+              className="w-full"
+            />
+          </PopoverContent>
+        </Popover>
+      ) : null}
       {onRecenter ? (
         <HudButton
           label={recenterLabel}

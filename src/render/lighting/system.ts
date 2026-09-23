@@ -114,6 +114,12 @@ export const DIRECTIONAL_BIAS_FT = 0.05
 const LIGHT_LAYER_MASK = 1 << LAYER.LIGHT
 const SIGHT_LAYER_MASK = 1 << LAYER.SIGHT
 
+/**
+ * CPU budget of the one frame after a tier change reallocated the atlases (every visible shadowed light
+ * and viewer is recaptured at once, up to this time, instead of 4 tiles per frame).
+ */
+export const TIER_SWITCH_CAPTURE_MS = 12
+
 export const DEFAULT_VIEW_STATE: ViewState = {
   mode: "editor",
   camera: "orbit",
@@ -217,6 +223,8 @@ export class AtlasLightingSystem implements LightingSystem {
   private view: ViewState = DEFAULT_VIEW_STATE
   private dimmed = new Set<Id>()
   private lights: ResolvedLight[] | null = null
+  /** The atlases were just reallocated (tier change): the next frame recaptures with TIER_SWITCH_CAPTURE_MS. */
+  private captureBurst = false
   private viewers: ResolvedViewer[] | null = null
   private readonly bounds = new THREE.Box3()
   private sceneDiagonal = 100
@@ -370,6 +378,9 @@ export class AtlasLightingSystem implements LightingSystem {
       this.viewerAtlas?.dispose()
       this.viewerAtlas = next.viewerAtlas ? new DistanceAtlas({ name: "atlas-viewers", ...next.viewerAtlas }, this.reencodeMaterial) : null
     }
+    // New atlases hold no captures: recapture everything on screen in the next frame (one longer frame)
+    // instead of dropping every shadowed light and switching them back on 4 per frame.
+    if (!sameLights || !sameHi || !sameViewers) this.captureBurst = true
     // One-time recompile of every material for the new tier's shader features.
     this.tiers.set(TIER_DEFINE[q])
     // beforeRender binds the new atlases once they hold captures.
@@ -398,10 +409,13 @@ export class AtlasLightingSystem implements LightingSystem {
     this.projScreen.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
     this.frustum.setFromProjectionMatrix(this.projScreen, THREE.WebGLCoordinateSystem, camera.reversedDepth === true)
 
-    const ranked = cullAndRankLights(this.resolvedLights(scene), {
+    const cut = this.cutawayY(scene)
+    // Caps above the cutaway plane are not lit by shadowed lights of the hidden storey (glsl/common.ts).
+    s.uCutawayY.value = cut ?? 1e9
+    const ranked = cullAndRankLights(this.resolvedLights(scene, world), {
       frustum: this.frustum,
       camera,
-      cutawayY: this.cutawayY(scene),
+      cutawayY: cut,
       maxLights: MAX_LIGHTS,
     })
     const viewers = this.view.vision === "off" ? [] : this.resolvedViewers(scene, world)
@@ -452,6 +466,8 @@ export class AtlasLightingSystem implements LightingSystem {
     }
 
     const ordered = orderTileUpdates(requests)
+    const burst = this.captureBurst
+    this.captureBurst = false
     const needSun = this.sunEnabled && this.sunDirty
     const needSky = this.skyEnabled && this.skyDirty
     let tilesUpdated = 0
@@ -467,7 +483,8 @@ export class AtlasLightingSystem implements LightingSystem {
       try {
         if (needSun) this.renderSun(renderer, scene)
         if (needSky) this.renderSky(renderer)
-        const run = runTileUpdates(ordered, { maxTiles: SHADOW_UPDATES_PER_FRAME, maxMs: SHADOW_UPDATE_MS }, (r) => jobs.get(r.key)?.(), this.now)
+        const budget = burst ? { maxTiles: MAX_LIGHTS + MAX_VIEWERS, maxMs: TIER_SWITCH_CAPTURE_MS } : { maxTiles: SHADOW_UPDATES_PER_FRAME, maxMs: SHADOW_UPDATE_MS }
+        const run = runTileUpdates(ordered, budget, (r) => jobs.get(r.key)?.(), this.now)
         tilesUpdated = run.updated.length
       } finally {
         restoreRendererState(renderer, saved)
@@ -584,9 +601,10 @@ export class AtlasLightingSystem implements LightingSystem {
   // ---------------------------------------------------------------------------------------------
   // Internals
 
-  private resolvedLights(scene: SceneLike): ResolvedLight[] {
+  private resolvedLights(scene: SceneLike, world: OcclusionWorld): ResolvedLight[] {
     // The DM with vision "off" sees hidden lights; previews show what the previewed tokens' players see.
-    if (!this.lights) this.lights = resolveLights(scene, { includeHidden: this.view.vision === "off" })
+    // Origins are pushed out of light blockers (cleared with the world in setScene / applyChange).
+    if (!this.lights) this.lights = resolveLights(scene, world, { includeHidden: this.view.vision === "off" })
     return this.lights
   }
 

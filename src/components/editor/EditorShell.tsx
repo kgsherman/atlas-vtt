@@ -11,7 +11,9 @@ import { groundHeightAt } from "@/core/scene/queries"
 import type { Id } from "@/core/scene/types"
 import type { EditorController } from "@/editor/controller"
 import type { EditorStore } from "@/editor/store"
-import type { Engine, Quality } from "@/render/contracts"
+import type { Engine } from "@/render/contracts"
+import { useQualityChoice } from "@/components/canvas/qualityChoice"
+import { overlayOpen } from "@/components/play/input"
 
 import {
   EditorActionsContext,
@@ -31,8 +33,9 @@ import { duplicateLevel } from "./lib/levelOps"
 import { editorMayHandleKey, isTextEntryTarget } from "./lib/pointer"
 import { defaultPreviewToken, type PreviewResult } from "./lib/preview"
 import { createViewportInfoStore } from "./lib/viewportInfo"
+import { readEditorView, writeEditorView } from "./lib/viewPrefs"
 import { Sidebar } from "./Sidebar"
-import { StatusBar, type QualityChoice } from "./StatusBar"
+import { StatusBar } from "./StatusBar"
 import { ToolOptionsBar } from "./ToolOptionsBar"
 import { ToolRail } from "./ToolRail"
 import { TopBar } from "./TopBar"
@@ -44,23 +47,6 @@ declare global {
     /** Dev-only automation handle (see EditorShell). */
     __atlasEditor?: { store: EditorStore; controller: EditorController; engine: Engine | null }
   }
-}
-
-const QUALITY_KEY = "atlas-editor:quality"
-
-function readQuality(): QualityChoice {
-  try {
-    const v = localStorage.getItem(QUALITY_KEY)
-    if (v === "low" || v === "medium" || v === "high" || v === "ultra" || v === "auto") return v
-  } catch {
-    // Storage unavailable: default.
-  }
-  return "auto"
-}
-
-/** A modal dialog, sheet or menu is open: canvas shortcuts must not fire underneath it. */
-function overlayOpen(): boolean {
-  return document.querySelector('[data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="sheet-content"], [role="menu"], [role="listbox"]') !== null
 }
 
 export interface EditorShellProps {
@@ -75,8 +61,7 @@ export function EditorShell({ doc, goHome, importRequest, setImportRequest }: Ed
   const confirm = useConfirm()
   const [engine, setEngine] = React.useState<Engine | null>(null)
   const [info] = React.useState(createViewportInfoStore)
-  const [quality, setQualityChoice] = React.useState<QualityChoice>(readQuality)
-  const [engineKey, setEngineKey] = React.useState(0)
+  const { choice: quality, setChoice: changeQuality, quality: qualityTier, engineKey } = useQualityChoice()
   const [preview, setPreview] = React.useState<PreviewState | null>(null)
   const [previewResult, setPreviewResult] = React.useState<PreviewResult | null>(null)
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false)
@@ -86,20 +71,22 @@ export function EditorShell({ doc, goHome, importRequest, setImportRequest }: Ed
   const [dropHint, setDropHint] = React.useState(false)
   const activeLevelName = useEditorState((s) => s.scene.levels[s.activeLevelId]?.name ?? "the active level")
 
+  // View choices (camera kind, grid, helpers, ghosts) are remembered per scene on this device.
+  const sceneId = useEditorState((s) => s.scene.id)
+  React.useEffect(() => {
+    const saved = readEditorView(sceneId)
+    if (saved) store.getState().setView(saved)
+    return store.subscribe((s, prev) => {
+      const v = s.view
+      const p = prev.view
+      if (s.scene.id !== sceneId) return
+      if (v.camera !== p.camera || v.showGrid !== p.showGrid || v.showHelpers !== p.showHelpers || v.ghostAdjacent !== p.ghostAdjacent) writeEditorView(sceneId, v)
+    })
+  }, [store, sceneId])
+
   // Preview of a token that was deleted (undo, …) ends.
   const previewTokenExists = useEditorState((s) => (preview ? Object.hasOwn(s.scene.tokens, preview.tokenId) : true))
   const activePreview = preview && previewTokenExists ? preview : null
-
-  const changeQuality = (q: QualityChoice) => {
-    try {
-      localStorage.setItem(QUALITY_KEY, q)
-    } catch {
-      // ignore
-    }
-    // "Auto" hands control back to the engine's own benchmark + adaptation: recreate it.
-    if (q === "auto" && quality !== "auto") setEngineKey((k) => k + 1)
-    setQualityChoice(q)
-  }
 
   // ---- actions ----------------------------------------------------------------------------------
   const actions = React.useMemo<EditorActions>(() => {
@@ -219,8 +206,7 @@ export function EditorShell({ doc, goHome, importRequest, setImportRequest }: Ed
       const text = e.clipboardData?.getData("text/plain")
       if (!text || !text.includes("atlas-clipboard")) return
       e.preventDefault()
-      const at = controller.cursor()?.ground ?? undefined
-      const r = store.getState().pasteText(text, at ? { at } : {})
+      const r = store.getState().pasteText(text, controller.pasteTarget())
       if (!r.ok) toast.error("Could not paste", { description: describeIssues(r.issues) })
     }
     // Capture phase: the editor sees keys before app-wide window listeners.
@@ -295,7 +281,7 @@ export function EditorShell({ doc, goHome, importRequest, setImportRequest }: Ed
                 ) : null}
                 <EditorViewport
                   key={engineKey}
-                  quality={quality === "auto" ? undefined : (quality as Quality)}
+                  quality={qualityTier}
                   preview={activePreview}
                   onPreviewToken={(id) => actions.enterPreview(id)}
                   onPreviewResult={setPreviewResult}

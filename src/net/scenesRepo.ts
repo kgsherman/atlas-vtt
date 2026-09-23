@@ -73,6 +73,12 @@ export interface ScenesRepo {
   listVersions(id: string): Promise<SceneVersionInfo[]>
   rename(id: string, name: string): Promise<SceneSummary>
   remove(id: string): Promise<void>
+  /**
+   * Image folders (document ids, `Scene.id`) used by this scene's versions and by nothing else of the
+   * caller's — no other scene's versions, no active session. Ask BEFORE remove(id), then delete them
+   * with AssetStore.deleteSceneImages (a deleted scene otherwise leaves its images behind).
+   */
+  imageFoldersToFree(id: string): Promise<Id[]>
   /** Returns the share slug (null when private). Online only. `rotate` issues a new link. */
   setVisibility(id: string, visibility: SceneVisibility, opts?: { rotate?: boolean }): Promise<string | null>
   /** Read a link-shared scene (the FULL DM document). Online only. */
@@ -83,6 +89,8 @@ export interface ScenesRepo {
 export const MAX_SCENE_VERSIONS = 50
 export const SCENE_NAME_MAX = 200
 export const SHARE_SLUG_RE = /^[A-Za-z0-9_-]{24}$/
+/** A scene document id (the image folder name). */
+const DOC_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
 
 /** Mirrors private.normalize_scene_name(). */
 export function normalizeSceneName(name: string): string {
@@ -190,6 +198,10 @@ export function createRemoteScenesRepo(client: AtlasClient): ScenesRepo {
     async remove(id) {
       const rows = unwrap(await client.from("scenes").delete().eq("id", id).select("id"))
       if (!rows || rows.length === 0) throw new NetError("not_found", "scene not found")
+    },
+    async imageFoldersToFree(id) {
+      const rows = unwrap(await client.rpc("image_folders_to_free", { p_scene_id: id }))
+      return (Array.isArray(rows) ? rows : []).filter((d): d is string => typeof d === "string" && DOC_ID_RE.test(d))
     },
     async setVisibility(id, visibility, opts = {}) {
       const { data, error } = await client.rpc("set_scene_visibility", { p_scene_id: id, p_visibility: visibility, p_rotate: opts.rotate ?? false })
@@ -313,6 +325,24 @@ export function createLocalScenesRepo(storeOrPromise: LocalStore | Promise<Local
       await record(id)
       await s.deletePrefix("sceneVersions", `${id}:`)
       await s.delete("scenes", id)
+    },
+    async imageFoldersToFree(id) {
+      const s = await store()
+      const docId = (data: unknown) => (data && typeof data === "object" && typeof (data as { id?: unknown }).id === "string" ? (data as { id: string }).id : null)
+      const mine = new Set<string>()
+      const elsewhere = new Set<string>()
+      for (const [key, v] of await s.entries<LocalVersionRecord>("sceneVersions")) {
+        const d = docId(v?.data)
+        if (d) (key.startsWith(`${id}:`) ? mine : elsewhere).add(d)
+      }
+      // Active local sessions (net/sessionsRepo keeps them in the same store: s:{id} + state:{id}).
+      for (const [key, session] of await s.entries<{ status?: string }>("sessions", "s:")) {
+        if (session?.status !== "active") continue
+        const rec = await s.get<{ state?: { scene?: unknown } }>("sessions", `state:${key.slice(2)}`)
+        const d = docId(rec?.state?.scene)
+        if (d) elsewhere.add(d)
+      }
+      return [...mine].filter((d) => DOC_ID_RE.test(d) && !elsewhere.has(d))
     },
     async setVisibility() {
       throw offline()
@@ -441,30 +471,40 @@ export function importSceneFile(text: string): ParseSceneResult {
 /**
  * Parse an `.atlas.json` and restore its embedded images into the asset store under the scene's
  * fresh id (asset ids are kept, so backdrops still resolve). Files without images import as before.
- * `restored` / `missing` list asset ids whose bytes were / were not in the file; a missing image keeps
- * its metadata (the backdrop renders without an image until it is re-imported).
+ * `restored` / `missing` list asset ids whose bytes were / were not stored; a missing image keeps its
+ * metadata (the backdrop renders without an image until it is re-imported).
+ *
+ * Never throws for the image store: when a putImage fails (quota, network…), the remaining images are
+ * counted as missing and the error is returned as `storeError`, with the SAME scene (and id), so the
+ * images already stored under it still resolve — re-parsing the file would give a new id and orphan them.
  */
 export async function importSceneFileWithAssets(
   text: string,
   assets: Pick<AssetStore, "putImage">
-): Promise<{ parsed: ParseSceneResult; restored: Id[]; missing: Id[] }> {
+): Promise<{ parsed: ParseSceneResult; restored: Id[]; missing: Id[]; storeError?: unknown }> {
   const { parsed, assetsData } = readSceneFile(text)
   const restored: Id[] = []
   const missing: Id[] = []
   if (!parsed.ok) return { parsed, restored, missing }
   const scene = parsed.scene
+  let storeError: unknown = undefined
   for (const meta of Object.values(scene.assets ?? {}).sort((a, b) => a.id.localeCompare(b.id))) {
     const url = Object.hasOwn(assetsData, meta.id) ? assetsData[meta.id] : undefined
     const m = url ? ASSET_DATA_URL_RE.exec(url) : null
-    if (!m) {
+    if (!m || storeError !== undefined) {
       missing.push(meta.id)
       continue
     }
     const mime = m[1] as SceneAsset["mime"]
     const blob = new Blob([base64ToBytes(m[2]) as Uint8Array<ArrayBuffer>], { type: mime })
-    const stored = await assets.putImage(scene.id, blob, { id: meta.id, kind: "image", name: meta.name, mime, width: meta.width, height: meta.height })
-    scene.assets![meta.id] = { ...meta, mime, bytes: stored.bytes }
-    restored.push(meta.id)
+    try {
+      const stored = await assets.putImage(scene.id, blob, { id: meta.id, kind: "image", name: meta.name, mime, width: meta.width, height: meta.height })
+      scene.assets![meta.id] = { ...meta, mime, bytes: stored.bytes }
+      restored.push(meta.id)
+    } catch (err) {
+      storeError = err ?? new Error("the image store failed")
+      missing.push(meta.id)
+    }
   }
-  return { parsed, restored, missing }
+  return storeError === undefined ? { parsed, restored, missing } : { parsed, restored, missing, storeError }
 }

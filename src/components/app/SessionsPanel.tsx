@@ -262,7 +262,9 @@ function EndSessionDialog({ session, onClose, onEnded }: { session: DmSession | 
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>End this game for everyone?</AlertDialogTitle>
-          <AlertDialogDescription>Players are disconnected and the room code stops working. The scene in your library is not affected.</AlertDialogDescription>
+          <AlertDialogDescription>
+            Players are disconnected and the room code stops working. Map edits made during the session that were not saved to your library are discarded: to keep them, Resume the session and use Save map to library first.
+          </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel disabled={busy}>Keep playing</AlertDialogCancel>

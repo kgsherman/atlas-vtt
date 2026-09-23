@@ -8,8 +8,36 @@
  * removed or replaced primitive (e.g. a door that was opened) can never block.
  */
 import { segmentEntry } from "../occlusion/primitives"
-import type { BlockChannel, OccluderPrimitive, OcclusionWorld, SegmentQueryOptions } from "../occlusion/types"
+import type { BlockChannel, OccluderPrimitive, OcclusionWorld, RayHit, SegmentQueryOptions } from "../occlusion/types"
 import type { Vec3 } from "../scene/types"
+
+/** Parametric tolerance within which two entry points along one segment count as the same. */
+const HIT_TIE = 1e-9
+
+/**
+ * The buried-point rule "the ray's FIRST hit is a blocker containing the end point", independent of
+ * which primitive the raycast reports on a tie: coplanar faces (walls sharing a face, a sill flush with
+ * another wall) are entered at the same t, and the reported one depends on grid registration order,
+ * i.e. on edit history. True when `hit` is one of `keys` (blockers containing `to`), or when one of
+ * them (not ignored) is entered no later than `hit`.
+ */
+export function hitEntersContaining(
+  world: OcclusionWorld,
+  from: Vec3,
+  to: Vec3,
+  hit: RayHit,
+  keys: ReadonlySet<string>,
+  channel: BlockChannel,
+  ignore?: ReadonlySet<string>
+): boolean {
+  if (keys.has(hit.primitive.key)) return true
+  for (const p of world.containing(to, channel)) {
+    if (!keys.has(p.key) || ignore?.has(p.sourceId)) continue
+    const t = segmentEntry(p, from, to)
+    if (t !== null && t <= hit.t + HIT_TIE) return true
+  }
+  return false
+}
 
 export class BlockerCache {
   private a: OccluderPrimitive | null = null

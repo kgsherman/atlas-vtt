@@ -7,7 +7,7 @@
  * - ambientAt: env.skyLevel where a vertical light-channel ray escapes above everything, else
  *   env.ambientLevel (no rays at all when both are equal);
  * - sun: the directional light's `grants` level where a light-channel ray toward it escapes the
- *   scene bounds;
+ *   scene bounds (the grid ∪ every occluder, see SceneBounds);
  * - light_i: lights that are on and not effectively hidden, 3D distance against the static radii,
  *   blocked only when `castsShadows` and the light-channel segment is blocked (the light's own id is
  *   ignored).
@@ -18,11 +18,17 @@
  * Point lights are stored as per-light contribution lists plus per-sample bright/dim counters, so a
  * light that moves, toggles or changes radius only touches its old and new spheres. Every cell whose
  * light may have changed gets `cellVersion[g] = version` (viewer caches re-evaluate those cells).
+ * Sub-cell light (subLevels) can change without any sample changing: a sun-shadow or sky edge can
+ * move between sub-cell centres. So an environment change marks every mixed cell (valid samples at
+ * different levels; uniform cells take the common level and change only with a sample), and an
+ * occluder change marks every mixed cell in the sky / sun-swept region, as well as cells whose
+ * samples changed.
  */
 import type { AABB3 } from "../geometry/box"
+import { primitiveBounds } from "../occlusion/primitives"
 import type { OcclusionWorld } from "../occlusion/types"
 import type { AmbientLevel, Environment, GridSettings, Id, Level, Vec3 } from "../scene/types"
-import { BlockerCache } from "./blockers"
+import { BlockerCache, hitEntersContaining } from "./blockers"
 import { SUBS_PER_CELL, type InsideInfo, type SampleLayout } from "./layout"
 import { SAMPLES_PER_CELL, type LightLevel } from "./types"
 
@@ -53,7 +59,14 @@ export function lightSignature(src: LightSource): string {
   return `${src.levelId}|${p.x},${p.y},${p.z}|${src.bright}|${src.dim}|${src.castsShadows ? 1 : 0}`
 }
 
-/** Extent used to decide that sky and sun rays have escaped the scene. */
+/**
+ * Extent used to decide that sky and sun rays have escaped the scene. Invariant: it contains the
+ * grid and every occluder primitive (the schema allows geometry up to 50 ft beyond the grid), and it
+ * only grows: the incremental engine expands it by every dirty box, so a new primitive stays inside
+ * and refreshBase re-sweeps the samples whose rays cross it. Bounds that do not shrink after a
+ * deletion are harmless (longer rays over empty space give the same answer), so a fresh build and an
+ * incremental one agree whatever the edit history.
+ */
 export interface SceneBounds {
   minX: number
   maxX: number
@@ -63,24 +76,24 @@ export interface SceneBounds {
   topY: number
 }
 
+/** The grid ∪ every occluder primitive's AABB, topped 1 ft above every level top and primitive. */
 export function sceneBounds(grid: GridSettings, levels: readonly Level[], world: OcclusionWorld): SceneBounds {
-  const b: SceneBounds = { minX: 0, maxX: grid.width * grid.cellSize, minZ: 0, maxZ: grid.depth * grid.cellSize, topY: 0 }
   let top = -Infinity
   for (const l of levels) top = Math.max(top, l.elevation + l.height)
-  for (const p of world.primitives) {
-    const y = p.shape === "box" ? p.center.y + p.halfExtents.y : p.shape === "cylinder" ? p.base.y + p.height : -Infinity
-    if (y > top) top = y
-    if (p.shape === "heightfield") {
-      for (let k = 0; k < p.heights.length; k++) if (p.heights[k] > top) top = p.heights[k]
-    }
+  const b: SceneBounds = {
+    minX: 0,
+    maxX: grid.width * grid.cellSize,
+    minZ: 0,
+    maxZ: grid.depth * grid.cellSize,
+    topY: (Number.isFinite(top) ? top : 0) + 1,
   }
-  b.topY = (Number.isFinite(top) ? top : 0) + 1
+  for (const p of world.primitives) expandBounds(b, primitiveBounds(p))
   return b
 }
 
-/** Grow bounds so they contain a (dirty) box. */
+/** Grow bounds so they contain a (dirty or primitive) box; empty boxes are skipped. */
 export function expandBounds(b: SceneBounds, box: AABB3): void {
-  if (box.minX > box.maxX) return
+  if (!(box.minX <= box.maxX && box.minY <= box.maxY)) return
   b.minX = Math.min(b.minX, box.minX)
   b.maxX = Math.max(b.maxX, box.maxX)
   b.minZ = Math.min(b.minZ, box.minZ)
@@ -247,12 +260,30 @@ export class LightField {
     }
   }
 
-  /** New environment: recompute sky/sun for every sample. */
+  /**
+   * New environment: recompute sky/sun for every sample. Mixed cells are marked too: their sub-cell
+   * light is traced per sub-cell and can change while every sample keeps its level.
+   */
   setEnvironment(env: Environment): void {
     this.env = envParams(env)
     this.version++
     this.subCache.clear()
     for (let s = 0; s < this.layout.nSamples; s++) this.storeBase(s)
+    for (let g = 0; g < this.layout.nCells; g++) if (this.mixed(g)) this.touch(g)
+  }
+
+  /** Whether the valid samples of cell g have different light levels (sub-cells are then traced). */
+  private mixed(g: number): boolean {
+    const valid = this.layout.valid
+    let common = -1
+    for (let k = 0; k < SAMPLES_PER_CELL; k++) {
+      const s = g * SAMPLES_PER_CELL + k
+      if (!valid[s]) continue
+      const lvl = this.level(s)
+      if (common < 0) common = lvl
+      else if (common !== lvl) return true
+    }
+    return false
   }
 
   private storeBase(s: number): void {
@@ -269,7 +300,9 @@ export class LightField {
   /**
    * Occluders changed inside `boxes` (and the samples in `changedSamples` moved or changed blocker
    * status): recompute sky bits under the boxes, sun bits whose rays may cross them, and the base
-   * of the changed samples.
+   * of the changed samples. Every mixed cell of that sky / sun-swept region is marked changed as well
+   * (and its cached sub-cell light dropped): a shadow edge can move between its sub-cell centres
+   * without any sample changing.
    */
   refreshBase(boxes: readonly AABB3[], changedSamples: readonly number[]): void {
     this.version++
@@ -301,6 +334,7 @@ export class LightField {
         }
         this.forCells(li, x0, z0, x1, z1, (g) => {
           for (let k = 0; k < SAMPLES_PER_CELL; k++) this.storeBase(g * SAMPLES_PER_CELL + k)
+          if (this.mixed(g)) this.touch(g)
         })
       }
     }
@@ -329,7 +363,7 @@ export class LightField {
     this.to.z = z
     if (ins !== null && ins.light.size > 0) {
       const hit = this.world.raycast(rec.pos, this.to, { channel: "light", ignoreSourceIds: rec.ignore })
-      return hit === null || ins.light.has(hit.primitive.key)
+      return hit === null || hitEntersContaining(this.world, rec.pos, this.to, hit, ins.light, "light", rec.ignore)
     }
     return !this.lightCache.blocked(rec.pos, this.to, rec.ignore)
   }

@@ -5,7 +5,7 @@
 import { cellCenter, cellOf, pathDistance } from "@/core/grid/grid"
 import { anchorPosition, measurePath, tokenAnchor } from "@/core/movement"
 import type { PathStep } from "@/core/movement/types"
-import { groundHeightAt, levelById } from "@/core/scene/queries"
+import { groundIndex, levelById } from "@/core/scene/queries"
 import type {
   Cell,
   GridSettings,
@@ -68,14 +68,18 @@ export function snapToCellCenter(grid: GridSettings, p: Vec2): Vec2 {
   return cellCenter(grid, cellOf(grid, p))
 }
 
-/** Ground height at p on a level (0 when the level is unknown). */
+/**
+ * Ground height at p on a level (0 when the level is unknown). Through the scene's memoised
+ * GroundIndex: this runs per path step on every drag update, and the free groundHeightAt scans every
+ * object per call. Scenes here are committed (never mutated in place).
+ */
 export function groundY(
   scene: Pick<SceneLike, "levels" | "grid" | "objects">,
   levelId: Id,
   p: Vec2
 ): number {
   if (!levelById(scene, levelId)) return 0
-  return groundHeightAt(scene, levelId, p)
+  return groundIndex(scene).groundHeightAt(levelId, p)
 }
 
 /** World points of a token path (footprint centres at ground level + a small lift). */

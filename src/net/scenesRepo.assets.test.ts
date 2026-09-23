@@ -81,6 +81,27 @@ describe(".atlas.json with embedded images", () => {
     expect(res.missing).toEqual([meta.id])
   })
 
+  it("keeps the scene id and what was stored when the image store fails partway", async () => {
+    const { assets, scene, meta, levelId } = await sceneWithImage()
+    const second = await assets.putImage(scene.id, new Blob([BYTES], { type: "image/webp" }), { id: "zz-second", name: "Second.webp", kind: "image", mime: "image/webp", width: 10, height: 10 })
+    scene.assets![second.id] = second
+    void levelId
+    const text = (await exportSceneFileWithAssets(scene, assets)).text
+    const target = createAssetStore({ client: null, store: createMemoryStore(), userId: "u" })
+    let calls = 0
+    const flaky = {
+      putImage: (...args: Parameters<typeof target.putImage>) => (++calls === 1 ? target.putImage(...args) : Promise.reject(new Error("quota"))),
+    }
+    const res = await importSceneFileWithAssets(text, flaky)
+    expect(res.parsed.ok).toBe(true)
+    if (!res.parsed.ok) return
+    expect(res.restored).toEqual([meta.id])
+    expect(res.missing).toEqual([second.id])
+    expect(res.storeError).toBeInstanceOf(Error)
+    // The image already stored resolves under the returned scene's id (no second parse, no new id).
+    expect(await target.getImage(res.parsed.scene.id, meta.id)).not.toBeNull()
+  })
+
   it("still rejects invalid documents", async () => {
     expect(readSceneFile('{"assetsData": {}}').parsed.ok).toBe(false)
     const res = await importSceneFileWithAssets("{not json", createAssetStore({ client: null, store: createMemoryStore(), userId: "u" }))

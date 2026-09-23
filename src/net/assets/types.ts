@@ -38,6 +38,18 @@ export interface AssetStore {
   deleteImage(sceneId: Id, assetId: Id): Promise<void>
   /** Copy a scene's assets to another scene id (fork/import). */
   copyImages(fromSceneId: Id, toSceneId: Id, assetIds: Id[]): Promise<void>
+  /**
+   * Delete every image stored under a document id (a deleted scene's folder: pass the ids from
+   * ScenesRepo.imageFoldersToFree, BEFORE removing the scene). Returns the number of objects removed.
+   * (Optional only so stand-in stores outside net/ keep compiling; both real stores implement it.)
+   */
+  deleteSceneImages?(sceneId: Id): Promise<number>
+  /**
+   * Delete the caller's images that no saved scene version, no active session and (in this browser) no
+   * editor draft references, among those older than `minAgeMs` (default 7 days; Supabase only — local
+   * mode has no age). Returns what was removed. (Optional like deleteSceneImages.)
+   */
+  sweepUnreferencedImages?(opts?: { minAgeMs?: number }): Promise<{ removed: number; bytes: number }>
 
   // ---- host side, during a session -------------------------------------------------------------
   /**
@@ -50,11 +62,12 @@ export interface AssetStore {
   /** Delete every tile chunk of a session (the DM, after ending it). Returns the number removed. */
   removeSessionTiles(sessionId: string): Promise<number>
   /**
-   * Superseded per-cell tile API (one shared object per cell + `player_tiles` grants): kept for the
-   * storage policies' compatibility tests; the host no longer uses it.
+   * @deprecated The per-cell tile API (`player_tiles`, grant_tiles) was removed from the database and
+   * the stores; these remain optional only so stand-in stores that still list them type-check.
    */
-  publishTiles(sessionId: string, levelId: Id, tiles: Array<{ cell: Cell; blob: Blob }>): Promise<void>
-  grantTiles(sessionId: string, hostEpoch: number, userId: string, levelId: Id, cells: Cell[]): Promise<void>
+  publishTiles?(sessionId: string, levelId: Id, tiles: Array<{ cell: Cell; blob: Blob }>): Promise<void>
+  /** @deprecated See publishTiles. */
+  grantTiles?(sessionId: string, hostEpoch: number, userId: string, levelId: Id, cells: Cell[]): Promise<void>
 }
 
 /** Player side: fetch the tile for an explored cell (null if not (yet) available). */
@@ -63,7 +76,9 @@ export interface BackdropTileSource {
   /**
    * The host's `{t: "tiles"}` announcement: which cells each of this player's chunks holds (reset = the
    * level's list replaces what was known). Sources that crop locally ignore it.
+   * Returns the cells whose chunk was re-cut (new mask or rev) while they stayed in it — their tile
+   * changed (e.g. more of a partly explored cell), so a compositor that drew them should redraw them.
    */
-  setChunks?(levelId: Id, chunks: ChunkEntry[], reset: boolean): void
+  setChunks?(levelId: Id, chunks: ChunkEntry[], reset: boolean): Cell[] | void
   dispose(): void
 }

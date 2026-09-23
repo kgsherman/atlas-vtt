@@ -2,11 +2,13 @@
 // browser context — BroadcastChannel does not cross contexts, so the three tabs share one context but
 // have separate per-tab identities).
 //
-// DM opens a sample (or an .atlas.json) → starts a session → two players join by room code → the DM
+// DM opens a sample (or an .atlas.json) → starts a session → the host map's right-click menus (token,
+// door, light) work before anyone has joined → two players join by room code → the DM
 // assigns characters through the Players tab → players move (mouse drag and planner paths) → every
 // player's view must equal the authoritative oracle (fresh vision engine + filter) → a player opens a
 // door → the DM locks movement and a move is rejected → a player reloads and rejoins in the same state
-// → the DM's tab reloads (a new host run) and both players resume in the same state → no hidden token,
+// → a player climbs the stairs by dragging past the top step and comes back with "Go down" → the DM's
+// tab reloads (a new host run) and both players resume in the same state → no hidden token,
 // attached light, secret door, DM note, object name or asset id ever reached a player (every
 // BroadcastChannel frame the player tabs received, plus the stored player_views rows).
 //
@@ -28,10 +30,16 @@ import {
 import {
   assignToken,
   clickDoor,
+  closeMenus,
+  crashed,
   drainWire,
   expectedView,
   findLeaks,
+  hostActiveLevel,
+  hostContextMenu,
+  hostMenuTargets,
   hostState,
+  hoverSubmenu,
   joinGame,
   mouseDrag,
   openSceneInEditor,
@@ -46,6 +54,7 @@ import {
   waitHosting,
   waitPlayerLive,
   waitResult,
+  walkToward,
 } from "./session.mjs"
 
 const OUT = outDir("multiplayer-local")
@@ -104,6 +113,100 @@ try {
   )
   await shot(dm, OUT, "01-dm-hosting")
 
+  // ---- host map menus before anyone joins -------------------------------------------------------------
+  checks.step("Host map menus work before any player has joined")
+  // Base UI menu labels outside a group throw ("MenuGroupContext is missing"), which crashed the host
+  // console into the error boundary (and sent every player to "Waiting for the DM").
+  const menuLogs = logs.length
+  const menuLevel = await hostActiveLevel(dm)
+  const targets = await hostMenuTargets(dm, menuLevel)
+  console.log(
+    `  level ${scene0.levels[menuLevel].name}: ${targets.tokens.length} tokens, ${targets.doors.length} doors, ${targets.lights.length} lights on screen`
+  )
+  const menuToken = targets.tokens[0]
+  checks.ok(!!menuToken, "a token is on screen", targets.tokens)
+  if (menuToken) {
+    checks.ok(
+      await hostContextMenu(dm, menuToken),
+      `right-clicking ${menuToken.name} opens its menu`
+    )
+    await hoverSubmenu(dm, "Move to level")
+    checks.ok(
+      (await dm.getByRole("menuitemcheckbox").count()) >=
+        Object.keys(scene0.levels).length,
+      "'Move to level' lists every level"
+    )
+    // Reopen: the open submenu's positioner covers the next trigger.
+    await hostContextMenu(dm, menuToken)
+    await hoverSubmenu(dm, "Controlled by")
+    checks.ok(
+      await dm.getByText("No players have joined yet").isVisible(),
+      "'Controlled by' says no players have joined yet"
+    )
+    checks.ok(!(await crashed(dm)), "the host console did not crash")
+    await closeMenus(dm)
+  }
+  let doorMenu = false
+  for (const d of targets.doors.slice(0, 6)) {
+    if (!(await hostContextMenu(dm, d))) continue
+    doorMenu = await dm
+      .getByRole("menuitem", { name: /^(Open|Close)/ })
+      .first()
+      .isVisible()
+    if (doorMenu) break
+  }
+  checks.ok(doorMenu, "right-clicking a door opens the door menu")
+  await closeMenus(dm)
+  let lightToggled = null
+  for (const l of targets.lights.slice(0, 8)) {
+    if (!(await hostContextMenu(dm, l))) continue
+    const toggle = dm.getByRole("menuitem", { name: /Put out|Light it/ })
+    if (!(await toggle.isVisible())) continue
+    const on = await dm.evaluate(
+      (id) =>
+        window.__atlasHost.runner.getSnapshot().state.scene.objects[id].on,
+      l.id
+    )
+    await toggle.click()
+    await waitFor(
+      dm,
+      ({ id, on }) =>
+        window.__atlasHost.runner.getSnapshot().state.scene.objects[id].on !==
+        on,
+      { id: l.id, on },
+      { timeout: 5000, label: "light toggled" }
+    ).then(
+      () => (lightToggled = l),
+      () => (lightToggled = false)
+    )
+    if (lightToggled) {
+      // Switch it back so the rest of the run plays the scene as authored.
+      await hostContextMenu(dm, l)
+      await dm.getByRole("menuitem", { name: /Put out|Light it/ }).click()
+      await waitFor(
+        dm,
+        ({ id, on }) =>
+          window.__atlasHost.runner.getSnapshot().state.scene.objects[id].on ===
+          on,
+        { id: l.id, on },
+        { timeout: 5000, label: "light restored" }
+      )
+    }
+    break
+  }
+  checks.ok(
+    !!lightToggled,
+    `a light's menu switches it off and on (${lightToggled?.name ?? lightToggled?.id ?? "none"})`
+  )
+  await closeMenus(dm)
+  checks.ok(
+    !(await crashed(dm)) &&
+      (await hostState(dm)).status === "hosting" &&
+      logs.slice(menuLogs).every((l) => !/MenuGroupContext/.test(l)),
+    "the host is still hosting, with no menu errors",
+    logs.slice(menuLogs).filter((l) => /MenuGroupContext/.test(l))
+  )
+
   // ---- players join ---------------------------------------------------------------------------------
   checks.step("Two players join by room code")
   const join = async (name, key) => ({
@@ -130,6 +233,30 @@ try {
     { label: "both players linked" }
   )
   checks.ok(true, "the host links both players")
+  if (menuToken) {
+    await dm.bringToFront()
+    await hostContextMenu(dm, menuToken)
+    await hoverSubmenu(dm, "Controlled by")
+    const listed = []
+    for (const n of [A.name, B.name])
+      if (
+        await dm.getByRole("menuitemcheckbox", { name: n }).first().isVisible()
+      )
+        listed.push(n)
+    checks.eq(listed, [A.name, B.name], "'Controlled by' lists both players")
+    await closeMenus(dm)
+    await sleep(300)
+    const statuses = await Promise.all(
+      [A, B].map((p) =>
+        p.page.evaluate(() => window.__atlasPlayer.client.getSnapshot().status)
+      )
+    )
+    checks.eq(
+      statuses,
+      ["live", "live"],
+      "both players stay live while the DM uses the menus"
+    )
+  }
 
   // ---- DM assigns characters ----------------------------------------------------------------------------
   checks.step("DM assigns characters in the Players tab")
@@ -361,6 +488,217 @@ try {
     (await waitResult(A.page, mvAfter.reqId)).ok,
     "after rejoining, moves work again"
   )
+
+  // ---- stairs ------------------------------------------------------------------------------------------------
+  // A drag to the cell just beyond a staircase's top edge must climb it even when the lower level has known
+  // floor there (the usual layout: stairs inside a room); the HUD then offers "Go down" on the landing.
+  const stairs = Object.values(hs.scene.objects).find(
+    (o) =>
+      o.type === "connector" &&
+      o.style === "stairs" &&
+      o.levelId === tB.levelId &&
+      hs.scene.levels[o.toLevelId]
+  )
+  if (stairs) {
+    checks.step(`${B.name} climbs the stairs by dragging past the top step`)
+    const r = stairs.rect
+    const i0 = Math.round(r.x / cs)
+    const i1 = Math.round((r.x + r.w) / cs) - 1
+    const j0 = Math.round(r.z / cs)
+    const j1 = Math.round((r.z + r.d) / cs) - 1
+    // Ascending direction: 0 = +Z, 1 = +X, 2 = -Z, 3 = -X.
+    const [bottom, beyond] = {
+      0: [
+        { i: i0, j: j0 },
+        { i: i0, j: j1 + 1 },
+      ],
+      1: [
+        { i: i0, j: j0 },
+        { i: i1 + 1, j: j0 },
+      ],
+      2: [
+        { i: i0, j: j1 },
+        { i: i0, j: j0 - 1 },
+      ],
+      3: [
+        { i: i1, j: j0 },
+        { i: i0 - 1, j: j0 },
+      ],
+    }[stairs.direction]
+    await B.page.bringToFront()
+    // First explore the landing cell's lower-level floor, from the cell one further along (a plan to the
+    // landing cell itself would already go up): that is the case where a drag used to path around the
+    // stairs on the lower level instead of climbing.
+    const fwd = [
+      { i: 0, j: 1 },
+      { i: 1, j: 0 },
+      { i: 0, j: -1 },
+      { i: -1, j: 0 },
+    ][stairs.direction]
+    const past = { i: beyond.i + fwd.i, j: beyond.j + fwd.j }
+    // (Getting next to it is enough; the check below is that the landing cell got explored.)
+    await walkToward(B.page, tokB.id, past)
+    let toBottom = await requestMoveTo(B.page, tokB.id, bottom)
+    if (!toBottom.reqId) {
+      // The staircase is behind closed doors the player has not opened (the Vineyard's manor hall): the
+      // planner only paths through known, open space. The DM opens the level's closed doors (a DM play
+      // control) and the player walks on.
+      const opened = await dm.evaluate((levelId) => {
+        const runner = window.__atlasHost.runner
+        const objects = runner.getSnapshot().state.scene.objects
+        const ids = Object.values(objects)
+          .filter(
+            (o) =>
+              o.type === "door" &&
+              o.levelId === levelId &&
+              o.state === "closed" &&
+              o.style !== "secret"
+          )
+          .map((o) => o.id)
+        for (const doorId of ids)
+          runner.dispatch({ t: "set-door", doorId, state: "open" })
+        return ids.length
+      }, tB.levelId)
+      console.log(
+        `  (the stairs are out of reach: the DM opened ${opened} closed doors)`
+      )
+      await sleep(600)
+      await walkToward(B.page, tokB.id, past, 10)
+      toBottom = await requestMoveTo(B.page, tokB.id, bottom)
+    }
+    const atBottom = toBottom.reqId
+      ? await waitResult(B.page, toBottom.reqId)
+      : null
+    checks.ok(
+      atBottom?.ok,
+      `${B.name} walks to the foot of the stairs (${toBottom.steps} steps)`,
+      atBottom ?? toBottom
+    )
+    if (atBottom?.ok) {
+      const lower = tB.levelId
+      const knownBeyond = await B.page.evaluate(
+        async ({ lower, c }) => {
+          const { decodeMask, cellTouched } =
+            await import("/src/core/vision/mask.ts")
+          const ex =
+            window.__atlasPlayer.client.getSnapshot().view.masks[lower]
+              ?.explored
+          return ex ? cellTouched(decodeMask(ex), c.j * ex.width + c.i) : false
+        },
+        { lower, c: beyond }
+      )
+      checks.ok(
+        knownBeyond,
+        `the landing cell ${beyond.i},${beyond.j} is known floor on the lower level too`
+      )
+      // Whether the player knows the upper storey's floor at the landing. Seen from the foot of the
+      // stairs it depends on the stairwell (the Crooked Lantern's is visible; the Vineyard manor's
+      // upper slab hides it). A drop there climbs only onto known floor, so if it is unknown the token
+      // first walks up the run to the top step, where its view level switches to the upper storey.
+      const upperGround = (c) =>
+        B.page.evaluate(
+          async ({ level, c, cs }) => {
+            const { hasGroundAt } = await import("/src/core/scene/queries.ts")
+            const scene = window.__atlasPlayer.client.getSnapshot().scene
+            return (
+              !!scene.levels[level] &&
+              hasGroundAt(scene, level, {
+                x: (c.i + 0.5) * cs,
+                z: (c.j + 0.5) * cs,
+              })
+            )
+          },
+          { level: stairs.toLevelId, c, cs }
+        )
+      if (!(await upperGround(beyond))) {
+        const top = { i: beyond.i - fwd.i, j: beyond.j - fwd.j }
+        const toTop = await requestMoveTo(B.page, tokB.id, top)
+        const atTop = toTop.reqId ? await waitResult(B.page, toTop.reqId) : null
+        checks.ok(
+          atTop?.ok,
+          `the upper landing is not visible from the foot: ${B.name} walks up to the top step`,
+          atTop ?? toTop
+        )
+        await sleep(600)
+        checks.ok(
+          await upperGround(beyond),
+          `from the top step, the upper landing is known floor`
+        )
+      }
+      await B.page.evaluate((id) => window.__atlasPlayer.select(id), tokB.id)
+      await sleep(300)
+      // Drag from the token (standing on the run's ground) to the landing, projected on the plane of
+      // the player's view level (where the drop is picked).
+      const at = await B.page.evaluate(
+        async ({ id }) => {
+          const { groundHeightAt, tokenViewLevelId } =
+            await import("/src/core/scene/queries.ts")
+          const scene = window.__atlasPlayer.client.getSnapshot().scene
+          const tok = scene.tokens[id]
+          const view = tokenViewLevelId(scene, tok)
+          return {
+            ground: groundHeightAt(scene, tok.levelId, tok.position),
+            dropY: scene.levels[view].elevation,
+            x: tok.position.x,
+            z: tok.position.z,
+          }
+        },
+        { id: tokB.id }
+      )
+      const from = await projectIn(B.page, "__atlasPlayer", {
+        x: at.x,
+        y: at.ground + 1,
+        z: at.z,
+      })
+      const to = await projectIn(B.page, "__atlasPlayer", {
+        x: (beyond.i + 0.5) * cs,
+        y: at.dropY,
+        z: (beyond.j + 0.5) * cs,
+      })
+      await mouseDrag(B.page, from, to)
+      await waitFor(
+        dm,
+        ({ id, level }) =>
+          window.__atlasHost.runner.getSnapshot().state.scene.tokens[id]
+            .levelId === level,
+        { id: tokB.id, level: stairs.toLevelId },
+        { timeout: 8000, label: "token upstairs" }
+      ).catch(() => {})
+      const up = (await hostState(dm)).state.scene.tokens[tokB.id]
+      checks.ok(
+        up.levelId === stairs.toLevelId &&
+          JSON.stringify(cellOf(up.position, cs)) === JSON.stringify(beyond),
+        `the drag climbs to ${hs.scene.levels[stairs.toLevelId].name}`,
+        { levelId: up.levelId, cell: cellOf(up.position, cs) }
+      )
+      const goDown = B.page.getByRole("button", { name: /^Go down/ })
+      await goDown
+        .first()
+        .waitFor({ timeout: 5000 })
+        .catch(() => {})
+      if (await goDown.first().isVisible()) {
+        await goDown.first().click()
+        await waitFor(
+          dm,
+          ({ id, level }) =>
+            window.__atlasHost.runner.getSnapshot().state.scene.tokens[id]
+              .levelId === level,
+          { id: tokB.id, level: lower },
+          { timeout: 8000, label: "token downstairs" }
+        ).catch(() => {})
+      }
+      checks.eq(
+        (await hostState(dm)).state.scene.tokens[tokB.id].levelId,
+        lower,
+        "on the landing, the HUD's Go down takes it back down"
+      )
+      checks.eq(
+        await viewConverges(dm, B.page, B.uid),
+        [],
+        `${B.name}'s view equals the oracle after the stairs`
+      )
+    }
+  }
   const movedAt = Date.now()
   for (const p of [A, B])
     checks.eq(
@@ -375,24 +713,25 @@ try {
   // stored game has the token where the host has it.
   const saved = async () =>
     dm.evaluate(
-      async ({ sid, tokenId }) => {
+      async ({ sid, tokenIds }) => {
         const m = await import("/src/app/createServices.ts")
         const s = await m.createServices({ mode: "local" })
         const row = await s.sessions.loadSessionState(sid)
         const state = row?.content?.kind === "game" ? row.content.state : null
         const live = window.__atlasHost.runner.getSnapshot().state
-        return (
-          JSON.stringify(state?.scene.tokens[tokenId]?.position) ===
-          JSON.stringify(live.scene.tokens[tokenId].position)
+        const where = (t) => JSON.stringify([t?.levelId, t?.position])
+        return tokenIds.every(
+          (id) =>
+            where(state?.scene.tokens[id]) === where(live.scene.tokens[id])
         )
       },
-      { sid: sessionId, tokenId: tokA.id }
+      { sid: sessionId, tokenIds: [tokA.id, tokB.id] }
     )
   const tSave = Date.now()
   while (!(await saved()) && Date.now() - tSave < 8000) await sleep(200)
   checks.ok(
     await saved(),
-    `the move was saved within ${((Date.now() - movedAt) / 1000).toFixed(1)} s of its result`
+    `the moves were saved within ${((Date.now() - movedAt) / 1000).toFixed(1)} s of their results`
   )
   const beforeHost = {
     A: await playerView(A.page),

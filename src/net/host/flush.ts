@@ -1,10 +1,11 @@
 /**
  * Per-player sync bookkeeping of the host (ARCHITECTURE §6.3): the recent-patch log used for hello
- * catch-ups, the request rate limiter (≤ 8 req/s, burst 16) and the wire epoch format.
+ * catch-ups, the recent-result log (results re-delivered with catch-ups), the request rate limiters
+ * (≤ 8 req/s, burst 16; hellos ≤ 1/s, burst 4) and the wire epoch format.
  *
  * Pure logic (no timers, no I/O) so it is unit-tested directly; hostRunner.ts drives it.
  */
-import type { PatchOp } from "@/core/session/types"
+import type { PatchOp, PlayerView, RequestResult } from "@/core/session/types"
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -21,7 +22,11 @@ export const HOST_TIMING = {
   urgentSaveGapMs: 500,
   /** Save gap after token moves and exploration: what a reload of the host tab may lose. */
   moveSaveGapMs: 1_000,
-  /** player_views upsert throttle per player. */
+  /**
+   * player_views upsert throttle per player for ordinary changes (other tokens moving, doors, lights).
+   * Changes a reload while the DM is away must not lose — the player's own tokens assigned or moved,
+   * exploration — are stored after `moveSaveGapMs` instead (see viewSaveUrgency).
+   */
   viewSaveIntervalMs: 5_000,
   /** session_members re-read period. */
   memberPollMs: 10_000,
@@ -37,6 +42,18 @@ export const HOST_TIMING = {
 } as const
 
 export const REQUEST_RATE = { ratePerSecond: 8, burst: 16 } as const
+
+/**
+ * Hellos per player (a separate budget: each one may cost a full snapshot plus a tile table per
+ * backdrop level). Honest clients coalesce hellos and retry with backoff (2.5 s → 15 s).
+ */
+export const HELLO_RATE = { ratePerSecond: 1, burst: 4 } as const
+
+/** "rate-limited" replies per player; over-budget requests beyond this are dropped silently. */
+export const REJECT_REPLY_RATE = { ratePerSecond: 2, burst: 4 } as const
+
+/** Results remembered per player for re-delivery with hello catch-ups. */
+export const RESULT_LOG_SIZE = 32
 
 /** Pending request results kept per player (beyond this, results of a flooding client are dropped). */
 export const MAX_PENDING_RESULTS = 32
@@ -127,6 +144,67 @@ export class OpLog {
     }
     return seq === toSeq ? ops : null
   }
+}
+
+// ---------------------------------------------------------------------------
+// Result log
+// ---------------------------------------------------------------------------
+
+/**
+ * The last RESULT_LOG_SIZE results sent to one player, with the view seq they went out at. A patch
+ * carrying a move's result can be lost on the wire; the catch-up answering the client's hello then
+ * carries the results sent after the client's seq (the client ignores reqIds it has settled already).
+ */
+export class ResultLog {
+  private entries: Array<{ seq: number; result: RequestResult }> = []
+  private readonly max: number
+
+  constructor(max = RESULT_LOG_SIZE) {
+    this.max = max
+  }
+
+  push(seq: number, results: readonly RequestResult[]): void {
+    for (const result of results) this.entries.push({ seq, result })
+    if (this.entries.length > this.max) this.entries = this.entries.slice(this.entries.length - this.max)
+  }
+
+  /** Results sent at a seq after `seq` (every remembered one for null: a client of another run). */
+  since(seq: number | null): RequestResult[] {
+    return this.entries.filter((e) => seq === null || e.seq > seq).map((e) => e.result)
+  }
+
+  get size(): number {
+    return this.entries.length
+  }
+}
+
+/**
+ * How soon a player's stored view (player_views) must follow a new view: "soon" when the player's own
+ * situation changed — which tokens they control or see through (e.g. the first assignment after
+ * joining), where their tokens stand, what they explored — since a reload while the DM is away shows
+ * that row; false (the normal throttle) otherwise.
+ */
+export function viewSaveUrgency(prev: PlayerView | null, next: PlayerView): "soon" | false {
+  if (!prev) return next.controlledTokenIds.length > 0 ? "soon" : false
+  const sameList = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((x, k) => x === b[k])
+  if (!sameList(prev.controlledTokenIds, next.controlledTokenIds) || !sameList(prev.visionTokenIds, next.visionTokenIds)) return "soon"
+  for (const id of next.controlledTokenIds) {
+    const a = Object.hasOwn(prev.tokens, id) ? prev.tokens[id] : undefined
+    const b = Object.hasOwn(next.tokens, id) ? next.tokens[id] : undefined
+    if (!a || !b) {
+      if (a !== b) return "soon"
+      continue
+    }
+    if (a.levelId !== b.levelId || a.position.x !== b.position.x || a.position.z !== b.position.z) return "soon"
+  }
+  const levels = new Set([...Object.keys(prev.masks), ...Object.keys(next.masks)])
+  for (const l of levels) {
+    const a = Object.hasOwn(prev.masks, l) ? prev.masks[l].explored : undefined
+    const b = Object.hasOwn(next.masks, l) ? next.masks[l].explored : undefined
+    if (a === b) continue
+    if (!a || !b || a.width !== b.width || a.depth !== b.depth || a.b64 !== b.b64 || (a.partial ?? "") !== (b.partial ?? "")) return "soon"
+  }
+  return false
 }
 
 // ---------------------------------------------------------------------------

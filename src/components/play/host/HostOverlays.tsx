@@ -28,6 +28,11 @@ import {
 } from "@/components/ui/select"
 import { Spinner } from "@/components/ui/spinner"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip"
 import { sortedLevels } from "@/core/scene/queries"
 import type { Id, Scene } from "@/core/scene/types"
 import type { GameState } from "@/core/session/types"
@@ -39,6 +44,7 @@ import { HudButton, HudPanel } from "../hud"
 import { TokenAvatar } from "../TokenAvatar"
 import type { HostActions } from "./hostActions"
 import type { PreviewInfo } from "./HostViewport"
+import { playerLabels } from "./playerLabels"
 
 /** Vertical level list (top storey first); the active level is the cutaway level. */
 export function LevelRail({
@@ -127,6 +133,11 @@ export function PreviewBanner({
   )
   const current = tokenIds[0] ?? ""
   const t = Object.hasOwn(scene.tokens, current) ? scene.tokens[current] : null
+  const senses = t
+    ? describeSenses(t.vision)
+        .map((s) => s.label)
+        .join(" · ")
+    : ""
   return (
     <HudPanel className="flex items-center gap-2 py-1 pr-1 pl-3 text-xs">
       <ScanEye className="size-4 text-sidebar-primary" />
@@ -152,16 +163,19 @@ export function PreviewBanner({
           ))}
         </SelectContent>
       </Select>
-      <span className="w-40 truncate text-[0.6875rem] text-muted-foreground">
-        {t
-          ? describeSenses(t.vision)
-              .map((s) => s.label)
-              .join(" · ")
-          : ""}
-      </span>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <span className="w-40 shrink-0 cursor-default truncate text-[0.6875rem] whitespace-nowrap text-muted-foreground" />
+          }
+        >
+          {senses}
+        </TooltipTrigger>
+        <TooltipContent>{senses || "No token"}</TooltipContent>
+      </Tooltip>
       <Badge
         variant="outline"
-        className="w-28 justify-center font-normal tabular-nums"
+        className="w-28 shrink-0 justify-center font-normal tabular-nums"
       >
         {!info || info.pending ? (
           <Spinner className="size-3" />
@@ -193,8 +207,9 @@ export function SelectedTokenCard({
   const scene = state.scene
   const t = Object.hasOwn(scene.tokens, tokenId) ? scene.tokens[tokenId] : null
   if (!t) return null
+  const labels = playerLabels(Object.values(state.players))
   const owners = (state.owners[t.id] ?? []).map(
-    (uid) => state.players[uid]?.displayName ?? "Player"
+    (uid) => labels.get(uid) ?? "Player"
   )
   const level = Object.hasOwn(scene.levels, t.levelId)
     ? scene.levels[t.levelId]

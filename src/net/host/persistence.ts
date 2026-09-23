@@ -2,7 +2,9 @@
  * Host persistence scheduling (ARCHITECTURE §6.3): `save_session_state` throttled to ~5 s (plus
  * "urgent" saves right after DM commands that reduce what players may see, and "soon" saves ~1 s after
  * token moves so a reloaded host tab resumes where the tokens were), and `upsert_player_view`
- * throttled to ≤ 5 s per player (awaited before `snapshot_ready`).
+ * throttled to ≤ 5 s per player for ordinary changes, but "soon" (~1 s) when the player's own tokens
+ * were assigned or moved or their exploration grew (a reload while the DM is away shows that row), and
+ * awaited before `snapshot_ready`.
  *
  * `ThrottledTask` coalesces requests: at most one run in flight, never two runs closer than the
  * interval (urgent requests: the minimum gap), and a request during a run schedules exactly one

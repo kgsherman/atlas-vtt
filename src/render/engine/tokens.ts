@@ -18,7 +18,6 @@ import {
   tokenBaseGeometry,
   tokenBodyGeometry,
   tokenCapGeometry,
-  tokenOutlineGeometry,
   tokenQuadGeometry,
   tokenRingGeometry,
   tokenTransforms,
@@ -111,6 +110,24 @@ void main() {
   float a = max(ring * 0.95, glow * 0.45 * pulse);
   if (a < 0.004) discard;
   gl_FragColor = vec4(vColor, a);
+  #include <colorspace_fragment>
+}
+`
+
+/**
+ * Faded outline marker of a token on a level above (annulus r 0.84..0.98 of the unit quad), with the
+ * same analytic fwidth edge as the rings: the canvas has no MSAA (engine.ts), and overlays draw onto it.
+ */
+const MARKER_FRAGMENT = /* glsl */ `
+uniform float uOpacity;
+varying vec2 vUv;
+varying vec3 vColor;
+void main() {
+  float r = length(vUv - 0.5) * 2.0;
+  float w = fwidth(r);
+  float a = smoothstep(0.84 - w, 0.84 + w, r) * (1.0 - smoothstep(0.98 - w, 0.98 + w, r));
+  if (a < 0.004) discard;
+  gl_FragColor = vec4(vColor, a * uOpacity);
   #include <colorspace_fragment>
 }
 `
@@ -317,7 +334,17 @@ export class TokenLayer {
       toneMapped: false,
       side: THREE.DoubleSide,
     })
-    const markerMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.45, depthTest: false, depthWrite: false, toneMapped: false, side: THREE.DoubleSide })
+    const markerMat = new THREE.ShaderMaterial({
+      name: "atlas-token-marker",
+      vertexShader: RING_VERTEX,
+      fragmentShader: MARKER_FRAGMENT,
+      uniforms: { uOpacity: { value: 0.45 } },
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+      side: THREE.DoubleSide,
+    })
     const ghostMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.4, depthWrite: false, toneMapped: false, vertexColors: true })
     this.decorMaterials = [markerMat, ghostMat, this.shadowMaterial, this.ringMaterial]
     const decor = (order: number) => (m: THREE.InstancedMesh) => {
@@ -325,7 +352,7 @@ export class TokenLayer {
       m.raycast = () => {}
       m.layers.set(LAYER.OVERLAY)
     }
-    this.markers = new GrowingInstances(this.decor, tokenOutlineGeometry(), markerMat, false, decor(8))
+    this.markers = new GrowingInstances(this.decor, tokenQuadGeometry(), markerMat, false, decor(8))
     this.rings = new GrowingInstances(this.decor, tokenQuadGeometry(), this.ringMaterial, false, decor(9))
     this.ghostBase = new GrowingInstances(this.decor, tokenBaseGeometry(), ghostMat, false, decor(10))
     this.ghostBody = new GrowingInstances(this.decor, tokenBodyGeometry(), ghostMat, false, decor(10))

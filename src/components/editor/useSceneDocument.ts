@@ -7,11 +7,12 @@
 import * as React from "react"
 import { toast } from "sonner"
 
+import { importedName } from "@/app/library"
 import { paths } from "@/app/routes"
 import type { AppServices } from "@/app/services"
 import { createScene } from "@/core/scene/factory"
 import type { Scene } from "@/core/scene/types"
-import type { EditorStore } from "@/editor/store"
+import type { DocumentStash, EditorStore } from "@/editor/store"
 import { deleteDraft, getLocalStore, listDrafts, loadDraft, saveDraft } from "@/net/localStore"
 import { exportSceneFileWithAssets, importSceneFileWithAssets, type SceneSummary, type SceneVersionInfo, type SceneVisibility } from "@/net/scenesRepo"
 import { describeNetError, isNetError } from "@/net/supabase"
@@ -411,6 +412,12 @@ export function useSceneDocument({ store, services, routeId, wantsImport, naviga
     return scenes.listVersions(id)
   }, [scenes])
 
+  /**
+   * The latest document with its undo history, set aside while an old version is viewed read-only, so
+   * "Back to latest" returns to it (history included) when the library's latest is still the same.
+   */
+  const latestStash = React.useRef<{ libraryId: string; version: number; stash: DocumentStash } | null>(null)
+
   const loadLibraryVersion = React.useCallback(
     async (version: SceneVersionInfo | null) => {
       const id = libraryIdRef.current
@@ -425,7 +432,22 @@ export function useSceneDocument({ store, services, routeId, wantsImport, naviga
           return
         }
         const latest = loaded.summary.latestVersion
-        store.getState().loadScene(loaded.parsed.scene, { readOnly: version !== null && loaded.version !== latest })
+        const viewingOld = version !== null && loaded.version !== latest
+        // Only a stash of this scene's current latest version is worth keeping.
+        const prevStash = latestStash.current
+        const kept = prevStash && prevStash.libraryId === id && prevStash.version === latest && prevStash.stash.scene.id === loaded.parsed.scene.id ? prevStash : null
+        latestStash.current = null
+        const st = store.getState()
+        if (viewingOld) {
+          // Leaving the (saved, editable) latest: keep it and its history for "Back to latest".
+          const keep = kept ?? (!st.readOnly && !st.dirty && baseVersionRef.current === latest ? { libraryId: id, version: latest, stash: st.detachDocument() } : null)
+          latestStash.current = keep
+          st.loadScene(loaded.parsed.scene, { readOnly: true })
+        } else if (kept) {
+          st.restoreDocument(kept.stash)
+        } else {
+          st.loadScene(loaded.parsed.scene, { readOnly: false })
+        }
         setLibrary(id, latest)
         draftRevision.current = store.getState().revision
         setMeta((m) =>
@@ -508,7 +530,20 @@ export function useSceneDocument({ store, services, routeId, wantsImport, naviga
           return
         }
         const scene = parsed.scene
-        const summary = await scenes.create(scene)
+        try {
+          // A second library entry with an identical name is ambiguous: suffix it.
+          scene.name = importedName(scene.name, (await scenes.list()).map((s) => s.name))
+        } catch {
+          // Listing failed: keep the file's name.
+        }
+        let summary: SceneSummary
+        try {
+          summary = await scenes.create(scene)
+        } catch (err) {
+          // Nothing references the images just stored for this document: remove them (best-effort).
+          for (const id of Object.keys(scene.assets ?? {})) await assets.deleteImage(scene.id, id).catch(() => {})
+          throw err
+        }
         store.getState().loadScene(scene)
         retainLevelImages(scene.id)
         setLibrary(summary.id, summary.latestVersion)

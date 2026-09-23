@@ -9,6 +9,7 @@
  */
 import { z } from "zod"
 
+import { MIN_WALL_LENGTH } from "./defaults"
 import { base64ToBytes, chunkSamples, parseChunkKey, sampleCounts } from "./heightmap"
 import { MAX_TERRAIN_HEIGHT } from "./heightmapBrush"
 import { validateReferences } from "./integrity"
@@ -39,6 +40,8 @@ export const SCENE_LIMITS = {
   maxIntensity: 100,
   /** Stored heights of a heightmap chunk (feet). */
   maxTerrainHeight: MAX_TERRAIN_HEIGHT,
+  /** Shortest wall (feet). */
+  minWallLength: MIN_WALL_LENGTH,
 } as const
 
 /** Max issues reported by parseScene (a garbage document could otherwise yield thousands). */
@@ -242,7 +245,7 @@ const wallSchema = z
     thickness: positive(SCENE_LIMITS.maxLength),
     material: materialSchema,
   })
-  .refine((w) => Math.hypot(w.b.x - w.a.x, w.b.z - w.a.z) >= 0.01, { message: "wall must be at least 0.01 ft long", path: ["b"] })
+  .refine((w) => Math.hypot(w.b.x - w.a.x, w.b.z - w.a.z) >= MIN_WALL_LENGTH, { message: `wall must be at least ${MIN_WALL_LENGTH} ft long`, path: ["b"] })
 
 const doorSchema = z.strictObject({
   ...baseFields,

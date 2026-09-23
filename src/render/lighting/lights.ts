@@ -5,14 +5,21 @@
  */
 import * as THREE from "three"
 
+import type { OcclusionWorld } from "@/core/occlusion/types"
 import { adjacentLevels, levelById, lightEffectivelyHidden, lightLevelId, lightWorldPosition } from "@/core/scene/queries"
 import type { FlickerSettings, Id, LightObject, LightPreset, SceneLike, Vec3 } from "@/core/scene/types"
+import { resolveLightWorldOrigin } from "@/core/vision"
 
 import { flickerSeed } from "./flicker"
 
 export interface ResolvedLight {
   id: Id
   levelId: Id
+  /**
+   * Shadow / capture origin: the world position pushed out of containing light blockers, the same point
+   * the CPU light field (core/vision) casts from. A light on a floor surface or inside a wall must not
+   * see through the blocker it sits in (the occluder test ignores primitives containing the source).
+   */
   position: Vec3
   /** Linear RGB (not multiplied by intensity). */
   color: [number, number, number]
@@ -56,16 +63,17 @@ export function linearColor(hex: string): [number, number, number] {
 
 /**
  * Lights that emit: `on`, and not effectively hidden unless `includeHidden` (the DM with vision "off"
- * sees hidden lights; previews and players never do). Sorted by id for determinism.
+ * sees hidden lights; previews and players never do). Sorted by id for determinism. Positions are pushed
+ * out of the light blockers of `world` (resolveLightWorldOrigin), like the authoritative light field.
  */
-export function resolveLights(scene: SceneLike, opts: { includeHidden: boolean }): ResolvedLight[] {
+export function resolveLights(scene: SceneLike, world: OcclusionWorld, opts: { includeHidden: boolean }): ResolvedLight[] {
   const out: ResolvedLight[] = []
   for (const o of Object.values(scene.objects)) {
     if (o.type !== "light" || !o.on) continue
     if (!opts.includeHidden && lightEffectivelyHidden(scene, o)) continue
     const dim = Math.max(0, o.dimRadius)
     if (!(dim > 0) || !(o.intensity > 0)) continue
-    const l = resolveLight(scene, o, dim)
+    const l = resolveLight(scene, world, o, dim)
     // Non-finite values would corrupt the packed uniform array (and three's array upload).
     if (!Number.isFinite(l.position.x + l.position.y + l.position.z + l.dim + l.bright + l.intensity)) continue
     out.push(l)
@@ -73,11 +81,20 @@ export function resolveLights(scene: SceneLike, opts: { includeHidden: boolean }
   return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 }
 
-function resolveLight(scene: SceneLike, o: LightObject, dim: number): ResolvedLight {
+/** Light origin as core/vision resolves it; the raw world position if that fails (degenerate documents). */
+function lightOrigin(world: OcclusionWorld, scene: SceneLike, o: LightObject): Vec3 {
+  try {
+    return resolveLightWorldOrigin(world, scene, o)
+  } catch {
+    return lightWorldPosition(scene, o)
+  }
+}
+
+function resolveLight(scene: SceneLike, world: OcclusionWorld, o: LightObject, dim: number): ResolvedLight {
   return {
     id: o.id,
     levelId: lightLevelId(scene, o),
-    position: lightWorldPosition(scene, o),
+    position: lightOrigin(world, scene, o),
     color: linearColor(o.color),
     intensity: o.intensity,
     bright: Math.min(Math.max(0, o.brightRadius), dim),

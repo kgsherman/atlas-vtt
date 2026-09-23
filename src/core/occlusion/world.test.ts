@@ -331,3 +331,23 @@ describe("incremental updates", () => {
     expect(world.queryCircle(null, { x: 200, z: -80 }, 3)).toHaveLength(1)
   })
 })
+
+describe("nearest-hit ties", () => {
+  it("raycast reports the same primitive on a fresh world and after an update round trip", () => {
+    // Walls P (box x ∈ [24, 50]) and Q (box x ∈ [24, 26]) share the x = 24 face; the ray enters both there.
+    const { scene, levelId } = flatScene(12, 8)
+    const P = add(scene, { ...createWall(levelId, { x: 24, z: 20 }, { x: 50, z: 20 }, { height: 10, thickness: 2 }), id: "P" })
+    add(scene, { ...createWall(levelId, { x: 25, z: 20.92 }, { x: 25, z: 23.92 }, { height: 3, thickness: 2 }), id: "Q" })
+    scene.objects = Object.fromEntries(Object.values(scene.objects).map((o) => [o.id, o]))
+    const eye = v(2.5, 9, 22.5)
+    const p = v(28.125, 0.25, 20.625)
+    const fresh = buildOcclusionWorld(scene).raycast(eye, p, { channel: "sight" })
+    expect(fresh?.primitive.key).toBe("P")
+    const w = buildOcclusionWorld(scene)
+    w.update(withObject(scene, { ...P, height: 10.5 }), ["P"])
+    w.update(scene, ["P"])
+    const after = w.raycast(eye, p, { channel: "sight" })
+    expect(after?.t).toBe(fresh?.t)
+    expect(after?.primitive.key).toBe("P")
+  })
+})

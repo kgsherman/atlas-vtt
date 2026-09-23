@@ -3,16 +3,26 @@
  * field, per-viewer line of sight, perception masks, token visibility and observation.
  */
 import type { OcclusionWorld } from "../occlusion/types"
-import { groundHeightAt } from "../scene/queries"
-import type { SceneLike, Token, Vec3 } from "../scene/types"
+import { groundHeightAt, lightWorldPosition, tokenGroundY } from "../scene/queries"
+import type { LightObject, SceneLike, Token, Vec3 } from "../scene/types"
 import { VisionEngineImpl } from "./engine"
-import { eyeAtGround, tokenPointsAtGround } from "./eye"
+import { eyeAtGround, resolveLightOrigin, tokenPointsAtGround } from "./eye"
 import type { VisionEngine } from "./types"
 
 export type * from "./types"
 export * from "./mask"
 export { VisionEngineImpl, type SampleInspection } from "./engine"
-export { CEILING_MARGIN, EYE_PUSH_MARGIN, FEET_OFFSET, TOKEN_POINT_INSET, ceilingAbove, eyeAtGround, tokenPointColumns, tokenPointsAtGround } from "./eye"
+export {
+  CEILING_MARGIN,
+  EYE_PUSH_MARGIN,
+  FEET_OFFSET,
+  TOKEN_POINT_INSET,
+  ceilingAbove,
+  eyeAtGround,
+  resolveLightOrigin,
+  tokenPointColumns,
+  tokenPointsAtGround,
+} from "./eye"
 export { LIGHT_LEVEL } from "./lightField"
 export {
   FootprintCache,
@@ -32,6 +42,21 @@ export function resolveViewerEye(
   token: Pick<Token, "levelId" | "position" | "eyeHeight" | "height">
 ): Vec3 {
   return eyeAtGround(world, groundHeightAt(scene, token.levelId, token.position), token)
+}
+
+/**
+ * World-space light origin as vision uses it: lightWorldPosition (attached lights follow their
+ * carrier) pushed out of containing light blockers, toward the light's own level for floor slabs
+ * (resolveLightOrigin). Renderers should shadow from the same point.
+ */
+export function resolveLightWorldOrigin(
+  world: OcclusionWorld,
+  scene: Pick<SceneLike, "levels" | "grid" | "objects" | "tokens">,
+  light: LightObject
+): Vec3 {
+  const carrier = light.attachedTokenId && Object.hasOwn(scene.tokens, light.attachedTokenId) ? scene.tokens[light.attachedTokenId] : null
+  const ground = carrier ? tokenGroundY(scene, carrier) : groundHeightAt(scene, light.levelId, light.position)
+  return resolveLightOrigin(world, lightWorldPosition(scene, light), ground)
 }
 
 /** Token visibility test points (footprint centre/corners × feet/mid/head, capped below the ceiling). */

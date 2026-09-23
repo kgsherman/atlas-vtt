@@ -130,6 +130,11 @@ const gameStateShape = z.strictObject({
   memory: boundedRecord(userIdSchema, boundedRecord(memoryKeySchema, z.unknown(), GAME_STATE_LIMITS.maxMemoryPerPlayer), GAME_STATE_LIMITS.maxPlayers),
   revealed: boundedRecord(userIdSchema, z.array(idSchema).max(GAME_STATE_LIMITS.maxRevealedPerPlayer), GAME_STATE_LIMITS.maxPlayers),
   seq: z.int().min(0).max(Number.MAX_SAFE_INTEGER),
+  // Optional (states saved before it still load; no GAME_STATE_VERSION bump).
+  origin: z
+    .strictObject({ sceneId: z.string().min(1).max(64), version: z.int().min(0).max(Number.MAX_SAFE_INTEGER).nullable(), dirty: z.boolean() })
+    .nullable()
+    .optional(),
 })
 
 export type ParseGameStateResult = { ok: true; state: GameState } | { ok: false; issues: string[] }
@@ -230,6 +235,7 @@ export function parseGameStateDetailed(json: unknown): ParseGameStateResult {
       memory,
       revealed,
       seq: raw.seq,
+      ...(raw.origin !== undefined ? { origin: raw.origin && { sceneId: raw.origin.sceneId, version: raw.origin.version, dirty: raw.origin.dirty } } : {}),
     },
   }
 }
@@ -271,5 +277,6 @@ export function serializeGameState(state: GameState): string {
     revealed: state.revealed,
     seq: state.seq,
   }
+  if (state.origin !== undefined) ordered.origin = state.origin
   return JSON.stringify(ordered)
 }

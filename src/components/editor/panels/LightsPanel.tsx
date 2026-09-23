@@ -62,7 +62,7 @@ function LightRow({ light, selected }: { light: LightObject; selected: boolean }
         size="sm"
         checked={light.on}
         disabled={readOnly}
-        aria-label={light.on ? "Turn off" : "Turn on"}
+        aria-label={`${light.on ? "Turn off" : "Turn on"} ${label}`}
         onClick={(e) => e.stopPropagation()}
         onCheckedChange={(on) => store.getState().setLightOn(light.id, on)}
       />

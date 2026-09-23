@@ -130,7 +130,10 @@ export class SampleLayout {
   /** Samples buried in blockers (with `buried[s] = 1`, a cheap pre-check for the hot loops). */
   readonly inside = new Map<number, InsideInfo>()
   readonly buried: Uint8Array
-  /** Per level: conservative min / max Y of its samples and top probes (Infinity / −Infinity when empty). */
+  /**
+   * Per level: conservative min / max Y of its samples, the sub-cell centres computed so far and their
+   * top probes (Infinity / −Infinity when empty). Only ever grows.
+   */
   readonly minY: Float64Array
   readonly maxY: Float64Array
   private readonly subs = new Map<number, SubLayout>()
@@ -253,7 +256,11 @@ export class SampleLayout {
       }
       valid[q] = 1
       y[q] = surface + VISION_SAMPLE_HEIGHT
-      inside.push(insideInfoAt(this.world, x, y[q], z))
+      const ins = insideInfoAt(this.world, x, y[q], z)
+      inside.push(ins)
+      // Keep the level's Y range a bound on every point whose light is cached (sub-cell centres can lie
+      // below every sample on uneven terrain): LightField.refreshBase sizes its sun sweep from it.
+      this.extendY(li, y[q], ins)
     }
     const sub = { valid, y, inside }
     this.subs.set(g, sub)

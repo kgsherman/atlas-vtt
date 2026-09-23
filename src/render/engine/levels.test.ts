@@ -4,7 +4,9 @@ import { describe, expect, it } from "vitest"
 import { createDoor, createLight, createPillar, createProp, createScene, createWall } from "@/core/scene/factory"
 
 import { BuildContext, buildLevel, BUCKETS } from "../builders"
-import { LevelView } from "./levels"
+import { DOOR_MARKER_ACCENT } from "../builders/doors"
+import { LAYER } from "../internal"
+import { DOOR_MARKER_SLOT, LevelView } from "./levels"
 import { testMaterials } from "./testUtils"
 
 function setup() {
@@ -88,6 +90,71 @@ describe("LevelView", () => {
     const { view } = setup()
     for (const mesh of view.pickMeshes()) expect(["glass"]).not.toContain(mesh.userData.slot)
     expect(view.pickMeshes().some((m) => m.name === "floors")).toBe(false)
+  })
+
+  it("shows door markers only when enabled (top-down views), pickable only then", () => {
+    const { view, door } = setup()
+    const markers = () => view.pickMeshes().filter((m) => m.userData.slot === DOOR_MARKER_SLOT)
+    const [leaf] = view.doorLeaves()
+    expect(leaf.marker).not.toBeNull()
+    expect(leaf.marker!.parent).toBe(leaf.pivot)
+    expect(leaf.marker!.visible).toBe(false)
+    expect(markers()).toHaveLength(0)
+    view.setDoorMarkersVisible(true)
+    expect(leaf.marker!.visible).toBe(true)
+    expect(markers().map((m) => m.userData.objectId)).toEqual([door.id])
+    // Outlined with the door.
+    expect(view.objectRefs(door.id).some((r) => r.mesh === leaf.marker)).toBe(true)
+    // Ghosted levels do not show them.
+    view.setMode("ghost")
+    expect(leaf.marker!.visible).toBe(false)
+    view.setMode("solid")
+    expect(leaf.marker!.visible).toBe(true)
+    view.setDoorMarkersVisible(false)
+    expect(markers()).toHaveLength(0)
+  })
+
+  it("recolours door markers by state and hides them while a portcullis is raised", () => {
+    const { view } = setup()
+    const [leaf] = view.doorLeaves()
+    const colors = () => Array.from(leaf.marker!.geometry.getAttribute("color").array as Float32Array)
+    const base = colors()
+    const accent = leaf.marker!.geometry.userData[DOOR_MARKER_ACCENT] as number
+    view.setDoorMarkersVisible(true)
+    view.applyDoorMarker(leaf, "closed", 0)
+    expect(colors()).toEqual(base)
+    view.applyDoorMarker(leaf, "locked", 0)
+    const locked = colors()
+    expect(locked.slice(0, accent * 3)).toEqual(base.slice(0, accent * 3))
+    expect(locked[accent * 3]).toBeGreaterThan(locked[accent * 3 + 1] * 4)
+    view.applyDoorMarker(leaf, "open", 1)
+    expect(colors()[0]).toBeLessThan(base[0])
+    expect(leaf.marker!.visible).toBe(true)
+    // Lifting doors: hidden past half-raised.
+    const lift = { ...leaf, leaf: { ...leaf.leaf, motion: "lift" as const } }
+    view.applyDoorMarker(lift, "open", 0.8)
+    expect(leaf.marker!.visible).toBe(false)
+    view.applyDoorMarker(lift, "closed", 0.2)
+    expect(leaf.marker!.visible).toBe(true)
+  })
+
+  it("moves flames and glows between the world and overlay layers", () => {
+    const { view } = setup()
+    const emissive: THREE.Object3D[] = []
+    view.group.traverse((o) => {
+      if (o.userData.slot === "flame" || o.userData.slot === "glow") emissive.push(o)
+    })
+    expect(emissive.length).toBeGreaterThan(0)
+    for (const o of emissive) expect(o.layers.mask).toBe(1 << LAYER.VISUAL)
+    view.setEmissiveLayer(LAYER.OVERLAY)
+    for (const o of emissive) expect(o.layers.mask).toBe(1 << LAYER.OVERLAY)
+    // Rebuilt buckets keep the layer; nothing else moves.
+    const { scene, lv } = setup()
+    view.setBucket("fixtures", buildLevel(new BuildContext(scene), lv).fixtures)
+    for (const f of view.flames()) expect(f.mesh.layers.mask).toBe(1 << LAYER.OVERLAY)
+    view.group.traverse((o) => {
+      if ((o as THREE.Mesh).isMesh && o.userData.slot === "world") expect(o.layers.mask).toBe(1 << LAYER.VISUAL)
+    })
   })
 
   it("animates flames without touching the base transforms", () => {

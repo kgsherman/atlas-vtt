@@ -4,9 +4,9 @@
  * and go).
  *
  * Sources: DM modes pass the whole decoded image (ImageBitmap, canvas, <img>, ImageData); player mode
- * passes a canvas it composites explored-cell tiles into and calls update() with the dirty world rect
- * after drawing more, which re-uploads only that sub-rectangle (texSubImage2D + mipmap regeneration)
- * instead of the whole image.
+ * passes a canvas it composites explored-cell tiles into and calls update() with the dirty world rects
+ * after drawing more, which re-uploads only those sub-rectangles (one texSubImage2D per region, then one
+ * mipmap regeneration for the whole update) instead of the whole image.
  *
  * Images larger than the tier's texel budget (or the GPU's max texture size) are downscaled once into
  * a private canvas; the budget follows the user's quality ceiling, not adaptive steps, so an adaptive
@@ -43,10 +43,22 @@ interface Entry {
   texture: THREE.Texture
   /** Downscaled copy (null = the source is uploaded directly). */
   scaled: Canvas2D | null
+  /** Source pixel size the texture was built from (a different live size means the source was resized). */
+  srcWidth: number
+  srcHeight: number
+  /** Texture size. */
   width: number
   height: number
   /** Texture texels per source pixel. */
   scale: number
+}
+
+/** Integer pixel rectangle. */
+export interface PixelRect {
+  x: number
+  y: number
+  w: number
+  h: number
 }
 
 export interface BackdropSink {
@@ -61,18 +73,64 @@ export function sourceSize(src: TexImageSource): { width: number; height: number
   return { width, height }
 }
 
-/** Texture size for an image under a texel budget and a side limit (aspect kept, never upscaled). */
+/**
+ * Texture size for an image under a texel budget and a side limit (aspect kept, never upscaled). A source
+ * within both limits (compared exactly, before any square root) keeps its size with scale exactly 1, so a
+ * canvas sized to the budget (`backdropTexelBudget`) is uploaded directly, without a private downscaled copy.
+ */
 export function fitTextureSize(width: number, height: number, maxTexels: number, maxSide: number): { width: number; height: number; scale: number } {
   if (!(width > 0 && height > 0)) return { width: 0, height: 0, scale: 1 }
+  if (width * height <= maxTexels && Math.max(width, height) <= maxSide) return { width, height, scale: 1 }
   const scale = Math.min(1, Math.sqrt(maxTexels / (width * height)), maxSide / Math.max(width, height))
   return { width: Math.max(1, Math.floor(width * scale)), height: Math.max(1, Math.floor(height * scale)), scale }
+}
+
+/**
+ * Max texels of one level image for a quality ceiling (the engine's own cap). Player compositors size
+ * their canvases with it so canvas and texture match and no second, downscaled copy is made.
+ */
+export function backdropTexelBudget(q: Quality): number {
+  return BACKDROP_MAX_TEXELS[q]
+}
+
+/**
+ * Coalesce pixel regions for upload: two regions are merged when their summed area covers at least
+ * `fill` of their bounding box (neighbouring cells become one copy; distant ones stay separate, so a
+ * move that explores both ends of the map never re-uploads everything in between).
+ */
+export function mergePixelRegions(regions: readonly PixelRect[], fill = 0.5): PixelRect[] {
+  const out: { r: PixelRect; area: number }[] = []
+  for (const region of regions) {
+    let cur = { r: region, area: region.w * region.h }
+    for (let merged = true; merged; ) {
+      merged = false
+      for (let i = 0; i < out.length; i++) {
+        const u = unionPixelRect(out[i].r, cur.r)
+        const area = out[i].area + cur.area
+        if (area >= fill * u.w * u.h) {
+          cur = { r: u, area: Math.min(area, u.w * u.h) }
+          out.splice(i, 1)
+          merged = true
+          break
+        }
+      }
+    }
+    out.push(cur)
+  }
+  return out.map((o) => o.r)
+}
+
+function unionPixelRect(a: PixelRect, b: PixelRect): PixelRect {
+  const x = Math.min(a.x, b.x)
+  const y = Math.min(a.y, b.y)
+  return { x, y, w: Math.max(a.x + a.w, b.x + b.w) - x, h: Math.max(a.y + a.h, b.y + b.h) - y }
 }
 
 /**
  * Source pixel rectangle covered by a world rect of an image placed over `rect` (clamped, integer,
  * expanded by `pad` pixels); null when they do not overlap.
  */
-export function dirtyPixels(rect: Rect, width: number, height: number, dirty: Rect, pad = 1): { x: number; y: number; w: number; h: number } | null {
+export function dirtyPixels(rect: Rect, width: number, height: number, dirty: Rect, pad = 1): PixelRect | null {
   const sx = width / rect.w
   const sy = height / rect.d
   const x0 = Math.max(0, Math.floor((dirty.x - rect.x) * sx) - pad)
@@ -129,6 +187,10 @@ function drawSource(
   ctx.drawImage(src as CanvasImageSource, sx, sy, sw, sh, dx, dy, dw, dh)
 }
 
+function isRectList(d: Rect | readonly Rect[]): d is readonly Rect[] {
+  return Array.isArray(d)
+}
+
 export class BackdropManager {
   private readonly renderer: THREE.WebGLRenderer
   private readonly sink: BackdropSink
@@ -181,21 +243,32 @@ export class BackdropManager {
     this.apply(levelId, entry)
   }
 
-  /** Re-upload after the source changed (a sub-rectangle when `dirty` is a world rect). */
-  update(levelId: Id, dirty?: Rect): void {
+  /**
+   * Re-upload after the source changed: everything when `dirty` is omitted, else only the texels under
+   * the dirty world rect(s). A list holds independent regions, uploaded separately (nearby ones are
+   * coalesced), with one mipmap regeneration for the whole update. Regions outside the image are ignored.
+   */
+  update(levelId: Id, dirty?: Rect | readonly Rect[]): void {
     const e = this.entries.get(levelId)
     if (!e) return
     const { width, height } = sourceSize(e.source)
-    if (width !== Math.round(e.width / e.scale) || height !== Math.round(e.height / e.scale)) {
+    if (width !== e.srcWidth || height !== e.srcHeight) {
       // The source was resized: rebuild.
       this.set(levelId, e.source, e.rect, e.opts)
       return
     }
-    const px = dirty ? dirtyPixels(e.rect, width, height, dirty, 2) : null
-    if (!px || !this.uploadRegion(e, px)) {
-      if (e.scaled) this.redrawScaled(e, null)
-      e.texture.needsUpdate = true
+    if (dirty !== undefined) {
+      const rects: readonly Rect[] = isRectList(dirty) ? dirty : [dirty]
+      const px: PixelRect[] = []
+      for (const r of rects) {
+        const p = dirtyPixels(e.rect, width, height, r, 2)
+        if (p) px.push(p)
+      }
+      if (px.length === 0 || this.uploadRegions(e, mergePixelRegions(px))) return
     }
+    // Full upload.
+    if (e.scaled) this.redrawScaled(e, null)
+    e.texture.needsUpdate = true
   }
 
   /** Scene revision: re-read per-level opacity / tint from the document. */
@@ -250,7 +323,7 @@ export class BackdropManager {
     texture.wrapS = THREE.ClampToEdgeWrapping
     texture.wrapT = THREE.ClampToEdgeWrapping
     texture.anisotropy = this.anisotropy()
-    const entry: Entry = { source, rect, opts: { ...opts }, texture, scaled, width: fit.width, height: fit.height, scale: fit.scale }
+    const entry: Entry = { source, rect, opts: { ...opts }, texture, scaled, srcWidth: width, srcHeight: height, width: fit.width, height: fit.height, scale: fit.scale }
     if (scaled) this.redrawScaled(entry, null)
     texture.needsUpdate = true
     // Upload now (not at first draw), so later partial updates always have a GPU texture to patch.
@@ -263,7 +336,7 @@ export class BackdropManager {
   }
 
   /** Redraw the downscaled copy (a source pixel region, or all of it). */
-  private redrawScaled(e: Entry, px: { x: number; y: number; w: number; h: number } | null): { x: number; y: number; w: number; h: number } | null {
+  private redrawScaled(e: Entry, px: PixelRect | null): PixelRect | null {
     const c = e.scaled
     const ctx = c && context2d(c)
     if (!c || !ctx) return null
@@ -287,12 +360,34 @@ export class BackdropManager {
     return { x: dx, y: dy, w: dw, h: dh }
   }
 
-  /** texSubImage2D of a texture region from a cropped copy; false when not possible (full upload then). */
-  private uploadRegion(e: Entry, px: { x: number; y: number; w: number; h: number }): boolean {
+  /**
+   * texSubImage2D of each source pixel region (downscaled first when the texture is a scaled copy); false
+   * when not possible (the caller does a full upload then). three regenerates the whole mip chain after
+   * every copy into a texture with `generateMipmaps`, so it is switched off for all copies but the last.
+   */
+  private uploadRegions(e: Entry, pxs: readonly PixelRect[]): boolean {
     const r = this.renderer as Partial<THREE.WebGLRenderer>
     if (typeof r.copyTextureToTexture !== "function" || e.texture.version === 0) return false
-    const region = e.scaled ? this.redrawScaled(e, px) : px
-    if (!region) return true
+    const regions: PixelRect[] = []
+    for (const px of pxs) {
+      const region = e.scaled ? this.redrawScaled(e, px) : px
+      if (region) regions.push(region)
+    }
+    const mips = e.texture.generateMipmaps
+    try {
+      for (let i = 0; i < regions.length; i++) {
+        e.texture.generateMipmaps = mips && i === regions.length - 1
+        if (!this.copyRegion(e, regions[i])) return false
+      }
+    } finally {
+      e.texture.generateMipmaps = mips
+    }
+    return true
+  }
+
+  /** Copy one texture-pixel region from the uploaded image (the scaled copy or the source). */
+  private copyRegion(e: Entry, region: PixelRect): boolean {
+    const r = this.renderer as Partial<THREE.WebGLRenderer> & Pick<THREE.WebGLRenderer, "copyTextureToTexture">
     const from = e.scaled ?? e.source
     const crop = createCanvas(region.w, region.h)
     const ctx = crop && context2d(crop)

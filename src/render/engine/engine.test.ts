@@ -6,7 +6,7 @@
 import * as THREE from "three"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
-import { createDoor, createFloor, createLevel, createProp, createScene, createToken, createWall } from "@/core/scene/factory"
+import { createDoor, createFloor, createLevel, createLight, createProp, createScene, createToken, createWall } from "@/core/scene/factory"
 import { denseHeights, createHeightmap } from "@/core/scene/heightmap"
 import type { DoorObject, Scene } from "@/core/scene/types"
 
@@ -21,7 +21,7 @@ const calls = vi.hoisted(() => ({
   backdrops: [] as { levelId: string; texture: unknown; opacity: number; tintWalls: boolean }[],
   renderParams: [] as { hdr: boolean; emissive: number; glow: number }[],
   renders: [] as { target: unknown; layers: number; background: unknown }[],
-  renderer: null as null | { loop: ((t: number) => void) | null; size: number[]; pixelRatio: number },
+  renderer: null as null | { loop: ((t: number) => void) | null; size: number[]; pixelRatio: number; params: Record<string, unknown>; contextLost: number },
 }))
 
 vi.mock("three", async (importOriginal) => {
@@ -47,9 +47,15 @@ vi.mock("three", async (importOriginal) => {
     size = [0, 0]
     autoClear = true
     target: unknown = null
+    params: Record<string, unknown>
+    contextLost = 0
     constructor(p: { canvas: HTMLCanvasElement }) {
       this.domElement = p.canvas
+      this.params = { ...p }
       calls.renderer = this
+    }
+    forceContextLoss() {
+      this.contextLost++
     }
     getContext() {
       return { getExtension: () => null }
@@ -123,6 +129,9 @@ vi.mock("../lighting/system", async () => {
 })
 
 const { createEngine } = await import("../index")
+const { placeholderFloatTexture } = await import("../materials/placeholders")
+const { noiseTexture } = await import("../materials/surface")
+const { tokenBaseGeometry } = await import("../builders/tokens")
 
 interface Internals {
   levels: Map<string, { group: THREE.Group; mode: string; doorLeaves(): { pivot: THREE.Object3D; mesh: THREE.Mesh }[]; terrain(): { mesh: THREE.Mesh } | null }>
@@ -184,7 +193,8 @@ describe("engine", () => {
     frame(32)
     expect(calls.beforeRender).toBe(3)
     expect(stats).toHaveLength(2)
-    expect(stats[1]).toMatchObject({ drawCalls: 3, triangles: 100, activeLights: 2, shadowTilesUpdated: 1, shadowTilesTotal: 3, quality: "medium" })
+    // Medium: world pass, composite and overlay pass (the fake renderer counts 3 calls / 100 triangles each).
+    expect(stats[1]).toMatchObject({ drawCalls: 9, triangles: 300, activeLights: 2, shadowTilesUpdated: 1, shadowTilesTotal: 3, quality: "medium" })
     // Pixel budget: 800×600 fits 2.1 MP at the jsdom device ratio of 1.
     expect(calls.renderer!.size).toEqual([800, 600])
     expect(calls.renderer!.pixelRatio).toBe(1)
@@ -217,6 +227,66 @@ describe("engine", () => {
     engine.dispose()
   })
 
+  it("editor top-down view does not follow the selected token", () => {
+    const { scene, ground, token } = sampleScene()
+    const engine = createEngine(canvasEl())
+    const internals = engine as unknown as Internals
+    engine.setScene(scene)
+    engine.setView({ mode: "editor", camera: "topdown", activeLevelId: ground, tilt: 0 })
+    engine.focus({ x: 50, y: 0, z: 50 }, { distance: 90, immediate: true })
+    frame(0)
+    engine.setOverlays({ selectedIds: [token.id] })
+    // A drag step / inspector edit moves the selected token: the camera stays put.
+    const moved: Scene = { ...scene, tokens: { ...scene.tokens, [token.id]: { ...token, position: { x: 72.5, z: 72.5 } } } }
+    engine.updateScene(moved)
+    for (let t = 16; t <= 2000; t += 16) frame(t)
+    expect(internals.controller.getTarget().x).toBeCloseTo(50)
+    expect(internals.controller.getTarget().z).toBeCloseTo(50)
+    // Switching to a play view does not glide to the edit made in the editor…
+    engine.setView({ mode: "player" })
+    for (let t = 2016; t <= 3000; t += 16) frame(t)
+    expect(internals.controller.getTarget().x).toBeCloseTo(50)
+    // …but the next confirmed move is followed.
+    const again: Scene = { ...moved, tokens: { ...moved.tokens, [token.id]: { ...token, position: { x: 32.5, z: 82.5 } } } }
+    engine.updateScene(again)
+    for (let t = 3016; t <= 5000; t += 16) frame(t)
+    expect(internals.controller.getTarget().x).toBeCloseTo(32.5)
+    expect(internals.controller.getTarget().z).toBeCloseTo(82.5)
+    engine.dispose()
+  })
+
+  it("releases module-level GPU singletons and loses a detached canvas' context on dispose", () => {
+    const { scene } = sampleScene()
+    const canvas = canvasEl()
+    document.body.appendChild(canvas)
+    const engine = createEngine(canvas)
+    engine.setScene(scene)
+    const fired: string[] = []
+    const shared = [placeholderFloatTexture(), noiseTexture(), tokenBaseGeometry()] as const
+    shared.forEach((o, k) => {
+      // Like three's renderer listener: removes itself when the object is disposed.
+      const d = o as THREE.EventDispatcher<{ dispose: object }>
+      const onDispose = () => {
+        fired.push(String(k))
+        d.removeEventListener("dispose", onDispose)
+      }
+      d.addEventListener("dispose", onDispose)
+    })
+    // Attached canvas (StrictMode / HMR re-creating an engine on it): the context must survive.
+    engine.dispose()
+    expect(fired.sort()).toEqual(["0", "1", "2"])
+    for (const o of shared) {
+      const listeners = (o as unknown as { _listeners?: Record<string, unknown[]> })._listeners
+      expect(listeners?.dispose ?? []).toHaveLength(0)
+    }
+    expect(calls.renderer!.contextLost).toBe(0)
+    // Detached (a real unmount): lost at once.
+    canvas.remove()
+    const second = createEngine(canvas)
+    second.dispose()
+    expect(calls.renderer!.contextLost).toBe(1)
+  })
+
   it("switches to the player camera with cutaway and follows the selected token", () => {
     const { scene, ground, upper, token } = sampleScene()
     const engine = createEngine(canvasEl())
@@ -235,6 +305,26 @@ describe("engine", () => {
     const target = internals.controller.getTarget()
     expect(target.x).toBeCloseTo(72.5)
     expect(target.z).toBeCloseTo(72.5)
+    engine.dispose()
+  })
+
+  it("shows door markers in top-down views only", () => {
+    const { scene, ground, door } = sampleScene()
+    const engine = createEngine(canvasEl())
+    const internals = engine as unknown as Internals
+    engine.setScene(scene)
+    const leaf = () => internals.levels.get(ground)!.doorLeaves()[0] as unknown as { marker: THREE.Mesh | null; leaf: { doorId: string } }
+    expect(leaf().leaf.doorId).toBe(door.id)
+    expect(leaf().marker!.visible).toBe(false)
+    engine.setView({ mode: "player", camera: "topdown", activeLevelId: ground, tilt: 0 })
+    expect(leaf().marker!.visible).toBe(true)
+    // Rebuilt door buckets keep following the camera.
+    const locked: Scene = { ...scene, objects: { ...scene.objects, [door.id]: { ...door, state: "locked" } } }
+    engine.updateScene(locked, { objects: [door.id] })
+    frame(0)
+    expect(leaf().marker!.visible).toBe(true)
+    engine.setView({ mode: "editor", camera: "orbit" })
+    expect(leaf().marker!.visible).toBe(false)
     engine.dispose()
   })
 
@@ -292,14 +382,83 @@ describe("engine", () => {
     engine.dispose()
   })
 
-  it("renders low / medium straight to the canvas and high / ultra through the post pipeline, overlays last", () => {
+  it("compiles an adaptive step's tier in the background and switches once it is ready", async () => {
     const { scene } = sampleScene()
+    const engine = createEngine(canvasEl(), { quality: "high" })
+    const internals = engine as unknown as { pendingQuality: { q: string } | null; releaseAfterFrame: unknown[] }
+    engine.setScene(scene)
+    // Slow frames (40 ms) until adaptive quality steps down.
+    let t = 0
+    while (!internals.pendingQuality && t < 10000) frame((t += 40))
+    expect(internals.pendingQuality?.q).toBe("medium")
+    // Nothing switched yet: the live materials keep drawing the old tier while the new one compiles.
+    expect(calls.setQuality).toEqual([])
+    frame((t += 40))
+    await Promise.resolve()
+    await Promise.resolve()
+    // Compiled: the next frame commits, and the compile clones are released after it drew.
+    frame(t + 40)
+    expect(calls.setQuality).toEqual(["medium"])
+    expect(internals.pendingQuality).toBeNull()
+    expect(internals.releaseAfterFrame).toHaveLength(0)
+    // A user choice applies at once and drops any pending step.
+    engine.setQuality("ultra")
+    expect(calls.setQuality).toEqual(["medium", "ultra"])
+    expect(engine.getQualityCeiling()).toBe("ultra")
+    engine.dispose()
+  })
+
+  it("draws flames in the overlay pass on medium (no bloom) and in the world pass otherwise", () => {
+    const { scene, ground } = sampleScene()
+    const torch = createLight(ground, "torch", { x: 30, z: 30 })
+    scene.objects[torch.id] = torch
     const engine = createEngine(canvasEl(), { quality: "medium" })
+    const internals = engine as unknown as { levels: Map<string, { flames(): { mesh: THREE.Object3D }[] }> }
+    engine.setScene(scene)
+    const layers = () => internals.levels.get(ground)!.flames().map((f) => f.mesh.layers.mask)
+    expect(layers().length).toBeGreaterThan(0)
+    expect(layers().every((m) => m === 0b1000)).toBe(true)
+    engine.setQuality("high")
+    expect(layers().every((m) => m === 0b0001)).toBe(true)
+    engine.setQuality("low")
+    expect(layers().every((m) => m === 0b0001)).toBe(true)
+    engine.dispose()
+  })
+
+  it("never asks for context MSAA, on any tier", () => {
+    for (const quality of ["low", "medium", "high", "ultra"] as const) {
+      const engine = createEngine(canvasEl(), { quality })
+      expect(calls.renderer!.params.antialias).toBe(false)
+      // The overlay pass depth-tests against the composite's gl_FragDepth.
+      expect(calls.renderer!.params.depth).toBe(true)
+      engine.dispose()
+    }
+  })
+
+  it("renders low straight to the canvas and medium / high / ultra through the post pipeline, overlays last", () => {
+    const { scene } = sampleScene()
+    const engine = createEngine(canvasEl(), { quality: "low" })
     engine.setScene(scene)
     frame(0)
     // Direct: one pass, world + overlay layers, no target, direct emissive parameters.
     expect(calls.renders.map((r) => [r.target, r.layers])).toEqual([[null, 0b1001]])
     expect(calls.renderParams.at(-1)).toMatchObject({ hdr: false, emissive: 1 })
+    // Medium (lite post): the world into the MSAA target, the composite, then the overlays.
+    engine.setQuality("medium")
+    expect(calls.renderParams.at(-1)).toMatchObject({ hdr: true, emissive: 1, glow: 0.55 })
+    calls.renders = []
+    frame(16)
+    expect(calls.renders[0].target).not.toBeNull()
+    expect(calls.renders[0].layers).toBe(0b0001)
+    expect(calls.renders.at(-1)).toMatchObject({ target: null, layers: 0b1000, background: null })
+    // No bloom / AO passes: world + composite + overlays.
+    expect(calls.renders.length).toBe(3)
+    // Back to low: the post pipeline goes away, everything straight to the canvas again.
+    engine.setQuality("low")
+    expect(calls.renderParams.at(-1)).toMatchObject({ hdr: false })
+    calls.renders = []
+    frame(32)
+    expect(calls.renders.map((r) => [r.target, r.layers])).toEqual([[null, 0b1001]])
     engine.setQuality("ultra")
     expect(calls.renderParams.at(-1)).toMatchObject({ hdr: true })
     calls.renders = []

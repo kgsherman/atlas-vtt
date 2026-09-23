@@ -8,7 +8,9 @@ import {
   Activity,
   Cpu,
   DoorClosed,
+  Gauge,
   Hammer,
+  LibraryBig,
   PanelRight,
   PanelRightClose,
   Play,
@@ -21,12 +23,15 @@ import { useLocation } from "wouter"
 
 import { paths } from "@/app/routes"
 import { AppLogoMark } from "@/components/app/AppLogo"
+import { QualitySelect } from "@/components/canvas/QualitySelect"
+import type { QualityChoice } from "@/components/canvas/qualityChoice"
 import { ModeBadge } from "@/components/app/ModeBadge"
 import { useConfirm } from "@/components/editor/context"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Kbd } from "@/components/ui/kbd"
 import { Separator } from "@/components/ui/separator"
+import { Spinner } from "@/components/ui/spinner"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import {
   Tooltip,
@@ -39,6 +44,7 @@ import type { FrameStats } from "@/render/contracts"
 import type { StoreApi } from "zustand/vanilla"
 
 import { StatusDot } from "../hud"
+import type { SaveMap } from "./useSaveMap"
 
 export type HostMode = "play" | "edit"
 
@@ -70,6 +76,7 @@ export function HostTopBar({
   sidebar,
   onSidebar,
   onEnd,
+  saveMap,
 }: {
   snap: HostSnapshot
   sceneName: string
@@ -80,6 +87,7 @@ export function HostTopBar({
   sidebar: boolean
   onSidebar(open: boolean): void
   onEnd(): void
+  saveMap: Pick<SaveMap, "library" | "dirty" | "saving" | "save">
 }) {
   const [, navigate] = useLocation()
   const confirm = useConfirm()
@@ -124,7 +132,7 @@ export function HostTopBar({
           <StatusDot tone={st.tone} pulse={snap.status === "starting"} />{" "}
           {st.label}
           {snap.status === "hosting" ? (
-            <span className="text-muted-foreground/70">· live session</span>
+            <span className="text-muted-foreground">· live session</span>
           ) : null}
         </span>
       </div>
@@ -214,6 +222,7 @@ export function HostTopBar({
           {sidebar ? "Hide the side panel" : "Show the side panel"}
         </TooltipContent>
       </Tooltip>
+      <SaveMapButton saveMap={saveMap} />
       <Button
         variant="destructive"
         size="sm"
@@ -223,6 +232,54 @@ export function HostTopBar({
         <DoorClosed data-icon="inline-start" /> End session
       </Button>
     </header>
+  )
+}
+
+function SaveMapButton({
+  saveMap,
+}: {
+  saveMap: Pick<SaveMap, "library" | "dirty" | "saving" | "save">
+}) {
+  const lib = saveMap.library
+  const linked = lib.status === "linked"
+  const tip =
+    lib.status === "linked"
+      ? saveMap.dirty
+        ? `The live map has edits that are not in “${lib.name}” yet. Save them as a new version.`
+        : `Save the live map as a new version of “${lib.name}”.`
+      : lib.status === "deleted"
+        ? "The scene this session was started from was deleted from your library."
+        : lib.status === "unavailable"
+          ? `The library can't be reached: ${lib.error}`
+          : "Looking up the library scene…"
+  return (
+    <Tooltip>
+      {/* The span keeps the tooltip working while the button is disabled. */}
+      <TooltipTrigger render={<span className="inline-flex" />}>
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={!linked || saveMap.saving}
+          onClick={() => void saveMap.save()}
+        >
+          {saveMap.saving ? (
+            <Spinner data-icon="inline-start" />
+          ) : (
+            <LibraryBig data-icon="inline-start" />
+          )}
+          Save map to library
+          {linked && saveMap.dirty ? (
+            <>
+              <span aria-hidden className="size-1.5 rounded-full bg-primary" />
+              <span className="sr-only">(unsaved map edits)</span>
+            </>
+          ) : null}
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom" className="max-w-64">
+        {tip}
+      </TooltipContent>
+    </Tooltip>
   )
 }
 
@@ -260,9 +317,13 @@ function Stat({
 export function HostStatusBar({
   snap,
   frame,
+  quality,
+  onQuality,
 }: {
   snap: HostSnapshot
   frame: StoreApi<{ stats: FrameStats | null }>
+  quality: QualityChoice
+  onQuality(q: QualityChoice): void
 }) {
   const stats = snap.stats
   const fs = useStore(frame, (s) => s.stats)
@@ -334,8 +395,18 @@ export function HostStatusBar({
         >
           {fs ? `${Math.round(fs.fps)} fps` : "—"}
         </span>
-        {fs ? <span>{fs.quality}</span> : null}
       </Stat>
+      <Separator orientation="vertical" className="h-3.5 self-center" />
+      <div className="flex items-center gap-1.5">
+        <Gauge className="size-3" />
+        <QualitySelect
+          value={quality}
+          onValueChange={onQuality}
+          current={fs?.quality}
+          className="h-5 gap-1 border-none bg-transparent px-1 text-[0.6875rem] dark:bg-transparent"
+          itemClassName="text-xs"
+        />
+      </div>
     </footer>
   )
 }

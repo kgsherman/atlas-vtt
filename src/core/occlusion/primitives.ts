@@ -547,10 +547,12 @@ export function primitiveTopAt(p: OccluderPrimitive, x: number, z: number): numb
 /**
  * Move a point contained in the primitive to `margin` feet past its nearest face (the rule used for
  * eyes and light origins, docs/ARCHITECTURE.md §2). Heightfields push vertically only.
- * Points outside the primitive are returned unchanged (copied).
+ * "Contained" uses the default EPS, like OcclusionWorld.containing and the segment ENTRY rule: a
+ * point on (or within EPS outside) a face would make segments from it ignore the primitive, so it
+ * is pushed too. Points outside the primitive are returned unchanged (copied).
  */
 export function pushOutOfPrimitive(p: OccluderPrimitive, q: Vec3, margin: number): Vec3 {
-  if (!primitiveContains(p, q, 0)) return { x: q.x, y: q.y, z: q.z }
+  if (!primitiveContains(p, q)) return { x: q.x, y: q.y, z: q.z }
   switch (p.shape) {
     case "box": {
       const c = Math.cos(p.yaw)

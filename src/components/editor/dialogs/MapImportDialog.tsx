@@ -365,7 +365,11 @@ export function MapImportDialog({ request, onClose, doc }: { request: MapImportR
         })
         decoded.catch(() => {})
         seedLevelImage(sceneId, meta.id, decoded)
-        if (!addBackdrop(target, levelId, imported, meta)) throw new Error(target.getState().lastRejected?.issues[0] ?? "the backdrop was refused")
+        if (!addBackdrop(target, levelId, imported, meta)) {
+          // Nothing references the stored image: remove it again (best-effort).
+          void assets.deleteImage(sceneId, meta.id).catch(() => {})
+          throw new Error(target.getState().lastRejected?.issues[0] ?? "the backdrop was refused")
+        }
         step()
         const notes: string[] = [`${imported.width}×${imported.height} px`]
         if (s.floor) {

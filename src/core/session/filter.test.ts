@@ -11,10 +11,13 @@ import { sampleById } from "../scene/samples"
 import type { Id, Scene } from "../scene/types"
 import { createGradeMask, decodeGrades, decodeMask } from "../vision/mask"
 import type { GradeMask, VisibilityResult } from "../vision/types"
+import { buildOcclusionWorld, primitiveBounds } from "../occlusion"
+import type { OccluderPrimitive } from "../occlusion/types"
 import { filterForPlayer } from "./filter"
 import { updateKnowledge } from "./memory"
 import { playerViewSchema } from "./playerViewSchema"
 import { reduceDm } from "./reduceDm"
+import { viewToScene } from "./viewToScene"
 import { createGameState } from "./state"
 import { add, addLevel, addToken, flatScene, TestHost } from "./test-utils"
 import type { GameState, PlayerDoor, PlayerLight, PlayerWall, PlayerWindow } from "./types"
@@ -397,6 +400,96 @@ describe("clipping to explored cells", () => {
 // ---------------------------------------------------------------------------
 // Levels, terrain, masks, flags
 // ---------------------------------------------------------------------------
+
+describe("wall pieces on terrain", () => {
+  /** 8 × 4 cells on a slope h = 0.3·x; wall W across it with a closed door and a window; W2 runs past the east edge. */
+  function slope(flat = false) {
+    const { scene, ground } = flatScene(8, 4)
+    if (!flat) {
+      const hm = createHeightmap(1)
+      const { samplesX, samplesZ } = sampleCounts(scene.grid, 1)
+      const dense = new Float32Array(samplesX * samplesZ)
+      for (let j = 0; j < samplesZ; j++) for (let i = 0; i < samplesX; i++) dense[j * samplesX + i] = 0.3 * i * 5
+      scene.levels[ground] = { ...scene.levels[ground], heightmap: writeHeights(hm, scene.grid, dense) }
+    }
+    const wall = add(scene, createWall(ground, { x: 0, z: 10 }, { x: 40, z: 10 }, { height: 10 }))
+    const door = add(scene, createDoor(wall, 6, { state: "closed", height: 7 }))
+    const win = add(scene, createWindow(wall, 12.5, { sillHeight: 3, height: 4 }))
+    const edge = add(scene, createWall(ground, { x: 30, z: 15 }, { x: 60, z: 15 }, { height: 20 }))
+    return { scene, ground, ids: [wall.id, door.id, win.id, edge.id] }
+  }
+
+  /** Explored columns [i0, i1) on every row. */
+  const columns = (i0: number, i1: number): [number, number][] => {
+    const out: [number, number][] = []
+    for (let j = 0; j < 4; j++) for (let i = i0; i < i1; i++) out.push([i, j])
+    return out
+  }
+
+  const kindOf = (p: OccluderPrimitive) => (p.sourceType === "door" ? "door" : p.key.includes("#lintel:") ? "lintel" : p.key.includes("#sill:") ? "sill" : "full")
+  const top = (p: OccluderPrimitive) => primitiveBounds(p).maxY
+  const bottom = (p: OccluderPrimitive) => primitiveBounds(p).minY
+
+  for (const [i0, i1] of [
+    [0, 3],
+    [0, 4],
+    [0, 5],
+    [5, 8],
+    [4, 8],
+    [3, 8],
+  ]) {
+    it(`pieces keep the host's world heights (columns ${i0}–${i1 - 1} explored)`, () => {
+      const { scene, ground, ids } = slope()
+      const { view } = know(withPlayer(scene), synthVis(scene, { [ground]: columns(i0, i1) }, ids))
+      const host = buildOcclusionWorld(scene).primitives.filter((p) => p.sourceType === "wall" || p.sourceType === "door")
+      const player = buildOcclusionWorld(viewToScene(view)).primitives.filter((p) => p.sourceType === "wall" || p.sourceType === "door")
+      expect(player.length).toBeGreaterThan(0)
+      let compared = 0
+      for (const p of player) {
+        const b = primitiveBounds(p)
+        const cx = (b.minX + b.maxX) / 2
+        const cz = (b.minZ + b.maxZ) / 2
+        const match = host.filter((h) => {
+          const hb = primitiveBounds(h)
+          return h.sourceId === p.sourceId.split("@")[0] && kindOf(h) === kindOf(p) && cx >= hb.minX && cx <= hb.maxX && cz >= hb.minZ && cz <= hb.maxZ
+        })
+        expect(match, p.key).toHaveLength(1)
+        expect(top(p), p.key).toBeCloseTo(top(match[0]), 6)
+        // Lintel bottoms are the door / window heads.
+        if (kindOf(p) === "lintel") expect(bottom(p), p.key).toBeCloseTo(bottom(match[0]), 6)
+        compared++
+      }
+      expect(compared).toBe(player.length)
+    })
+  }
+
+  it("the wall past the grid edge keeps its host top; a piece buried in the client's ground is not sent", () => {
+    const { scene, ground, ids } = slope()
+    const edgePieces = (sc: Scene) => {
+      const { view } = know(withPlayer(sc), synthVis(sc, { [ground]: columns(5, 8) }, ids))
+      return Object.values(view.objects).filter((o): o is PlayerWall => o.type === "wall" && o.id.startsWith(`${ids[3]}@`))
+    }
+    const pieces = edgePieces(scene)
+    expect(pieces).toHaveLength(1)
+    // Host base: ground at the midpoint x = 45 (beyond the lattice: 0); client: ground at x = 35.
+    expect(pieces[0].height).toBeCloseTo(20 - 0.3 * 35, 6)
+    // 8 ft tall from the host base 0: its top is below the client's ground (10.5) at the piece.
+    const edge = scene.objects[ids[3]]
+    if (edge.type !== "wall") throw new Error("edge wall")
+    expect(edgePieces({ ...scene, objects: { ...scene.objects, [edge.id]: { ...edge, height: 8 } } })).toEqual([])
+  })
+
+  it("flat levels: pieces and openings keep the remembered heights", () => {
+    const { scene, ground, ids } = slope(true)
+    const { view } = know(withPlayer(scene), synthVis(scene, { [ground]: columns(0, 3) }, ids))
+    const walls = Object.values(view.objects).filter((o): o is PlayerWall => o.type === "wall")
+    expect(walls.length).toBeGreaterThan(0)
+    for (const w of walls) expect(w.height).toBe(w.id.startsWith(ids[3]) ? 20 : 10)
+    expect((view.objects[ids[1]] as PlayerDoor).height).toBe(7)
+    const win = view.objects[ids[2]] as PlayerWindow
+    expect([win.sillHeight, win.height]).toEqual([3, 4])
+  })
+})
 
 describe("levels", () => {
   it("sends a stub for the unexplored level at the other end of a seen connector", () => {

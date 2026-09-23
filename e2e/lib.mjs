@@ -93,9 +93,14 @@ export class Checks {
 /**
  * Launch the shared headless Chromium (scripts/pw.mjs). By default frames are capped by vsync: with
  * several tabs rendering uncapped (the launcher's benchmarking flags) the GPU is saturated and a newly
- * opened tab can take 15 s to get its first frames. Pass `{ uncapped: true }` for frame-time measurements.
+ * opened tab can take 15 s to get its first frames. Pass `{ uncapped: true }` for frame-time measurements,
+ * and `extraArgs` for more Chromium flags (e.g. `--js-flags=--expose-gc`).
  */
-export async function openBrowser({ backend = GPU, uncapped = false } = {}) {
+export async function openBrowser({
+  backend = GPU,
+  uncapped = false,
+  extraArgs = [],
+} = {}) {
   const o = launchOptions(backend)
   const args = uncapped
     ? o.args
@@ -105,7 +110,7 @@ export async function openBrowser({ backend = GPU, uncapped = false } = {}) {
   return chromium.launch({
     headless: true,
     executablePath: HEADLESS_SHELL,
-    args,
+    args: [...args, ...extraArgs],
     env: o.env,
   })
 }

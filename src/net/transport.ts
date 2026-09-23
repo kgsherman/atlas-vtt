@@ -162,7 +162,9 @@ export interface HostPlayerLink {
   onRequest(cb: (raw: unknown) => void): Unsubscribe
   /**
    * Fires every time both channels are SUBSCRIBED after either (re)joined — boot, reconnect,
-   * recreated channel, newly opened member. Push a snapshot / snapshot_ready here (§6.3).
+   * recreated channel, newly opened member. The host pushes a snapshot / snapshot_ready on a player's
+   * first link, and `sync` (plus the tile table) on a rejoin: a client that missed patches then asks
+   * for a catch-up with hello (§6.3).
    */
   onReady(cb: () => void): Unsubscribe
   isReady(): boolean
@@ -236,6 +238,14 @@ export interface Transport {
   openPlayerChannels(sessionId: string, userId: string, opts?: PlayerChannelOptions): PlayerChannels
   /** Messages currently waiting for a rate-limit token (lets the host coalesce patches). */
   pendingSends(): number
+  /**
+   * Whether THIS device's own connection looks up (e.g. `navigator.onLine` and the Realtime socket).
+   * Optional: transports without a network (LocalTransport) omit it, which means "always online".
+   * Lets a player tell "I'm offline" from "the DM is not responding".
+   */
+  networkOnline?(): boolean
+  /** Changes of networkOnline() (only reported while someone listens). */
+  onNetworkChange?(cb: (online: boolean) => void): Unsubscribe
   /** Close every channel and release resources. */
   dispose(): Promise<void>
 }

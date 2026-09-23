@@ -456,8 +456,9 @@ function LightFields({ o }: { o: LightObject }) {
       <FieldRow label="Dim radius">
         <NumberInput value={o.dimRadius} min={0} max={1000} step={5} unit="ft" disabled={readOnly} onCommit={(dimRadius) => update({ dimRadius: Math.max(dimRadius, o.brightRadius) })} />
       </FieldRow>
-      <FieldRow label="Height" hint={o.attachedTokenId ? "Height above the carrier's ground." : "Height above the ground."}>
-        <NumberInput value={o.position.y} min={-100} max={1000} step={0.5} unit="ft" disabled={readOnly} onCommit={(y) => update({ position: { ...o.position, y } })} />
+      <FieldRow label="Height" hint={o.attachedTokenId ? "Height above the carrier's ground." : "Height above the ground. Below it, the light would sit inside the floor (it then shines from just above it)."}>
+        {/* A free-standing light below its ground is inside the floor slab: not offered. */}
+        <NumberInput value={o.position.y} min={o.attachedTokenId ? -100 : 0} max={1000} step={0.5} unit="ft" disabled={readOnly} onCommit={(y) => update({ position: { ...o.position, y } })} />
       </FieldRow>
       <SwitchField label="Casts shadows" description="Off: the light shines through walls (for vision too)." checked={o.castsShadows} disabled={readOnly} onCheckedChange={(castsShadows) => update({ castsShadows })} />
       <Separator className="my-1" />

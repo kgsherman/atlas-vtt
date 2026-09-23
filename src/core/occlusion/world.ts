@@ -12,7 +12,7 @@ import { aabb3ContainsPoint, aabb3Union, circleOverlapsAABB2, inflateRect, orien
 import { createInterval, lineAABB3 } from "../geometry/ray"
 import { clipSegmentToBox2Into } from "../geometry/segment"
 import { EPS } from "../geometry/vec"
-import { rectsOverlap } from "../scene/queries"
+import { rectsOverlap, structureSignature } from "../scene/queries"
 import type { Id, Rect, SceneLike, Vec2, Vec3 } from "../scene/types"
 import {
   BuildContext,
@@ -90,14 +90,6 @@ interface GridParams {
 
 const scratch = createInterval()
 const clipRange = createInterval()
-
-function structureSignature(scene: SceneLike): string {
-  const g = scene.grid
-  const levels = Object.values(scene.levels)
-    .map((l) => `${l.id}:${l.elevation}:${l.height}:${l.floorThickness}:${l.heightmap ? l.heightmap.resolution : "-"}`)
-    .sort()
-  return `${g.cellSize}|${g.width}|${g.depth}|${levels.join(",")}`
-}
 
 // ---------------------------------------------------------------------------
 // Primitive equality and dirty regions
@@ -417,7 +409,9 @@ export class GridOcclusionWorld implements OcclusionWorld {
                 this.hitT = t
                 return e
               }
-              if (t < best) {
+              // Exact ties (coplanar faces) go to the smallest key, so the reported primitive does
+              // not depend on registration order (edit history).
+              if (t < best || (t === best && bestEntry !== null && e.prim.key < bestEntry.prim.key)) {
                 best = t
                 bestEntry = e
               }

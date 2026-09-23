@@ -225,11 +225,11 @@ begin
   perform pg_temp.eq('catalog: authenticated can execute exactly the RPCs',
     (select string_agg(p.proname, ',' order by p.proname) from pg_proc p
       where p.pronamespace = 'public'::regnamespace and has_function_privilege('authenticated', p.oid, 'execute')),
-    'claim_host,create_scene,create_session,end_session,get_shared_scene,grant_tiles,join_session,list_session_members,revoke_tiles,save_scene_version,save_session_state,session_info,set_display_name,set_member_status,set_scene_visibility,upsert_player_view');
+    'claim_host,create_scene,create_session,end_session,get_shared_scene,image_folders_to_free,join_session,list_session_members,save_scene_version,save_session_state,session_info,set_display_name,set_member_status,set_scene_visibility,unreferenced_scene_assets,upsert_player_view');
   perform pg_temp.eq('catalog: authenticated can execute only the policy helpers in private',
     (select string_agg(p.proname, ',' order by p.proname) from pg_proc p
       where p.pronamespace = 'private'::regnamespace and has_function_privilege('authenticated', p.oid, 'execute')),
-    'can_delete_session_tile,can_read_session_tile,can_write_session_tile,is_active_member,is_session_dm,normalize_display_name,topic_kind,topic_sid,topic_uid');
+    'can_delete_session_tile,can_insert_scene_asset,can_read_session_tile,can_write_session_tile,is_active_member,is_session_dm,normalize_display_name,topic_kind,topic_sid,topic_uid');
   perform pg_temp.eq('catalog: every public/private function pins an empty search_path',
     (select coalesce(string_agg(p.proname, ','), '') from pg_proc p
       where p.pronamespace in ('public'::regnamespace, 'private'::regnamespace)
@@ -370,10 +370,21 @@ begin
   perform pg_temp.eq('player: cannot change own member status',
     pg_temp.try(format($q$update public.session_members set status = 'active' where session_id = %L$q$, v_sid)),
     'permission denied for table session_members');
-  perform pg_temp.eq('player: can rename self',
-    pg_temp.val(format($q$with u as (update public.session_members set display_name = 'Alicia' where session_id = %L returning 1) select count(*) from u$q$, v_sid)), '1');
+  perform pg_temp.eq('player: cannot rename self directly (only through join_session)',
+    pg_temp.try(format($q$update public.session_members set display_name = 'Alicia' where session_id = %L$q$, v_sid)),
+    'permission denied for table session_members');
   perform pg_temp.eq('player: cannot rename others',
-    pg_temp.val(format($q$with u as (update public.session_members set display_name = 'x' where session_id = %L and user_id = %L returning 1) select count(*) from u$q$, v_sid, p2)), '0');
+    pg_temp.try(format($q$update public.session_members set display_name = 'x' where session_id = %L and user_id = %L$q$, v_sid, p2)),
+    'permission denied for table session_members');
+  perform pg_temp.eq('player: renames by joining again', pg_temp.val(format('select public.join_session(%L, %L)', v_code, 'Alicia')), v_sid::text);
+  perform pg_temp.eq('player: cannot take another member''s name (any case)',
+    pg_temp.try(format('select public.join_session(%L, %L)', v_code, 'bOB')), 'name_taken');
+  perform pg_temp.eq('player: cannot take the DM''s name',
+    pg_temp.try(format('select public.join_session(%L, %L)', v_code, 'dungeon master')), 'name_taken');
+  perform pg_temp.eq('player: cannot pose as the DM',
+    pg_temp.try(format('select public.join_session(%L, %L)', v_code, ' DM ')), 'name_taken');
+  perform pg_temp.eq('player: the failed renames changed nothing',
+    pg_temp.val('select string_agg(display_name, '','') from public.session_members'), 'Alicia');
   perform pg_temp.eq('player: cannot delete the session',
     pg_temp.val(format('with u as (delete from public.sessions where id = %L returning 1) select count(*) from u', v_sid)), '0');
   perform pg_temp.eq('player: cannot write player_views directly',
@@ -491,7 +502,8 @@ begin
     pg_temp.val(format('select member_status from public.session_info(%L)', v_sid)), 'kicked');
   perform pg_temp.eq('kick: kicked user cannot read own player_views row', pg_temp.val('select count(*) from public.player_views'), '0');
   perform pg_temp.eq('kick: kicked user cannot rename self',
-    pg_temp.val(format($q$with u as (update public.session_members set display_name = 'K2' where session_id = %L returning 1) select count(*) from u$q$, v_sid)), '0');
+    pg_temp.try(format($q$update public.session_members set display_name = 'K2' where session_id = %L$q$, v_sid)),
+    'permission denied for table session_members');
 
   -- ======================= realtime matrix (ARCHITECTURE §6.1) =======================
   create temp table atlas_rt_allowed (who text, kind text, op text, ext text) on commit drop;

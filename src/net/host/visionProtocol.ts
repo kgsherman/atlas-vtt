@@ -10,6 +10,11 @@
  *
  * Every scene revision carries a `tag` (the host's scene revision counter). A compute result reports
  * the tag of the scene it was computed on; the host never pairs it with another revision.
+ *
+ * `probe` evaluates a hypothetical revision without adopting it: the worker applies a diff to its
+ * current revision (e.g. a moving token at an intermediate step of its path), computes visibility for
+ * several viewer sets, and restores the engine to the current revision. It never changes the worker's
+ * scene or tag, so a compute posted after a probe sees exactly what it would have seen without it.
  */
 import type { Environment, GridSettings, Id, Level, SceneLike, SceneObject, Token } from "@/core/scene/types"
 import { createVisionEngine } from "@/core/vision"
@@ -28,9 +33,14 @@ export type VisionRequest =
   | { id: number; op: "setScene"; tag: number; scene: SceneLike }
   | { id: number; op: "update"; tag: number; change: VisionChange; scene?: SceneLike; diff?: SceneDiff }
   | { id: number; op: "compute"; viewers: Id[] }
+  /**
+   * Visibility of `viewerSets` (one result per set) on the current revision with `diff` applied (or on
+   * `scene`, in-thread), without adopting it. `change` lists what the diff changes.
+   */
+  | { id: number; op: "probe"; tokenId: Id; change: VisionChange; diff?: SceneDiff; scene?: SceneLike; viewerSets: Id[][] }
 
 export type VisionResponse =
-  | { id: number; ok: true; tag: number; ms: number; result?: VisibilityResult }
+  | { id: number; ok: true; tag: number; ms: number; result?: VisibilityResult; results?: VisibilityResult[] }
   | { id: number; ok: false; error: string }
 
 const own = <T>(rec: Record<Id, T>, id: Id): T | undefined => (Object.hasOwn(rec, id) ? rec[id] : undefined)
@@ -105,6 +115,15 @@ export function resultTransferables(result: VisibilityResult): ArrayBuffer[] {
   return [...new Set(out)]
 }
 
+/** Transferables of a response (a compute's result or a probe's results). */
+export function responseTransferables(res: VisionResponse): ArrayBuffer[] {
+  if (!res.ok) return []
+  const out: ArrayBuffer[] = []
+  if (res.result) out.push(...resultTransferables(res.result))
+  for (const r of res.results ?? []) out.push(...resultTransferables(r))
+  return [...new Set(out)]
+}
+
 const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now())
 
 /** The worker's message handler, usable in-thread (tests, fallback) and inside the Worker. */
@@ -115,6 +134,15 @@ export class VisionWorkerCore {
 
   get currentTag(): number {
     return this.tag
+  }
+
+  private computeOn(scene: SceneLike, viewerIds: readonly Id[]): VisibilityResult {
+    const engine = this.engine!
+    const viewers = [...new Set(viewerIds)].flatMap((id) => {
+      const t = own(scene.tokens, id)
+      return t && Object.hasOwn(scene.levels, t.levelId) ? [engine.viewerFor(t)] : []
+    })
+    return engine.compute(viewers)
   }
 
   handle(req: VisionRequest): VisionResponse {
@@ -139,14 +167,25 @@ export class VisionWorkerCore {
         }
         case "compute": {
           if (!this.engine || !this.scene) throw new Error("compute before setScene")
-          const scene = this.scene
-          const engine = this.engine
-          const viewers = [...new Set(req.viewers)].flatMap((id) => {
-            const t = own(scene.tokens, id)
-            return t && Object.hasOwn(scene.levels, t.levelId) ? [engine.viewerFor(t)] : []
-          })
-          const result = engine.compute(viewers)
+          const result = this.computeOn(this.scene, req.viewers)
           return { id: req.id, ok: true, tag: this.tag, ms: now() - t0, result }
+        }
+        case "probe": {
+          if (!this.engine || !this.scene) throw new Error("probe before setScene")
+          const engine = this.engine
+          const saved = this.scene
+          const step = req.scene ? visionScene(req.scene) : applySceneDiff(saved, req.diff ?? {})
+          const change: VisionChange = { ...req.change }
+          if (!change.tokens?.includes(req.tokenId)) change.tokens = [...(change.tokens ?? []), req.tokenId]
+          engine.update(step, change)
+          let results: VisibilityResult[]
+          try {
+            results = req.viewerSets.map((ids) => this.computeOn(step, ids))
+          } finally {
+            // Back to the current revision (this.scene / this.tag were never touched).
+            engine.update(saved, change)
+          }
+          return { id: req.id, ok: true, tag: this.tag, ms: now() - t0, results }
         }
       }
     } catch (err) {

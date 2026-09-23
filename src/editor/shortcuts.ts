@@ -6,6 +6,7 @@
  * Arrow nudges move one cell (Shift: one foot) along world axes: ArrowUp = −Z, ArrowDown = +Z,
  * ArrowLeft = −X, ArrowRight = +X (screen directions in the default top-down orientation).
  */
+import type { SnapMode } from "@/core/grid/grid"
 import type { Id, Vec2 } from "@/core/scene/types"
 
 import type { EditorStore } from "./store"
@@ -17,7 +18,8 @@ export type ShortcutAction =
   | { type: "redo" }
   | { type: "copy" }
   | { type: "cut" }
-  | { type: "paste" }
+  /** `free`: keep the raw pointer point (no snapping). */
+  | { type: "paste"; free?: boolean }
   | { type: "duplicate" }
   | { type: "delete" }
   | { type: "select-all" }
@@ -77,7 +79,8 @@ export const SHORTCUTS: ShortcutDef[] = [
   { keys: "Ctrl+Shift+Z / Ctrl+Y", description: "Redo", action: { type: "redo" } },
   { keys: "Ctrl+C", description: "Copy", action: { type: "copy" } },
   { keys: "Ctrl+X", description: "Cut", action: { type: "cut" } },
-  { keys: "Ctrl+V", description: "Paste at the pointer", action: { type: "paste" } },
+  { keys: "Ctrl+V", description: "Paste at the pointer (snapped)", action: { type: "paste" } },
+  { keys: "Ctrl+Alt+V", description: "Paste at the pointer without snapping", action: { type: "paste", free: true } },
   { keys: "Ctrl+D", description: "Duplicate", action: { type: "duplicate" } },
   { keys: "Ctrl+A", description: "Select all on the level", action: { type: "select-all" } },
   { keys: "Delete / Backspace", description: "Delete selection", action: { type: "delete" } },
@@ -93,6 +96,7 @@ export const SHORTCUTS: ShortcutDef[] = [
 /** Map a key event to an editor action, or null. */
 export function resolveShortcut(e: ToolKeyEvent): ShortcutAction | null {
   const key = e.key.length === 1 ? e.key.toLowerCase() : e.key
+  if (e.ctrl && e.alt && !e.shift && key === "v") return { type: "paste", free: true }
   if (e.ctrl && !e.alt) {
     switch (key) {
       case "z":
@@ -148,12 +152,18 @@ export function resolveShortcut(e: ToolKeyEvent): ShortcutAction | null {
   return null
 }
 
+export interface PasteTarget {
+  at?: Vec2
+  hostWallId?: Id
+  snap?: SnapMode
+}
+
 export interface ShortcutContext {
   store: EditorStore
   /** Abort the active tool's gesture (before undo/redo/level switches). */
   cancelGesture?(): void
-  /** Where Ctrl+V pastes: the pointer's ground point and the wall under it. */
-  pasteTarget?(): { at?: Vec2; hostWallId?: Id }
+  /** Where Ctrl+V pastes: the pointer's ground point, the wall under it and the snap mode to apply. */
+  pasteTarget?(): PasteTarget
 }
 
 /** Run an action against the store. Returns whether it did anything (i.e. the key was consumed). */
@@ -182,10 +192,12 @@ export function runShortcut(action: ShortcutAction, ctx: ShortcutContext): boole
       return s.copySelection() !== null
     case "cut":
       return s.cutSelection() !== null
-    case "paste":
+    case "paste": {
       if (!s.clipboard) return false
-      s.paste(ctx.pasteTarget?.() ?? {})
+      const target = ctx.pasteTarget?.() ?? {}
+      s.paste(action.free && target.at ? { ...target, snap: "free" } : target)
       return true
+    }
     case "duplicate":
       return s.duplicateSelection().length > 0
     case "delete":

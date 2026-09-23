@@ -2,7 +2,8 @@ import * as React from "react"
 import { Activity, Crosshair, Gauge, Layers, MousePointerClick } from "lucide-react"
 import { useStore } from "zustand"
 
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { QualitySelect } from "@/components/canvas/QualitySelect"
+import type { QualityChoice } from "@/components/canvas/qualityChoice"
 import { Separator } from "@/components/ui/separator"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import type { Quality } from "@/render/contracts"
@@ -12,15 +13,7 @@ import { useEditorState } from "./context"
 import { formatElevation, trimNumber } from "./lib/format"
 import type { ViewportInfoStore } from "./lib/viewportInfo"
 
-export type QualityChoice = Quality | "auto"
-
-const QUALITY_ITEMS: { value: QualityChoice; label: string }[] = [
-  { value: "auto", label: "Auto" },
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
-  { value: "ultra", label: "Ultra" },
-]
+export type { QualityChoice }
 
 const SNAP_LABELS = { center: "Cell centre", vertex: "Vertex", half: "Half cell", free: "Free" } as const
 
@@ -49,12 +42,12 @@ function CursorReadout({ info }: { info: ViewportInfoStore }) {
           <span className={cn(!cursor.inside && "text-destructive")}>
             {cursor.i}, {cursor.j}
           </span>
-          <span className="text-muted-foreground/70">
+          <span className="text-muted-foreground">
             ({trimNumber(cursor.x, 1)}, {trimNumber(cursor.z, 1)} ft)
           </span>
         </>
       ) : (
-        <span className="text-muted-foreground/60">—</span>
+        <span className="text-muted-foreground">—</span>
       )}
     </Item>
   )
@@ -62,7 +55,7 @@ function CursorReadout({ info }: { info: ViewportInfoStore }) {
 
 function FrameReadout({ info }: { info: ViewportInfoStore }) {
   const stats = useStore(info, (s) => s.stats)
-  if (!stats) return <span className="text-muted-foreground/60">Starting renderer…</span>
+  if (!stats) return <span className="text-muted-foreground">Starting renderer…</span>
   const slow = stats.frameMsP95 > 18
   return (
     <Item
@@ -71,8 +64,8 @@ function FrameReadout({ info }: { info: ViewportInfoStore }) {
       className="tabular-nums"
     >
       <span className={cn(slow ? "text-destructive" : "text-foreground/80")}>{Math.round(stats.fps)} fps</span>
-      <span className="text-muted-foreground/70">p95 {trimNumber(stats.frameMsP95, 1)} ms</span>
-      <span className="text-muted-foreground/70">{stats.drawCalls} draws</span>
+      <span className="text-muted-foreground">p95 {trimNumber(stats.frameMsP95, 1)} ms</span>
+      <span className="text-muted-foreground">{stats.drawCalls} draws</span>
     </Item>
   )
 }
@@ -114,18 +107,13 @@ export function StatusBar({
       <Separator orientation="vertical" className="h-3.5 self-center" />
       <div className="flex items-center gap-1.5">
         <Gauge className="size-3" />
-        <Select value={quality} onValueChange={(v) => v && onQualityChange(v as QualityChoice)}>
-          <SelectTrigger size="sm" aria-label="Render quality" className="h-5 gap-1 border-none bg-transparent px-1 text-[0.6875rem] dark:bg-transparent">
-            <SelectValue>{(v: QualityChoice) => (v === "auto" ? `Auto${stats?.quality || actualQuality ? ` (${stats?.quality ?? actualQuality})` : ""}` : QUALITY_ITEMS.find((q) => q.value === v)?.label)}</SelectValue>
-          </SelectTrigger>
-          <SelectContent side="top" align="end" alignItemWithTrigger={false}>
-            {QUALITY_ITEMS.map((q) => (
-              <SelectItem key={q.value} value={q.value} className="text-xs">
-                {q.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+        <QualitySelect
+          value={quality}
+          onValueChange={onQualityChange}
+          current={stats?.quality ?? actualQuality}
+          className="h-5 gap-1 border-none bg-transparent px-1 text-[0.6875rem] dark:bg-transparent"
+          itemClassName="text-xs"
+        />
       </div>
     </footer>
   )

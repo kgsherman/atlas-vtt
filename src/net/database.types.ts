@@ -273,6 +273,7 @@ export type Database = {
           version: number
         }[]
       }
+      image_folders_to_free: { Args: { p_scene_id: string }; Returns: string[] }
       join_session: {
         Args: { p_display_name: string; p_room_code: string }
         Returns: string
@@ -321,6 +322,10 @@ export type Database = {
       set_scene_visibility: {
         Args: { p_rotate?: boolean; p_scene_id: string; p_visibility: string }
         Returns: string
+      }
+      unreferenced_scene_assets: {
+        Args: { p_min_age?: string }
+        Returns: string[]
       }
       upsert_player_view: {
         Args: {

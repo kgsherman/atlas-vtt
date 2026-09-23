@@ -3,7 +3,7 @@ import { CheckIcon, CopyIcon, Link2Icon, RefreshCwIcon, ShieldAlertIcon, Trash2I
 import { toast } from "sonner"
 
 import { copyText } from "@/app/clipboard"
-import { userMessage } from "@/app/library"
+import { deleteScene, userMessage } from "@/app/library"
 import { paths } from "@/app/routes"
 import { useServices } from "@/app/services"
 import { useLastNonNull } from "@/app/useAsync"
@@ -92,7 +92,7 @@ function RenameForm({ scene, onClose, onRenamed }: { scene: SceneSummary; onClos
 // ---------------------------------------------------------------------------
 
 export function DeleteSceneDialog({ scene, onClose, onDeleted }: { scene: SceneSummary | null; onClose(): void; onDeleted(scene: SceneSummary): void }) {
-  const { scenes } = useServices()
+  const services = useServices()
   const [deleting, setDeleting] = React.useState(false)
   // Keep the last scene on screen during the closing animation.
   const shown = useLastNonNull(scene)
@@ -101,9 +101,11 @@ export function DeleteSceneDialog({ scene, onClose, onDeleted }: { scene: SceneS
     if (!scene) return
     setDeleting(true)
     try {
-      await scenes.remove(scene.id)
+      // Also removes the scene's map images (unless a running game still uses them).
+      const { warnings } = await deleteScene(services, scene)
       onDeleted(scene)
       onClose()
+      if (warnings.length > 0) toast.warning("Scene deleted", { description: warnings.join(" ") })
     } catch (err) {
       toast.error("Couldn't delete the scene", { description: userMessage(err) })
     } finally {

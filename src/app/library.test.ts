@@ -8,7 +8,7 @@ import { createMemoryStore } from "@/net/localStore"
 import { readSceneFile } from "@/net/scenesRepo"
 
 import { createServices } from "./createServices"
-import { copySharedScene, createFromSample, duplicateScene, exportScene, importSceneFile, LibraryError, nextCopyName, userMessage } from "./library"
+import { copySharedScene, createFromSample, deleteScene, duplicateScene, exportScene, importedName, importSceneFile, LibraryError, nextCopyName, userMessage } from "./library"
 import type { AppServices } from "./services"
 
 const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 250])
@@ -80,6 +80,15 @@ describe("nextCopyName", () => {
     expect(nextCopyName("Keep", [])).toBe("Keep (copy)")
     expect(nextCopyName("Keep", ["Keep (copy)"])).toBe("Keep (copy 2)")
     expect(nextCopyName("Keep (copy)", ["Keep (copy)", "Keep (copy 2)"])).toBe("Keep (copy 3)")
+  })
+})
+
+describe("importedName", () => {
+  it("keeps new names and suffixes names already in the library", () => {
+    expect(importedName("Keep", ["Other"])).toBe("Keep")
+    expect(importedName("Keep", ["Keep"])).toBe("Keep (imported)")
+    expect(importedName("Keep", ["Keep", "Keep (imported)"])).toBe("Keep (imported 2)")
+    expect(importedName("Keep (imported)", ["Keep (imported)"])).toBe("Keep (imported 2)")
   })
 })
 
@@ -206,5 +215,51 @@ describe("library operations", () => {
     expect(loaded.parsed.scene.assets).toBeUndefined()
     expect(Object.values(loaded.parsed.scene.levels).every((l) => !l.backdrop)).toBe(true)
     expect(loaded.parsed.scene.id).not.toBe(scene.id)
+  })
+})
+
+describe("map image cleanup", () => {
+  const storeMap = (s: Awaited<ReturnType<typeof localServices>>, scene: Scene) =>
+    s.assets.putImage(scene.id, new Blob([PNG_BYTES], { type: "image/png" }), { id: "map1", kind: "image", name: "ground.webp", mime: "image/png", width: 1400, height: 1400 })
+
+  it("deleting a scene removes its map images", async () => {
+    const s = await localServices()
+    const scene = sceneWithBackdrop()
+    await storeMap(s, scene)
+    const summary = await s.scenes.create(scene)
+    const { warnings } = await deleteScene(s, summary)
+    expect(warnings).toEqual([])
+    expect(await s.scenes.get(summary.id)).toBeNull()
+    expect(s.assets.blobs.has(`${scene.id}/map1`)).toBe(false)
+  })
+
+  it("keeps the images while an active session started from the scene may use them", async () => {
+    const s = await localServices()
+    const scene = sceneWithBackdrop()
+    await storeMap(s, scene)
+    const summary = await s.scenes.create(scene)
+    await s.sessions.createSession(summary.id)
+    await deleteScene(s, summary)
+    expect(await s.scenes.get(summary.id)).toBeNull()
+    expect(s.assets.blobs.has(`${scene.id}/map1`)).toBe(true)
+  })
+
+  it("an import that fails to create the scene removes the images it stored", async () => {
+    const s = await localServices()
+    const scene = sceneWithBackdrop()
+    await storeMap(s, scene)
+    const file = await exportScene(s, await s.scenes.create(scene))
+    const failing = { ...s, scenes: { ...s.scenes, create: async () => Promise.reject(new Error("quota")) } }
+    const before = new Set(s.assets.blobs.keys())
+    await expect(importSceneFile(failing, new Blob([file.text]))).rejects.toThrow("quota")
+    expect(new Set(s.assets.blobs.keys())).toEqual(before)
+  })
+
+  it("imports a scene whose name is taken under a suffixed name", async () => {
+    const s = await localServices()
+    const scene = sceneWithBackdrop()
+    const file = await exportScene(s, await s.scenes.create(scene))
+    const imported = await importSceneFile(s, new Blob([file.text]))
+    expect(imported.summary.name).toBe("Vineyard (imported)")
   })
 })

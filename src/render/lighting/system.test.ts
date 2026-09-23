@@ -7,7 +7,7 @@ import * as THREE from "three"
 import { describe, expect, it } from "vitest"
 
 import type { OccluderPrimitive, OcclusionWorld, OrientedBox } from "@/core/occlusion/types"
-import { createLight, createScene, createToken } from "@/core/scene/factory"
+import { createLevel, createLight, createScene, createToken } from "@/core/scene/factory"
 import type { LightObject, Scene, Vec3 } from "@/core/scene/types"
 import { LAYER } from "../internal"
 import { AtlasLightingSystem, DEFAULT_VIEW_STATE, QUALITY_CONFIG } from "./system"
@@ -135,6 +135,25 @@ const lightIds = (sys: AtlasLightingSystem, count: number) => {
 }
 
 describe("AtlasLightingSystem", () => {
+  it("publishes the cutaway plane for the cap rule in play views with cutaway, 1e9 otherwise", () => {
+    const { scene, ground, world, renderer, camera } = setup()
+    const upper = createLevel({ name: "Upper", elevation: 10, floorThickness: 1 })
+    const twoStoreys: Scene = { ...scene, levels: { ...scene.levels, [upper.id]: upper } }
+    const sys = new AtlasLightingSystem(renderer, "medium", { now: fakeClock })
+    sys.setScene(twoStoreys, world)
+    const at = (view: Partial<typeof DEFAULT_VIEW_STATE>) => {
+      sys.setView({ ...DEFAULT_VIEW_STATE, activeLevelId: ground, ...view })
+      sys.beforeRender(renderer, camera, 0)
+      return sys.shared.uCutawayY.value
+    }
+    expect(at({ mode: "editor", cutaway: true })).toBe(1e9)
+    expect(at({ mode: "dm-play", cutaway: true })).toBe(9)
+    expect(at({ mode: "player", cutaway: true, vision: "fog" })).toBe(9)
+    expect(at({ mode: "player", cutaway: false, vision: "fog" })).toBe(1e9)
+    // The top storey has nothing above it.
+    expect(at({ mode: "dm-play", cutaway: true, activeLevelId: upper.id })).toBe(1e9)
+  })
+
   it("stops at the CPU time cap", () => {
     const { scene, world, renderer, camera } = setup()
     let t = 0
@@ -302,9 +321,15 @@ describe("AtlasLightingSystem", () => {
     sys.setQuality("low")
     expect(sys.shared.uLightCount.value).toBe(count) // previous frame's list until the next beforeRender
     const s = sys.beforeRender(renderer, camera, 4)
-    // New atlas: every tile must be recaptured; lights without one are not drawn yet.
-    expect(s.tilesUpdated).toBe(4)
+    // New atlas: every tile must be recaptured, all at once in the first frame (no lights popping back
+    // in 4 per frame); the frame after is back to the normal budget.
+    expect(s.tilesUpdated).toBe(shadowed)
+    expect(shadowed).toBeGreaterThan(4)
+    let drawn = 0
+    for (let k = 0; k < sys.shared.uLightCount.value; k++) if (u[k * 16 + 10] > 0) drawn++
+    expect(drawn).toBe(shadowed)
     expect(u[10]).toBe(256)
+    expect(sys.beforeRender(renderer, camera, 5).tilesUpdated).toBeLessThanOrEqual(4)
   })
 
   it("gives the highest-ranked lights hi-res tiles and soft shadows on ultra", () => {

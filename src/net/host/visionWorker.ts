@@ -4,7 +4,7 @@
  * `new Worker(new URL("./visionWorker.ts", import.meta.url), { type: "module" })`.
  * Messages are handled strictly in order, so a compute always runs on the latest posted revision.
  */
-import { resultTransferables, VisionWorkerCore, type VisionRequest, type VisionResponse } from "./visionProtocol"
+import { responseTransferables, VisionWorkerCore, type VisionRequest, type VisionResponse } from "./visionProtocol"
 
 interface WorkerScope {
   onmessage: ((ev: MessageEvent<VisionRequest>) => void) | null
@@ -16,6 +16,6 @@ const core = new VisionWorkerCore()
 
 scope.onmessage = (ev) => {
   const res = core.handle(ev.data)
-  const transfer = res.ok && res.result ? resultTransferables(res.result) : []
+  const transfer = responseTransferables(res)
   scope.postMessage(res, transfer)
 }

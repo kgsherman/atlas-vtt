@@ -16,6 +16,8 @@ export const DEFAULT_CELL_SIZE = 5
 export const DEFAULT_LEVEL_HEIGHT = 10
 export const DEFAULT_FLOOR_THICKNESS = 1
 export const DEFAULT_WALL_THICKNESS = 0.5
+/** Shortest wall (a→b, feet) the schema accepts. */
+export const MIN_WALL_LENGTH = 0.01
 export const DEFAULT_DOOR_WIDTH = 4
 export const DEFAULT_DOOR_HEIGHT = 7
 export const DEFAULT_WINDOW_WIDTH = 3

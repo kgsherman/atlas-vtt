@@ -32,13 +32,20 @@ export function isTextEntry(target: EventTarget | null): boolean {
   return false
 }
 
-/** A modal dialog, sheet or menu is open: map shortcuts must not fire underneath it. */
-export function overlayOpen(): boolean {
-  return (
-    document.querySelector(
-      '[data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="sheet-content"], [role="menu"], [role="listbox"]'
-    ) !== null
-  )
+const OVERLAY_SELECTOR =
+  '[data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="sheet-content"], [role="menu"], [role="listbox"]'
+
+/**
+ * A modal dialog, sheet or menu is open: map shortcuts must not fire underneath it. Only live overlays
+ * count: Base UI keeps a closed Select/Menu popup mounted inside a `[hidden]` (unmounted-but-kept) or
+ * `[inert]` (closing) wrapper, and those must not swallow shortcuts for the rest of the page's life.
+ * `closest()` rather than `checkVisibility()` so the check also works under jsdom.
+ */
+export function overlayOpen(root: ParentNode = document): boolean {
+  for (const el of root.querySelectorAll(OVERLAY_SELECTOR)) {
+    if (!el.closest("[hidden], [inert]")) return true
+  }
+  return false
 }
 
 /** Zoom the engine camera about the canvas centre (the camera zooms on wheel events). */

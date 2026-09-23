@@ -8,7 +8,9 @@
  *
  * The probe uses its own tiny WebGL2 context (released afterwards), so it can run before the engine
  * exists and never disturbs the engine's GL state. It takes ~100–300 ms on a first run (measured:
- * RTX 5070 Ti 110 ms → ultra, Radeon iGPU 190 ms → medium, SwiftShader → low without timing).
+ * RTX 5070 Ti 110 ms → ultra, Radeon iGPU 190 ms → medium). The renderer string is read first
+ * (readRendererInfo): a software renderer (SwiftShader, llvmpipe) is classified low without timing,
+ * which would otherwise block its first load for 1–2 s.
  */
 import type { Quality } from "../contracts"
 
@@ -153,6 +155,31 @@ void main() {
 }
 `
 
+function rendererStrings(gl: WebGL2RenderingContext): { renderer: string; vendor: string } {
+  const dbg = gl.getExtension("WEBGL_debug_renderer_info")
+  return {
+    renderer: String(dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)),
+    vendor: String(dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR)),
+  }
+}
+
+/** GPU renderer / vendor strings from a throwaway 1×1 WebGL2 context (released at once); null without WebGL2. */
+export function readRendererInfo(): { renderer: string; vendor: string } | null {
+  if (typeof document === "undefined") return null
+  let gl: WebGL2RenderingContext | null = null
+  try {
+    const canvas = document.createElement("canvas")
+    canvas.width = 1
+    canvas.height = 1
+    gl = canvas.getContext("webgl2", { antialias: false, depth: false, stencil: false, powerPreference: "high-performance" })
+    return gl ? rendererStrings(gl) : null
+  } catch {
+    return null
+  } finally {
+    gl?.getExtension("WEBGL_lose_context")?.loseContext()
+  }
+}
+
 function compile(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader | null {
   const s = gl.createShader(type)
   if (!s) return null
@@ -176,9 +203,7 @@ export function measureShaderCost(frames = 16): { msPerMP: number; renderer: str
   if (!gl) return null
   const lose = gl.getExtension("WEBGL_lose_context")
   try {
-    const dbg = gl.getExtension("WEBGL_debug_renderer_info")
-    const renderer = String(dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER))
-    const vendor = String(dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR))
+    const { renderer, vendor } = rendererStrings(gl)
     const vs = compile(gl, gl.VERTEX_SHADER, VS)
     const fs = compile(gl, gl.FRAGMENT_SHADER, FS)
     const prog = gl.createProgram()
@@ -273,6 +298,10 @@ export interface ProbeOptions {
   cssWidth?: number
   cssHeight?: number
   dpr?: number
+  /** Renderer-string reader (default readRendererInfo; tests inject one). */
+  rendererInfo?: () => { renderer: string; vendor: string } | null
+  /** Timed benchmark (default measureShaderCost; tests inject one). */
+  measure?: () => { msPerMP: number; renderer: string; vendor: string } | null
 }
 
 function defaultStorage(): Storage | null {
@@ -297,18 +326,28 @@ export async function probeQuality(opts: ProbeOptions = {}): Promise<QualityProb
     const tier = cached.msPerMP !== null ? tierForCost(cached.msPerMP, cached.cap, tierPixels(w, h, dpr)) : cached.tier
     return { tier, renderer: cached.renderer, vendor: "", msPerMP: cached.msPerMP, cap: cached.cap, reason: cached.reason, cached: true }
   }
-  const m = measureShaderCost()
+  const store = (e: Omit<CacheEntry, "at">) => {
+    try {
+      storage?.setItem(PROBE_CACHE_KEY, JSON.stringify({ ...e, at: Date.now() } satisfies CacheEntry))
+    } catch {
+      // Storage full / blocked: no cache.
+    }
+  }
+  // Classify before timing: a software renderer is low whatever it measures, and timing it costs 1–2 s.
+  const info = (opts.rendererInfo ?? readRendererInfo)()
+  if (info && classifyRenderer(info.renderer).software) {
+    const reason = "software renderer"
+    store({ renderer: info.renderer, tier: "low", msPerMP: null, cap: "low", reason })
+    return { tier: "low", renderer: info.renderer, vendor: info.vendor, msPerMP: null, cap: "low", reason, cached: false }
+  }
+  const m = (opts.measure ?? measureShaderCost)()
   if (!m) {
     return { tier: "medium", renderer: "unknown", vendor: "", msPerMP: null, cap: "medium", reason: "no WebGL2 probe", cached: false }
   }
   const cls = classifyRenderer(m.renderer)
   const tier = cls.software ? "low" : minQ(cls.cap, tierForCost(m.msPerMP, cls.cap, tierPixels(w, h, dpr)))
   const reason = `${cls.label}, ${m.msPerMP.toFixed(2)} ms/MP`
-  try {
-    storage?.setItem(PROBE_CACHE_KEY, JSON.stringify({ renderer: m.renderer, tier, msPerMP: m.msPerMP, cap: cls.cap, reason, at: Date.now() } satisfies CacheEntry))
-  } catch {
-    // Storage full / blocked: no cache.
-  }
+  store({ renderer: m.renderer, tier, msPerMP: m.msPerMP, cap: cls.cap, reason })
   return { tier, renderer: m.renderer, vendor: m.vendor, msPerMP: m.msPerMP, cap: cls.cap, reason, cached: false }
 }
 

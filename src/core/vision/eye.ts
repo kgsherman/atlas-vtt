@@ -2,8 +2,8 @@
  * Viewer eyes and token test points (docs/ARCHITECTURE.md §5.2 "Viewer eye" and "Tokens").
  * The renderer uses resolveViewerEye too, so CPU and GPU line of sight start from the same point.
  */
-import { primitiveContains, pushOutOfPrimitive } from "../occlusion/primitives"
-import type { OcclusionWorld, SegmentQueryOptions } from "../occlusion/types"
+import { heightfieldSurfaceAt, primitiveContains, pushOutOfPrimitive } from "../occlusion/primitives"
+import type { OccluderPrimitive, OcclusionWorld, SegmentQueryOptions } from "../occlusion/types"
 import { SIZE_FOOTPRINT } from "../scene/defaults"
 import type { Token, Vec3 } from "../scene/types"
 
@@ -51,6 +51,56 @@ export function eyeAtGround(world: OcclusionWorld, ground: number, token: Pick<T
     eye = pushOutOfPrimitive(p, eye, EYE_PUSH_MARGIN)
   }
   return eye
+}
+
+/** Push-out passes for a light origin (a pass may land in a neighbouring blocker, e.g. at a T-junction). */
+const LIGHT_PUSH_PASSES = 4
+/** A floor slab whose top is within this of the light's own ground is the light's own floor (feet). */
+const OWN_FLOOR_TOLERANCE = 0.01
+
+/** Push a point out of a floor / terrain slab vertically: up out of the light's own floor, down out of a ceiling. */
+function pushOutOfSlab(p: OccluderPrimitive, q: Vec3, groundY: number): Vec3 {
+  let top: number | null
+  let bottom: number
+  if (p.shape === "heightfield") {
+    top = heightfieldSurfaceAt(p, q.x, q.z)
+    bottom = top === null ? 0 : top - p.thickness
+  } else if (p.shape === "box") {
+    top = p.center.y + p.halfExtents.y
+    bottom = p.center.y - p.halfExtents.y
+  } else {
+    top = p.base.y + p.height
+    bottom = p.base.y
+  }
+  if (top === null) return pushOutOfPrimitive(p, q, EYE_PUSH_MARGIN)
+  const y = top <= groundY + OWN_FLOOR_TOLERANCE ? top + EYE_PUSH_MARGIN : bottom - EYE_PUSH_MARGIN
+  return { x: q.x, y, z: q.z }
+}
+
+/**
+ * Light origin as vision uses it (renderers should shadow from the same point): `p` pushed
+ * EYE_PUSH_MARGIN past the nearest face of every light blocker containing it. Containment uses the
+ * segment ENTRY rule's EPS, since rays from a point inside (or on) a blocker ignore that blocker: a
+ * candle on a slab would light the storey below, a torch inside a wall both of its sides. The query is
+ * repeated so a push that lands in another blocker (a T-junction, a wall under a slab) is resolved too.
+ * Unlike eyes there is no feet exception: a torch inside a wall has its foot inside the wall too.
+ *
+ * With `groundY` (the ground the light stands on, see lightWorldPosition), a light belongs to its
+ * level: floor / terrain slabs push it vertically toward that level's space instead of to their
+ * nearest face, UP out of its own floor (slab top ≤ ground) and DOWN out of any slab above the ground
+ * (the next storey's floor): a lantern hung into the ceiling lights its own room, not the one above.
+ */
+export function resolveLightOrigin(world: OcclusionWorld, p: Vec3, groundY?: number): Vec3 {
+  let q: Vec3 = { x: p.x, y: p.y, z: p.z }
+  for (let pass = 0; pass < LIGHT_PUSH_PASSES; pass++) {
+    const inside = world.containing(q, "light")
+    if (inside.length === 0) return q
+    for (const prim of inside) {
+      const slab = groundY !== undefined && (prim.sourceType === "floor" || prim.sourceType === "terrain")
+      q = slab ? pushOutOfSlab(prim, q, groundY) : pushOutOfPrimitive(prim, q, EYE_PUSH_MARGIN)
+    }
+  }
+  return q
 }
 
 /** Test-point columns (XZ offsets from the token centre): centre, 4 inset corners, + 4 edge midpoints for ≥ 3-cell footprints. */

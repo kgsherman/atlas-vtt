@@ -1,7 +1,7 @@
 /**
  * The player's HUD over the map: session chip (scene, connection), status banners (DM away, movement
  * locked, reconnecting), the party panel (own characters, selected character card with senses, speed
- * and ladder climbs), the tool dock and the camera dock. Everything floats in fixed-size glass panels so
+ * and level changes: ladder climbs, stairs/ramp steps), the tool dock and the camera dock. Everything floats in fixed-size glass panels so
  * nothing shifts the map.
  */
 import * as React from "react"
@@ -117,6 +117,7 @@ export function PlayerHud({
             scene={scene}
             snap={snap}
             climbs={climbs}
+            tool={tool}
           />
         ) : null}
       </div>
@@ -166,7 +167,7 @@ export function PlayerHud({
                 ) : (
                   <ArrowDownToLine data-icon="inline-start" />
                 )}
-                Climb {c.direction}
+                {climbLabel(c)}
                 {c.toLevelName ? (
                   <span className="opacity-75">· {c.toLevelName}</span>
                 ) : null}
@@ -362,16 +363,40 @@ function PartyPanel({
   )
 }
 
+/** "Climb up" for ladders, "Go up" for stairs and ramps. */
+function climbLabel(c: ClimbOption): string {
+  return `${c.style === "ladder" ? "Climb" : "Go"} ${c.direction}`
+}
+
+function cardHint(tool: PlayTool, climbs: ClimbOption[]): string {
+  if (tool === "measure")
+    return "Measuring: press and drag from a point to measure. Hold Shift when you press to add another leg. Esc clears it."
+  if (climbs.length > 0) {
+    const where = climbs.every((c) => c.style === "ladder")
+      ? "Standing on a ladder"
+      : "At the stairs"
+    const moves = climbs
+      .map((c) =>
+        c.toLevelName ? `${c.direction} to ${c.toLevelName}` : c.direction
+      )
+      .join(" or ")
+    return `${where}: go ${moves} with the button below.`
+  }
+  return "Drag your token to move. Click a door next to you to open or close it."
+}
+
 function CharacterCard({
   token,
   scene,
   snap,
   climbs,
+  tool,
 }: {
   token: Token
   scene: SceneLike
   snap: PlayerClientSnapshot
   climbs: ClimbOption[]
+  tool: PlayTool
 }) {
   const view = snap.view!
   const pt = Object.hasOwn(view.tokens, token.id) ? view.tokens[token.id] : null
@@ -416,9 +441,7 @@ function CharacterCard({
         </Tooltip>
       </div>
       <p className="text-[0.6875rem] leading-relaxed text-muted-foreground">
-        {climbs.length > 0
-          ? `Standing on a ladder: climb ${climbs.map((c) => (c.toLevelName ? `${c.direction} to ${c.toLevelName}` : c.direction)).join(" or ")} with the button below.`
-          : "Drag your token to move. Click a door next to you to open or close it."}
+        {cardHint(tool, climbs)}
       </p>
     </HudPanel>
   )

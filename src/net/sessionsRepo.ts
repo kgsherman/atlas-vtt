@@ -165,6 +165,17 @@ export function formatRoomCode(code: string): string {
 }
 
 /** 40 random bits (byte & 31 is uniform: 256 is a multiple of 32). Server codes come from SQL. */
+/** Names that pose as the DM (join_session refuses them; mirrors private.display_name_taken). */
+export const RESERVED_DISPLAY_NAMES = ["dm", "gm", "the dm", "the gm", "dungeon master", "game master", "the dungeon master", "the game master"]
+
+/** Whether `name` is unavailable to `uid` among a session's members (case-insensitive). */
+export function displayNameTaken(name: string, uid: string, members: Readonly<Record<string, { displayName: string }>>, dmName: string | null = null): boolean {
+  const lower = name.toLowerCase()
+  if (RESERVED_DISPLAY_NAMES.includes(lower)) return true
+  if (dmName !== null && dmName.toLowerCase() === lower) return true
+  return Object.entries(members).some(([id, m]) => id !== uid && m.displayName.toLowerCase() === lower)
+}
+
 export function generateRoomCode(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(8))
   return [...bytes].map((b) => ROOM_CODE_ALPHABET[b & 31]).join("")
@@ -435,6 +446,8 @@ export function createLocalSessionsRepo(opts: LocalSessionsRepoOptions = {}): Se
       const existing = s.members[uid]
       if (existing?.status === "kicked") throw new NetError("kicked", "you were removed from this session")
       if (!existing && Object.keys(s.members).length >= MAX_MEMBERS) throw new NetError("session_full", "this session has too many members")
+      // Like join_session: no posing as the DM, no second player with the same name.
+      if (displayNameTaken(name, uid, s.members)) throw new NetError("name_taken", "that name is taken in this session")
       s.members[uid] = { displayName: name, status: "active", joinedAt: existing?.joinedAt ?? new Date().toISOString() }
       await putSession(s)
       return s.id

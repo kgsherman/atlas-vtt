@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest"
 import { createConnector, createDoor, createFloor, createLevel, createLight, createPillar, createProp, createScene, createToken, createWall, createWindow } from "./factory"
 import { copySelection, deleteWithDependents, objectBounds, pasteClipboard, reprojectOpenings, selectionBounds, splitWall, validateReferences } from "./integrity"
 import { lightLevelId, lightWorldPosition, wallOpenings } from "./queries"
+import { parseScene } from "./schema"
 import type { ConnectorObject, LightObject, Scene, SceneObject, WallObject } from "./types"
 
 /** Ground (0) / upper (10) / attic (20) with a stair from ground to upper, a walled room with openings, tokens and lights. */
@@ -387,5 +388,67 @@ describe("reprojectOpenings / splitWall", () => {
     expect(scene.objects[door.id]).toBeUndefined()
     expect(splitWall(scene, w.id, 0)).toBeNull()
     expect(validateReferences(scene)).toEqual([])
+  })
+
+  it("never creates a wall shorter than the schema minimum", () => {
+    const { scene, w } = setup()
+    const len = Math.hypot(w.b.x - w.a.x, w.b.z - w.a.z)
+    for (const d of [0.002, 0.009, len - 0.009, len - 0.002, -1, len + 1, Number.NaN]) expect(splitWall(scene, w.id, d), String(d)).toBeNull()
+    // A skewed wall far from the origin: splits right at the minimum stay valid (or are refused).
+    const skew = createWall(w.levelId, { x: 43.21, z: 17.3 }, { x: 43.21 + 3 * Math.cos(1), z: 17.3 + 3 * Math.sin(1) })
+    scene.objects[skew.id] = skew
+    for (const d of [0.01, 0.0100001, 3 - 0.01]) {
+      const draft = structuredClone(scene)
+      const id = splitWall(draft, skew.id, d)
+      if (id === null) continue
+      const parsed = parseScene(JSON.parse(JSON.stringify(draft)))
+      expect(parsed.ok, `${d}: ${parsed.ok ? "" : parsed.issues.join("; ")}`).toBe(true)
+    }
+    expect(parseScene(JSON.parse(JSON.stringify(scene))).ok).toBe(true)
+  })
+})
+
+describe("copySelection openings", () => {
+  it("copies each selected wall followed by its openings in ascending offset, without duplicates", () => {
+    const scene = createScene({ width: 20, depth: 20 })
+    const L = Object.keys(scene.levels)[0]
+    const add = <T extends SceneObject>(o: T): T => {
+      scene.objects[o.id] = o
+      return o
+    }
+    const w1 = add(createWall(L, { x: 0, z: 10 }, { x: 60, z: 10 }))
+    const w2 = add(createWall(L, { x: 0, z: 30 }, { x: 60, z: 30 }))
+    const w3 = add(createWall(L, { x: 0, z: 50 }, { x: 60, z: 50 }))
+    // Created out of offset order, doors and windows interleaved.
+    const o1 = [add(createWindow(w1, 40)), add(createDoor(w1, 10)), add(createWindow(w1, 25)), add(createDoor(w1, 52))]
+    const o2 = [add(createDoor(w2, 30)), add(createWindow(w2, 5))]
+    add(createDoor(w3, 20)) // not selected
+    const clip = copySelection(scene, [w1.id, o1[2].id, w2.id, o2[0].id])
+    const byOffset = (list: SceneObject[]) => [...list].sort((a, b) => ("offset" in a && "offset" in b ? a.offset - b.offset : 0)).map((o) => o.id)
+    expect(clip.objects.map((o) => o.id)).toEqual([w1.id, ...byOffset(o1), w2.id, ...byOffset(o2)])
+    expect(new Set(clip.objects.map((o) => o.id)).size).toBe(clip.objects.length)
+    // Same result as the per-wall query.
+    expect(clip.objects.map((o) => o.id)).toEqual([w1, w2].flatMap((w) => [w.id, ...wallOpenings(scene, w.id).map((o) => o.id)]))
+  })
+
+  it("scales linearly: 5000 walls with 1000 openings copy in well under a second", () => {
+    const scene = createScene({ width: 200, depth: 200 })
+    const L = Object.keys(scene.levels)[0]
+    for (let k = 0; k < 5000; k++) {
+      const x = (k % 100) * 10
+      const z = Math.floor(k / 100) * 10
+      const w = createWall(L, { x, z }, { x: x + 8, z })
+      scene.objects[w.id] = w
+      if (k % 5 === 0) {
+        const d = createDoor(w, 4, { width: 3 })
+        scene.objects[d.id] = d
+      }
+    }
+    const ids = Object.keys(scene.objects)
+    const t0 = performance.now()
+    const clip = copySelection(scene, ids)
+    const ms = performance.now() - t0
+    expect(clip.objects).toHaveLength(ids.length)
+    expect(ms).toBeLessThan(1000)
   })
 })

@@ -3,9 +3,11 @@
  * host keeps that player's explored cells of the battlemap in Storage as chunks of TILE_CHUNK × TILE_CHUNK
  * cells (net/assets/chunks.ts: `{sessionId}/{userId}/{levelId}/{ci}_{cj}.webp`, readable only by that
  * player and the DM). After every knowledge update (`sync`), chunks whose explored cells changed are
- * re-drawn (only explored cells, tilePx per cell — the stored px per cell) and uploaded in the
- * background, nearest to the player's tokens first, a few at a time, backing off when Storage
- * rate-limits. Each finished upload is announced to the player (`onChunks` → `{t: "tiles"}`) so their
+ * re-drawn (only explored sub-cells, tilePx per cell — the stored px per cell: a partly explored cell
+ * is clipped to its explored 4×4 sub-cells, so no art beyond what the player perceived is shipped) and
+ * uploaded in the background, nearest to the player's tokens first, a few at a time, backing off when
+ * Storage rate-limits. A partly explored cell that grows (or shrinks) re-cuts its chunk under a new
+ * `rev`. Each finished upload is announced to the player (`onChunks` → `{t: "tiles"}`) so their
  * client fetches it; hostRunner waits briefly for a player's uploads before sending the view that reveals
  * the cells, but never blocks the game on them.
  *
@@ -18,8 +20,8 @@
 import { decodeMaskCached } from "@/core/session/masks"
 import type { PlayerBackdrop } from "@/core/session/types"
 import type { Cell, GridSettings, Id, Rect, Scene, Vec2 } from "@/core/scene/types"
-import { cellTouched } from "@/core/vision/mask"
-import type { EncodedMask } from "@/core/vision/types"
+import { FULL_SUBMASK, getCell } from "@/core/vision/mask"
+import { SUBCELLS, type EncodedMask } from "@/core/vision/types"
 
 import { chunkFromKey, chunkKey, TILE_CHUNK, type ChunkEntry } from "../assets/chunks"
 import type { AssetStore } from "../assets/types"
@@ -101,11 +103,64 @@ export interface TileImage {
   readonly height: number
 }
 
+/** Integer pixel rect (chunk pixels). */
+export interface PixelRect {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
 /** One cell of a chunk: its crop of the image, drawn at (ox, oy) in the chunk. */
 export interface ChunkPart {
   crop: TileCrop
   ox: number
   oy: number
+  /**
+   * Draw only inside these rects (chunk pixels): the explored sub-cells of a partly explored cell.
+   * Absent for a fully explored cell (its crop's destination rect already bounds the draw).
+   */
+  clip?: readonly PixelRect[]
+}
+
+/**
+ * Chunk-pixel rects covering the set sub-cells of `submask` (bit sz·SUBCELLS + sx) of a cell drawn at
+ * (ox, oy) with `px` pixels per cell: one rect per horizontal run of set sub-cells per row, merged with
+ * the row below when the run is identical. Edges are rounded on absolute coordinates, so neighbouring
+ * sub-cells (and cells) meet without gaps or overlaps.
+ */
+export function subcellClipRects(submask: number, ox: number, oy: number, px: number): PixelRect[] {
+  const edge = (origin: number, k: number) => Math.round(origin + (k * px) / SUBCELLS)
+  const out: PixelRect[] = []
+  /** Runs of the previous row still open for vertical merging: "sx0,sx1" → rect. */
+  let open = new Map<string, PixelRect>()
+  for (let sz = 0; sz < SUBCELLS; sz++) {
+    const next = new Map<string, PixelRect>()
+    for (let sx = 0; sx < SUBCELLS; ) {
+      if ((submask & (1 << (sz * SUBCELLS + sx))) === 0) {
+        sx++
+        continue
+      }
+      let end = sx
+      while (end + 1 < SUBCELLS && (submask & (1 << (sz * SUBCELLS + end + 1))) !== 0) end++
+      const key = `${sx},${end}`
+      const y1 = edge(oy, sz + 1)
+      const prev = open.get(key)
+      if (prev) {
+        prev.h = y1 - prev.y
+        next.set(key, prev)
+      } else {
+        const x0 = edge(ox, sx)
+        const y0 = edge(oy, sz)
+        const r = { x: x0, y: y0, w: edge(ox, end + 1) - x0, h: y1 - y0 }
+        out.push(r)
+        next.set(key, r)
+      }
+      sx = end + 1
+    }
+    open = next
+  }
+  return out.filter((r) => r.w > 0 && r.h > 0)
 }
 
 export interface TileCodec {
@@ -154,8 +209,16 @@ export function createCanvasTileCodec(opts: { quality?: number; canvases?: numbe
         ctx.clearRect(0, 0, sizePx, sizePx)
         ctx.imageSmoothingEnabled = true
         ctx.imageSmoothingQuality = "high"
-        for (const { crop, ox, oy } of parts) {
+        for (const { crop, ox, oy, clip } of parts) {
+          if (clip) {
+            if (clip.length === 0) continue
+            ctx.save()
+            ctx.beginPath()
+            for (const r of clip) ctx.rect(r.x, r.y, r.w, r.h)
+            ctx.clip()
+          }
           ctx.drawImage(image as ImageBitmap, crop.sx, crop.sy, crop.sw, crop.sh, ox + crop.dx, oy + crop.dy, crop.dw, crop.dh)
+          if (clip) ctx.restore()
         }
         return await canvas.convertToBlob({ type: "image/webp", quality })
       } finally {
@@ -184,19 +247,50 @@ interface LevelSpec {
   key: string
 }
 
+/**
+ * What one chunk object holds: the cells with pixels (mask bits), each cell's explored sub-cells
+ * (`subs[bit]`: FULL_SUBMASK, a partial sub-mask, or 0) and `rev`, a non-zero hash of `subs`.
+ */
+export interface ChunkTarget {
+  cells: number
+  subs: readonly number[]
+  rev: number
+}
+
+/** Non-zero uint32 FNV-1a hash of a chunk's 16 sub-cell masks (the chunk content version). */
+export function chunkRev(subs: readonly number[]): number {
+  let h = 0x811c9dc5
+  for (let bit = 0; bit < TILE_CHUNK * TILE_CHUNK; bit++) {
+    const v = subs[bit] ?? 0
+    h = Math.imul(h ^ (v & 0xff), 0x01000193)
+    h = Math.imul(h ^ ((v >>> 8) & 0xff), 0x01000193)
+  }
+  h >>>= 0
+  return h === 0 ? 1 : h
+}
+
+function sameTarget(a: ChunkTarget | undefined, b: ChunkTarget | undefined): boolean {
+  if ((a?.cells ?? 0) !== (b?.cells ?? 0)) return false
+  if (!a || !b || a.cells === 0) return true
+  if (a.rev !== b.rev) return false
+  for (let bit = 0; bit < TILE_CHUNK * TILE_CHUNK; bit++) if ((a.subs[bit] ?? 0) !== (b.subs[bit] ?? 0)) return false
+  return true
+}
+
 /** One player's chunks on one level. */
 interface PlayerLevel {
-  /** chunk key → cell mask of the object in Storage. */
-  uploaded: Map<number, number>
-  /** chunk key → cell mask the object should hold (the explored cells; absent = no object). */
-  target: Map<number, number>
+  /** chunk key → content of the object in Storage. */
+  uploaded: Map<number, ChunkTarget>
+  /** chunk key → content the object should hold (the explored sub-cells; absent = no object). */
+  target: Map<number, ChunkTarget>
   queued: Set<number>
   inflight: Set<number>
   /** The explored mask last synced (encoded masks are immutable: same object = nothing new). */
   explored: EncodedMask | null
 }
 
-const behind = (st: PlayerLevel, key: number) => (st.target.get(key) ?? 0) !== (st.uploaded.get(key) ?? 0)
+/** The chunk's object differs from what it should hold (new, grown, shrunk or emptied cells). */
+const behind = (st: PlayerLevel, key: number) => !sameTarget(st.target.get(key), st.uploaded.get(key))
 
 interface Job {
   uid: string
@@ -218,7 +312,7 @@ export interface BackdropTilerOptions {
   /** Scene ids under which the scene's assets may be stored, tried in order. */
   assetSceneIds: () => string[]
   /**
-   * Chunks of a player's level were uploaded (entries carry their cell masks) or removed (mask 0);
+   * Chunks of a player's level were uploaded (entries `[ci, cj, cells, rev]`) or removed (`[ci, cj, 0]`);
    * `reset`: the level's chunks start over (placement changed) and `entries` replace everything.
    */
   onChunks: (uid: string, levelId: Id, entries: ChunkEntry[], reset: boolean) => void
@@ -359,21 +453,27 @@ export class BackdropTiler {
       if (!st) perLevel.set(levelId, (st = { uploaded: new Map(), target: new Map(), queued: new Set(), inflight: new Set(), explored: null }))
       if (st.explored === (enc ?? null)) continue
       st.explored = enc ?? null
-      const desired = new Map<number, number>()
+      const desired = new Map<number, { cells: number; subs: number[] }>()
       if (enc && enc.width === grid.width && enc.depth === grid.depth) {
         const mask = decodeMaskCached(enc)
         const { i0, j0, i1, j1 } = spec.range
         for (let j = j0; j <= j1; j++) {
           for (let i = i0; i <= i1; i++) {
-            if (!cellTouched(mask, j * grid.width + i)) continue
+            const idx = j * grid.width + i
+            const sub = getCell(mask, idx) ? FULL_SUBMASK : (mask.partial.get(idx) ?? 0)
+            if (sub === 0) continue
             const ci = Math.floor(i / TILE_CHUNK)
             const cj = Math.floor(j / TILE_CHUNK)
             const key = chunkKey(ci, cj)
-            desired.set(key, (desired.get(key) ?? 0) | (1 << ((j - cj * TILE_CHUNK) * TILE_CHUNK + (i - ci * TILE_CHUNK))))
+            let t = desired.get(key)
+            if (!t) desired.set(key, (t = { cells: 0, subs: new Array<number>(TILE_CHUNK * TILE_CHUNK).fill(0) }))
+            const bit = (j - cj * TILE_CHUNK) * TILE_CHUNK + (i - ci * TILE_CHUNK)
+            t.cells |= 1 << bit
+            t.subs[bit] = sub
           }
         }
       }
-      st.target = desired
+      st.target = new Map([...desired].map(([key, t]) => [key, { cells: t.cells, subs: t.subs, rev: chunkRev(t.subs) }]))
       // Chunks behind their target: new cells, or fewer after a fog reset (shrunk or deleted).
       for (const key of new Set([...desired.keys(), ...st.uploaded.keys()])) {
         if (behind(st, key) && !st.queued.has(key) && !st.inflight.has(key)) {
@@ -403,7 +503,13 @@ export class BackdropTiler {
     const out: Array<{ levelId: Id; entries: ChunkEntry[] }> = []
     for (const [levelId, st] of this.players.get(uid) ?? []) {
       if (!this.levels.has(levelId)) continue
-      out.push({ levelId, entries: [...st.uploaded].map(([key, mask]) => { const { ci, cj } = chunkFromKey(key); return [ci, cj, mask] as ChunkEntry }) })
+      out.push({
+        levelId,
+        entries: [...st.uploaded].map(([key, t]) => {
+          const { ci, cj } = chunkFromKey(key)
+          return [ci, cj, t.cells, t.rev] as ChunkEntry
+        }),
+      })
     }
     return out
   }
@@ -454,10 +560,10 @@ export class BackdropTiler {
         if (this.idle(job.uid)) this.resolveWaiters(job.uid)
         continue
       }
-      const mask = st.target.get(job.key) ?? 0
+      const target = st.target.get(job.key) ?? null
       st.inflight.add(job.key)
       this.active++
-      void this.run(job, st, mask)
+      void this.run(job, st, target)
     }
     if (Number.isFinite(soonest)) this.wakeAt(soonest)
   }
@@ -470,15 +576,15 @@ export class BackdropTiler {
     }, Math.max(0, at - this.now()))
   }
 
-  private async run(job: Job, st: PlayerLevel, mask: number): Promise<void> {
+  private async run(job: Job, st: PlayerLevel, target: ChunkTarget | null): Promise<void> {
     const { ci, cj } = chunkFromKey(job.key)
     let ok = false
     try {
-      if (mask === 0) {
+      if (!target || target.cells === 0) {
         await this.o.assets.deleteTileChunks(this.o.sessionId, job.uid, job.levelId, [{ ci, cj }])
         this.stats.removed++
       } else {
-        const blob = await this.cut(job.levelId, ci, cj, mask)
+        const blob = await this.cut(job.levelId, ci, cj, target)
         if (blob) {
           await this.o.assets.putTileChunk(this.o.sessionId, job.uid, job.levelId, ci, cj, blob)
           this.stats.uploaded++
@@ -502,9 +608,13 @@ export class BackdropTiler {
     const current = this.players.get(job.uid)?.get(job.levelId)
     if (current === st && !this.disposed) {
       if (ok) {
-        if (mask === 0) st.uploaded.delete(job.key)
-        else st.uploaded.set(job.key, mask)
-        this.o.onChunks(job.uid, job.levelId, [[ci, cj, mask]], false)
+        if (!target || target.cells === 0) {
+          st.uploaded.delete(job.key)
+          this.o.onChunks(job.uid, job.levelId, [[ci, cj, 0]], false)
+        } else {
+          st.uploaded.set(job.key, target)
+          this.o.onChunks(job.uid, job.levelId, [[ci, cj, target.cells, target.rev]], false)
+        }
       }
       // The target moved on meanwhile, or the upload failed: go again (failures after a delay).
       if (behind(st, job.key) && !st.queued.has(job.key)) {
@@ -520,8 +630,8 @@ export class BackdropTiler {
     this.pump()
   }
 
-  /** Draw the chunk's explored cells (null when the level's image is unavailable). */
-  private async cut(levelId: Id, ci: number, cj: number, mask: number): Promise<Blob | null> {
+  /** Draw the chunk's explored sub-cells (null when the level's image is unavailable). */
+  private async cut(levelId: Id, ci: number, cj: number, target: ChunkTarget): Promise<Blob | null> {
     const spec = this.levels.get(levelId)
     const codec = this.o.codec
     const grid = this.grid
@@ -537,11 +647,19 @@ export class BackdropTiler {
       const px = size / TILE_CHUNK
       const parts: ChunkPart[] = []
       for (let bit = 0; bit < TILE_CHUNK * TILE_CHUNK; bit++) {
-        if ((mask & (1 << bit)) === 0) continue
+        if ((target.cells & (1 << bit)) === 0) continue
+        const sub = target.subs[bit] ?? 0
+        if (sub === 0) continue
         const u = bit % TILE_CHUNK
         const v = Math.floor(bit / TILE_CHUNK)
         const crop = tileCrop(spec.rect, image.width, image.height, grid.cellSize, { i: ci * TILE_CHUNK + u, j: cj * TILE_CHUNK + v }, px)
-        if (crop) parts.push({ crop, ox: u * px, oy: v * px })
+        if (!crop) continue
+        const ox = u * px
+        const oy = v * px
+        // A partly explored cell ships only its explored sub-cells (walls often cross the middle of a
+        // cell: the far side is not the player's to see).
+        if (sub === FULL_SUBMASK) parts.push({ crop, ox, oy })
+        else parts.push({ crop, ox, oy, clip: subcellClipRects(sub, ox, oy, px) })
       }
       return await codec.encodeChunk(image, parts, size)
     } finally {

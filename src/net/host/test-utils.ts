@@ -22,7 +22,7 @@ import type { PlayerChannels, Transport } from "../transport"
 import { createHostRunner } from "./index"
 import type { CreateHostRunnerOptions } from "./hostRunner"
 import { createInThreadVisionClient, type WorkerLike } from "./visionClient"
-import { resultTransferables, VisionWorkerCore, type VisionRequest } from "./visionProtocol"
+import { responseTransferables, VisionWorkerCore, type VisionRequest } from "./visionProtocol"
 
 export const DM = "d0000000-0000-4000-8000-00000000000d"
 export const P1 = "a1000000-0000-4000-8000-000000000001"
@@ -45,7 +45,7 @@ export class FakeWorker implements WorkerLike {
     setTimeout(() => {
       if (this.terminated) return
       const res = this.core.handle(req)
-      const transfer = res.ok && res.result ? resultTransferables(res.result) : []
+      const transfer = responseTransferables(res)
       const data = structuredClone(res, { transfer })
       this.emit("message", { data } as unknown as Event)
     }, 0)
@@ -117,12 +117,6 @@ export function recordingAssets(mode: "supabase" | "local" = "local", opts: { de
       chunks.clear()
       return n
     },
-    publishTiles: async () => {
-      throw new Error("the host uploads per-player chunks")
-    },
-    grantTiles: async () => {
-      throw new Error("the host uploads per-player chunks")
-    },
   }
   return { store, chunks, uploads, removed, cleaned: () => sessionsCleaned }
 }
@@ -184,6 +178,11 @@ export class Mirror {
   private async onMessage(m: HostToClient): Promise<void> {
     this.raw.push(JSON.stringify(m))
     this.messages.push(m)
+    // A dropped patch is lost with its results (simulated loss).
+    if (m.t === "patch" && this.dropPatches > 0 && (m.nonce === undefined || m.nonce === this.nonce)) {
+      this.dropPatches--
+      return
+    }
     if ((m.t === "snapshot" || m.t === "patch") && m.results) this.results.push(...m.results)
     switch (m.t) {
       case "snapshot":
@@ -200,10 +199,6 @@ export class Mirror {
       }
       case "patch": {
         if (m.nonce !== undefined && m.nonce !== this.nonce) return
-        if (this.dropPatches > 0) {
-          this.dropPatches--
-          return
-        }
         if (this.view && m.epoch === this.epoch && m.baseSeq === this.seq) {
           try {
             this.accept(applyPatchOps(this.view, m.ops), m.epoch, m.seq, m)

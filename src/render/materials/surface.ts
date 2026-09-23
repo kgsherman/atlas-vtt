@@ -7,6 +7,8 @@ import * as THREE from "three"
 
 import type { DoorStyle, MaterialId } from "@/core/scene/types"
 
+import { trackShared } from "../engine/sharedResources"
+
 export const MAT = {
   NONE: 0,
   STONE: 1,
@@ -141,6 +143,8 @@ export function noiseTexture(): THREE.DataTexture {
     noise.colorSpace = THREE.NoColorSpace
     noise.name = "atlas-detail-noise"
     noise.needsUpdate = true
+    // Outlives engines: released (GPU side only) when an engine is disposed.
+    trackShared(noise)
   }
   return noise
 }

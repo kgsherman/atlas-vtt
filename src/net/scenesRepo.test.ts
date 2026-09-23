@@ -116,6 +116,23 @@ describe("local scenes repo", () => {
     expect(loaded.parsed).toEqual({ ok: false, error: "too-new", issues: ["newer schema"] })
   })
 
+  it("names the image folders only this scene uses (not shared ones, not an active session's)", async () => {
+    const store = createMemoryStore()
+    const local = createLocalScenesRepo(store)
+    const a = await local.create(scene)
+    // Another library entry with the same document (a copy that kept Scene.id) shares its images.
+    const copy = await local.create(scene)
+    const other = createScene({ name: "Other" })
+    await local.saveVersion(a.id, other)
+    expect((await local.imageFoldersToFree(a.id)).sort()).toEqual([other.id])
+    await local.remove(copy.id)
+    expect((await local.imageFoldersToFree(a.id)).sort()).toEqual([scene.id, other.id].sort())
+    // A running session on `other` keeps its folder.
+    await store.put("sessions", "s:sess1", { id: "sess1", status: "active" })
+    await store.put("sessions", "state:sess1", { epoch: 0, state: { kind: "seed", scene: { id: other.id } } })
+    expect(await local.imageFoldersToFree(a.id)).toEqual([scene.id])
+  })
+
   it("does not support sharing offline", async () => {
     const { id } = await repo.create(scene)
     await expectNetError(repo.setVisibility(id, "link"), "unsupported_offline")

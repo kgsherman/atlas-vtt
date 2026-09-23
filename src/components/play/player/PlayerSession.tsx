@@ -4,7 +4,8 @@
  *
  *  - view → engine: the scene rebuilt from the PlayerView (incremental updates from the client's
  *    change hints), vision "fog" with hostMasks = view.masks, viewers = view.visionTokenIds, cutaway at
- *    the selected token's level, top-down camera following the selected token;
+ *    the selected token's view level (core tokenViewLevelId: its own level, or the upper room from the
+ *    top of a stair run), top-down camera following the selected token;
  *  - input: PlayController (select, drag-to-move with A* preview + ruler, measure, door clicks) →
  *    requestMove / requestDoor; pending moves drawn dashed until the host answers;
  *  - results → toasts with friendly reasons.
@@ -15,9 +16,14 @@ import { toast } from "sonner"
 import { useServices } from "@/app/services"
 import { EngineCanvas } from "@/components/canvas/EngineCanvas"
 import { useEngine } from "@/components/canvas/engineContext"
+import { useQualityChoice } from "@/components/canvas/qualityChoice"
 import { validateMove } from "@/core/movement"
 import { buildOcclusionWorld } from "@/core/occlusion"
-import { sortedLevels, tokenGroundY } from "@/core/scene/queries"
+import {
+  sortedLevels,
+  tokenGroundY,
+  tokenViewLevelId,
+} from "@/core/scene/queries"
 import type { Id, SceneLike } from "@/core/scene/types"
 import {
   bindBackdropsToEngine,
@@ -37,7 +43,8 @@ import {
   type ClimbOption,
   type PlayTool,
 } from "@/play"
-import type { Engine } from "@/render/contracts"
+import { backdropTexelBudget } from "@/render"
+import type { Engine, Quality } from "@/render/contracts"
 
 import {
   usePlayCanvasInput,
@@ -63,6 +70,11 @@ import { PlayerHud } from "./PlayerHud"
 const DEG = Math.PI / 180
 const FOCUS_VIEW_HEIGHT = 70
 
+/** Backdrop canvas pixels for a quality ceiling: just under the engine's texel cap, so it is uploaded as is. */
+function backdropCanvasBudget(q: Quality): number {
+  return Math.floor(backdropTexelBudget(q) * 0.99)
+}
+
 declare global {
   interface Window {
     /** Dev-only automation handle for the player view. */
@@ -87,6 +99,9 @@ export function PlayerSession({ sessionId }: { sessionId: string }) {
         repo: services.sessions,
         identity: services.identity,
         tiles: services.tilesFor(sessionId),
+        // Until the engine's quality ceiling is known, composite at the medium tier's texel budget
+        // rather than the full map size (a weak device must not allocate a full-size canvas first).
+        backdrop: { maxCanvasPixels: backdropCanvasBudget("medium") },
       })
       void c
         .start()
@@ -109,7 +124,14 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
   const [grid, setGrid] = usePreference("atlas-play:grid", true, isBool)
   const [tilt, setTilt] = usePreference("atlas-play:tilt", 15, isNum)
   const [engine, setEngine] = React.useState<Engine | null>(null)
+  const quality = useQualityChoice()
+  const [ceiling, setCeiling] = React.useState<Quality | null>(null)
   useGuardThemeHotkey()
+
+  // Backdrop canvases follow the engine's quality ceiling (the engine caps textures at the same budget).
+  React.useEffect(() => {
+    if (ceiling) client.setBackdropBudget(backdropCanvasBudget(ceiling))
+  }, [client, ceiling])
 
   const controlled = React.useMemo(
     () =>
@@ -124,7 +146,12 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
     selectedId && scene && Object.hasOwn(scene.tokens, selectedId)
       ? scene.tokens[selectedId]
       : null
-  const activeLevelId = selectedToken?.levelId ?? defaultLevel(scene)
+  // The view level: the token's level, or the upper room from the top rows of a stair run (its eye is
+  // above that floor). Cutaway, measure/door picks and the planner's preferred drag level follow it.
+  const activeLevelId =
+    selectedToken && scene
+      ? tokenViewLevelId(scene, selectedToken)
+      : defaultLevel(scene)
 
   // ---- controller -----------------------------------------------------------------------------------
   const [live] = React.useState(
@@ -284,12 +311,12 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
     }
   })
 
-  // ---- climb (ladders) ---------------------------------------------------------------------------
+  // ---- level changes (ladders, stairs/ramp top edges) -------------------------------------------
   const climbs: ClimbOption[] = React.useMemo(() => {
     if (!scene || !selectedToken) return []
     const options = climbOptions(scene, selectedToken)
     if (options.length === 0) return []
-    // Only while standing on a ladder: validate the switch like the host will.
+    // Only on a ladder or next to a stairs/ramp top edge: validate the step like the host will.
     const world = buildOcclusionWorld(scene)
     return options.filter(
       (o) =>
@@ -352,7 +379,13 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
 
   return (
     <div className="relative h-svh w-full overflow-hidden bg-black text-foreground">
-      <EngineCanvas onEngine={setEngine} className="bg-black">
+      <EngineCanvas
+        key={quality.engineKey}
+        quality={quality.quality}
+        onEngine={setEngine}
+        onQualityCeiling={setCeiling}
+        className="bg-black"
+      >
         <PlayerBridge
           client={client}
           snap={snap}
@@ -382,6 +415,11 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
               onTilt: setTilt,
               grid,
               onGrid: setGrid,
+              quality: {
+                value: quality.choice,
+                onChange: quality.setChoice,
+                current: ceiling,
+              },
             }}
           />
         ) : null}
@@ -442,7 +480,7 @@ function PlayerBridge({
     controller.sceneChanged()
   }, [engine, scene, client, planner, controller])
 
-  // View: fog of war from the host masks; cutaway at the selected token's level.
+  // View: fog of war from the host masks; cutaway at the selected token's view level.
   const hasView = snap.view !== null
   const visionTokenIds = snap.view?.visionTokenIds
   const masks = snap.view?.masks

@@ -20,6 +20,7 @@ import type { HostRunnerImpl } from "@/net/host"
 import {
   previewDimmedTokens,
   previewHostMasks,
+  previewSeenTokens,
   sceneChangeBetween,
   isEmptyChange,
   type PlayController,
@@ -201,9 +202,8 @@ function HostBridge({
         const masks = previewHostMasks(scene, result)
         const dimmed = previewDimmedTokens(scene, preview, result)
         setPreviewMasks({ key: previewKey, masks, dimmed })
-        const visible = [...result.visibleTokenIds].filter(
-          (id) => !preview.includes(id)
-        ).length
+        // Hidden tokens are never sent to players: not counted (and drawn dimmed, as DM-only).
+        const visible = previewSeenTokens(scene, preview, result).length
         onPreviewInfoRef.current({
           tokenIds: preview,
           visible,

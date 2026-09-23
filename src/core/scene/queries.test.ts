@@ -11,6 +11,7 @@ import {
   effectiveFloorRects,
   floorCutouts,
   groundHeightAt,
+  groundIndex,
   hasGroundAt,
   levelCeilingY,
   lightEffectivelyHidden,
@@ -21,6 +22,7 @@ import {
   rectSubtract,
   sortedLevels,
   tokenRect,
+  tokenViewLevelId,
   wallNormal,
 } from "./queries"
 import type { ConnectorObject, Level, Rect, Scene, SceneObject } from "./types"
@@ -250,5 +252,106 @@ describe("walls and openings", () => {
     const n = wallNormal(w)
     expect(n.x).toBeCloseTo(0)
     expect(n.z).toBeCloseTo(1)
+  })
+})
+
+describe("tokenViewLevelId", () => {
+  // A 6-row, 10 ft stair run from the ground floor (0) to the upper floor (10), rising along +z.
+  function stairs() {
+    const { scene, ground, upper } = tower()
+    const run = add(scene, createConnector(ground.id, upper.id, { x: 20, z: 10, w: 5, d: 30 }, 0))
+    const ladder = add(scene, createConnector(ground.id, upper.id, { x: 40, z: 40, w: 5, d: 5 }, 0, "ladder"))
+    const at = (row: number, eyeHeight: number) => ({ levelId: ground.id, position: { x: 22.5, z: 12.5 + 5 * row }, eyeHeight })
+    return { scene, ground, upper, run, ladder, at }
+  }
+
+  it("is the token's own level off a run", () => {
+    const { scene, ground } = stairs()
+    expect(tokenViewLevelId(scene, { levelId: ground.id, position: { x: 7.5, z: 7.5 }, eyeHeight: 14 })).toBe(ground.id)
+  })
+
+  it("switches to the arrival level once the eye is above its floor", () => {
+    const { scene, ground, upper, at } = stairs()
+    expect([0, 1, 2, 3, 4, 5].map((row) => tokenViewLevelId(scene, at(row, 5.5)))).toEqual([ground.id, ground.id, ground.id, upper.id, upper.id, upper.id])
+    // A halfling (eye 3) switches later; a giant (eye 14) from the bottom row.
+    expect([0, 1, 2, 3, 4, 5].map((row) => tokenViewLevelId(scene, at(row, 3)))).toEqual([ground.id, ground.id, ground.id, ground.id, upper.id, upper.id])
+    expect([0, 1, 2, 3, 4, 5].map((row) => tokenViewLevelId(scene, at(row, 14)))).toEqual(Array(6).fill(upper.id))
+  })
+
+  it("never switches on a ladder", () => {
+    const { scene, ground, upper } = stairs()
+    expect(tokenViewLevelId(scene, { levelId: ground.id, position: { x: 42.5, z: 42.5 }, eyeHeight: 14 })).toBe(ground.id)
+    expect(tokenViewLevelId(scene, { levelId: upper.id, position: { x: 42.5, z: 42.5 }, eyeHeight: 5.5 })).toBe(upper.id)
+  })
+
+  it("stays on the token's level when the connector's arrival level is missing", () => {
+    const { scene, ground, run, at } = stairs()
+    scene.objects[run.id] = { ...run, toLevelId: "gone" }
+    expect(tokenViewLevelId(scene, at(5, 5.5))).toBe(ground.id)
+  })
+})
+
+describe("groundIndex", () => {
+  /** Tower with stairs, a ramp, a ladder, a masked floor and terrain on the upper level. */
+  function varied() {
+    const { scene, ground, upper, roof } = tower()
+    add(scene, createConnector(ground.id, upper.id, { x: 10, z: 10, w: 5, d: 15 }, 0))
+    add(scene, createConnector(upper.id, roof.id, { x: 30, z: 5, w: 10, d: 5 }, 3, "ramp"))
+    add(scene, createConnector(ground.id, upper.id, { x: 40, z: 40, w: 5, d: 5 }, 1, "ladder"))
+    // A masked floor on the roof: 8 × 4 cells of 1.25 ft at x = 3.75 (not lattice-aligned), checkerboard rows.
+    add(scene, { ...createFloor(roof.id, { x: 3.75, z: 20, w: 10, d: 5 }), mask: { spacing: 1.25, cols: 8, rows: 4, b64: btoa(String.fromCharCode(0xff, 0x0f, 0xf0, 0x3c)) } })
+    const hm = createHeightmap(2)
+    const { samplesX, samplesZ } = sampleCounts(scene.grid, 2)
+    const dense = new Float32Array(samplesX * samplesZ)
+    for (let k = 0; k < dense.length; k++) dense[k] = 0.25 * Math.sin(k / 7)
+    scene.levels[upper.id] = { ...upper, heightmap: writeHeights(hm, scene.grid, dense) }
+    return { scene, ground, upper, roof }
+  }
+
+  const expectSameAsFree = (scene: Scene) => {
+    const index = groundIndex(scene)
+    let ground = 0
+    for (const levelId of Object.keys(scene.levels)) {
+      expect(index.effectiveFloors(levelId)).toEqual(effectiveFloorRects(scene, levelId))
+      for (let z = -2.3; z < 52; z += 1.1) {
+        for (let x = -2.3; x < 52; x += 1.1) {
+          const p = { x, z }
+          const has = hasGroundAt(scene, levelId, p)
+          expect(index.hasGroundAt(levelId, p), `${levelId} ${x},${z}`).toBe(has)
+          expect(index.groundHeightAt(levelId, p), `${levelId} ${x},${z}`).toBe(groundHeightAt(scene, levelId, p))
+          if (has) ground++
+        }
+      }
+    }
+    expect(ground).toBeGreaterThan(0)
+  }
+
+  it("gives the free functions' results", () => {
+    expectSameAsFree(varied().scene)
+  })
+
+  it("is memoised per scene revision and rebuilt after immer edits to objects, levels or terrain", () => {
+    const { scene, ground, upper, roof } = varied()
+    const a = groundIndex(scene)
+    expect(groundIndex(scene)).toBe(a)
+    expect(groundIndex({ ...scene })).toBe(a)
+    const added = produce(scene, (d) => {
+      const c = createConnector(ground.id, roof.id, { x: 0, z: 40, w: 5, d: 10 }, 0)
+      d.objects[c.id] = c
+    })
+    expect(groundIndex(added)).not.toBe(a)
+    expectSameAsFree(added)
+    const raised = produce(added, (d) => {
+      d.levels[upper.id].elevation = 12
+    })
+    expect(groundIndex(raised)).not.toBe(groundIndex(added))
+    expectSameAsFree(raised)
+    const terrain = produce(raised, (d) => {
+      const { samplesX, samplesZ } = sampleCounts(d.grid, 2)
+      d.levels[upper.id].heightmap = writeHeights(createHeightmap(2), d.grid, new Float32Array(samplesX * samplesZ).fill(1.5))
+    })
+    expect(groundIndex(terrain)).not.toBe(groundIndex(raised))
+    expect(groundIndex(terrain).groundHeightAt(upper.id, { x: 2.5, z: 2.5 })).toBe(13.5)
+    expectSameAsFree(terrain)
   })
 })

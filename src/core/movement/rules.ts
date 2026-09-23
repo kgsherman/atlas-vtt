@@ -9,6 +9,9 @@
  *    row is the run's last row (on the lower level) and the footprint one cell beyond (on the upper
  *    level), in either direction. The footprint must lie within the run's width.
  *
+ * A same-level step may enter or leave a run across its bottom edge, or across a side where the ground
+ * difference is at most MAX_RUN_SIDE_STEP (see crossesConnectorEdge).
+ *
  * Checks, in order: out-of-bounds, adjacency (not-adjacent / no-connector / connector-edge for level
  * changes), connector-edge, corner-cutting, blocked, no-ground. (Speed is checked by validateMove.)
  */
@@ -84,13 +87,28 @@ function stairsTouched(ctx: MoveContext, a: PathStep, b: PathStep): boolean {
 }
 
 /**
+ * Largest ground difference (feet) a same-level step may climb or drop while a footprint cell enters or
+ * leaves a stairs/ramp run across one of its SIDES (parallel to the run), measured between that cell's
+ * centre on the run and off it: the bottom rows can be stepped onto from the side, the high ones cannot
+ * (no jumping off a staircase, and no staircase shortcuts).
+ */
+export const MAX_RUN_SIDE_STEP = 2.5
+
+/** Along-run position of a run's bottom row (see spanAlong; the top row is `sp.top`). */
+const spanBottom = (sp: ConnectorSpan): number => (sp.alongZ ? (sp.sign > 0 ? sp.j0 : -sp.j1) : sp.sign > 0 ? sp.i0 : -sp.i1)
+
+/**
  * Connector-edge rule for a same-level step, per footprint cell: a cell that enters or leaves a
- * stairs/ramp rect crosses its TOP edge when the cell outside the rect is beyond the top row.
- *  - On the run's lower level, crossing the top edge is only possible as a level change.
+ * stairs/ramp rect crosses its TOP edge when the cell outside the rect is beyond the top row, its
+ * BOTTOM edge when beyond the bottom row, and a SIDE otherwise.
+ *  - On the run's lower level, crossing the top edge is only possible as a level change, and crossing
+ *    a side only where the crossing cell's ground difference is at most MAX_RUN_SIDE_STEP.
  *  - On the upper level, a footprint may enter/leave the rect only across the top edge.
  */
 export function crossesConnectorEdge(ctx: MoveContext, levelId: Id, a: Cell, di: number, dj: number): boolean {
   const k = ctx.k
+  const s = ctx.grid.cellSize
+  const cellGround = (i: number, j: number) => ctx.groundAt(levelId, { x: (i + 0.5) * s, z: (j + 0.5) * s })
   for (const sp of ctx.spans) {
     if (sp.c.style === "ladder") continue
     const lower = sp.c.levelId === levelId
@@ -108,8 +126,11 @@ export function crossesConnectorEdge(ctx: MoveContext, levelId: Id, a: Cell, di:
         const inA = spanContains(sp, ci, cj)
         const inB = spanContains(sp, ci + di, cj + dj)
         if (inA === inB) continue
-        const beyond = inA ? spanAlong(sp, ci + di, cj + dj) > sp.top : spanAlong(sp, ci, cj) > sp.top
+        const outside = inA ? spanAlong(sp, ci + di, cj + dj) : spanAlong(sp, ci, cj)
+        const beyond = outside > sp.top
         if (lower ? beyond : !beyond) return true
+        // A side: compare the ground of this footprint cell on the run and off it.
+        if (lower && outside >= spanBottom(sp) && Math.abs(cellGround(ci, cj) - cellGround(ci + di, cj + dj)) > MAX_RUN_SIDE_STEP) return true
       }
     }
   }

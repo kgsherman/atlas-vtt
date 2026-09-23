@@ -55,6 +55,7 @@ export {
 export {
   isEmptyChange,
   previewDimmedTokens,
+  previewSeenTokens,
   previewHostMasks,
   sceneChangeBetween,
   scenePatches,

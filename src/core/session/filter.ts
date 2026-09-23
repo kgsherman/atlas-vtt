@@ -17,7 +17,7 @@
  * mask never reaches a player.
  * Precondition: updateKnowledge(state, uid, vis) has been applied for the same `vis`.
  */
-import { groundHeightAt, levelById, lightEffectivelyHidden, lightWorldPosition, sortedLevels, wallLength } from "../scene/queries"
+import { groundHeightAt, levelById, levelGround, lightEffectivelyHidden, lightWorldPosition, sortedLevels, wallLength } from "../scene/queries"
 import type { ConnectorObject, Environment, Id, Level, LightObject, Scene, SceneObject, Token } from "../scene/types"
 import { encodeGrades, encodeMask, createCellMask, getCell, setCell } from "../vision/mask"
 import { objectFootprint } from "../vision/observe"
@@ -43,8 +43,11 @@ import {
   type PlayerWall,
   type PlayerWindow,
 } from "./types"
+import { playerBackdrop } from "./backdrop"
 import { pieceId, sortedKeys } from "./util"
 import { levelFromPlayer, objectFromPlayer } from "./viewToScene"
+
+export { MAX_BACKDROP_TILE_PX, playerBackdrop } from "./backdrop"
 
 // ---------------------------------------------------------------------------
 // Memoisation of per-object clipping (memory entries and explored masks are immutable values).
@@ -202,28 +205,7 @@ function copyWhole(m: PlayerObject): PlayerObject | null {
   }
 }
 
-/** Largest tile edge a backdrop may announce (px per grid cell). */
-export const MAX_BACKDROP_TILE_PX = 1024
-
-/**
- * A level's map image as a player sees it: placement + tile size (stored px per grid cell, from the
- * asset metadata). null when the level has no backdrop or its asset metadata is missing.
- */
-export function playerBackdrop(scene: Pick<Scene, "levels" | "assets" | "grid">, levelId: Id): PlayerBackdrop | null {
-  const level = own(scene.levels, levelId)
-  const b = level?.backdrop
-  if (!b || !(b.rect.w > 0 && b.rect.d > 0)) return null
-  const asset = own(scene.assets, b.assetId)
-  if (!asset) return null
-  const tilePx = Math.round((asset.width * scene.grid.cellSize) / b.rect.w)
-  if (!(tilePx >= 1)) return null
-  return {
-    rect: { x: b.rect.x, z: b.rect.z, w: b.rect.w, d: b.rect.d },
-    opacity: b.opacity,
-    tintWalls: b.tintWalls,
-    tilePx: Math.min(MAX_BACKDROP_TILE_PX, tilePx),
-  }
-}
+const clamp = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > hi ? hi : v)
 
 interface LightOut {
   base: PlayerLight
@@ -345,7 +327,9 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
     list.push({ o, t0, t1 })
   }
 
-  // Walls → pieces (runs widened to contain their sent openings), openings re-parented.
+  // Walls → pieces (runs widened to contain their sent openings), openings re-parented. Pieces on
+  // heightmap levels are rebased below, once the client's terrain is known.
+  const wallPieces: { pid: Id; wall: PlayerWall; mid: { x: number; z: number }; openings: Id[] }[] = []
   for (const [id, { wall, runs }] of walls) {
     const ops = wallOpenings.get(id) ?? []
     const rs = mergeRuns([...runs.map((r): Run => [r[0], r[1]]), ...ops.map((op): Run => [op.t0, op.t1])])
@@ -371,10 +355,14 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
         material: wall.material,
       }
       pieces.push({ pid, t0, t1 })
+      wallPieces.push({ pid, wall, mid: { x: (pa.x + pb.x) / 2, z: (pa.z + pb.z) / 2 }, openings: [] })
     }
+    const first = wallPieces.length - pieces.length
     for (const op of ops) {
-      const piece = pieces.find((p) => p.t0 <= op.t0 + 1e-6 && op.t1 <= p.t1 + 1e-6)
-      if (piece) objects[op.o.id] = copyOpening(op.o, piece.pid, op.o.offset - piece.t0)
+      const k = pieces.findIndex((p) => p.t0 <= op.t0 + 1e-6 && op.t1 <= p.t1 + 1e-6)
+      if (k < 0) continue
+      objects[op.o.id] = copyOpening(op.o, pieces[k].pid, op.o.offset - pieces[k].t0)
+      wallPieces[first + k].openings.push(op.o.id)
     }
   }
 
@@ -437,6 +425,45 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
     if (o.type === "connector") clientConnectors[o.id] = objectFromPlayer(o) as ConnectorObject
   }
   const clientScene = { grid, levels: clientLevels, objects: clientConnectors }
+
+  // ---- wall pieces, rebased onto the ground the player's client will compute --------------------
+  // A wall's base is the ground at ITS midpoint (Terrain rule), so on terrain a piece would stand on
+  // the ground at the piece's midpoint instead. Shift each piece (and its openings) by
+  // d = host base − client base so the top, lintels, sills and door heads keep the host's world Y.
+  // Heights are clamped against the host height H first, which makes the client's own clamps against
+  // H + d no-ops. Flat levels need nothing (d = 0) and stay byte-identical.
+  for (const piece of wallPieces) {
+    const { wall } = piece
+    if (!own(scene.levels, wall.levelId)?.heightmap) continue
+    const hostBase = levelGround(scene, wall.levelId, (wall.a.x + wall.b.x) / 2, (wall.a.z + wall.b.z) / 2)
+    const d = hostBase - levelGround(clientScene, wall.levelId, piece.mid.x, piece.mid.z)
+    if (d === 0) continue
+    const H = wall.height
+    if (!(H + d > 0)) {
+      // The client's ground at the piece midpoint is above the host wall's top (the wall is buried
+      // there): nothing of it stands above that ground, so the piece is not sent.
+      delete objects[piece.pid]
+      for (const oid of piece.openings) delete objects[oid]
+      continue
+    }
+    const w = objects[piece.pid] as PlayerWall
+    w.height = H + d
+    for (const oid of piece.openings) {
+      const o = objects[oid]
+      if (o.type === "door") {
+        o.height = Math.max(0, clamp(o.height, 0, H) + d)
+      } else if (o.type === "window") {
+        const sill = clamp(o.sillHeight, 0, H)
+        const head = clamp(o.sillHeight + o.height, sill, H)
+        // No host sill → none on the client either. A host sill whose top is below the client's
+        // ground at the piece midpoint (sill + d ≤ 0) makes the client window sill-less: the only
+        // residual difference, and it lies below that ground.
+        const sillOut = sill > 0 ? Math.max(0, sill + d) : 0
+        o.sillHeight = sillOut
+        o.height = Math.max(0, head + d - sillOut)
+      }
+    }
+  }
   for (const id of [...lights.keys()].sort()) {
     const l = lights.get(id)!
     if (!Object.hasOwn(levels, l.levelId)) continue

@@ -1,9 +1,9 @@
 /**
  * Pure geometry edits on scene drafts used by editor commands and tools: translating and rotating
- * selections, and the reference point a drag snaps with.
+ * selections, the reference point a drag snaps with, and where a paste at the pointer snaps to.
  */
 import { snapPoint, type SnapMode } from "@/core/grid/grid"
-import { openingFits, selectionBounds } from "@/core/scene/integrity"
+import { openingFits, selectionBounds, type AtlasClipboard } from "@/core/scene/integrity"
 import { openingSegment, wallDirection, wallLength } from "@/core/scene/queries"
 import type { Id, Rect, Scene, SceneObject, Token, Vec2 } from "@/core/scene/types"
 
@@ -247,4 +247,25 @@ export function snapDragDelta(scene: Scene, grabbedId: Id, raw: Vec2, mode: Snap
     snapped = snapPoint(scene.grid, target, edge ? edgeSnapMode(mode) : mode)
   }
   return { x: snapped.x - anchor.x, z: snapped.z - anchor.z }
+}
+
+/**
+ * Where a clipboard's origin should land for a paste at the pointer `at` under snap `mode`: the paste
+ * translation is snapped with the drag rules (snapDragDelta) on a reference item — the first token
+ * (footprint anchoring), else the first floor/connector/wall (edge snapping), else the first other
+ * item with a drag anchor — so the relative layout is kept and that item lands on the grid. "free"
+ * (or nothing to snap by) returns `at` unchanged.
+ */
+export function snapPasteAt(scene: Scene, clip: AtlasClipboard, at: Vec2, mode: SnapMode): Vec2 {
+  if (mode === "free") return { x: at.x, z: at.z }
+  const probe: Scene = {
+    ...scene,
+    objects: Object.fromEntries(clip.objects.map((o) => [o.id, o])),
+    tokens: Object.fromEntries(clip.tokens.map((t) => [t.id, t])),
+  }
+  const edge = clip.objects.find((o) => o.type === "floor" || o.type === "connector" || o.type === "wall")
+  const refId = clip.tokens[0]?.id ?? edge?.id ?? clip.objects.find((o) => dragAnchor(probe, o.id) !== null)?.id
+  if (refId === undefined || dragAnchor(probe, refId) === null) return { x: at.x, z: at.z }
+  const d = snapDragDelta(probe, refId, { x: at.x - clip.origin.x, z: at.z - clip.origin.z }, mode)
+  return { x: clip.origin.x + d.x, z: clip.origin.z + d.z }
 }

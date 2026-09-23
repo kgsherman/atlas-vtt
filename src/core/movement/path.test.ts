@@ -71,6 +71,18 @@ describe("findPath", () => {
     expectValid(scene, t, path(scene, t, down), down)
   })
 
+  it("does not use a staircase's high sides as a shortcut across it", () => {
+    const { scene, levelId } = flatScene()
+    const upper = addLevel(scene, { elevation: 10 })
+    add(scene, createConnector(levelId, upper.id, { x: 10, z: 5, w: 5, d: 20 }, 0))
+    const t = tokenAt(scene, levelId, { i: 1, j: 3 })
+    const target = at(3, 3, levelId)
+    const route = expectValid(scene, t, path(scene, t, target), target)
+    // Straight across (1,3) → (2,3) → (3,3) would jump on and off the run 6 ft up.
+    expect(route.length).toBeGreaterThan(3)
+    for (const s of route) if (s.cell.i === 2) expect(s.cell.j === 1 || s.cell.j < 1 || s.cell.j > 4, JSON.stringify(route)).toBe(true)
+  })
+
   it("climbs a ladder in place", () => {
     const { scene, levelId } = flatScene()
     const upper = addLevel(scene, { elevation: 10 })

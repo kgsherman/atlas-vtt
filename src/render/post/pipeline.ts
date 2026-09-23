@@ -1,9 +1,13 @@
 /**
- * Post-processing for the high and ultra tiers (ARCHITECTURE §10): the main pass renders into a
+ * Post-processing for the medium, high and ultra tiers (ARCHITECTURE §10): the main pass renders into a
  * half-float MSAA target with a depth texture; then (ultra) screen-space ambient obscurance at half
- * resolution with a depth-aware blur, bloom (threshold → 6-level down/up chain) and a final composite to
- * the canvas (tone mapping, vignette, grain, dithering) that also writes the scene depth, so overlays drawn
- * afterwards are depth-tested against the world.
+ * resolution with a depth-aware blur, bloom (high / ultra: threshold → 6-level down/up chain) and a final
+ * composite to the canvas (tone mapping, vignette, grain, dithering) that also writes the scene depth, so
+ * overlays drawn afterwards are depth-tested against the world. Low renders straight to the canvas.
+ *
+ * The canvas has no MSAA (engine.ts): the scene target is the only MSAA, so it follows the tier at runtime.
+ * Medium is the "lite" preset: MSAA + Reinhard (c / (1 + c), identical to three's ReinhardToneMapping at
+ * exposure 1, which low uses in the materials) + sRGB + dither, without bloom, AO, vignette or grain.
  *
  * Fog awareness: the composite never adds bloom or grain onto pure-black pixels while `fog` is set
  * (player fog of war: unexplored stays black), AO and vignette only darken. Flames of unperceived
@@ -12,6 +16,7 @@
 import * as THREE from "three"
 
 import type { Quality } from "../contracts"
+import { MSAA_SAMPLES } from "../engine/quality"
 import { createFullscreenTriangle } from "../materials/occluderMaterials"
 import { AO_BLUR_FRAGMENT, AO_FRAGMENT, BLOOM_DOWN_FRAGMENT, BLOOM_PREFILTER_FRAGMENT, BLOOM_UP_FRAGMENT, FULLSCREEN_VERTEX, OUTPUT_FRAGMENT } from "./shaders"
 
@@ -29,12 +34,26 @@ export interface PostSettings {
   glow: number
 }
 
+/** Direct-path (no post) flame / glow parameters; medium's lite post keeps the same look. */
+export const DIRECT_EMISSIVE = { emissive: 1, glow: 0.55 }
+
 /** Post-processing per tier; null = direct rendering to the canvas (tone mapping in the materials). */
 export const POST_SETTINGS: Record<Quality, PostSettings | null> = {
   low: null,
-  medium: null,
+  // Lite: only the MSAA target and the composite (tone mapping, sRGB, dither, scene depth for overlays).
+  medium: {
+    samples: MSAA_SAMPLES.medium,
+    bloom: null,
+    ao: null,
+    vignette: 0,
+    grain: 0,
+    tone: "reinhard",
+    exposure: 1,
+    emissive: DIRECT_EMISSIVE.emissive,
+    glow: DIRECT_EMISSIVE.glow,
+  },
   high: {
-    samples: 4,
+    samples: MSAA_SAMPLES.high,
     bloom: { strength: 0.8, threshold: 1.5, knee: 0.6 },
     ao: null,
     vignette: 0.22,
@@ -45,7 +64,7 @@ export const POST_SETTINGS: Record<Quality, PostSettings | null> = {
     glow: 0.35,
   },
   ultra: {
-    samples: 4,
+    samples: MSAA_SAMPLES.ultra,
     bloom: { strength: 0.85, threshold: 1.5, knee: 0.6 },
     ao: { radius: 3, intensity: 1.5, strength: 0.8 },
     vignette: 0.26,
@@ -56,9 +75,6 @@ export const POST_SETTINGS: Record<Quality, PostSettings | null> = {
     glow: 0.35,
   },
 }
-
-/** Direct-path (no post) flame / glow parameters. */
-export const DIRECT_EMISSIVE = { emissive: 1, glow: 0.55 }
 
 const BLOOM_LEVELS = 6
 

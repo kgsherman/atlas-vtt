@@ -1,7 +1,8 @@
 import * as THREE from "three"
 import { describe, expect, it } from "vitest"
 
-import { createLevel, createLight, createScene, createToken } from "@/core/scene/factory"
+import { buildOcclusionWorld } from "@/core/occlusion"
+import { createFloor, createLevel, createLight, createScene, createToken, createWall } from "@/core/scene/factory"
 import type { Scene } from "@/core/scene/types"
 
 import { cullAndRankLights, cutawayPlaneY, linearColor, resolveLights, screenCoverage } from "./lights"
@@ -41,9 +42,9 @@ describe("resolveLights", () => {
     scene.tokens[token.id] = token
     for (const l of [on, off, hidden, carried]) scene.objects[l.id] = l
 
-    const player = resolveLights(scene, { includeHidden: false }).map((l) => l.id)
+    const player = resolveLights(scene, buildOcclusionWorld(scene), { includeHidden: false }).map((l) => l.id)
     expect(player).toEqual([on.id])
-    const dm = resolveLights(scene, { includeHidden: true }).map((l) => l.id).sort()
+    const dm = resolveLights(scene, buildOcclusionWorld(scene), { includeHidden: true }).map((l) => l.id).sort()
     expect(dm).toEqual([on.id, hidden.id, carried.id].sort())
   })
 
@@ -53,7 +54,7 @@ describe("resolveLights", () => {
     scene.tokens[token.id] = token
     const carried = createLight(ground, "torch", { x: 0, z: 0 }, { attachedTokenId: token.id, position: { x: 0, y: 4, z: 0 } })
     scene.objects[carried.id] = carried
-    const [l] = resolveLights(scene, { includeHidden: false })
+    const [l] = resolveLights(scene, buildOcclusionWorld(scene), { includeHidden: false })
     expect(l.levelId).toBe(upper)
     expect(l.position).toEqual({ x: 42.5, y: 14, z: 17.5 })
     const [r, g, b] = linearColor("#ff9a3c")
@@ -63,6 +64,26 @@ describe("resolveLights", () => {
     expect(g).toBeCloseTo(0.3231, 3)
     expect(l.bright).toBe(20)
     expect(l.dim).toBe(40)
+  })
+
+  it("pushes origins out of the light blockers containing them, like the CPU light field", () => {
+    const { scene, ground, upper } = twoLevelScene()
+    const slab = createFloor(upper, { x: 0, z: 0, w: 100, d: 100 }, "wood")
+    const wall = createWall(ground, { x: 60, z: 0 }, { x: 60, z: 40 }, { height: 9, thickness: 1 })
+    // A candle standing on the upper slab (y = 0, inside the slab within eps) must not see through it…
+    const candle = createLight(upper, "candle", { x: 20, z: 20 }, { position: { x: 20, y: 0, z: 20 } })
+    // …and a torch inside a wall (a wall drawn through it) must light one side only.
+    const torch = createLight(ground, "torch", { x: 60.1, z: 20 })
+    const open = createLight(ground, "torch", { x: 30, z: 30 })
+    for (const o of [slab, wall, candle, torch, open]) scene.objects[o.id] = o
+    const world = buildOcclusionWorld(scene)
+    const byId = new Map(resolveLights(scene, world, { includeHidden: false }).map((l) => [l.id, l]))
+    expect(byId.get(candle.id)!.position.y).toBeCloseTo(10.3, 5)
+    expect(byId.get(candle.id)!.levelId).toBe(upper)
+    const t = byId.get(torch.id)!.position
+    expect(t.x).toBeCloseTo(60.8, 5)
+    expect(world.containing(t, "light")).toEqual([])
+    expect(byId.get(open.id)!.position).toEqual({ x: 30, y: open.position.y, z: 30 })
   })
 })
 
@@ -78,7 +99,7 @@ describe("cullAndRankLights", () => {
     const cam = topDownCamera()
     const cutawayY = cutawayPlaneY(scene, ground)
     expect(cutawayY).toBe(9)
-    const ranked = cullAndRankLights(resolveLights(scene, { includeHidden: false }), {
+    const ranked = cullAndRankLights(resolveLights(scene, buildOcclusionWorld(scene), { includeHidden: false }), {
       frustum: frustumOf(cam),
       camera: cam,
       cutawayY,
@@ -102,7 +123,7 @@ describe("cullAndRankLights", () => {
       scene.objects[l.id] = l
     }
     const cam = topDownCamera()
-    const ranked = cullAndRankLights(resolveLights(scene, { includeHidden: false }), {
+    const ranked = cullAndRankLights(resolveLights(scene, buildOcclusionWorld(scene), { includeHidden: false }), {
       frustum: frustumOf(cam),
       camera: cam,
       cutawayY: null,

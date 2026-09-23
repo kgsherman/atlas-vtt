@@ -7,8 +7,8 @@
 import type { Id, Rect, Vec2 } from "@/core/scene/types"
 import type { OverlayState, PickResult } from "@/render/contracts"
 
-import { resolveShortcut, runShortcut } from "./shortcuts"
-import type { EditorStore } from "./store"
+import { resolveShortcut, runShortcut, type PasteTarget } from "./shortcuts"
+import { currentSnapMode, type EditorStore } from "./store"
 import { createTools, type ToolSet } from "./tools"
 import type { Tool, ToolKeyEvent, ToolPointerEvent } from "./tools/types"
 
@@ -32,6 +32,12 @@ export interface EditorController {
   setTerrainPreview(fn: ((levelId: Id, heights: Float32Array | null, dirty: Rect | null) => void) | null): void
   /** Last pointer position on the active level (paste target). */
   cursor(): { ground: Vec2 | null; pick: PickResult } | null
+  /**
+   * Where a paste at the pointer lands (Ctrl+V, the Edit menu, system paste): the pointer's ground
+   * point, the wall under it (re-hosts copied openings) and the effective snap mode (Alt = free).
+   * Empty when the pointer has not been over the level.
+   */
+  pasteTarget(): PasteTarget
   /** Cancel the active tool's gesture (e.g. when the canvas loses the pointer). */
   cancelGesture(): void
   dispose(): void
@@ -82,12 +88,12 @@ export function createEditorController(store: EditorStore, opts: { now?: () => n
     lastPointer = { ground: e.ground ? { ...e.ground } : null, pick: e.pick }
   }
 
-  const pasteTarget = (): { at?: Vec2; hostWallId?: Id } => {
+  const pasteTarget = (): PasteTarget => {
     if (!lastPointer?.ground) return {}
     const s = store.getState()
     const objectId = lastPointer.pick.objectId
     const hostWallId = objectId && Object.hasOwn(s.scene.objects, objectId) && s.scene.objects[objectId].type === "wall" ? objectId : undefined
-    return { at: lastPointer.ground, hostWallId }
+    return { at: { ...lastPointer.ground }, hostWallId, snap: currentSnapMode(s) }
   }
 
   const controller: EditorController = {
@@ -152,6 +158,8 @@ export function createEditorController(store: EditorStore, opts: { now?: () => n
     },
 
     cursor: () => lastPointer,
+
+    pasteTarget,
 
     cancelGesture() {
       current.cancel?.()

@@ -20,7 +20,8 @@ import { GridOverlay } from "./grid"
 import { buildOutlines, disposeOutlines, type ObjectMeshRef } from "./highlight"
 import { TextLabel } from "./label"
 import { buildToolPreview, disposePreview } from "./previews"
-import { circlePoints, dashPolyline, pathStepPoints, ribbonPositions } from "./ribbon"
+import { createEdgeAAMaterial, edgeGeometry } from "../materials/edgeAAMaterial"
+import { circlePoints, dashPolyline, discEdgeGeometry, mergeEdgeGeometry, pathStepPoints, ribbonEdgeGeometry, ringEdgeGeometry } from "./ribbon"
 
 const SELECT_COLOR = "#34d399"
 const HOVER_COLOR = "#a7f3d0"
@@ -83,9 +84,10 @@ export class OverlayManager {
   private readonly selectMat = overlayLine(SELECT_COLOR, 0.95)
   private readonly hoverMat = overlayLine(HOVER_COLOR, 0.6)
   private readonly hiddenMat = overlayLine(HIDDEN_COLOR, 0.7)
-  private readonly rulerMat = overlayFill(RULER_COLOR, 0.95)
-  private readonly rulerDotMat = overlayFill("#fafafa", 0.95)
-  private readonly pendingMat = overlayFill(PENDING_COLOR, 0.85)
+  // Ribbons, dots and rings fade their own edges (the canvas has no MSAA; materials/edgeAAMaterial).
+  private readonly rulerMat = createEdgeAAMaterial(RULER_COLOR, { opacity: 0.95 })
+  private readonly rulerDotMat = createEdgeAAMaterial("#fafafa", { opacity: 0.95 })
+  private readonly pendingMat = createEdgeAAMaterial(PENDING_COLOR, { opacity: 0.85 })
   private readonly arrowMat = overlayFill(ARROW_COLOR, 0.55)
 
   private outlines: Outline[] = []
@@ -242,18 +244,13 @@ export class OverlayManager {
     }
     const root = new THREE.Object3D()
     const wpp = this.host.worldPerPixel()
-    const width = Math.max(0.2, wpp * 3)
+    // + half a pixel per side: the edge fade is centred on the nominal edge.
+    const width = Math.max(0.2, wpp * 3) + wpp
     const lifted = r.points.map((p) => ({ x: p.x, y: p.y + 0.12, z: p.z }))
-    if (lifted.length >= 2) {
-      const g = new THREE.BufferGeometry()
-      g.setAttribute("position", new THREE.BufferAttribute(ribbonPositions(lifted, width), 3))
-      root.add(new THREE.Mesh(g, this.rulerMat))
-    }
-    for (const p of lifted) {
-      const dot = new THREE.Mesh(new THREE.CircleGeometry(Math.max(0.25, wpp * 4), 20).rotateX(-Math.PI / 2), this.rulerDotMat)
-      dot.position.set(p.x, p.y + 0.01, p.z)
-      root.add(dot)
-    }
+    if (lifted.length >= 2) root.add(new THREE.Mesh(edgeGeometry(ribbonEdgeGeometry(lifted, width)), this.rulerMat))
+    const dotRadius = Math.max(0.25, wpp * 4) + wpp / 2
+    const dots = mergeEdgeGeometry(lifted.map((p) => discEdgeGeometry(p.x, p.y + 0.01, p.z, dotRadius, 20)))
+    if (dots.positions.length > 0) root.add(new THREE.Mesh(edgeGeometry(dots), this.rulerDotMat))
     // The label sprite lives directly under the overlay root (sprites share one geometry that must
     // never be disposed with the ruler tree).
     if (!this.rulerLabel) {
@@ -283,27 +280,17 @@ export class OverlayManager {
     const moves = this.state.pendingMoves
     if (!scene || Object.keys(moves).length === 0) return
     const root = new THREE.Object3D()
-    const width = Math.max(0.25, this.host.worldPerPixel() * 3)
+    const wpp = this.host.worldPerPixel()
+    // + half a pixel per side: the edge fade is centred on the nominal edge.
+    const width = Math.max(0.25, wpp * 3) + wpp
     for (const [tokenId, steps] of Object.entries(moves) as [Id, PathStep[]][]) {
       if (steps.length < 2) continue
       const token = Object.hasOwn(scene.tokens, tokenId) ? scene.tokens[tokenId] : null
       const pts = pathStepPoints(scene, steps, token?.size ?? "medium").map((p) => ({ x: p.x, y: p.y + 0.15, z: p.z }))
       const dashes = dashPolyline(pts, 1.6, 1.0)
-      const arrays = dashes.map((d) => ribbonPositions(d, width))
-      const total = arrays.reduce((n, a) => n + a.length, 0)
-      const merged = new Float32Array(total)
-      let o = 0
-      for (const a of arrays) {
-        merged.set(a, o)
-        o += a.length
-      }
-      const g = new THREE.BufferGeometry()
-      g.setAttribute("position", new THREE.BufferAttribute(merged, 3))
-      root.add(new THREE.Mesh(g, this.pendingMat))
       const end = pts[pts.length - 1]
-      const ring = new THREE.Mesh(new THREE.RingGeometry(1.1, 1.5, 32).rotateX(-Math.PI / 2), this.pendingMat)
-      ring.position.set(end.x, end.y, end.z)
-      root.add(ring)
+      const merged = mergeEdgeGeometry([...dashes.map((d) => ribbonEdgeGeometry(d, width)), ringEdgeGeometry(end.x, end.y, end.z, 1.1 - wpp / 2, 1.5 + wpp / 2, 48)])
+      root.add(new THREE.Mesh(edgeGeometry(merged), this.pendingMat))
     }
     root.traverse((o) => {
       o.renderOrder = 13

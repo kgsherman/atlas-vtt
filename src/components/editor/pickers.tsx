@@ -74,6 +74,7 @@ export function PropPicker({ value, onValueChange, className }: { value: PropKin
               <button
                 key={kind}
                 type="button"
+                aria-pressed={selected}
                 onClick={() => {
                   onValueChange(kind)
                   setOpen(false)

@@ -7,19 +7,28 @@
  *
  * A drag target is a ground point on the active level; when that level has no ground there (a stair
  * landing upstairs, the room under a ladder), the other levels with ground at that cell are tried in
- * order of elevation distance, so dragging onto the top of a staircase paths up it.
+ * order of elevation distance, so dragging onto the top of a staircase paths up it. A drop on the cell
+ * just beyond a stairs/ramp top edge (on the run's lower level) means going up: the run's upper level
+ * is tried first there, even when the lower level also has floor at that cell (the usual layout: stairs
+ * inside a room). If the landing is blocked, the lower-level path is still found.
  */
 import {
   anchorPosition,
   findPath,
+  footprintCells,
   MAX_PATH_STEPS,
   tokenAnchor,
   validateMove,
 } from "@/core/movement"
+import {
+  connectorSpan,
+  footprintAlong,
+  footprintWithinLateral,
+} from "@/core/movement/context"
 import type { MoveRejectReason, PathStep } from "@/core/movement/types"
 import { buildOcclusionWorld } from "@/core/occlusion"
 import type { OcclusionWorld } from "@/core/occlusion/types"
-import { hasGroundAt, levelById, sortedLevels } from "@/core/scene/queries"
+import { groundIndex, levelById, sortedLevels } from "@/core/scene/queries"
 import type { Cell, Id, SceneLike, Token } from "@/core/scene/types"
 import type { SceneChange } from "@/render/contracts"
 
@@ -143,7 +152,13 @@ export class MovePlanner {
         reason: "unreachable",
       }
     const centre = anchorPosition(scene, token.size, cell)
-    const levels = this.candidateLevels(scene, preferred, centre)
+    const levels = this.candidateLevels(
+      scene,
+      preferred,
+      centre,
+      cell,
+      footprintCells(token.size)
+    )
     if (levels.length === 0)
       return {
         ...base,
@@ -179,23 +194,36 @@ export class MovePlanner {
     }
   }
 
-  /** Preferred level first (if it has ground there), then others with ground, nearest elevation first. */
+  /**
+   * Upper levels of stairs/ramps whose top edge `cell` lies just beyond (from `preferred`, their lower
+   * level) first, then the preferred level (if it has ground there), then other levels with ground,
+   * nearest elevation first.
+   */
   private candidateLevels(
     scene: SceneLike,
     preferred: Id,
-    p: { x: number; z: number }
+    p: { x: number; z: number },
+    cell: Cell,
+    k: number
   ): Id[] {
     const pref = levelById(scene, preferred)
+    const g = groundIndex(scene)
     const out: Id[] = []
-    if (pref && hasGroundAt(scene, preferred, p)) out.push(preferred)
+    const add = (id: Id) => {
+      if (!out.includes(id)) out.push(id)
+    }
+    for (const id of upLevelsBeyondTop(scene, preferred, cell, k)) {
+      if (g.hasGroundAt(id, p)) add(id)
+    }
+    if (pref && g.hasGroundAt(preferred, p)) add(preferred)
     const others = sortedLevels(scene)
-      .filter((l) => l.id !== preferred && hasGroundAt(scene, l.id, p))
+      .filter((l) => l.id !== preferred && g.hasGroundAt(l.id, p))
       .sort(
         (a, b) =>
           Math.abs(a.elevation - (pref?.elevation ?? 0)) -
           Math.abs(b.elevation - (pref?.elevation ?? 0))
       )
-    for (const l of others) out.push(l.id)
+    for (const l of others) add(l.id)
     return out
   }
 
@@ -228,4 +256,33 @@ export class MovePlanner {
     })
     return { ok: v.ok, reason: v.reason, legalSteps: v.legalSteps }
   }
+}
+
+/**
+ * `toLevelId`s of the stairs/ramps on `levelId` whose top edge a k × k footprint anchored at `cell`
+ * sits just beyond (the cell an orthogonal step across the top edge lands on: core crossingFor's
+ * test), in object-id order.
+ */
+export function upLevelsBeyondTop(
+  scene: SceneLike,
+  levelId: Id,
+  cell: Cell,
+  k: number
+): Id[] {
+  const out: Id[] = []
+  for (const id of Object.keys(scene.objects).sort()) {
+    const o = scene.objects[id]
+    if (o.type !== "connector" || o.style === "ladder") continue
+    if (o.levelId !== levelId || !levelById(scene, o.toLevelId)) continue
+    const sp = connectorSpan(o, scene.grid.cellSize)
+    if (!sp) continue
+    const lower = { i: cell.i - sp.fwd.i, j: cell.j - sp.fwd.j }
+    if (
+      footprintWithinLateral(sp, lower, k) &&
+      footprintAlong(sp, lower, k).hi === sp.top &&
+      !out.includes(o.toLevelId)
+    )
+      out.push(o.toLevelId)
+  }
+  return out
 }

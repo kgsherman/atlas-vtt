@@ -1,6 +1,11 @@
 /**
- * Small JSON-value helpers shared by memory, filter and diff.
+ * Small JSON-value helpers shared by memory, filter and diff. No imports (backdrop.ts relies on it).
  */
+
+/** Own-property lookup (records keyed by untrusted ids must never reach the prototype chain). */
+export function own<T>(rec: Readonly<Record<string, T>> | undefined, key: string): T | undefined {
+  return rec !== undefined && Object.hasOwn(rec, key) ? rec[key] : undefined
+}
 
 export function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v)

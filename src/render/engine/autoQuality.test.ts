@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { classifyRenderer, PREDICTED_BUDGET_MS, PROBE_CACHE_KEY, predictTierMs, probeQuality, tierForCost, tierPixels } from "./autoQuality"
 
@@ -65,5 +65,28 @@ describe("tier from the measured cost", () => {
     storage.setItem(PROBE_CACHE_KEY, JSON.stringify({ renderer: "GPU", tier: "high", msPerMP: 0.2, cap: "ultra", reason: "old", at: 0 }))
     const q = await probeQuality({ storage: storage as unknown as Storage, cssWidth: 1920, cssHeight: 1080, dpr: 1 })
     expect(q).toMatchObject({ cached: false, tier: "medium" })
+  })
+
+  it("classifies a software renderer as low without running the timed benchmark", async () => {
+    const storage = new MemoryStorage()
+    const measure = vi.fn(() => ({ msPerMP: 40, renderer: "SwiftShader", vendor: "Google" }))
+    const p = await probeQuality({
+      storage: storage as unknown as Storage,
+      rendererInfo: () => ({ renderer: "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero)), SwiftShader driver)", vendor: "Google Inc." }),
+      measure,
+    })
+    expect(measure).not.toHaveBeenCalled()
+    expect(p).toMatchObject({ tier: "low", cap: "low", msPerMP: null, reason: "software renderer", cached: false })
+    // Cached like a measurement: the next page load does not even read the renderer.
+    const again = await probeQuality({ storage: storage as unknown as Storage, rendererInfo: () => null, measure })
+    expect(again).toMatchObject({ tier: "low", cached: true })
+    expect(measure).not.toHaveBeenCalled()
+  })
+
+  it("times hardware renderers as before", async () => {
+    const measure = vi.fn(() => ({ msPerMP: 0.033, renderer: "ANGLE (NVIDIA GeForce RTX 5070 Ti)", vendor: "NVIDIA" }))
+    const p = await probeQuality({ storage: null, rendererInfo: () => ({ renderer: "ANGLE (NVIDIA GeForce RTX 5070 Ti)", vendor: "NVIDIA" }), measure, cssWidth: 1920, cssHeight: 1080, dpr: 1 })
+    expect(measure).toHaveBeenCalledTimes(1)
+    expect(p).toMatchObject({ tier: "ultra", cap: "ultra", msPerMP: 0.033 })
   })
 })

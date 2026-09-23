@@ -173,3 +173,26 @@ describe("serializeGameState / parseGameState", () => {
     expect(parsed.explored.p1).toEqual(state.explored.p1)
   })
 })
+
+describe("origin (the library scene the live map comes from)", () => {
+  it("round-trips with and without an origin; states saved before the field still load", () => {
+    const state = playedState()
+    expect(state.origin).toBeUndefined()
+    const plain = parseGameStateJson(serializeGameState(state))
+    expect(plain).toEqual(clone(state))
+    expect(plain && "origin" in plain).toBe(false)
+    for (const origin of [{ sceneId: "lib-1", version: 7, dirty: true }, { sceneId: "lib-2", version: null, dirty: false }, null]) {
+      const withOrigin: GameState = { ...state, origin }
+      const parsed = parseGameStateJson(serializeGameState(withOrigin))
+      expect(parsed?.origin).toEqual(origin)
+      expect(parsed).toEqual(clone(withOrigin))
+    }
+  })
+
+  it("rejects a malformed origin", () => {
+    const state = playedState()
+    for (const origin of [{ sceneId: "", version: 1, dirty: false }, { sceneId: "a", version: -1, dirty: false }, { sceneId: "a", version: 1.5, dirty: false }, { sceneId: "a", version: 1, dirty: "yes" }, { sceneId: "a", version: 1, dirty: false, extra: 1 }]) {
+      expect(parseGameState({ ...clone(state), origin }), JSON.stringify(origin)).toBeNull()
+    }
+  })
+})

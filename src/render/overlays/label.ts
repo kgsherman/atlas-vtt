@@ -30,13 +30,16 @@ export class TextLabel {
 
   setText(text: string): void {
     if (text === this.text) return
-    this.text = text
     const ctx = this.canvas.getContext("2d")
+    // No context: do not record the text as drawn (a later call retries).
     if (!ctx) return
+    this.text = text
     const font = `600 ${FONT_PX}px system-ui, -apple-system, "Segoe UI", sans-serif`
     ctx.font = font
     const w = Math.ceil(ctx.measureText(text).width) + PAD_PX * 2
     const h = FONT_PX + PAD_PX * 2
+    const resized = w !== this.canvas.width || h !== this.canvas.height
+    // Assigning the size also clears the canvas and resets the context state.
     this.canvas.width = w
     this.canvas.height = h
     ctx.font = font
@@ -55,6 +58,10 @@ export class TextLabel {
     ctx.textAlign = "center"
     ctx.fillText(text, w / 2, h / 2 + 1)
     this.aspect = w / h
+    // three allocates immutable storage (texStorage2D) at the first upload's size, so a wider canvas
+    // cannot be uploaded into it (GL_INVALID_VALUE, stale text); dispose() frees the GL texture and the
+    // next render creates one at the new size. The material keeps this same texture object.
+    if (resized) this.texture.dispose()
     this.texture.needsUpdate = true
   }
 

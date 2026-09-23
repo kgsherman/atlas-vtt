@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
-import { createPillar, createProp, createWall } from "@/core/scene/factory"
-import type { DoorObject, PillarObject, PropObject } from "@/core/scene/types"
+import { createPillar, createProp, createToken, createWall } from "@/core/scene/factory"
+import type { DoorObject, PillarObject, PropObject, WallObject } from "@/core/scene/types"
 
 import { createEditorController } from "./controller"
 import { resolveShortcut, SHORTCUTS } from "./shortcuts"
@@ -25,6 +25,7 @@ describe("resolveShortcut", () => {
     expect(resolveShortcut(key("c", { ctrl: true }))).toEqual({ type: "copy" })
     expect(resolveShortcut(key("x", { ctrl: true }))).toEqual({ type: "cut" })
     expect(resolveShortcut(key("v", { ctrl: true }))).toEqual({ type: "paste" })
+    expect(resolveShortcut(key("v", { ctrl: true, alt: true }))).toEqual({ type: "paste", free: true })
     expect(resolveShortcut(key("d", { ctrl: true }))).toEqual({ type: "duplicate" })
     expect(resolveShortcut(key("a", { ctrl: true }))).toEqual({ type: "select-all" })
     expect(resolveShortcut(key("Delete"))).toEqual({ type: "delete" })
@@ -125,6 +126,79 @@ describe("editor controller", () => {
     expect(pasted[0].wallId).toBe(other.id)
     expect(pasted[0].offset).toBeCloseTo(12)
     expect(controller.cursor()?.ground).toEqual({ x: 22, z: 80 })
+  })
+
+  describe("paste at the pointer snaps like a drag", () => {
+    const pasted = (store: ReturnType<typeof setup>["store"]) => {
+      const s = store.getState()
+      return s.selection.map((id) => (Object.hasOwn(s.scene.tokens, id) ? s.scene.tokens[id] : s.scene.objects[id]))
+    }
+
+    it("puts a pasted token on a cell centre", () => {
+      const { f, store, controller } = setup()
+      store.getState().setSnapMode("center")
+      const t = createToken(f.groundId, { x: 12.5, z: 12.5 }, { size: "medium" })
+      store.getState().addToken(t)
+      store.getState().select([t.id])
+      controller.keyDown(key("c", { ctrl: true }))
+      controller.pointerMove(at(33.3, 81.1))
+      expect(controller.keyDown(key("v", { ctrl: true }))).toBe(true)
+      const [p] = pasted(store)
+      expect(p && "position" in p ? p.position : null).toEqual({ x: 32.5, z: 82.5 })
+    })
+
+    it("puts a pasted prop on a cell centre", () => {
+      const { f, store, controller } = setup()
+      store.getState().setSnapMode("center")
+      const crate = createProp(f.groundId, "crate", { x: 12.5, y: 0, z: 42.5 })
+      store.getState().addObject(crate)
+      store.getState().select([crate.id])
+      controller.keyDown(key("c", { ctrl: true }))
+      controller.pointerMove(at(41.3, 78.7))
+      controller.keyDown(key("v", { ctrl: true }))
+      const [p] = pasted(store) as PropObject[]
+      expect(p.position.x).toBeCloseTo(42.5)
+      expect(p.position.z).toBeCloseTo(77.5)
+    })
+
+    it("keeps a wall on grid vertices and a token on a cell centre together", () => {
+      const { f, store, controller } = setup()
+      store.getState().setSnapMode("center")
+      const wall = createWall(f.groundId, { x: 60, z: 20 }, { x: 80, z: 20 })
+      const t = createToken(f.groundId, { x: 72.5, z: 27.5 })
+      store.getState().addObject(wall)
+      store.getState().addToken(t)
+      store.getState().select([wall.id, t.id])
+      controller.keyDown(key("c", { ctrl: true }))
+      controller.pointerMove(at(31.7, 63.4))
+      controller.keyDown(key("v", { ctrl: true }))
+      const items = pasted(store)
+      const w = items.find((o) => o && "type" in o && o.type === "wall") as WallObject
+      const tok = items.find((o) => o && !("type" in o)) as { position: { x: number; z: number } }
+      for (const v of [w.a.x, w.a.z, w.b.x, w.b.z]) expect(v % 5).toBeCloseTo(0)
+      expect(tok.position.x % 5).toBeCloseTo(2.5)
+      expect(tok.position.z % 5).toBeCloseTo(2.5)
+      // Relative layout kept.
+      expect(tok.position.x - w.a.x).toBeCloseTo(12.5)
+      expect(tok.position.z - w.a.z).toBeCloseTo(7.5)
+    })
+
+    it("keeps the raw pointer point with free snapping (Alt / Ctrl+Alt+V)", () => {
+      const { f, store, controller } = setup()
+      store.getState().setSnapMode("center")
+      const t = createToken(f.groundId, { x: 12.5, z: 12.5 })
+      store.getState().addToken(t)
+      store.getState().select([t.id])
+      controller.keyDown(key("c", { ctrl: true }))
+      controller.pointerMove(at(33.3, 81.1))
+      controller.keyDown(key("v", { ctrl: true, alt: true }))
+      const [p] = pasted(store)
+      const pos = p && "position" in p ? p.position : { x: NaN, z: NaN }
+      expect(pos.x).toBeCloseTo(33.3)
+      expect(pos.z).toBeCloseTo(81.1)
+      store.getState().setSnapMode("free")
+      expect(controller.pasteTarget()).toMatchObject({ at: { x: 33.3, z: 81.1 }, snap: "free" })
+    })
   })
 
   it("arrows nudge, Delete deletes, Ctrl+D duplicates, PageUp changes level, G/H toggle view", () => {

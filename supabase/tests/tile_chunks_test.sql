@@ -155,6 +155,8 @@ begin
     pg_temp.try(format($q$insert into storage.objects (bucket_id, name) values ('session-tiles', %L)$q$, format('%s/%s/L1/64_0.webp', v_sid, p1))) like 'new row violates row-level security policy%'
     and pg_temp.try(format($q$insert into storage.objects (bucket_id, name) values ('session-tiles', %L)$q$, format('%s/%s/L1/0_0.png', v_sid, p1))) like 'new row violates row-level security policy%'
     and pg_temp.try(format($q$insert into storage.objects (bucket_id, name) values ('session-tiles', %L)$q$, format('%s/%s/L1/extra/0_0.webp', v_sid, p1))) like 'new row violates row-level security policy%');
+  perform pg_temp.check('write: no chunks for someone who is not a member of the session',
+    pg_temp.try(format($q$insert into storage.objects (bucket_id, name) values ('session-tiles', %L)$q$, format('%s/%s/L1/0_0.webp', v_sid, x))) like 'new row violates row-level security policy%');
   perform pg_temp.check('write: the DM cannot write into another DM''s session',
     pg_temp.try(format($q$insert into storage.objects (bucket_id, name) values ('session-tiles', %L)$q$, format('%s/%s/L1/0_0.webp', v_osid, p1))) like 'new row violates row-level security policy%');
   perform pg_temp.eq('write: the DM replaces (upserts) a chunk',

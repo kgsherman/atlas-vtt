@@ -257,14 +257,112 @@ class SupervisedChannel implements RawChannel {
   }
 }
 
+/** Browser event target for online/offline (absent under Node). */
+export interface OnlineEvents {
+  addEventListener(type: "online" | "offline", cb: () => void): void
+  removeEventListener(type: "online" | "offline", cb: () => void): void
+}
+
+/**
+ * This device's connection: `navigator.onLine` (instant, via the online/offline events) and the
+ * Realtime socket (polled; lost = it was connected and has been down for two polls in a row, so a
+ * quick reconnect does not flap). Polling only runs while someone listens.
+ */
+export class NetworkMonitor {
+  private readonly listeners = new Listeners<[boolean]>()
+  private last = true
+  private socketSeen = false
+  private socketDownPolls = 0
+  private timer: ReturnType<typeof setInterval> | null = null
+  private listenerCount = 0
+  private readonly socketConnected: () => boolean
+  private readonly pollMs: number
+  private readonly navigatorOnline: () => boolean
+  private readonly events: OnlineEvents | null
+  private readonly onEvent = () => this.check()
+
+  constructor(
+    socketConnected: () => boolean,
+    opts: { pollMs?: number; navigatorOnline?: () => boolean; events?: OnlineEvents | null } = {}
+  ) {
+    this.socketConnected = socketConnected
+    this.pollMs = opts.pollMs ?? 1000
+    this.navigatorOnline = opts.navigatorOnline ?? (() => typeof navigator === "undefined" || navigator.onLine !== false)
+    this.events = opts.events !== undefined ? opts.events : typeof window !== "undefined" && typeof window.addEventListener === "function" ? window : null
+  }
+
+  online(): boolean {
+    return this.navigatorOnline() && !(this.socketSeen && this.socketDownPolls >= 2)
+  }
+
+  onChange(cb: (online: boolean) => void): Unsubscribe {
+    const off = this.listeners.add(cb)
+    if (this.timer === null) {
+      this.last = this.online()
+      this.events?.addEventListener("online", this.onEvent)
+      this.events?.addEventListener("offline", this.onEvent)
+      this.timer = setInterval(() => this.poll(), this.pollMs)
+    }
+    this.listenerCount++
+    let done = false
+    return () => {
+      if (done) return
+      done = true
+      off()
+      if (--this.listenerCount === 0) this.stop()
+    }
+  }
+
+  /** One socket poll (exposed for tests). */
+  poll(): void {
+    let connected: boolean
+    try {
+      connected = this.socketConnected()
+    } catch {
+      connected = true
+    }
+    if (connected) {
+      this.socketSeen = true
+      this.socketDownPolls = 0
+    } else if (this.socketSeen) {
+      this.socketDownPolls++
+    }
+    this.check()
+  }
+
+  private check(): void {
+    const now = this.online()
+    if (now === this.last) return
+    this.last = now
+    this.listeners.emit(now)
+  }
+
+  stop(): void {
+    if (this.timer !== null) clearInterval(this.timer)
+    this.timer = null
+    this.events?.removeEventListener("online", this.onEvent)
+    this.events?.removeEventListener("offline", this.onEvent)
+  }
+}
+
 export class SupabaseTransport implements Transport {
   readonly kind = "supabase" as const
   private readonly ctx: Ctx
   private readonly channels = new Set<SupervisedChannel>()
   private disposed = false
+  private readonly network: NetworkMonitor
 
   constructor(client: AtlasClient = getSupabase(), opts: SupabaseTransportOptions = {}) {
     this.ctx = { client, bucket: new TokenBucket(opts.rate ?? REALTIME_SEND_RATE), backoff: opts.backoff ?? defaultBackoff }
+    this.network = new NetworkMonitor(() => client.realtime.isConnected())
+  }
+
+  networkOnline(): boolean {
+    return this.network.online()
+  }
+
+  onNetworkChange(cb: (online: boolean) => void): Unsubscribe {
+    return this.network.onChange(cb)
   }
 
   private readonly factory: RawChannelFactory = (topic, opts) => {
@@ -289,6 +387,7 @@ export class SupabaseTransport implements Transport {
   async dispose(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
+    this.network.stop()
     this.ctx.bucket.dispose()
     await Promise.all([...this.channels].map((c) => c.close()))
   }

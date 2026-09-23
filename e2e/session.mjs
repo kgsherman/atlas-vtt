@@ -462,3 +462,172 @@ export function findLeaks(texts, secrets, allow = new Set()) {
   }
   return hits
 }
+
+// ---- host console map menus ------------------------------------------------------------------------
+
+/** The page hit the app's error boundary ("Something went wrong"). */
+export async function crashed(page) {
+  return page.getByText("Something went wrong").isVisible()
+}
+
+/**
+ * The level the host console shows by default (HostSession `defaultLevel`): the level with the most
+ * visible PCs, else the one nearest elevation 0.
+ */
+export async function hostActiveLevel(dm) {
+  return dm.evaluate(() => {
+    const s = window.__atlasHost.runner.getSnapshot().state.scene
+    const counts = new Map()
+    for (const t of Object.values(s.tokens))
+      if (t.kind === "pc" && !t.hidden)
+        counts.set(t.levelId, (counts.get(t.levelId) ?? 0) + 1)
+    let best = null
+    let n = 0
+    for (const [id, c] of counts) if (c > n && s.levels[id]) [best, n] = [id, c]
+    if (best) return best
+    const levels = Object.values(s.levels)
+    let g = levels[0]
+    for (const l of levels)
+      if (Math.abs(l.elevation) < Math.abs(g.elevation)) g = l
+    return g.id
+  })
+}
+
+/**
+ * Right-click targets on a level of the host map, in client px: tokens (body centre), doors (leaf centre,
+ * 3 ft up) and static lights (their ground point, which the host's menu resolves within 1.5 ft). Only
+ * points inside the canvas are returned.
+ */
+export async function hostMenuTargets(dm, levelId) {
+  return dm.evaluate(async (levelId) => {
+    const { groundHeightAt, openingSegment } =
+      await import("/src/core/scene/queries.ts")
+    const { engine, runner } = window.__atlasHost
+    const s = runner.getSnapshot().state.scene
+    const r = document
+      .querySelector("canvas[data-slot=engine-canvas]")
+      .getBoundingClientRect()
+    const at = (x, z, dy) => {
+      const q = engine.project({
+        x,
+        y: groundHeightAt(s, levelId, { x, z }) + dy,
+        z,
+      })
+      const p = { x: r.left + q.x, y: r.top + q.y }
+      const inside =
+        q.visible &&
+        p.x > r.left + 8 &&
+        p.x < r.right - 8 &&
+        p.y > r.top + 8 &&
+        p.y < r.bottom - 8
+      return inside ? p : null
+    }
+    const out = { tokens: [], doors: [], lights: [] }
+    for (const t of Object.values(s.tokens)) {
+      if (t.levelId !== levelId) continue
+      const p = at(t.position.x, t.position.z, Math.min(1, t.height / 2))
+      if (p) out.tokens.push({ id: t.id, name: t.name, ...p })
+    }
+    for (const o of Object.values(s.objects)) {
+      if (o.levelId !== levelId) continue
+      if (o.type === "door" && s.objects[o.wallId]) {
+        const seg = openingSegment(s.objects[o.wallId], o)
+        const p = at((seg.a.x + seg.b.x) / 2, (seg.a.z + seg.b.z) / 2, 3)
+        if (p) out.doors.push({ id: o.id, state: o.state, ...p })
+      } else if (o.type === "light" && !o.attachedTokenId) {
+        const p = at(o.position.x, o.position.z, 0)
+        if (p) out.lights.push({ id: o.id, name: o.name, on: o.on, ...p })
+      }
+    }
+    return out
+  }, levelId)
+}
+
+/** Right-click a client point on the host map; resolves true when a context menu opened. */
+export async function hostContextMenu(dm, p) {
+  await closeMenus(dm)
+  await dm.mouse.move(p.x, p.y, { steps: 2 })
+  await sleep(100)
+  await dm.mouse.click(p.x, p.y, { button: "right" })
+  await sleep(400)
+  return (
+    (await dm.locator("[data-slot=context-menu-content]:visible").count()) > 0
+  )
+}
+
+/** Hover a submenu trigger of the open context menu (by its text) and give the submenu time to open. */
+export async function hoverSubmenu(dm, text) {
+  await dm
+    .locator("[data-slot=context-menu-sub-trigger]:visible", { hasText: text })
+    .first()
+    .hover()
+  await sleep(500)
+}
+
+/** Close every open context menu level (Escape closes one submenu level at a time). */
+export async function closeMenus(page) {
+  for (let k = 0; k < 4; k++) {
+    if (
+      (await page
+        .locator("[data-slot=context-menu-content]:visible")
+        .count()) === 0
+    )
+      return
+    await page.keyboard.press("Escape")
+    await sleep(150)
+  }
+}
+
+/**
+ * Walk a token toward `cell` through what its player has explored: each hop plans to the reachable cell
+ * nearest the target (the planner only knows explored floor), moves there, and looks again. Resolves true
+ * once the token stands on `cell`.
+ */
+export async function walkToward(page, tokenId, cell, hops = 5) {
+  for (let k = 0; k < hops; k++) {
+    const next = await page.evaluate(
+      ({ tokenId, cell }) => {
+        const p = window.__atlasPlayer
+        const scene = p.client.getSnapshot().scene
+        const t = scene.tokens[tokenId]
+        const cs = scene.grid.cellSize
+        const here = {
+          i: Math.floor(t.position.x / cs),
+          j: Math.floor(t.position.z / cs),
+        }
+        if (here.i === cell.i && here.j === cell.j) return { done: true }
+        const cand = []
+        for (let di = -8; di <= 8; di++)
+          for (let dj = -8; dj <= 8; dj++)
+            cand.push({ i: cell.i + di, j: cell.j + dj, d: Math.hypot(di, dj) })
+        cand.sort((a, b) => a.d - b.d)
+        const dHere = Math.hypot(here.i - cell.i, here.j - cell.j)
+        for (const c of cand) {
+          if (c.d >= dHere) break
+          const plan = p.planner.plan(tokenId, { i: c.i, j: c.j }, t.levelId)
+          if (plan?.path && plan.path.at(-1).levelId === t.levelId)
+            return { reqId: p.client.requestMove(tokenId, plan.path) }
+        }
+        return { stuck: true }
+      },
+      { tokenId, cell }
+    )
+    if (next.done) return true
+    if (!next.reqId) return false
+    const res = await waitResult(page, next.reqId)
+    if (!res.ok) return false
+    await sleep(400)
+  }
+  return page.evaluate(
+    ({ tokenId, cell }) => {
+      const scene = window.__atlasPlayer.client.getSnapshot().scene
+      const t = scene.tokens[tokenId]
+      const cs = scene.grid.cellSize
+      return (
+        Math.floor(t.position.x / cs) === cell.i &&
+        Math.floor(t.position.z / cs) === cell.j
+      )
+    },
+    { tokenId, cell }
+  )
+}

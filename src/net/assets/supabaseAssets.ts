@@ -3,14 +3,14 @@
  *  - `scene-assets` (private): DM images at `{ownerId}/{sceneId}/{assetId}.{webp|png|jpg}`; storage
  *    policies allow only the owner's own folder.
  *  - `session-tiles` (private): per-player chunks of explored-cell tiles at
- *    `{sessionId}/{userId}/{levelId}/{ci}_{cj}.webp` (./chunks.ts), written by the session's DM and
- *    readable only by that user while an active member (and the DM).
- *    (The superseded per-cell layout `{sessionId}/{levelId}/{i}_{j}.webp` + `player_tiles` grants is
- *    kept by publishTiles / grantTiles for compatibility.)
- * Migrations: supabase/migrations/*_map_assets_storage.sql, *_tile_chunks.sql.
+ *    `{sessionId}/{userId}/{levelId}/{ci}_{cj}.webp` (./chunks.ts), written by the session's DM (for
+ *    members only) and readable only by that user while an active member (and the DM).
+ * Quotas (migration *_owner_quotas.sql): ≤ 300 images / 1 GB per owner, ≤ 20000 tile objects per
+ * session — Storage answers 403 beyond them, reported as "quota_exceeded" for images.
+ * Migrations: supabase/migrations/*_map_assets_storage.sql, *_tile_chunks.sql, *_drop_legacy_tiles.sql.
  */
 import { newId } from "@/core/scene/factory"
-import type { Cell, Id } from "@/core/scene/types"
+import type { Id } from "@/core/scene/types"
 
 import { NetError, toNetError, type AtlasClient } from "../supabase"
 import { chunkPath, MAX_CHUNK_COORD } from "./chunks"
@@ -19,15 +19,15 @@ import type { AssetMeta, AssetMime, AssetStore } from "./types"
 
 export const ASSET_BUCKET = "scene-assets"
 export const TILE_BUCKET = "session-tiles"
-/** Server cap on cells per grant_tiles call (the client sends smaller batches). */
-export const GRANT_BATCH = 2000
-const UPLOAD_CONCURRENCY = 6
+/** Objects per Storage list/remove call. */
+const PAGE = 1000
+/** Default age before an unreferenced image may be swept (drafts of other browsers may still use it). */
+export const SWEEP_MIN_AGE_MS = 7 * 24 * 3600 * 1000
 
 const EXT: Record<AssetMime, string> = { "image/webp": "webp", "image/png": "png", "image/jpeg": "jpg" }
 const MIMES: AssetMime[] = ["image/webp", "image/png", "image/jpeg"]
 
 export const assetPath = (ownerId: string, sceneId: Id, assetId: Id, mime: AssetMime) => `${ownerId}/${sceneId}/${assetId}.${EXT[mime]}`
-export const tilePath = (sessionId: string, levelId: Id, cell: Cell) => `${sessionId}/${levelId}/${cell.i}_${cell.j}.webp`
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
@@ -59,41 +59,47 @@ function storageError(err: unknown, what: string): NetError {
   return new NetError("unknown", `${what}: ${message}`, { cause: err })
 }
 
-/** Run tasks with bounded concurrency; resolves when all settle, rethrows the first failure. */
-export async function runLimited<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
-  let next = 0
-  let firstError: unknown = null
-  const worker = async () => {
-    while (next < items.length) {
-      const item = items[next++]
-      try {
-        await fn(item)
-      } catch (err) {
-        firstError ??= err
-      }
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
-  if (firstError) throw firstError
-}
-
 function checkChunk(sessionId: string, userId: string, levelId: Id, ci: number, cj: number): void {
   if (!UUID_RE.test(sessionId) || !UUID_RE.test(userId)) throw new NetError("invalid_argument", "invalid session or user id")
   checkAssetId("level", levelId)
   if (![ci, cj].every((n) => Number.isInteger(n) && n >= 0 && n < MAX_CHUNK_COORD)) throw new NetError("invalid_argument", "invalid chunk")
 }
 
-type RpcClient = { rpc: (fn: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: unknown }> }
+export interface SupabaseAssetStoreOptions {
+  /** Document ids whose images must never be swept (e.g. this browser's editor drafts). */
+  keepDocIds?: () => Promise<Set<string>>
+}
 
-export function createSupabaseAssetStore(client: AtlasClient, ownerId: string): AssetStore {
+export function createSupabaseAssetStore(client: AtlasClient, ownerId: string, opts: SupabaseAssetStoreOptions = {}): AssetStore {
   const assets = () => client.storage.from(ASSET_BUCKET)
   const tiles = () => client.storage.from(TILE_BUCKET)
-  /**
-   * Tiles uploaded by this store, keyed by path + size + type, so re-publishing the same tile is free
-   * while a re-cut tile (new backdrop image under the same cell) is uploaded again.
-   */
-  const published = new Set<string>()
-  const publishKey = (path: string, blob: Blob) => `${path}|${blob.size}|${blob.type}`
+
+  /** Files (not folders) directly in `folder`: name → size in bytes. */
+  const listFolder = async (folder: string): Promise<Map<string, number>> => {
+    const out = new Map<string, number>()
+    for (let offset = 0; ; offset += PAGE) {
+      const { data, error } = await assets().list(folder, { limit: PAGE, offset })
+      if (error) throw storageError(error, "list images")
+      const entries = data ?? []
+      for (const f of entries) {
+        if (f.id === null) continue
+        const size = (f.metadata as { size?: unknown } | null)?.size
+        out.set(`${folder}/${f.name}`, typeof size === "number" ? size : 0)
+      }
+      if (entries.length < PAGE) return out
+    }
+  }
+
+  const removeAll = async (names: readonly string[]): Promise<number> => {
+    let removed = 0
+    for (let k = 0; k < names.length; k += PAGE) {
+      const batch = names.slice(k, k + PAGE)
+      const { error } = await assets().remove(batch)
+      if (error) throw storageError(error, "delete images")
+      removed += batch.length
+    }
+    return removed
+  }
 
   /** Download the asset whichever extension it was stored with (WebP first: imports encode WebP). */
   const download = async (sceneId: Id, assetId: Id): Promise<Blob | null> => {
@@ -117,7 +123,11 @@ export function createSupabaseAssetStore(client: AtlasClient, ownerId: string): 
         upsert: true,
         cacheControl: "31536000",
       })
-      if (error) throw storageError(error, "upload image")
+      if (error) {
+        // The path is ours and well-formed (checked above): a refusal means the account's image quota.
+        if (storageStatus(error) === 403) throw new NetError("quota_exceeded", "upload image: Storage refused the image; the account's image quota (300 images / 1 GB) may be used up", { cause: error })
+        throw storageError(error, "upload image")
+      }
       const full: AssetMeta = { id, kind: "image", name: meta.name, mime: meta.mime, width: meta.width, height: meta.height, bytes: blob.size }
       return full
     },
@@ -153,7 +163,12 @@ export function createSupabaseAssetStore(client: AtlasClient, ownerId: string): 
       checkChunk(sessionId, userId, levelId, ci, cj)
       // No CDN caching: a chunk is replaced as its player explores (clients also bust the cache).
       const { error } = await tiles().upload(chunkPath(sessionId, userId, levelId, ci, cj), blob, { contentType: blob.type || "image/webp", upsert: true, cacheControl: "0" })
-      if (error) throw storageError(error, "upload tile chunk")
+      if (error) {
+        if (storageStatus(error) === 403) {
+          throw new NetError("permission_denied", "upload tile chunk: refused (the player may have left the session, or its tile storage is full)", { cause: error })
+        }
+        throw storageError(error, "upload tile chunk")
+      }
     },
     async deleteTileChunks(sessionId, userId, levelId, chunks) {
       for (const c of chunks) checkChunk(sessionId, userId, levelId, c.ci, c.cj)
@@ -164,53 +179,35 @@ export function createSupabaseAssetStore(client: AtlasClient, ownerId: string): 
     async removeSessionTiles(sessionId) {
       return removeSessionTiles(client, sessionId)
     },
-    async publishTiles(sessionId, levelId, list) {
-      if (!UUID_RE.test(sessionId)) throw new NetError("invalid_argument", "invalid session id")
-      checkAssetId("level", levelId)
-      const todo = list.filter((t) => !published.has(publishKey(tilePath(sessionId, levelId, t.cell), t.blob)))
-      await runLimited(todo, UPLOAD_CONCURRENCY, async (t) => {
-        const path = tilePath(sessionId, levelId, t.cell)
-        // Short cache: a re-cut tile replaces the object under the same path.
-        const { error } = await tiles().upload(path, t.blob, { contentType: t.blob.type || "image/webp", upsert: true, cacheControl: "60" })
-        if (error) throw storageError(error, "upload tile")
-        published.add(publishKey(path, t.blob))
-      })
-    },
-    async grantTiles(sessionId, hostEpoch, userId, levelId, cells) {
-      if (!UUID_RE.test(sessionId) || !UUID_RE.test(userId)) throw new NetError("invalid_argument", "invalid session or user id")
-      checkAssetId("level", levelId)
-      const rpc = client as unknown as RpcClient
-      for (let k = 0; k < cells.length; k += GRANT_BATCH) {
-        const batch = cells.slice(k, k + GRANT_BATCH).map((c) => [c.i, c.j])
-        const { error } = await rpc.rpc("grant_tiles", {
-          p_session_id: sessionId,
-          p_host_epoch: hostEpoch,
-          p_user_id: userId,
-          p_level_id: levelId,
-          p_cells: batch,
-        })
-        if (error) throw toNetError(error)
+    async deleteSceneImages(sceneId) {
+      checkAssetId("scene", sceneId)
+      let removed = 0
+      // Removing shifts the listing: list from the start again until the folder is empty.
+      for (;;) {
+        const names = [...(await listFolder(`${ownerId}/${sceneId}`)).keys()].slice(0, PAGE)
+        if (names.length === 0) return removed
+        removed += await removeAll(names)
+        if (names.length < PAGE) return removed
       }
     },
+    async sweepUnreferencedImages(sweep = {}) {
+      const minAgeMs = Math.max(0, sweep.minAgeMs ?? SWEEP_MIN_AGE_MS)
+      const { data, error } = await client.rpc("unreferenced_scene_assets", { p_min_age: `${Math.round(minAgeMs / 1000)} seconds` })
+      if (error) throw toNetError(error)
+      const keep = opts.keepDocIds ? await opts.keepDocIds().catch(() => new Set<string>()) : new Set<string>()
+      const names = (Array.isArray(data) ? data : [])
+        .filter((n): n is string => typeof n === "string" && n.startsWith(`${ownerId}/`))
+        .filter((n) => !keep.has(n.split("/")[1]))
+      if (names.length === 0) return { removed: 0, bytes: 0 }
+      // Sizes come from the folder listings (the RPC names objects only).
+      let bytes = 0
+      const wanted = new Set(names)
+      for (const folder of new Set(names.map((n) => n.slice(0, n.lastIndexOf("/"))))) {
+        for (const [name, size] of await listFolder(folder)) if (wanted.has(name)) bytes += size
+      }
+      return { removed: await removeAll(names), bytes }
+    },
   }
-}
-
-/**
- * Download one granted tile; null when it is not published or not granted (400/403/404).
- *
- * Supabase's CDN caches private objects per requester for the object's cache time (tiles: 60 s), so a
- * player keeps seeing a tile they already downloaded for up to a minute after a revoke (they have its
- * pixels anyway). Pass `nonce` to bypass the cache, e.g. when retrying a tile that was not granted yet.
- */
-export async function downloadTile(client: AtlasClient, sessionId: string, levelId: Id, cell: Cell, signal?: AbortSignal, nonce?: string): Promise<Blob | null> {
-  const { data, error } = await client.storage
-    .from(TILE_BUCKET)
-    .download(tilePath(sessionId, levelId, cell), nonce ? { cacheNonce: nonce } : {}, signal ? { signal } : undefined)
-  if (error) {
-    if (isMissing(error)) return null
-    throw storageError(error, "download tile")
-  }
-  return data
 }
 
 /**
@@ -228,21 +225,8 @@ export async function downloadChunk(client: AtlasClient, sessionId: string, user
 }
 
 /**
- * Remove a player's (or, with userId null, everyone's) tile grants, e.g. after a fog reset — fenced by
- * the host epoch like grant_tiles. Returns the number of grants removed.
- */
-export async function revokeTiles(client: AtlasClient, sessionId: string, hostEpoch: number, userId: string | null = null, levelId: Id | null = null): Promise<number> {
-  if (!UUID_RE.test(sessionId) || (userId !== null && !UUID_RE.test(userId))) throw new NetError("invalid_argument", "invalid session or user id")
-  if (levelId !== null) checkAssetId("level", levelId)
-  const rpc = client as unknown as RpcClient
-  const { data, error } = await rpc.rpc("revoke_tiles", { p_session_id: sessionId, p_host_epoch: hostEpoch, p_user_id: userId, p_level_id: levelId })
-  if (error) throw toNetError(error)
-  return typeof data === "number" ? data : 0
-}
-
-/**
- * DM cleanup: delete every tile object of a session (its players' chunks, and per-cell tiles of the
- * superseded layout), e.g. after ending it. Returns the number of objects removed.
+ * DM cleanup: delete every tile object of a session (its players' chunks, and leftovers of the old
+ * per-cell layout), e.g. after ending it. Returns the number of objects removed.
  */
 export async function removeSessionTiles(client: AtlasClient, sessionId: string): Promise<number> {
   if (!UUID_RE.test(sessionId)) throw new NetError("invalid_argument", "invalid session id")

@@ -9,6 +9,7 @@ import { SIZE_FOOTPRINT } from "@/core/scene/defaults"
 import { tokenGroundY } from "@/core/scene/queries"
 import type { Id, SceneLike, Token } from "@/core/scene/types"
 
+import { trackShared } from "../engine/sharedResources"
 import { hexToLinear, type RGB } from "./color"
 import { sharedGeometry } from "./shared"
 import { writePrism, writeQuadOutward } from "./shapes"
@@ -50,7 +51,7 @@ export function tokenCapGeometry(): THREE.BufferGeometry {
     g = new THREE.CircleGeometry(0.5, 48).rotateX(-Math.PI / 2)
     g.userData.shared = true
     g.name = "token:cap"
-    capCache = g
+    capCache = trackShared(g)
   }
   return g
 }
@@ -63,7 +64,7 @@ export function tokenQuadGeometry(): THREE.BufferGeometry {
     g = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2)
     g.userData.shared = true
     g.name = "token:quad"
-    quadCache = g
+    quadCache = trackShared(g)
   }
   return g
 }

@@ -8,17 +8,23 @@
  * them honour fog; editor overlays use unlit three.js materials. Nothing here adds THREE.Light,
  * scene.fog, shadow maps or clipping planes.
  *
- * Frame (ARCHITECTURE §10): low / medium render straight to the canvas (tone mapping in the materials,
- * context MSAA). High / ultra render the world into the post pipeline's HDR MSAA target, run AO (ultra),
- * bloom and the composite onto the canvas, then draw the OVERLAY layer (outlines, previews, rulers, token
- * rings) on top, depth-tested against the composited scene depth and untouched by tone mapping.
+ * Frame (ARCHITECTURE §10): low renders straight to the canvas (tone mapping in the materials, no MSAA).
+ * Medium / high / ultra render the world into the post pipeline's HDR MSAA target, run AO (ultra), bloom
+ * (high / ultra) and the composite onto the canvas, then draw the OVERLAY layer (outlines, previews,
+ * rulers, token rings; on medium also flames and glows, which have no bloom to feed) on top,
+ * depth-tested against the composited scene depth and untouched by tone mapping. The canvas itself never
+ * has MSAA (a context attribute is fixed at creation; render targets follow the tier at runtime), so
+ * flat overlay meshes anti-alias their own edges (materials/edgeAAMaterial).
+ *
+ * Adaptive tier steps compile the next tier's programs in the background and switch once they are ready
+ * (requestQuality); the user's setQuality applies at once.
  */
 import * as THREE from "three"
 
 import { buildOcclusionWorld } from "@/core/occlusion"
 import type { DirtyRegion, OcclusionWorld } from "@/core/occlusion/types"
 import { effectiveFloorRects, lightLevelId, sortedLevels, tokenGroundY, type EffectiveFloor } from "@/core/scene/queries"
-import type { Id, SceneLike, Vec3 } from "@/core/scene/types"
+import type { Id, Rect, SceneLike, Vec3 } from "@/core/scene/types"
 
 import { BuildContext, buildBucket, buildLevel, BUCKETS } from "../builders"
 import { DOOR_ANIMATION_SECONDS } from "../builders/doors"
@@ -33,9 +39,9 @@ import type { CameraController } from "../cameras/types"
 import type { Engine, EngineOptions, FrameStats, OverlayState, PickOptions, PickResult, Quality, SceneChange, ViewState } from "../contracts"
 import { LAYER, type LightingSystem } from "../internal"
 import { createLightingSystem } from "../lighting/system"
-import { precompileScene } from "../materials/util"
+import { precompileScene, TIER_DEFINE } from "../materials/util"
 import { DIRECT_EMISSIVE, POST_SETTINGS, PostPipeline, type PostSettings } from "../post/pipeline"
-import type { ObjectMeshRef } from "../overlays/highlight"
+import { disposeCachedEdges, type ObjectMeshRef } from "../overlays/highlight"
 import { OverlayManager } from "../overlays/manager"
 import { Picker } from "../picking/picker"
 import { DEFAULT_VIEW, MAX_TILT } from "./defaults"
@@ -45,8 +51,20 @@ import { computeLevelPlan, effectiveActiveLevelId, type LevelPlanEntry } from ".
 import { LevelView, type LevelMaterials, type SharedMaterials } from "./levels"
 import { pickInitialQuality } from "./autoQuality"
 import { BackdropManager, type BackdropOptions } from "./backdrops"
-import { AdaptiveQuality, computePixelRatio, FrameTimeWindow, intervalFrameCost, MAX_PIXEL_RATIO, PIXEL_BUDGET } from "./quality"
+import { releaseSharedGpuResources, sharedGpuGeometries } from "./sharedResources"
+import { AdaptiveQuality, computePixelRatio, FrameTimeWindow, intervalFrameCost, MAX_PIXEL_RATIO, MISSED_VSYNC_MS, PIXEL_BUDGET } from "./quality"
 import { TokenLayer } from "./tokens"
+
+/** Longest wait for a background tier compile before switching anyway (compiling synchronously then). */
+export const TIER_COMPILE_DEADLINE_MS = 1500
+
+interface PendingQuality {
+  q: Quality
+  compiled: boolean
+  deadline: number
+  /** Dispose the compile clones (after the committed tier has drawn once). */
+  release: () => void
+}
 
 const LAYERS_ALL = (1 << LAYER.VISUAL) | (1 << LAYER.OVERLAY)
 const LAYERS_WORLD = 1 << LAYER.VISUAL
@@ -92,6 +110,9 @@ export class AtlasEngine implements Engine {
   private follow: { id: Id; key: string } | null = null
 
   private quality: Quality
+  /** Adaptive step whose programs are compiling in the background (see requestQuality). */
+  private pendingQuality: PendingQuality | null = null
+  private readonly releaseAfterFrame: (() => void)[] = []
   private qualityFrozen = false
   private readonly adaptive: AdaptiveQuality
   private readonly frameWindow = new FrameTimeWindow(2000)
@@ -115,10 +136,13 @@ export class AtlasEngine implements Engine {
     this.quality = opts.quality ?? "high"
     this.adaptive = new AdaptiveQuality(this.quality)
 
-    // MSAA is a context attribute: fixed at creation (medium/high on, low off).
+    // No context MSAA on any tier: a context attribute is fixed at creation, so it could not follow
+    // adaptive tier changes (low would keep paying for it; a context created at low would have none on
+    // medium). MSAA comes only from the post pipeline's scene target (medium and up). The depth buffer
+    // stays: the overlay pass depth-tests against the composite's gl_FragDepth.
     this.renderer = new THREE.WebGLRenderer({
       canvas,
-      antialias: this.quality !== "low",
+      antialias: false,
       alpha: false,
       stencil: false,
       depth: true,
@@ -291,6 +315,8 @@ export class AtlasEngine implements Engine {
       let lv = this.levels.get(level.id)
       if (!lv) {
         lv = new LevelView(level.id, this.createLevelMaterials(level.id), this.shared)
+        lv.setDoorMarkersVisible(this.view.camera === "topdown")
+        lv.setEmissiveLayer(this.emissiveLayer())
         this.levels.set(level.id, lv)
         this.worldRoot.add(lv.group)
       }
@@ -360,7 +386,7 @@ export class AtlasEngine implements Engine {
     this.backdrops.set(levelId, image, rect, opts)
   }
 
-  updateLevelImage(levelId: Id, dirty?: { x: number; z: number; w: number; d: number }): void {
+  updateLevelImage(levelId: Id, dirty?: Rect | readonly Rect[]): void {
     this.backdrops.update(levelId, dirty)
   }
 
@@ -398,7 +424,11 @@ export class AtlasEngine implements Engine {
     const next: ViewState = { ...prev, ...partial }
     next.tilt = Math.min(MAX_TILT, Math.max(0, next.tilt))
     this.view = next
-    if (next.camera !== prev.camera) this.switchCamera(next.camera === "topdown" ? this.topdown : this.orbit)
+    if (next.camera !== prev.camera) {
+      this.switchCamera(next.camera === "topdown" ? this.topdown : this.orbit)
+      // Door markers make doors in walls running up / down the screen visible and pickable from above.
+      for (const lv of this.levels.values()) lv.setDoorMarkersVisible(next.camera === "topdown")
+    }
     this.topdown.tilt = next.tilt
     this.topdown.keyboardPan = next.mode !== "editor"
     this.replan()
@@ -456,8 +486,11 @@ export class AtlasEngine implements Engine {
   }
 
   /**
-   * Player camera follow: when the selected token's confirmed position changes, glide to it.
-   * Selecting a token does not move the camera by itself.
+   * Camera follow: in the player and dm-play views, when the selected token's confirmed position changes,
+   * the top-down camera glides to it. The editor never follows: its drags and inspector edits move the
+   * document itself, and gliding under the cursor would feed back into the drag (the token overshoots).
+   * Selecting a token does not move the camera by itself. `follow` is tracked in every mode so switching
+   * to a play view does not trigger a stale glide.
    */
   private checkFollow(): void {
     const scene = this.scene
@@ -469,7 +502,7 @@ export class AtlasEngine implements Engine {
     }
     const t = scene.tokens[id]
     const key = `${t.levelId}|${t.position.x}|${t.position.z}`
-    if (this.follow && this.follow.id === id && this.follow.key !== key && this.controller === this.topdown && Object.hasOwn(scene.levels, t.levelId)) {
+    if (this.follow && this.follow.id === id && this.follow.key !== key && this.view.mode !== "editor" && this.controller === this.topdown && Object.hasOwn(scene.levels, t.levelId)) {
       this.topdown.setTarget({ x: t.position.x, y: tokenGroundY(scene, t), z: t.position.z }, false)
     }
     this.follow = { id, key }
@@ -480,16 +513,28 @@ export class AtlasEngine implements Engine {
   // -------------------------------------------------------------------------
 
   setQuality(q: Quality): void {
+    // The user's choice applies at once (a deliberate one-time recompile); a pending adaptive step is dropped.
+    this.cancelPendingQuality()
     this.adaptive.setCeiling(q)
     // Image resolution follows the ceiling only (adaptive steps never re-upload map images).
     this.backdrops.setQuality(q)
     this.applyQuality(q)
   }
 
+  getQualityCeiling(): Quality {
+    return this.adaptive.ceiling
+  }
+
   async benchmarkQuality(): Promise<Quality> {
     const q = await pickInitialQuality({ cssWidth: this.canvas.clientWidth || undefined, cssHeight: this.canvas.clientHeight || undefined })
     if (!this.disposed) this.setQuality(q)
     return q
+  }
+
+  private cancelPendingQuality(): void {
+    const p = this.pendingQuality
+    this.pendingQuality = null
+    p?.release()
   }
 
   private applyQuality(q: Quality): void {
@@ -501,6 +546,21 @@ export class AtlasEngine implements Engine {
     // Tier defines / post targets change the programs: compile them again up front.
     this.precompiled = false
     this.precompile()
+  }
+
+  /**
+   * Layer of flames and glow sprites: the overlay pass (onto the canvas after the composite, blended in
+   * display space as on the direct path) when the post pipeline has no bloom to feed (medium), else the
+   * world pass. Tone mapping in the composite would otherwise wash flames out and flatten their glow.
+   */
+  private emissiveLayer(): number {
+    const s = this.post?.current
+    return s && !s.bloom ? LAYER.OVERLAY : LAYER.VISUAL
+  }
+
+  private applyEmissiveLayer(): void {
+    const layer = this.emissiveLayer()
+    for (const lv of this.levels.values()) lv.setEmissiveLayer(layer)
   }
 
   /** Post pipeline and emissive parameters of a tier. */
@@ -517,6 +577,7 @@ export class AtlasEngine implements Engine {
       this.post = null
       this.lighting.setRenderParams({ hdr: false, emissive: DIRECT_EMISSIVE.emissive, glow: DIRECT_EMISSIVE.glow })
     }
+    this.applyEmissiveLayer()
   }
 
   private drawingBufferSize(): THREE.Vector2 | null {
@@ -536,6 +597,10 @@ export class AtlasEngine implements Engine {
     const dpr = window.devicePixelRatio || 1
     this.lastDpr = dpr
     const pr = computePixelRatio(w, h, dpr, PIXEL_BUDGET[this.quality], MAX_PIXEL_RATIO[this.quality])
+    if (w !== this.cssSize.w || h !== this.cssSize.h) {
+      // A tier that failed at the old size may fit now (and the other way round: fresh samples).
+      this.adaptive.clearFailedSteps()
+    }
     if (pr !== this.pixelRatio || w !== this.cssSize.w || h !== this.cssSize.h) {
       this.pixelRatio = pr
       this.cssSize = { w, h }
@@ -590,6 +655,7 @@ export class AtlasEngine implements Engine {
     for (const lv of this.levels.values()) lv.animateFlames(timeSec, flameFlicker)
     this.overlays.update()
 
+    this.commitPendingQuality(now)
     const camera = this.controller.camera
     const ls = this.lighting.beforeRender(this.renderer, camera, timeSec)
     // Fog-aware grid (explored cells only in player fog mode) and its blending for the target.
@@ -605,14 +671,18 @@ export class AtlasEngine implements Engine {
     info.reset()
     this.gpuTimer.end()
     const cpuMs = performance.now() - cpu0
+    if (this.releaseAfterFrame.length > 0) for (const release of this.releaseAfterFrame.splice(0)) release()
 
     // Adaptive quality: real GPU cost when measurable, else the frame interval (steady vsync = headroom).
+    // A frame that missed vsync is never headroom: the timer excludes present / resolve time and
+    // contention (a 33 ms interval was seen with the timer reading 10.7 ms).
     if (dtMs < 250) {
       this.frameWindow.push(now, dtMs)
       const gpu = this.gpuTimer.latestMs
-      const cost = gpu !== null ? Math.max(cpuMs, gpu) : intervalFrameCost(dtMs, this.frameWindow.percentile(0.5), this.frameWindow.p95())
+      let cost = gpu !== null ? Math.max(cpuMs, gpu) : intervalFrameCost(dtMs, this.frameWindow.percentile(0.5), this.frameWindow.p95())
+      if (gpu !== null && dtMs > Math.max(MISSED_VSYNC_MS, this.frameWindow.percentile(0.5) * 1.25)) cost = Math.max(cost, this.adaptive.upThresholdMs)
       const step = this.qualityFrozen ? null : this.adaptive.push(now, cost)
-      if (step) this.applyQuality(step)
+      if (step) this.requestQuality(step, now)
     }
     if (this.frameListeners.size > 0) {
       const stats: FrameStats = {
@@ -668,12 +738,13 @@ export class AtlasEngine implements Engine {
     for (const lv of this.levels.values()) {
       for (const d of lv.doorLeaves()) {
         const id = d.leaf.doorId
+        const obj = Object.hasOwn(scene.objects, id) ? scene.objects[id] : undefined
+        const door = obj && obj.type === "door" ? obj : undefined
         let t = this.doorT.get(id)
         if (this.doorFrame.get(id) !== this.frameNo) {
           // Advance each door once per frame (double doors have two leaves).
           this.doorFrame.set(id, this.frameNo)
-          const door = Object.hasOwn(scene.objects, id) ? scene.objects[id] : undefined
-          const target = door && door.type === "door" && door.state === "open" ? 1 : 0
+          const target = door && door.state === "open" ? 1 : 0
           if (t === undefined) t = target
           else if (t !== target) {
             const step = dt / DOOR_ANIMATION_SECONDS
@@ -682,6 +753,7 @@ export class AtlasEngine implements Engine {
           this.doorT.set(id, t)
         }
         LevelView.applyDoor(d, t ?? 0)
+        lv.applyDoorMarker(d, door?.state ?? "closed", t ?? 0)
       }
     }
   }
@@ -730,38 +802,128 @@ export class AtlasEngine implements Engine {
   private precompile(): void {
     if (this.precompiled || this.levels.size === 0) return
     this.precompiled = true
-    const holder = new THREE.Object3D()
+    const holders = this.compileHolders((m) => m, this.quality)
+    if (!holders) return
+    for (const h of holders) {
+      void this.compileHolderFor(h.holder, h.canvas ? null : (this.post?.target ?? null)).then(() => {
+        for (const c of h.holder.children) if ((c as THREE.InstancedMesh).isInstancedMesh) (c as THREE.InstancedMesh).dispose()
+      })
+    }
+  }
+
+  /**
+   * One mesh per material variant a frame of tier `q` can draw (level opaque / ghost / ghost-depth,
+   * plain and instanced; tokens and fixture holders, plain and instanced; flames, glass, glow), each
+   * material mapped through `map` (the live ones, or clones for another tier), grouped by the target
+   * they are drawn into: the main pass (the post target on post tiers), or the canvas for flames and
+   * glows on a post tier without bloom (they are drawn in the overlay pass there). null before the
+   * first level exists.
+   */
+  private compileHolders(map: (m: THREE.Material) => THREE.Material, q: Quality): { holder: THREE.Object3D; canvas: boolean }[] | null {
+    const lv = this.levels.values().next().value as LevelView | undefined
+    if (!lv) return null
+    const settings = POST_SETTINGS[q]
+    const world = new THREE.Object3D()
+    const emissive = settings && !settings.bloom ? new THREE.Object3D() : world
     const g = tokenBaseGeometry()
-    const lv = this.levels.values().next().value as LevelView
-    const add = (m: THREE.Material, instanced: boolean) => {
+    const add = (holder: THREE.Object3D, m: THREE.Material, instanced: boolean) => {
       if (instanced) {
-        const im = new THREE.InstancedMesh(g, m, 1)
+        const im = new THREE.InstancedMesh(g, map(m), 1)
         im.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(3), 3)
         holder.add(im)
-      } else holder.add(new THREE.Mesh(g, m))
+      } else holder.add(new THREE.Mesh(g, map(m)))
     }
     const mats = lv.materials
-    add(mats.opaque, false)
-    add(mats.opaqueInstanced, true)
-    add(mats.ghost, false)
-    add(mats.ghostInstanced, true)
-    add(mats.ghostDepth, false)
-    add(mats.ghostDepthInstanced, true)
-    add(this.shared.token, false)
-    add(this.tokenInstancedMaterial, true)
-    add(this.shared.flame, true)
-    add(this.shared.glass, false)
-    if (this.shared.glow) add(this.shared.glow, true)
+    add(world, mats.opaque, false)
+    add(world, mats.opaqueInstanced, true)
+    add(world, mats.ghost, false)
+    add(world, mats.ghostInstanced, true)
+    add(world, mats.ghostDepth, false)
+    add(world, mats.ghostDepthInstanced, true)
+    // Fixture holders draw the token material both merged and instanced.
+    add(world, this.shared.token, false)
+    add(world, this.shared.token, true)
+    add(world, this.tokenInstancedMaterial, true)
+    add(world, this.shared.glass, false)
+    add(emissive, this.shared.flame, true)
+    add(emissive, this.shared.flame, false)
+    if (this.shared.glow) add(emissive, this.shared.glow, true)
+    const out = [{ holder: world, canvas: settings === null }]
+    if (emissive !== world) out.push({ holder: emissive, canvas: true })
+    return out
+  }
+
+  /** Compile a holder's programs for a main-pass target (null = the canvas). */
+  private compileHolderFor(holder: THREE.Object3D, target: THREE.WebGLRenderTarget | null): Promise<void> {
     // Programs depend on the target (tone mapping / output transform): compile for the one the main pass uses.
     const r = this.renderer as Partial<THREE.WebGLRenderer>
     const prev = r.getRenderTarget?.call(this.renderer) ?? null
-    const target = this.post?.target ?? null
     if (target) r.setRenderTarget?.call(this.renderer, target)
-    const done = precompileScene(this.renderer, holder, this.controller.camera, this.root)
-    if (target) r.setRenderTarget?.call(this.renderer, prev)
-    void done.then(() => {
-      for (const c of holder.children) if ((c as THREE.InstancedMesh).isInstancedMesh) (c as THREE.InstancedMesh).dispose()
+    try {
+      return precompileScene(this.renderer, holder, this.controller.camera, this.root)
+    } finally {
+      if (target) r.setRenderTarget?.call(this.renderer, prev)
+    }
+  }
+
+  /**
+   * Adaptive tier step, in two phases (no shader-compile stall mid-game): the next tier's programs are
+   * compiled in the background from clones of every material variant with that tier's AT_TIER define
+   * (KHR_parallel_shader_compile through compileAsync), then renderFrame commits the tier once they are
+   * ready, or after TIER_COMPILE_DEADLINE_MS. three's program cache hands the live materials the
+   * precompiled programs when their defines switch. A newer request replaces a pending one.
+   */
+  private requestQuality(q: Quality, now: number): void {
+    const pending = this.pendingQuality
+    if (pending) {
+      if (pending.q === q) return
+      this.pendingQuality = null
+      pending.release()
+    }
+    if (q === this.quality) return
+    const define = String(TIER_DEFINE[q])
+    const clones: THREE.Material[] = []
+    const holders = this.compileHolders((m) => {
+      const c = m.clone()
+      const sm = c as THREE.ShaderMaterial
+      if (sm.defines && "AT_TIER" in sm.defines) sm.defines = { ...sm.defines, AT_TIER: define }
+      clones.push(c)
+      return c
+    }, q)
+    if (!holders) {
+      this.applyQuality(q)
+      return
+    }
+    // Any off-screen target gives the programs of a post tier (linear output, no tone mapping).
+    const scratch = POST_SETTINGS[q] !== null && !this.post?.target ? new THREE.WebGLRenderTarget(1, 1) : null
+    const offscreen = this.post?.target ?? scratch
+    const next: PendingQuality = {
+      q,
+      compiled: false,
+      deadline: now + TIER_COMPILE_DEADLINE_MS,
+      release: () => {
+        for (const h of holders) for (const c of h.holder.children) if ((c as THREE.InstancedMesh).isInstancedMesh) (c as THREE.InstancedMesh).dispose()
+        for (const c of clones) c.dispose()
+        scratch?.dispose()
+      },
+    }
+    this.pendingQuality = next
+    void Promise.all(holders.map((h) => this.compileHolderFor(h.holder, h.canvas ? null : offscreen))).then(() => {
+      next.compiled = true
     })
+  }
+
+  /** Commit a pending adaptive step when its programs are ready (or its deadline passed). */
+  private commitPendingQuality(now: number): void {
+    const p = this.pendingQuality
+    if (!p || (!p.compiled && now < p.deadline)) return
+    this.pendingQuality = null
+    this.applyQuality(p.q)
+    if (this.sizeDirty) this.applySize()
+    // Samples taken while the old tier kept drawing must not decide the next step.
+    this.adaptive.reset()
+    // The clones keep the precompiled programs alive until the live materials have used them.
+    this.releaseAfterFrame.push(p.release)
   }
 
   // -------------------------------------------------------------------------
@@ -844,6 +1006,7 @@ export class AtlasEngine implements Engine {
     const size = this.drawingBufferSize()
     if (size) this.post.setSize(size.x, size.y)
     this.lighting.setRenderParams({ hdr: true, emissive: next.emissive, glow: next.glow })
+    this.applyEmissiveLayer()
   }
 
   /**
@@ -917,6 +1080,15 @@ export class AtlasEngine implements Engine {
 
   // -------------------------------------------------------------------------
 
+  /**
+   * Free everything. Module-level singletons (placeholder textures, shared unit geometries) are released
+   * too (engine/sharedResources): three leaves a renderer-capturing "dispose" listener on each, which
+   * would keep this renderer and its WebGL context alive; other live engines simply re-upload them.
+   * When the canvas is already detached (a real unmount: React removes the DOM before effect cleanups),
+   * the context is force-lost so its drawing buffer is freed at once instead of at GC. Not when the
+   * canvas is still attached: StrictMode / HMR re-create an engine on the same canvas, which shares the
+   * same GL context, and losing it would leave that engine without WebGL.
+   */
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
@@ -941,6 +1113,11 @@ export class AtlasEngine implements Engine {
     this.lighting.dispose()
     this.gpuTimer.dispose()
     this.frameListeners.clear()
+    this.cancelPendingQuality()
+    for (const release of this.releaseAfterFrame.splice(0)) release()
+    for (const g of sharedGpuGeometries()) disposeCachedEdges(g)
+    releaseSharedGpuResources()
     this.renderer.dispose()
+    if (!this.canvas.isConnected) this.renderer.forceContextLoss()
   }
 }

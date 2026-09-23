@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest"
 import { createWall } from "@/core/scene/factory"
 import { sampleById } from "@/core/scene/samples"
 import type { Scene } from "@/core/scene/types"
-import { deltaFromPatches, reduceDm } from "@/core/session"
+import { deltaFromPatches, reduceDm, sceneWithTokenAt } from "@/core/session"
 import { createGameState, type SceneDelta } from "@/core/session/state"
 import type { GameState } from "@/core/session/types"
 import { createVisionEngine } from "@/core/vision"
@@ -138,6 +138,66 @@ describe("vision clients", () => {
     await expect(client.compute([brunhild.id], 1)).rejects.toThrow(/boom/)
     expect(failures).toHaveLength(1)
     expect(fake.terminated).toBe(true)
+  })
+
+  it("a probe evaluates a step without changing the client's revision (worker and in-thread)", async () => {
+    const { scene, brunhild, aldric } = lantern()
+    const state = createGameState({ sessionId: "s", roomCode: "R", scene })
+    const step = sceneWithTokenAt(state.scene, aldric.id, { cell: { i: 23, j: 11 }, levelId: aldric.levelId })
+    const fresh = createVisionEngine(step)
+    const expected = fresh.compute([fresh.viewerFor(step.tokens[aldric.id])])
+    for (const client of [createWorkerVisionClient(new FakeWorker()), createInThreadVisionClient()]) {
+      await client.setScene(state.scene, 7)
+      const before = await client.compute([aldric.id, brunhild.id], 7)
+      const probe = await client.probe(step, { tokens: [aldric.id] }, [[aldric.id], [aldric.id, brunhild.id]])
+      expect(probe.stateSeq).toBe(7)
+      expect(probe.results).toHaveLength(2)
+      // The step's visibility, as a fresh engine on the step scene sees it.
+      expect(probe.results[0]).toEqual(expected)
+      // Afterwards everything is as before the probe: same tag, same result.
+      const after = await client.compute([aldric.id, brunhild.id], 7)
+      expect(after.stateSeq).toBe(7)
+      expect(after.result).toEqual(before.result)
+      expect(client.pendingProbes).toBe(0)
+      client.dispose()
+    }
+  })
+
+  it("probes wait for idle foreground work and run one at a time", async () => {
+    const { scene, aldric } = lantern()
+    const fake = new FakeWorker()
+    const ops: string[] = []
+    const post = fake.postMessage.bind(fake)
+    fake.postMessage = (message: unknown) => {
+      ops.push((message as { op: string }).op)
+      post(message)
+    }
+    const client = createWorkerVisionClient(fake)
+    const state = createGameState({ sessionId: "s", roomCode: "R", scene })
+    const step = (i: number) => sceneWithTokenAt(state.scene, aldric.id, { cell: { i, j: 11 }, levelId: aldric.levelId })
+    void client.setScene(state.scene, 1)
+    const c1 = client.compute([aldric.id], 1)
+    const p1 = client.probe(step(22), { tokens: [aldric.id] }, [[aldric.id]])
+    const p2 = client.probe(step(23), { tokens: [aldric.id] }, [[aldric.id]])
+    // Queued behind the foreground calls: nothing posted for them yet.
+    expect(ops).toEqual(["setScene", "compute"])
+    expect(client.pendingProbes).toBe(2)
+    await c1
+    await Promise.resolve()
+    // Foreground idle: the first probe is posted, the second waits for it.
+    expect(ops).toEqual(["setScene", "compute", "probe"])
+    // A foreground call now waits for at most that one probe; the second probe goes after it.
+    const c2 = client.compute([aldric.id], 1)
+    expect(ops).toEqual(["setScene", "compute", "probe", "compute"])
+    await Promise.all([p1, p2, c2])
+    expect(ops).toEqual(["setScene", "compute", "probe", "compute", "probe"])
+    expect(client.pendingProbes).toBe(0)
+    // Disposing rejects queued probes.
+    const busy = client.compute([aldric.id], 1).catch(() => "rejected")
+    const queued = client.probe(step(24), { tokens: [aldric.id] }, [[aldric.id]])
+    client.dispose()
+    await expect(queued).rejects.toThrow(/disposed/)
+    expect(await busy).toBe("rejected")
   })
 
   it("in-thread errors reject the call without breaking later ones", async () => {

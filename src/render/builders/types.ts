@@ -65,6 +65,8 @@ export interface DoorLeafBuild {
   slot: "world"
   leaf: DoorLeaf
   geometry: THREE.BufferGeometry
+  /** Top-down marker in the same pivot frame (builders/doors.ts doorMarkerGeometry), null if degenerate. */
+  marker: THREE.BufferGeometry | null
 }
 
 export type MeshBuild = MergedBuild | InstancedBuild | DoorLeafBuild

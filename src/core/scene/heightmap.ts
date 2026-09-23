@@ -90,8 +90,11 @@ export function getSample(hm: Heightmap, sx: number, sz: number): number {
 /**
  * Terrain height at world x,z (relative to level elevation), interpolated on the triangle
  * split described at the top of this file. 0 outside the lattice or with no heightmap.
+ * With `grid`, samples beyond the grid's lattice read 0 even where a boundary chunk still holds
+ * padding values (e.g. after the grid shrank), exactly like occlusion's TerrainSampler; every
+ * scene-level caller (levelGround) passes it.
  */
-export function sampleHeight(hm: Heightmap | null, cellSize: number, x: number, z: number): number {
+export function sampleHeight(hm: Heightmap | null, cellSize: number, x: number, z: number, grid?: Pick<GridSettings, "width" | "depth">): number {
   if (!hm) return 0
   const s = sampleSpacing(cellSize, hm.resolution)
   const fx = x / s
@@ -101,14 +104,57 @@ export function sampleHeight(hm: Heightmap | null, cellSize: number, x: number, 
   const sz = Math.floor(fz)
   const tx = fx - sx
   const tz = fz - sz
-  const h00 = getSample(hm, sx, sz)
-  const h11 = getSample(hm, sx + 1, sz + 1)
+  const maxSx = grid ? grid.width * hm.resolution : Infinity
+  const maxSz = grid ? grid.depth * hm.resolution : Infinity
+  const at = (i: number, j: number) => (i > maxSx || j > maxSz ? 0 : getSample(hm, i, j))
+  const h00 = at(sx, sz)
+  const h11 = at(sx + 1, sz + 1)
   if (tx >= tz) {
-    const h10 = getSample(hm, sx + 1, sz)
+    const h10 = at(sx + 1, sz)
     return h00 + tx * (h10 - h00) + tz * (h11 - h10)
   }
-  const h01 = getSample(hm, sx, sz + 1)
+  const h01 = at(sx, sz + 1)
   return h00 + tz * (h01 - h00) + tx * (h11 - h01)
+}
+
+/**
+ * The heightmap restricted to a grid's lattice: chunks starting beyond it are dropped and the samples
+ * of boundary chunks beyond it (padding) are zeroed; chunks left all-zero are dropped. Returns `hm`
+ * itself when nothing changes. Use it whenever the grid shrinks, so stale padding can neither be read
+ * nor come back when the grid grows again.
+ */
+export function cropHeightmapToGrid(hm: Heightmap, grid: Pick<GridSettings, "width" | "depth">): Heightmap {
+  const n = chunkSamples(hm.resolution)
+  const { samplesX, samplesZ } = sampleCounts(grid, hm.resolution)
+  let chunks: Record<string, string> | null = null
+  for (const key of Object.keys(hm.chunks)) {
+    const { ci, cj } = parseChunkKey(key)
+    const x0 = ci * n
+    const z0 = cj * n
+    if (x0 + n <= samplesX && z0 + n <= samplesZ) continue
+    const src = decodeChunk(hm.chunks[key], hm.resolution)
+    let changed = x0 >= samplesX || z0 >= samplesZ
+    let nonZero = false
+    const out = new Float32Array(n * n)
+    if (!changed) {
+      for (let lz = 0; lz < n; lz++) {
+        for (let lx = 0; lx < n; lx++) {
+          const v = src[lz * n + lx]
+          if (x0 + lx >= samplesX || z0 + lz >= samplesZ) {
+            if (v !== 0) changed = true
+            continue
+          }
+          out[lz * n + lx] = v
+          if (v !== 0) nonZero = true
+        }
+      }
+    }
+    if (!changed) continue
+    chunks ??= { ...hm.chunks }
+    if (nonZero) chunks[key] = encodeChunk(out)
+    else delete chunks[key]
+  }
+  return chunks ? { resolution: hm.resolution, chunks } : hm
 }
 
 /** Dense copy of the whole lattice (samplesX × samplesZ, row-major by z). */

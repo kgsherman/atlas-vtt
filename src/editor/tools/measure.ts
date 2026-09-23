@@ -6,7 +6,7 @@
  * clears it.
  */
 import { cellCenter, cellOf, pathDistance } from "@/core/grid/grid"
-import { groundHeightAt } from "@/core/scene/queries"
+import { groundIndex } from "@/core/scene/queries"
 import type { Cell, GridSettings, Id, Vec2 } from "@/core/scene/types"
 import type { RulerOverlay } from "@/render/contracts"
 
@@ -160,9 +160,10 @@ export function createMeasureTool(deps: ToolDeps): MeasureTool {
       if (pts.length > 0 && levelId) {
         const lid = levelId
         const hasLevel = Object.hasOwn(s.scene.levels, lid)
+        const g = hasLevel ? groundIndex(s.scene) : null
         value = {
           levelId: lid,
-          points: pts.map((p) => ({ x: p.x, y: hasLevel ? groundHeightAt(s.scene, lid, p) : 0, z: p.z })),
+          points: pts.map((p) => ({ x: p.x, y: g ? g.groundHeightAt(lid, p) : 0, z: p.z })),
           label: formatFeet(measureDistance(s.scene.grid, pts, free), free),
         }
       }

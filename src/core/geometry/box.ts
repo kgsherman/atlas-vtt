@@ -23,14 +23,6 @@ export interface AABB3 {
   maxZ: number
 }
 
-export function emptyAABB3(): AABB3 {
-  return { minX: Infinity, minY: Infinity, minZ: Infinity, maxX: -Infinity, maxY: -Infinity, maxZ: -Infinity }
-}
-
-export function isEmptyAABB3(b: AABB3): boolean {
-  return b.minX > b.maxX || b.minY > b.maxY || b.minZ > b.maxZ
-}
-
 export function aabb3Union(a: AABB3, b: AABB3): AABB3 {
   return {
     minX: Math.min(a.minX, b.minX),
@@ -42,18 +34,6 @@ export function aabb3Union(a: AABB3, b: AABB3): AABB3 {
   }
 }
 
-/** Closed overlap test, inflated by eps (eps may be negative to require a positive-volume overlap). */
-export function aabb3Overlaps(a: AABB3, b: AABB3, eps = 0): boolean {
-  return (
-    a.minX <= b.maxX + eps &&
-    b.minX <= a.maxX + eps &&
-    a.minY <= b.maxY + eps &&
-    b.minY <= a.maxY + eps &&
-    a.minZ <= b.maxZ + eps &&
-    b.minZ <= a.maxZ + eps
-  )
-}
-
 export function aabb3ContainsPoint(b: AABB3, p: Vec3, eps = 0): boolean {
   return (
     p.x >= b.minX - eps &&
@@ -63,19 +43,6 @@ export function aabb3ContainsPoint(b: AABB3, p: Vec3, eps = 0): boolean {
     p.z >= b.minZ - eps &&
     p.z <= b.maxZ + eps
   )
-}
-
-export function rectToAABB2(r: Rect): AABB2 {
-  return { minX: r.x, minZ: r.z, maxX: r.x + r.w, maxZ: r.z + r.d }
-}
-
-export function aabb2ToRect(b: AABB2): Rect {
-  return { x: b.minX, z: b.minZ, w: b.maxX - b.minX, d: b.maxZ - b.minZ }
-}
-
-/** Strict overlap (positive area) of two ground-plane boxes. */
-export function aabb2Overlaps(a: AABB2, b: AABB2): boolean {
-  return a.minX < b.maxX && b.minX < a.maxX && a.minZ < b.maxZ && b.minZ < a.maxZ
 }
 
 /** Expand a rect by `m` feet on every side. */

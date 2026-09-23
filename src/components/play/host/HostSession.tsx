@@ -12,7 +12,8 @@ import { useLocation } from "wouter"
 
 import { paths } from "@/app/routes"
 import { useServices } from "@/app/services"
-import { EditorContext, useConfirm } from "@/components/editor/context"
+import { useQualityChoice } from "@/components/canvas/qualityChoice"
+import { EditorContext } from "@/components/editor/context"
 import { Sidebar as EditorSidebar } from "@/components/editor/Sidebar"
 import { ToolOptionsBar } from "@/components/editor/ToolOptionsBar"
 import { ToolRail } from "@/components/editor/ToolRail"
@@ -57,7 +58,9 @@ import {
   useAdoptHostScene,
   useHostEditKeys,
   type HostEditor,
+  type HostEditorView,
 } from "./hostEditor"
+import { EndSessionDialog } from "./EndSessionDialog"
 import { HostEditorProviders } from "./HostEditorProviders"
 import {
   CameraKindSwitch,
@@ -68,6 +71,7 @@ import {
 } from "./HostOverlays"
 import { HostViewport, type PreviewInfo } from "./HostViewport"
 import { SessionPanel, type SessionTab } from "./SessionPanel"
+import { useSaveMap } from "./useSaveMap"
 
 declare global {
   interface Window {
@@ -134,7 +138,6 @@ function HostTable({ runner }: { runner: HostRunnerImpl }) {
   const snap = React.useSyncExternalStore(subscribe, getSnapshot)
   const state = snap.state
   const [, navigate] = useLocation()
-  const confirm = useConfirm()
 
   const retry = () => void runner.takeOver()
 
@@ -182,7 +185,6 @@ function HostTable({ runner }: { runner: HostRunnerImpl }) {
       snap={snap}
       state={state}
       navigate={navigate}
-      confirm={confirm}
     />
   )
 }
@@ -192,13 +194,11 @@ function HostConsole({
   snap,
   state,
   navigate,
-  confirm,
 }: {
   runner: HostRunnerImpl
   snap: ReturnType<HostRunnerImpl["getSnapshot"]>
   state: GameState
   navigate: (to: string) => void
-  confirm: ReturnType<typeof useConfirm>
 }) {
   const scene = state.scene
   const [mode, setMode] = React.useState<HostMode>("play")
@@ -227,6 +227,7 @@ function HostConsole({
     createStore<{ stats: FrameStats | null }>()(() => ({ stats: null }))
   )
   const hosting = snap.status === "hosting"
+  const quality = useQualityChoice()
   useGuardThemeHotkey(mode === "play")
 
   const activeLevelId =
@@ -253,6 +254,11 @@ function HostConsole({
     () => createHostActions(runner, () => live.get().state),
     [runner, live]
   )
+  const saveMap = useSaveMap(
+    snap.sessionId,
+    React.useCallback(() => live.get().state.scene, [live])
+  )
+  const [ending, setEnding] = React.useState(false)
   const focusToken = React.useCallback(
     (id: Id) => {
       const s = live.get()
@@ -353,6 +359,8 @@ function HostConsole({
   )
 
   // ---- edit mode -------------------------------------------------------------------------------------
+  // The DM's editor view choices (ghosted adjacent levels, hidden levels) survive leaving Edit map.
+  const [editView, setEditView] = React.useState<HostEditorView>({})
   const enterEdit = React.useCallback(() => {
     if (editor || !hosting) return
     controller.cancel()
@@ -361,14 +369,31 @@ function HostConsole({
       createHostEditor(runner, live.get().state.scene, {
         camera,
         activeLevelId,
+        view: editView,
+        onEdit: saveMap.markDirty,
       })
     )
     setMode("edit")
-  }, [editor, hosting, controller, runner, live, camera, activeLevelId])
+  }, [
+    editor,
+    hosting,
+    controller,
+    runner,
+    live,
+    camera,
+    activeLevelId,
+    editView,
+    saveMap.markDirty,
+  ])
   const exitEdit = React.useCallback(() => {
     if (!editor) return
     setLevelChoice(editor.ctx.store.getState().activeLevelId)
-    const cam = editor.ctx.store.getState().view.camera
+    const view = editor.ctx.store.getState().view
+    setEditView({
+      ghostAdjacent: view.ghostAdjacent,
+      levelVisibility: view.levelVisibility,
+    })
+    const cam = view.camera
     setCamera(cam)
     editor.dispose()
     setEditor(null)
@@ -388,7 +413,8 @@ function HostConsole({
     [runner]
   )
   useAdoptHostScene(editor, scene)
-  useHostEditKeys(editor, exitEdit)
+  const saveToLibrary = React.useCallback(() => void saveMap.save(), [saveMap])
+  useHostEditKeys(editor, exitEdit, saveToLibrary)
 
   // ---- keyboard (play mode) --------------------------------------------------------------------------
   usePlayKeys((action) => {
@@ -465,22 +491,18 @@ function HostConsole({
   }, [mode, togglePreview])
 
   // ---- session actions -------------------------------------------------------------------------------
-  const endSession = async () => {
-    const ok = await confirm({
-      title: "End the session for everyone?",
-      description:
-        "Players are disconnected and the room code stops working. The map in your library is not changed.",
-      confirmLabel: "End session",
-      destructive: true,
-    })
-    if (!ok) return
+  /** End for everyone (after saving the map to the library when `save`); false = stay on the dialog. */
+  const endSession = async (save: boolean): Promise<boolean> => {
+    if (save && !(await saveMap.save({ confirm: false }))) return false
     try {
       await runner.endSession()
       toast.success("Session ended")
+      return true
     } catch (err) {
       toast.error("Couldn't end the session", {
         description: err instanceof Error ? err.message : String(err),
       })
+      return false
     }
   }
 
@@ -504,7 +526,8 @@ function HostConsole({
         onPreview={togglePreview}
         sidebar={sidebar}
         onSidebar={setSidebar}
-        onEnd={() => void endSession()}
+        onEnd={() => setEnding(true)}
+        saveMap={saveMap}
       />
       <div className="flex min-h-0 flex-1">
         {editor ? <ToolRail /> : null}
@@ -512,6 +535,8 @@ function HostConsole({
           {editor ? <ToolOptionsBar /> : null}
           <div className="relative min-h-0 flex-1">
             <HostViewport
+              key={quality.engineKey}
+              quality={quality.quality}
               runner={runner}
               state={state}
               actions={actions}
@@ -544,24 +569,27 @@ function HostConsole({
                 </div>
               ) : (
                 <div className="pointer-events-none absolute inset-0 z-10 select-none">
-                  <div className="absolute top-3 left-3">
-                    <LevelRail
-                      scene={scene}
-                      activeLevelId={activeLevelId}
-                      onLevel={setLevelChoice}
-                    />
-                  </div>
-                  <div className="absolute inset-x-0 top-3 flex flex-col items-center gap-2">
-                    {activePreview ? (
-                      <PreviewBanner
+                  {/* One row: the banners start right of the level rail, so they never cover it. */}
+                  <div className="absolute inset-x-3 top-3 flex items-start gap-3">
+                    <div className="shrink-0">
+                      <LevelRail
                         scene={scene}
-                        info={previewInfo}
-                        tokenIds={activePreview}
-                        onChange={(ids) => previewToken(ids[0])}
-                        onExit={() => setPreview(null)}
+                        activeLevelId={activeLevelId}
+                        onLevel={setLevelChoice}
                       />
-                    ) : null}
-                    {state.movementLocked ? <LockedPill /> : null}
+                    </div>
+                    <div className="flex min-w-0 flex-1 flex-col items-center gap-2">
+                      {activePreview ? (
+                        <PreviewBanner
+                          scene={scene}
+                          info={previewInfo}
+                          tokenIds={activePreview}
+                          onChange={(ids) => previewToken(ids[0])}
+                          onExit={() => setPreview(null)}
+                        />
+                      ) : null}
+                      {state.movementLocked ? <LockedPill /> : null}
+                    </div>
                   </div>
                   {selectedId ? (
                     <div className="absolute bottom-3 left-3">
@@ -650,7 +678,24 @@ function HostConsole({
           )
         ) : null}
       </div>
-      <HostStatusBar snap={snap} frame={frame} />
+      <EndSessionDialog
+        open={ending}
+        onOpenChange={setEnding}
+        dirty={saveMap.dirty}
+        canSave={saveMap.library.status === "linked"}
+        sceneName={
+          saveMap.library.status === "linked"
+            ? saveMap.library.name
+            : scene.name
+        }
+        onEnd={endSession}
+      />
+      <HostStatusBar
+        snap={snap}
+        frame={frame}
+        quality={quality.choice}
+        onQuality={quality.setChoice}
+      />
     </div>
   )
 
@@ -665,6 +710,7 @@ function HostConsole({
           previewToken(id)
         }}
         onExit={exitEdit}
+        onSave={saveToLibrary}
       >
         {main}
       </HostEditorProviders>

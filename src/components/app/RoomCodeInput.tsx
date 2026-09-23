@@ -28,7 +28,7 @@ export function RoomCodeInput({ value, onChange, size = "default", invalid, id, 
   return (
     <InputGroup className={cn(size === "lg" && "h-11", className)}>
       <InputGroupAddon>
-        <KeyRoundIcon className={cn(size === "lg" && "size-4", complete ? "text-primary" : "text-muted-foreground")} />
+        <KeyRoundIcon className={cn(size === "lg" && "size-4", complete ? "text-primary dark:text-sidebar-primary" : "text-muted-foreground")} />
       </InputGroupAddon>
       <InputGroupInput
         id={id}
@@ -66,7 +66,7 @@ export function RoomCodeInput({ value, onChange, size = "default", invalid, id, 
         }}
       />
       <InputGroupAddon align="inline-end">
-        <span className={cn("font-mono text-[0.65rem] tabular-nums", complete ? "text-primary" : "text-muted-foreground")}>
+        <span className={cn("font-mono text-[0.65rem] tabular-nums", complete ? "text-primary dark:text-sidebar-primary" : "text-muted-foreground")}>
           {value.length}/{ROOM_CODE_LENGTH}
         </span>
       </InputGroupAddon>

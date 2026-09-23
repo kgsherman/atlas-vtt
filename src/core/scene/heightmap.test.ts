@@ -6,6 +6,7 @@ import {
   chunkKey,
   chunkSamples,
   createHeightmap,
+  cropHeightmapToGrid,
   decodeChunk,
   denseHeights,
   encodeChunk,
@@ -16,6 +17,7 @@ import {
   sampleHeight,
   writeHeights,
 } from "./heightmap"
+import { TerrainSampler } from "../occlusion/terrain"
 import type { Heightmap } from "./types"
 
 const grid = { cellSize: 5, width: 20, depth: 12 }
@@ -174,5 +176,57 @@ describe("sampleHeight", () => {
   it("reports the height range", () => {
     expect(heightRange(null)).toEqual({ min: 0, max: 0 })
     expect(heightRange(hm)).toEqual({ min: 0, max: 5 })
+  })
+})
+
+describe("grid shrink: padding beyond the lattice", () => {
+  // 8 × 8 cells at resolution 1 with a 6 ft plateau, shrunk to 6 cells wide. The kept boundary chunk
+  // (ci = 0, samples 0..7) still holds samples 7 (x = 35) as padding: it must read as 0.
+  const big = { cellSize: 5, width: 8, depth: 8 }
+  const small = { cellSize: 5, width: 6, depth: 8 }
+  const plateau = () => {
+    const { samplesX, samplesZ } = sampleCounts(big, 1)
+    return writeHeights(createHeightmap(1), big, new Float32Array(samplesX * samplesZ).fill(6))
+  }
+
+  it("sampleHeight with the grid agrees with occlusion's TerrainSampler beyond the extent", () => {
+    const hm = plateau()
+    const sampler = new TerrainSampler({ elevation: 0, heightmap: hm }, small)
+    for (const x of [27.5, 30, 31, 32.5, 34.9, 36, 45]) {
+      for (const z of [0, 10, 12.5, 39]) expect(sampleHeight(hm, 5, x, z, small), `${x},${z}`).toBeCloseTo(sampler.heightAt(x, z), 9)
+    }
+    // Without the grid, the padding sample is read (the old behaviour).
+    expect(sampleHeight(hm, 5, 32.5, 10)).toBe(6)
+    expect(sampleHeight(hm, 5, 32.5, 10, small)).toBe(3)
+  })
+
+  it("cropHeightmapToGrid zeroes boundary padding and drops chunks beyond the lattice", () => {
+    const res = 1
+    const n = chunkSamples(res)
+    const { samplesX, samplesZ } = sampleCounts({ width: 20, depth: 20 }, res)
+    const hm = writeHeights(createHeightmap(res), { cellSize: 5, width: 20, depth: 20 }, new Float32Array(samplesX * samplesZ).fill(2))
+    expect(Object.keys(hm.chunks).sort()).toEqual(["0,0", "0,1", "0,2", "1,0", "1,1", "1,2", "2,0", "2,1", "2,2"])
+    const shrunk = { width: 10, depth: 6 }
+    const cropped = cropHeightmapToGrid(hm, shrunk)
+    // Samples 0..10 × 0..6 remain: chunks (0|1, 0) only.
+    expect(Object.keys(cropped.chunks).sort()).toEqual(["0,0", "1,0"])
+    for (const key of Object.keys(cropped.chunks)) {
+      const { ci, cj } = parseChunkKey(key)
+      const arr = decodeChunk(cropped.chunks[key], res)
+      for (let lz = 0; lz < n; lz++) {
+        for (let lx = 0; lx < n; lx++) {
+          const inside = ci * n + lx <= shrunk.width * res && cj * n + lz <= shrunk.depth * res
+          expect(arr[lz * n + lx], `${key} ${lx},${lz}`).toBe(inside ? 2 : 0)
+        }
+      }
+    }
+    // Growing back does not resurrect the old terrain: beyond the old extent everything reads 0.
+    const regrown = { cellSize: 5, width: 20, depth: 20 }
+    expect(sampleHeight(cropped, 5, 80, 20, regrown)).toBe(0)
+    expect(sampleHeight(cropped, 5, 20, 60, regrown)).toBe(0)
+    expect(sampleHeight(cropped, 5, 20, 20, regrown)).toBe(2)
+    // Nothing to crop → the same object.
+    expect(cropHeightmapToGrid(cropped, shrunk)).toBe(cropped)
+    expect(cropHeightmapToGrid(hm, { width: 20, depth: 20 })).toBe(hm)
   })
 })

@@ -17,7 +17,7 @@ export type * from "./types"
 export { footprintCells, tokenAnchor } from "./footprint"
 export { DOORWAY_MARGIN, MOVE_CLEARANCE, MoveContext, STEP_UP_HEIGHT, sweepRadius, walkableDoorOffset } from "./context"
 export { PATH_NODE_LIMIT } from "./pathfind"
-export { candidateSteps, checkStep } from "./rules"
+export { candidateSteps, checkStep, MAX_RUN_SIDE_STEP } from "./rules"
 
 /** Paths with more steps than this are rejected (MoveOptions.maxSteps default). */
 export const MAX_PATH_STEPS = 256

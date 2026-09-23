@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
-import { AdaptiveQuality, computePixelRatio, FrameTimeWindow, intervalFrameCost, MAX_PIXEL_RATIO, MIN_PIXEL_RATIO, PIXEL_BUDGET, qualityDown, qualityUp } from "./quality"
+import type { Quality } from "../contracts"
+import { AdaptiveQuality, computePixelRatio, FrameTimeWindow, intervalFrameCost, MAX_PIXEL_RATIO, MIN_PIXEL_RATIO, PIXEL_BUDGET, qualityDown, qualityUp, UP_BUDGET_MS, UP_COST_RATIO } from "./quality"
 
 describe("pixel budget", () => {
   it("keeps the device ratio when the canvas fits the budget", () => {
@@ -79,13 +80,73 @@ describe("adaptive quality", () => {
   it("backs off stepping up after oscillating", () => {
     const a = new AdaptiveQuality("high")
     run(a, 0, 4000, 30) // → medium
-    run(a, 4016, 11000, 8) // → high after 5 s
+    run(a, 4016, 11000, 7) // → high after 5 s
     expect(a.current).toBe("high")
     run(a, 11016, 15000, 30) // → medium again soon after
     expect(a.current).toBe("medium")
-    // The next step up now needs 10 s of fast frames.
-    expect(run(a, 15016, 22000, 8)).toEqual([])
-    expect(run(a, 22016, 28000, 8)).toEqual(["high"])
+    // High failed: not tried again, however fast medium runs…
+    expect(a.failedTiers).toEqual(["high"])
+    expect(run(a, 15016, 40000, 7)).toEqual([])
+    // …until conditions change (a resize); then the doubled back-off still applies (10 s).
+    a.clearFailedSteps()
+    expect(run(a, 40016, 50000, 7)).toEqual([])
+    expect(run(a, 50016, 53000, 7)).toEqual(["high"])
+  })
+
+  it("steps up only when the next tier's predicted cost fits the budget", () => {
+    // Medium at 10 ms: under the 12 ms threshold, but high would cost ~19 ms.
+    const a = new AdaptiveQuality("high")
+    run(a, 0, 4000, 30)
+    expect(a.current).toBe("medium")
+    expect(10 * UP_COST_RATIO.medium).toBeGreaterThan(UP_BUDGET_MS)
+    expect(run(a, 4016, 60000, 10)).toEqual([])
+    // A budget override lets it through.
+    const b = new AdaptiveQuality("high", { upBudgetMs: 20 })
+    run(b, 0, 4000, 30)
+    expect(run(b, 4016, 12000, 10)).toEqual(["high"])
+  })
+
+  /** Vsync-bound simulation: per-tier GPU cost, frame interval max(16.7, cost). */
+  const simulate = (a: AdaptiveQuality, cost: Record<Quality, number>, seconds: number) => {
+    const changes: string[] = []
+    let q: Quality = a.current
+    for (let t = 0; t < seconds * 1000; ) {
+      t += Math.max(16.7, cost[q])
+      const step = a.push(t, cost[q])
+      if (step) {
+        changes.push(`${q}→${step}`)
+        q = step
+      }
+    }
+    return changes
+  }
+
+  it("settles on medium for an iGPU with medium 10.6 / high 19 ms (no oscillation)", () => {
+    const a = new AdaptiveQuality("high")
+    expect(simulate(a, { low: 7.2, medium: 10.6, high: 19, ultra: 34.5 }, 600)).toEqual(["high→medium"])
+    expect(a.current).toBe("medium")
+  })
+
+  it("still climbs from low to ultra on a fast GPU", () => {
+    const a = new AdaptiveQuality("ultra")
+    // Reach low without any failed step up (no step up happened yet).
+    run(a, 0, 12000, 40)
+    expect(a.current).toBe("low")
+    expect(a.failedTiers).toEqual([])
+    expect(simulate(a, { low: 3, medium: 4, high: 6, ultra: 11 }, 60)).toEqual(["low→medium", "medium→high", "high→ultra"])
+  })
+
+  it("setCeiling clears the failed-step memory", () => {
+    const a = new AdaptiveQuality("high")
+    run(a, 0, 4000, 30) // → medium
+    run(a, 4016, 11000, 7) // → high
+    run(a, 11016, 15000, 30) // → medium: high failed
+    expect(a.failedTiers).toEqual(["high"])
+    a.setCeiling("high")
+    expect(a.failedTiers).toEqual([])
+    run(a, 15016, 19000, 30) // → medium (no step up before it: nothing recorded)
+    expect(a.failedTiers).toEqual([])
+    expect(run(a, 19016, 26000, 7)).toEqual(["high"])
   })
 
   it("setCeiling applies the user's choice immediately", () => {

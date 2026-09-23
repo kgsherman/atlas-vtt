@@ -34,8 +34,6 @@ async function waitFor(predicate: () => boolean, what: string, timeoutMs = 5000)
 
 const assets = {
   mode: "local",
-  publishTiles: async () => {},
-  grantTiles: async () => {},
   getImage: async () => null,
   putImage: async () => {
     throw new Error("unused")

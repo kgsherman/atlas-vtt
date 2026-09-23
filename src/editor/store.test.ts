@@ -637,3 +637,28 @@ describe("editor store: view", () => {
     expect(store.getState().toolSettings.brush.radius).toBe(1)
   })
 })
+
+describe("editor store: detach / restore document", () => {
+  it("keeps the undo history of a document set aside while another is viewed", () => {
+    const f = fixtureScene()
+    const store = makeStore(f.scene)
+    const pillar = createPillar(f.groundId, { x: 5, z: 5 })
+    store.getState().addObject(pillar)
+    store.getState().markSaved()
+    const edited = store.getState().scene
+    const stash = store.getState().detachDocument()
+    expect(store.getState().history.canUndo).toBe(false)
+    // View an old version read-only (loadScene clears only the fresh history).
+    store.getState().loadScene(f.scene, { readOnly: true })
+    expect(store.getState().readOnly).toBe(true)
+    store.getState().restoreDocument(stash)
+    const st = store.getState()
+    expect(st.scene).toBe(edited)
+    expect(st.readOnly).toBe(false)
+    expect(st.dirty).toBe(false)
+    expect(st.history).toMatchObject({ canUndo: true, undoLabel: "Add pillar" })
+    expect(st.undo()).toBe(true)
+    expect(store.getState().scene.objects[pillar.id]).toBeUndefined()
+    expect(store.getState().dirty).toBe(true)
+  })
+})

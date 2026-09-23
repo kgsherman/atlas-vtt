@@ -254,8 +254,7 @@ function EditorMenus({ doc, previewing }: { doc: SceneDocument; previewing: bool
           <MenubarItem
             disabled={!editable}
             onClick={run(() => {
-              const at = controller.cursor()?.ground ?? undefined
-              void store.getState().pasteFromSystem(at ? { at } : {})
+              void store.getState().pasteFromSystem(controller.pasteTarget())
             })}
           >
             Paste
@@ -369,11 +368,13 @@ function EditorMenus({ doc, previewing }: { doc: SceneDocument; previewing: bool
             <MenubarShortcut>?</MenubarShortcut>
           </MenubarItem>
           <MenubarSeparator />
-          <MenubarLabel className="leading-relaxed">
+          {/* A plain hint, not a MenubarLabel: Base UI group labels must sit inside a MenubarGroup
+              (outside one they throw and crash the editor) and are aria-hidden. */}
+          <div className="px-2 py-1.5 text-xs leading-relaxed text-muted-foreground">
             Right-drag orbits · middle-drag pans · wheel zooms.
             <br />
             Hold Alt for free placement.
-          </MenubarLabel>
+          </div>
         </MenubarContent>
       </MenubarMenu>
     </Menubar>

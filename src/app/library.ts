@@ -90,6 +90,64 @@ export async function createFromSample(services: AppServices, sampleId: string):
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
 
+/** Best-effort removal of a document's stored map images; returns how many could not be removed. */
+async function deleteImages(services: AppServices, docId: string, assetIds: readonly string[]): Promise<number> {
+  let failed = 0
+  for (const id of assetIds) {
+    try {
+      await services.assets.deleteImage(docId, id)
+    } catch {
+      failed++
+    }
+  }
+  return failed
+}
+
+/**
+ * Delete a library scene and (best-effort) its map images. The row goes first, so a failed image
+ * delete leaves an orphan image, never a scene with missing images. Images stay while an active
+ * session started from the scene may still read them (or when that can't be checked). Only the latest
+ * version's images are known here; ones only older versions referenced are not removed.
+ */
+export async function deleteScene(services: AppServices, summary: SceneSummary): Promise<{ warnings: string[] }> {
+  let docId: string | null = null
+  let assetIds: string[] = []
+  try {
+    const loaded = await services.scenes.load(summary.id)
+    if (loaded.parsed.ok) {
+      docId = loaded.parsed.scene.id
+      assetIds = Object.keys(loaded.parsed.scene.assets ?? {})
+    }
+  } catch {
+    // Unreadable latest version: delete the row anyway; its images (if any) stay.
+  }
+  let inUse = false
+  if (assetIds.length > 0) {
+    try {
+      inUse = (await services.sessions.listMySessions()).some((s) => s.sceneId === summary.id && s.status === "active")
+    } catch {
+      inUse = true
+    }
+  }
+  await services.scenes.remove(summary.id)
+  const warnings: string[] = []
+  if (docId && !inUse && assetIds.length > 0) {
+    const failed = await deleteImages(services, docId, assetIds)
+    if (failed > 0) warnings.push(`${plural(failed, "map image", "map images")} could not be removed from storage.`)
+  }
+  return { warnings }
+}
+
+/** "Keep (imported)", then "Keep (imported 2)", … when the library already has the name. */
+export function importedName(name: string, existing: Iterable<string>): string {
+  const taken = new Set(existing)
+  if (!taken.has(name)) return name
+  const base = name.replace(/\s+\(imported(?: \d+)?\)$/u, "")
+  let candidate = `${base} (imported)`
+  for (let n = 2; taken.has(candidate); n++) candidate = `${base} (imported ${n})`
+  return candidate
+}
+
 /** Import an `.atlas.json` file (with embedded map images) into the library. */
 export async function importSceneFile(services: AppServices, file: Blob): Promise<LibraryResult> {
   const text = await file.text()
@@ -110,7 +168,21 @@ export async function importSceneFile(services: AppServices, file: Blob): Promis
     if (parsed.error === "too-new") throw new LibraryError("This file was made by a newer version of Atlas. Update the app to open it.")
     throw new LibraryError("This file is not a valid Atlas scene.", parsed.issues.slice(0, 5))
   }
-  const summary = await services.scenes.create(parsed.scene)
+  const scene = parsed.scene
+  try {
+    // A second entry with an identical name is ambiguous in the library: suffix it.
+    scene.name = importedName(scene.name, (await services.scenes.list()).map((s) => s.name))
+  } catch {
+    // Listing failed: keep the file's name.
+  }
+  let summary: SceneSummary
+  try {
+    summary = await services.scenes.create(scene)
+  } catch (err) {
+    // No scene references the images stored for it: remove them (best-effort).
+    await deleteImages(services, scene.id, Object.keys(scene.assets ?? {}))
+    throw err
+  }
   if (missing > 0) warnings.push(`${plural(missing, "map image is", "map images are")} not included in the file.`)
   return { summary, warnings }
 }

@@ -77,6 +77,8 @@ export const SERVER_ERROR_CODES = [
   "too_many_sessions",
   "room_code_unavailable",
   "not_member",
+  "quota_exceeded",
+  "name_taken",
 ] as const
 
 export type ServerErrorCode = (typeof SERVER_ERROR_CODES)[number]
@@ -190,6 +192,10 @@ export function describeNetError(code: NetErrorCode): string {
       return "Could not allocate a room code. Try again."
     case "not_member":
       return "That player is not an active member of the session."
+    case "quota_exceeded":
+      return "You have reached your storage limit. Delete old scenes, versions or map images first."
+    case "name_taken":
+      return "That name is taken in this session (by another player or the DM). Pick another one."
     case "unsupported_offline":
       return "This needs an online connection (Supabase)."
     case "unknown":

@@ -27,12 +27,12 @@ import {
   createWall,
   createWindow,
 } from "@/core/scene/factory"
-import { denseHeights, writeHeights } from "@/core/scene/heightmap"
+import { bytesToBase64, denseHeights, writeHeights } from "@/core/scene/heightmap"
 import { parseScene } from "@/core/scene/schema"
 import { validateReferences } from "@/core/scene/integrity"
-import { groundHeightAt, hasGroundAt, sortedLevels } from "@/core/scene/queries"
+import { effectiveFloorRects, floorRects, groundHeightAt, hasGroundAt, sortedLevels } from "@/core/scene/queries"
 import { SAMPLE_SCENES, sampleById } from "@/core/scene/samples"
-import type { CreatureSize, Id, LightPreset, PropKind, Scene, SceneObject } from "@/core/scene/types"
+import type { CreatureSize, FloorObject, Id, LightPreset, PropKind, Scene, SceneObject } from "@/core/scene/types"
 import { applyPatchOps, createGameState, deltaFromPatches, diffViews, parsePlayerView, reduceDm, viewToScene } from "@/core/session"
 import { TestHost } from "@/core/session/test-utils"
 import { encodeGrades, encodeMask, VisionEngineImpl } from "@/core/vision"
@@ -40,12 +40,70 @@ import { SceneIndex } from "@/core/vision/sceneIndex"
 import type { VisibilityResult } from "@/core/vision/types"
 import { sceneChangeFromPatches } from "@/editor/sceneChange"
 import { createEditorStore } from "@/editor/store"
+import { buildLevel } from "@/render/builders"
 import { BuildContext as RenderContext } from "@/render/builders/context"
+import { pillarExtent, propPlacement } from "@/render/builders/props"
 import { wallFrame as renderWallFrame, wallPieces } from "@/render/builders/walls"
 import { boxInstanceMatrix } from "@/render/occluders/geometry"
 import { OccluderProxies } from "@/render/occluders/proxies"
+import { SURF } from "@/render/internal"
 
-const SCENES = SAMPLE_SCENES.map((s) => [s.id, s.build()] as const)
+/**
+ * Test-only fixture (not a user-facing sample): masked floors (the map-image feature) on a flat and a
+ * heightmap level, rect origins off the cell grid, stairs cutting each masked floor, pillars, every
+ * prop kind rotated on both levels, and a cellar slab of an explicit 0.01 ft thickness.
+ */
+function maskFloorFixture(): Scene {
+  const scene = createScene({ name: "Mask floors", width: 12, depth: 12, groundFloor: false })
+  const put = <T extends SceneObject>(o: T): T => {
+    scene.objects[o.id] = o
+    return o
+  }
+  const ground = Object.values(scene.levels)[0]
+  const cellar = createLevel({ name: "Cellar", elevation: -12 })
+  const upper = createLevel({ name: "Upper", elevation: 12 })
+  scene.levels[cellar.id] = cellar
+  scene.levels[upper.id] = upper
+  const res = 4
+  const hm = { resolution: res, chunks: {} } as const
+  const dense = denseHeights(hm, scene.grid)
+  for (let k = 0; k < dense.heights.length; k++) dense.heights[k] = Math.sin(k * 0.37) * 1.5 + Math.cos(k * 0.011) * 0.75
+  scene.levels[upper.id] = { ...upper, heightmap: writeHeights(hm, scene.grid, dense.heights) }
+  // Irregular masks at cellSize / 4 with an origin off the cell grid (x = 3.75).
+  const spacing = scene.grid.cellSize / 4
+  const masked = (levelId: Id, seed: number): FloorObject => {
+    const rect = { x: 3.75, z: 2.5, w: 40, d: 45 }
+    const cols = Math.round(rect.w / spacing)
+    const rows = Math.round(rect.d / spacing)
+    const bytes = new Uint8Array(Math.ceil((cols * rows) / 8))
+    for (let v = 0; v < rows; v++) {
+      for (let u = 0; u < cols; u++) {
+        const k = v * cols + u
+        if ((u * 7 + v * 3 + seed) % 5 !== 0 && Math.hypot(u - cols / 2, v - rows / 2) < cols / 2) bytes[k >> 3] |= 1 << (k & 7)
+      }
+    }
+    return put({ ...createFloor(levelId, rect), mask: { spacing, cols, rows, b64: bytesToBase64(bytes) } })
+  }
+  masked(ground.id, 0)
+  masked(upper.id, 2)
+  // One thickness rule (core/scene floorThickness) for render and occlusion: a 0.01 ft slab is drawn
+  // and blocks 0.01 ft thick (no visual minimum in render/builders/floors.ts).
+  put({ ...createFloor(cellar.id, { x: 0, z: 0, w: 60, d: 60 }), id: "thin-slab", thickness: 0.01 })
+  put(createConnector(cellar.id, ground.id, { x: 20, z: 20, w: 5, d: 15 }, 0))
+  put(createConnector(ground.id, upper.id, { x: 30, z: 25, w: 10, d: 5 }, 1))
+  for (const level of [ground, upper]) {
+    put(createPillar(level.id, { x: 12.3, z: 17.1 }))
+    put(createPillar(level.id, { x: 36.2, z: 12.4 }, { shape: "round", height: 6 }))
+    Object.keys(PROP_LIBRARY).forEach((kind, k) => {
+      put(createProp(level.id, kind as PropKind, { x: 6 + (k % 6) * 8.3, y: 0, z: 30 + Math.floor(k / 6) * 7.7 }, { rotationY: 0.3 + k * 0.4 }))
+    })
+    const t = createToken(level.id, { x: 12.5, z: 22.5 })
+    scene.tokens[t.id] = t
+  }
+  return scene
+}
+
+const SCENES = [...SAMPLE_SCENES.map((s) => [s.id, s.build()] as const), ["mask-floors", maskFloorFixture()] as const]
 
 const baseId = (id: Id): Id => id.split("@")[0]
 
@@ -105,6 +163,135 @@ describe("render builders agree with core/occlusion", () => {
   }
 })
 
+interface Extent {
+  minX: number
+  maxX: number
+  minY: number
+  maxY: number
+  minZ: number
+  maxZ: number
+}
+
+const emptyExtent = (): Extent => ({ minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity })
+
+function grow(e: Extent, b: Extent): void {
+  e.minX = Math.min(e.minX, b.minX)
+  e.maxX = Math.max(e.maxX, b.maxX)
+  e.minY = Math.min(e.minY, b.minY)
+  e.maxY = Math.max(e.maxY, b.maxY)
+  e.minZ = Math.min(e.minZ, b.minZ)
+  e.maxZ = Math.max(e.maxZ, b.maxZ)
+}
+
+/** Per-object vertex extents of one render bucket's merged meshes (from userData.ranges), plus walkable triangle counts. */
+function renderExtents(scene: Scene, bucket: "floors" | "connectors"): { extents: Map<Id, Extent>; walkable: Map<Id, number> } {
+  const extents = new Map<Id, Extent>()
+  const walkable = new Map<Id, number>()
+  const ctx = new RenderContext(scene)
+  for (const level of sortedLevels(scene)) {
+    for (const m of buildLevel(ctx, level.id)[bucket].meshes) {
+      if (m.kind !== "merged") continue
+      const pos = m.geometry.getAttribute("position")
+      const surf = m.geometry.getAttribute("aSurf")
+      for (const r of m.geometry.userData.ranges as { id: string; start: number; count: number }[]) {
+        const e = extents.get(r.id) ?? emptyExtent()
+        for (let k = r.start * 3; k < (r.start + r.count) * 3; k++) {
+          grow(e, { minX: pos.getX(k), maxX: pos.getX(k), minY: pos.getY(k), maxY: pos.getY(k), minZ: pos.getZ(k), maxZ: pos.getZ(k) })
+        }
+        extents.set(r.id, e)
+        if (m.terrainOffsets && surf) {
+          let n = 0
+          for (let t = r.start; t < r.start + r.count; t++) if (surf.getX(t * 3) === SURF.WALKABLE) n++
+          walkable.set(r.id, (walkable.get(r.id) ?? 0) + n)
+        }
+      }
+    }
+  }
+  return { extents, walkable }
+}
+
+/** Union of primitiveBounds per source id. */
+function occluderExtents(scene: Scene): Map<Id, Extent> {
+  const out = new Map<Id, Extent>()
+  for (const p of buildOcclusionWorld(scene).primitives) {
+    const e = out.get(p.sourceId) ?? emptyExtent()
+    grow(e, primitiveBounds(p))
+    out.set(p.sourceId, e)
+  }
+  return out
+}
+
+describe("render builders agree with core/occlusion: floors, connectors, pillars, props", () => {
+  for (const [name, scene] of SCENES) {
+    it(`${name}: floor / terrain slabs have the occluders' extents; terrain top cells = heightfield solid cells`, () => {
+      const occ = occluderExtents(scene)
+      const { extents, walkable } = renderExtents(scene, "floors")
+      const solid = new Map<Id, number>()
+      for (const p of buildOcclusionWorld(scene).primitives) if (p.shape === "heightfield") solid.set(p.sourceId, p.solid.reduce((a, b) => a + b, 0))
+      let checked = 0
+      for (const o of Object.values(scene.objects)) {
+        if (o.type !== "floor") continue
+        const r = extents.get(o.id)
+        const b = occ.get(o.id)
+        expect(r === undefined, `${o.id}: rendered ${r !== undefined}, occluder ${b !== undefined}`).toBe(b === undefined)
+        if (!r || !b) continue
+        for (const k of ["minX", "maxX", "minY", "maxY", "minZ", "maxZ"] as const) expect(r[k], `${o.id} ${k}`).toBeCloseTo(b[k], 3)
+        if (solid.has(o.id)) expect(walkable.get(o.id), `${o.id} walkable triangles / 2`).toBe(2 * solid.get(o.id)!)
+        checked++
+      }
+      expect(checked).toBeGreaterThan(0)
+    })
+
+    it(`${name}: stairs / ramps: occluder bottom = visual bottom, occluder top within the visual`, () => {
+      const occ = occluderExtents(scene)
+      const { extents } = renderExtents(scene, "connectors")
+      for (const o of Object.values(scene.objects)) {
+        if (o.type !== "connector" || o.style === "ladder") continue
+        const r = extents.get(o.id)
+        const b = occ.get(o.id)
+        expect(r && b, o.id).toBeTruthy()
+        expect(r!.minY, o.id).toBeCloseTo(b!.minY, 3)
+        expect(b!.maxY, o.id).toBeLessThanOrEqual(r!.maxY + 1e-6)
+      }
+    })
+
+    it(`${name}: pillars and blocking props span the same heights as their occluders`, () => {
+      const occ = occluderExtents(scene)
+      const ctx = new RenderContext(scene)
+      for (const o of Object.values(scene.objects)) {
+        if (o.type === "pillar") {
+          const e = pillarExtent(ctx, o)
+          const b = occ.get(o.id)
+          expect(b, o.id).toBeTruthy()
+          expect(e.bottom, o.id).toBeCloseTo(b!.minY, 6)
+          expect(e.top, o.id).toBeCloseTo(b!.maxY, 6)
+        } else if (o.type === "prop") {
+          const b = occ.get(o.id)
+          if (!b) continue
+          const pl = propPlacement(ctx, o)
+          expect(pl.bottom, `${o.kind} ${o.id}`).toBeCloseTo(b.minY, 6)
+          expect(pl.top, `${o.kind} ${o.id}`).toBeCloseTo(b.maxY, 6)
+        }
+      }
+    })
+  }
+
+  it("the mask-floor fixture exercises what it claims", () => {
+    const scene = SCENES.find(([n]) => n === "mask-floors")![1]
+    const parsed = parseScene(JSON.parse(JSON.stringify(scene)))
+    expect(parsed.ok, parsed.ok ? "" : parsed.issues.join("\n")).toBe(true)
+    expect(validateReferences(scene)).toEqual([])
+    const world = buildOcclusionWorld(scene)
+    // Both masked floors are cut by a stair run, one as boxes (flat), one as a heightfield.
+    const floors = Object.values(scene.objects).filter((o): o is FloorObject => o.type === "floor" && o.mask !== undefined)
+    expect(floors).toHaveLength(2)
+    const area = (rects: { w: number; d: number }[]) => rects.reduce((a, r) => a + r.w * r.d, 0)
+    for (const f of floors) expect(area(effectiveFloorRects(scene, f.levelId).map((e) => e.rect))).toBeLessThan(area(floorRects(f)) - 1)
+    expect(world.primitives.some((p) => p.shape === "heightfield")).toBe(true)
+    expect(world.primitives.filter((p) => p.sourceType === "prop").length).toBeGreaterThan(2 * Object.keys(PROP_LIBRARY).length - 4)
+  })
+})
+
 describe("vision and movement share the ground and connector rules", () => {
   for (const [name, scene] of SCENES) {
     it(`${name}: every cell a token can stand on is sampleable by vision, at the same height`, () => {
@@ -144,8 +331,9 @@ describe("vision and movement share the ground and connector rules", () => {
 })
 
 /** Crooked Lantern session: every PC assigned to its own player. */
-function lanternSession(): { host: TestHost; players: string[]; pcs: Id[] } {
+function lanternSession(edit?: (scene: Scene) => void): { host: TestHost; players: string[]; pcs: Id[] } {
   const scene = sampleById("crooked-lantern")!.build()
+  edit?.(scene)
   const pcs = Object.values(scene.tokens)
     .filter((t) => t.kind === "pc")
     .map((t) => t.id)
@@ -292,7 +480,30 @@ const sortedPrimitives = (prims: readonly OccluderPrimitive[]) => [...prims].sor
 
 describe("live editing: editor patches → session delta → incremental occlusion and vision", () => {
   it("the host's incremental world and visibility equal a fresh build after every kind of edit", () => {
-    const { host, players, pcs } = lanternSession()
+    // A tall wall beyond the grid's east edge (the schema allows 50 ft), toward the moon: its shadow
+    // falls on the map, and sun rays must not stop at the grid edge (fresh and incremental bounds).
+    let outside: Id = ""
+    const { host, players, pcs } = lanternSession((s) => {
+      const ground = sortedLevels(s).find((l) => l.elevation === 0)!
+      const x = s.grid.width * s.grid.cellSize + 8
+      const w = createWall(ground.id, { x, z: -10 }, { x, z: s.grid.depth * s.grid.cellSize + 10 }, { height: 60 })
+      s.objects[w.id] = w
+      outside = w.id
+    })
+    {
+      // Not vacuous: the wall changes some sun bits of a fresh build.
+      const without = { ...host.scene, objects: { ...host.scene.objects } }
+      delete without.objects[outside]
+      const a = new VisionEngineImpl(host.scene)
+      const b = new VisionEngineImpl(without)
+      let differ = 0
+      for (const level of sortedLevels(host.scene)) {
+        for (let j = 0; j < host.scene.grid.depth; j++) {
+          for (let i = 0; i < host.scene.grid.width; i++) if (a.inspectSample(level.id, i, j)?.sunlit !== b.inspectSample(level.id, i, j)?.sunlit) differ++
+        }
+      }
+      expect(differ).toBeGreaterThan(0)
+    }
     const store = createEditorStore({ systemClipboard: null, scene: host.scene })
     store.getState().setPatchSink((patches) => {
       const r = host.dm({ t: "apply-scene-patches", patches })
@@ -329,6 +540,14 @@ describe("live editing: editor patches → session delta → incremental occlusi
     const wall = objectsOf("wall").find((w) => objectsOf("door").some((d) => d.wallId === w.id))!
     expect(store.getState().updateObject(wall.id, { a: { x: wall.a.x + 1, z: wall.a.z }, b: { x: wall.b.x + 1, z: wall.b.z } })).toBe(true)
     check("wall moved")
+
+    // The wall beyond the grid moved further out (the fresh build's bounds must still contain it).
+    {
+      const w = scene().objects[outside]
+      if (w.type !== "wall") throw new Error("outside wall")
+      expect(store.getState().updateObject(outside, { a: { x: w.a.x + 4, z: w.a.z }, b: { x: w.b.x + 4, z: w.b.z } })).toBe(true)
+    }
+    check("wall beyond the grid moved")
 
     // Tokens moved (attached lights follow).
     for (const id of pcs) {

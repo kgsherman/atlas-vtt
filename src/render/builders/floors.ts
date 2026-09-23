@@ -10,6 +10,7 @@
  */
 import * as THREE from "three"
 
+import { floorThickness as sceneFloorThickness } from "@/core/scene/queries"
 import type { FloorObject, Id, MaterialId } from "@/core/scene/types"
 
 import { SURF } from "../internal"
@@ -46,11 +47,13 @@ function cellVariation(m: MaterialId): number {
   return m === "water" ? 0.01 : m === "grass" || m === "dirt" || m === "sand" ? 0.025 : 0.03
 }
 
+/**
+ * Slab thickness: core/scene floorThickness, the one rule shared with core/occlusion (no visual
+ * minimum: a slab is drawn exactly as thick as it blocks). Floors whose thickness is not positive are
+ * not drawn (they do not block either).
+ */
 export function floorThickness(ctx: BuildContext, floor: FloorObject): number {
-  const level = ctx.level(floor.levelId)
-  const th = floor.thickness ?? level?.floorThickness ?? 1
-  // Visual slabs keep a minimal thickness even for degenerate documents.
-  return th > 0.05 ? th : 0.05
+  return sceneFloorThickness(ctx.scene, floor)
 }
 
 function cellColor(base: RGB, material: MaterialId, i: number, j: number): RGB {
@@ -204,8 +207,10 @@ export function buildFloorsBucket(ctx: BuildContext, levelId: Id): BucketBuild {
     for (const e of ctx.effectiveFloors(levelId)) {
       const floor = ctx.object(e.floorId)
       if (!floor || floor.type !== "floor") continue
+      const th = floorThickness(ctx, floor)
+      if (!(th > 0)) continue
       w.begin(floor.id)
-      writeFlatSlab(w, ctx, floor, e.rect, top, floorThickness(ctx, floor))
+      writeFlatSlab(w, ctx, floor, e.rect, top, th)
       w.end()
     }
     const g = w.build()
@@ -214,8 +219,10 @@ export function buildFloorsBucket(ctx: BuildContext, levelId: Id): BucketBuild {
   }
   const tw = new TerrainWriter(w)
   for (const floor of ctx.ofType(levelId, "floor")) {
+    const th = floorThickness(ctx, floor)
+    if (!(th > 0)) continue
     w.begin(floor.id)
-    writeTerrainSlab(tw, ctx, floor, ground, floorThickness(ctx, floor))
+    writeTerrainSlab(tw, ctx, floor, ground, th)
     w.end()
   }
   const g = w.build()

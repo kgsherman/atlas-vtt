@@ -4,10 +4,10 @@
  *
  *   ATLAS_LIVE_SUPABASE=1 npx vitest run src/net/assets/live.assets.supabase.test.ts
  *
- * Anonymous DM, player and outsider: the DM stores an image (scene-assets, owner-only), publishes two
- * tiles and grants one to the player (fenced grant_tiles); the player can download exactly the granted
- * tile; revoke_tiles and a stale epoch behave; everything created is removed again (the anonymous auth
- * users are printed, auth.users is not reachable with the publishable key).
+ * Anonymous DM, player and outsider: the DM stores an image (scene-assets, owner-only) and uploads a
+ * tile chunk for the player (session-tiles, members only); the player downloads exactly their own
+ * chunk; nobody else can; everything created is removed again (the anonymous auth users are printed,
+ * auth.users is not reachable with the publishable key).
  */
 import { afterAll, describe, expect, it, vi } from "vitest"
 
@@ -20,7 +20,7 @@ import { createRemoteScenesRepo } from "../scenesRepo"
 import { createRemoteSessionsRepo } from "../sessionsRepo"
 import { createAtlasClient, type AtlasClient } from "../supabase"
 import { createAssetStore } from "./index"
-import { downloadTile, removeSessionTiles, revokeTiles } from "./supabaseAssets"
+import { downloadChunk, removeSessionTiles } from "./supabaseAssets"
 
 vi.mock("@/core/scene/schema", async (orig) => ({
   ...(await orig<typeof import("@/core/scene/schema")>()),
@@ -47,7 +47,7 @@ describe.skipIf(!enabled)("live Supabase: map image storage under RLS", () => {
     console.info(`[live test] anonymous users created: ${createdUsers.join(", ")}`)
   })
 
-  it("stores DM images privately and serves only granted tiles", { timeout: 90_000 }, async () => {
+  it("stores DM images privately and serves each player only their own chunks", { timeout: 90_000 }, async () => {
     const [dmC, pC, xC] = [newClient(), newClient(), newClient()]
     const [dm, p, x] = await Promise.all([dmC, pC, xC].map((c) => ensureSession(c)))
     createdUsers.push(dm.userId, p.userId, x.userId)
@@ -75,28 +75,17 @@ describe.skipIf(!enabled)("live Supabase: map image storage under RLS", () => {
     expect(await createRemoteSessionsRepo(pC).joinSession(roomCode, "Tiles")).toBe(sid)
     const epoch = await dmRepo.claimHost(sid)
 
-    // --- tiles: publish two, grant one
+    // --- chunks: one for the player; none for someone who never joined
     const levelId = Object.keys(docScene.levels)[0]
-    const tile = (n: number) => new Blob([new Uint8Array([0x52, 0x49, 0x46, 0x46, n])], { type: "image/webp" })
-    await dmAssets.publishTiles(sid, levelId, [
-      { cell: { i: 0, j: 0 }, blob: tile(1) },
-      { cell: { i: 1, j: 0 }, blob: tile(2) },
-    ])
+    const chunk = new Blob([new Uint8Array([0x52, 0x49, 0x46, 0x46, 1])], { type: "image/webp" })
+    await dmAssets.putTileChunk(sid, p.userId, levelId, 0, 0, chunk)
     cleanups.push(() => removeSessionTiles(dmC, sid))
-    await dmAssets.grantTiles(sid, epoch, p.userId, levelId, [{ i: 0, j: 0 }])
-    expect((await downloadTile(pC, sid, levelId, { i: 0, j: 0 }))?.size).toBe(5)
-    expect(await downloadTile(pC, sid, levelId, { i: 1, j: 0 })).toBeNull()
-    expect(await downloadTile(xC, sid, levelId, { i: 0, j: 0 })).toBeNull()
-    expect((await downloadTile(dmC, sid, levelId, { i: 1, j: 0 }))?.size).toBe(5)
-    // Players cannot publish, grant or revoke.
-    await expect(pAssets.publishTiles(sid, levelId, [{ cell: { i: 2, j: 0 }, blob: tile(3) }])).rejects.toBeTruthy()
-    await expect(pAssets.grantTiles(sid, epoch, p.userId, levelId, [{ i: 1, j: 0 }])).rejects.toMatchObject({ code: "not_found" })
-    // Stale host epoch is fenced.
-    await expect(dmAssets.grantTiles(sid, epoch - 1, p.userId, levelId, [{ i: 1, j: 0 }])).rejects.toMatchObject({ code: "stale_epoch" })
-    // Revoke (fog reset) removes access. The CDN may keep serving the copy this player already fetched
-    // (cached per requester for the tile's 60 s cache time), so check with a fresh URL.
-    expect(await revokeTiles(dmC, sid, epoch, p.userId)).toBe(1)
-    expect(await downloadTile(pC, sid, levelId, { i: 0, j: 0 }, undefined, `revoked-${Date.now()}`)).toBeNull()
-    await expect(revokeTiles(dmC, sid, epoch - 1)).rejects.toMatchObject({ code: "stale_epoch" })
+    await expect(dmAssets.putTileChunk(sid, x.userId, levelId, 0, 0, chunk)).rejects.toMatchObject({ code: "permission_denied" })
+    expect((await downloadChunk(pC, sid, p.userId, levelId, 0, 0, "1"))?.size).toBe(5)
+    expect(await downloadChunk(xC, sid, p.userId, levelId, 0, 0, "1")).toBeNull()
+    expect((await downloadChunk(dmC, sid, p.userId, levelId, 0, 0, "1"))?.size).toBe(5)
+    // Players cannot upload chunks, not even their own.
+    await expect(pAssets.putTileChunk(sid, p.userId, levelId, 1, 0, chunk)).rejects.toBeTruthy()
+    void epoch
   })
 })

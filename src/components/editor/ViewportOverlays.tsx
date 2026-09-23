@@ -192,20 +192,26 @@ export function PreviewBar({ tokenId, result, onTokenChange }: { tokenId: Id; re
   const senses = t ? [t.vision.blind ? "blind" : t.vision.darkvision > 0 ? `darkvision ${t.vision.darkvision} ft` : "normal vision", t.vision.blindsight > 0 ? `blindsight ${t.vision.blindsight} ft` : null].filter(Boolean).join(" · ") : ""
   return (
     <div className="flex h-10 shrink-0 items-center gap-3 border-b bg-primary/10 px-3">
-      <div className="flex items-center gap-1.5 text-xs font-medium text-primary">
+      <div className="flex shrink-0 items-center gap-1.5 text-xs font-medium whitespace-nowrap text-primary">
         <Eye className="size-3.5" /> Player view preview
       </div>
-      <div className="h-5 w-px bg-border" />
-      <span className="text-[0.6875rem] text-muted-foreground">Seeing as</span>
-      <SelectInput className="w-44" value={tokenId} options={options} onValueChange={onTokenChange} aria-label="Previewed token" />
-      <span className="truncate text-[0.6875rem] text-muted-foreground">
-        {levelName ? `${levelName} · ` : ""}
-        {senses}
-      </span>
+      <div className="h-5 w-px shrink-0 bg-border" />
+      <span className="shrink-0 text-[0.6875rem] whitespace-nowrap text-muted-foreground">Seeing as</span>
+      <SelectInput className="w-44 shrink-0" value={tokenId} options={options} onValueChange={onTokenChange} aria-label="Previewed token" />
+      <Tooltip>
+        <TooltipTrigger render={<span className="min-w-0 cursor-default truncate text-[0.6875rem] whitespace-nowrap text-muted-foreground" />}>
+          {levelName ? `${levelName} · ` : ""}
+          {senses}
+        </TooltipTrigger>
+        <TooltipContent>
+          {levelName ? `${levelName} · ` : ""}
+          {senses}
+        </TooltipContent>
+      </Tooltip>
       <div className="flex-1" />
       {result ? (
         <Tooltip>
-          <TooltipTrigger render={<Badge variant="outline" className="cursor-default font-normal tabular-nums" />}>
+          <TooltipTrigger render={<Badge variant="outline" className="shrink-0 cursor-default font-normal tabular-nums" />}>
             {result.visibleTokenIds.length} other token{result.visibleTokenIds.length === 1 ? "" : "s"} visible · {Math.round(result.ms)} ms
           </TooltipTrigger>
           <TooltipContent>Computed locally by the vision engine; explored = what is perceived right now. Click another token to switch.</TooltipContent>
@@ -213,7 +219,7 @@ export function PreviewBar({ tokenId, result, onTokenChange }: { tokenId: Id; re
       ) : (
         <Spinner className="size-3.5" />
       )}
-      <Button size="sm" variant="outline" onClick={actions.exitPreview}>
+      <Button size="sm" variant="outline" className="shrink-0" onClick={actions.exitPreview}>
         <X data-icon="inline-start" /> Exit preview <Kbd className="ml-1">Esc</Kbd>
       </Button>
     </div>

@@ -234,14 +234,25 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
         return noop(state, `patches do not apply: ${e instanceof Error ? e.message : String(e)}`)
       }
       const delta = deltaFromPatches(state.scene, scene, cmd.patches)
-      const next = reconcileKnowledge({ ...state, scene, seq: state.seq + 1 }, state.scene, scene)
+      const edited: GameState = { ...state, scene, seq: state.seq + 1 }
+      // The live map now differs from the library version it came from.
+      if (state.origin && !state.origin.dirty) edited.origin = { ...state.origin, dirty: true }
+      const next = reconcileKnowledge(edited, state.scene, scene)
       return { state: next, delta, dirtyPlayers: "all" }
+    }
+    case "set-origin": {
+      const o = cmd.origin
+      const cur = state.origin
+      if (o === null ? cur === null : cur && cur.sceneId === o.sceneId && cur.version === o.version && cur.dirty === o.dirty) return noop(state)
+      return { state: { ...state, origin: o && { sceneId: o.sceneId, version: o.version, dirty: o.dirty }, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: [] }
     }
     case "load-scene": {
       const prev = state.scene
       const owners: GameState["owners"] = {}
       for (const [id, list] of Object.entries(state.owners)) if (Object.hasOwn(cmd.scene.tokens, id)) owners[id] = list
-      const next: GameState = { ...state, scene: cmd.scene, owners, explored: {}, memory: {}, revealed: {}, seq: state.seq + 1 }
+      // Another map: the old origin no longer applies.
+      const origin = cmd.origin ? { sceneId: cmd.origin.sceneId, version: cmd.origin.version, dirty: cmd.origin.dirty } : null
+      const next: GameState = { ...state, scene: cmd.scene, owners, explored: {}, memory: {}, revealed: {}, seq: state.seq + 1, origin }
       const delta: SceneDelta = {
         objects: sorted([...Object.keys(prev.objects), ...Object.keys(cmd.scene.objects)]),
         tokens: sorted([...Object.keys(prev.tokens), ...Object.keys(cmd.scene.tokens)]),

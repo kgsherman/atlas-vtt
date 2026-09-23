@@ -14,4 +14,11 @@ export { DEFAULT_VIEW } from "./engine/defaults"
  */
 export { pickInitialQuality, probeQuality, type ProbeOptions, type QualityProbe } from "./engine/autoQuality"
 
+/**
+ * Max texels of one level image per quality ceiling (the engine's own cap, engine/backdrops.ts). Give a
+ * player's backdrop compositor `backdropTexelBudget(engine.getQualityCeiling())` as its canvas budget so the
+ * canvas is uploaded as is instead of being copied into a second, downscaled canvas.
+ */
+export { BACKDROP_MAX_TEXELS, backdropTexelBudget } from "./engine/backdrops"
+
 export const createEngine: CreateEngine = (canvas, opts) => new AtlasEngine(canvas, opts)

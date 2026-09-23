@@ -5,9 +5,15 @@
  * material and full thickness so a closed secret door reads as plain wall.
  *
  * Only the visual leaf animates; occluders follow the authoritative state instantly (§4.2).
+ *
+ * Top-down views also get a door marker per leaf: a flat bar just above the wall top, wider than the
+ * wall, so doors in walls that run up / down the screen (a 2–3 px line from above) are visible and
+ * pickable. It lives in the same pivot frame, so it follows the leaf's swing / slide.
  */
+import type * as THREE from "three"
+
 import { DOOR_STYLES, MATERIAL_COLORS } from "@/core/scene/defaults"
-import type { DoorObject, Id, Vec3 } from "@/core/scene/types"
+import type { DoorObject, Id, MaterialId, Vec3 } from "@/core/scene/types"
 
 import type { BuildContext } from "./context"
 import { hexToLinear, materialColor, scaleRgb, tint, type RGB } from "./color"
@@ -178,6 +184,54 @@ export function doorLeafGeometry(f: WallFrame, door: DoorObject, leaf: DoorLeaf)
   return w
 }
 
+/** Marker bar: how far it sticks out past each wall face, its height above the wall top and thickness. */
+export const DOOR_MARKER_OVERHANG = 0.3
+export const DOOR_MARKER_LIFT = 0.02
+export const DOOR_MARKER_THICKNESS = 0.04
+
+/** Style colour of a door's top-down marker (brighter than the leaf so it reads against the wall top). */
+export function doorMarkerColor(door: DoorObject, wallMaterial: MaterialId): RGB {
+  const lift = (c: RGB, f: number): RGB => [Math.min(1, c[0] * f), Math.min(1, c[1] * f), Math.min(1, c[2] * f)]
+  switch (door.style) {
+    case "secret":
+      return lift(materialColor(wallMaterial), 1.3)
+    case "iron":
+    case "bars":
+    case "portcullis":
+      return lift(METAL, 1.2)
+    default:
+      return lift(WOOD, 1.7)
+  }
+}
+
+/** userData key of a marker geometry: first vertex of its accent plate (recoloured by door state). */
+export const DOOR_MARKER_ACCENT = "accentStart"
+
+/**
+ * Top-down marker of a leaf in its pivot frame: a slab over the leaf's width, just above the wall top
+ * and DOOR_MARKER_OVERHANG past each wall face, then a small centre plate (the vertices from
+ * `geometry.userData[DOOR_MARKER_ACCENT]` on) that the engine recolours by door state (red when locked).
+ * Plain albedo (no procedural surface): it is a map symbol, not part of the building.
+ */
+export function doorMarkerGeometry(f: WallFrame, door: DoorObject, leaf: DoorLeaf): THREE.BufferGeometry | null {
+  const w = new MeshWriter()
+  const W = leaf.width
+  const y0 = f.wall.height + DOOR_MARKER_LIFT
+  const y1 = y0 + DOOR_MARKER_THICKNESS
+  const t = f.wall.thickness / 2 + DOOR_MARKER_OVERHANG
+  const color = doorMarkerColor(door, f.wall.material)
+  const inset = Math.min(0.05, W / 4)
+  w.begin(door.id)
+  writeBox(w, inset, y0, -t, W - inset, y1, t, color)
+  const accentStart = w.vertexCount
+  const half = Math.min(0.3, W / 4)
+  writeBox(w, W / 2 - half, y1, -t * 0.6, W / 2 + half, y1 + 0.02, t * 0.6, color)
+  w.end()
+  const g = w.build()
+  if (g) g.userData[DOOR_MARKER_ACCENT] = accentStart
+  return g
+}
+
 /** Door leaves of every door hosted by the level's walls. */
 export function buildDoorsBucket(ctx: BuildContext, levelId: Id): BucketBuild {
   const meshes: DoorLeafBuild[] = []
@@ -188,7 +242,9 @@ export function buildDoorsBucket(ctx: BuildContext, levelId: Id): BucketBuild {
     if (!f) continue
     for (const leaf of doorLeaves(f, door)) {
       const geometry = doorLeafGeometry(f, door, leaf).build()
-      if (geometry) meshes.push({ kind: "door", name: `door:${door.id}:${leaf.index}`, slot: "world", leaf, geometry })
+      if (!geometry) continue
+      const marker = doorMarkerGeometry(f, door, leaf)
+      meshes.push({ kind: "door", name: `door:${door.id}:${leaf.index}`, slot: "world", leaf, geometry, marker })
     }
   }
   return { meshes }

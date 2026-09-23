@@ -20,7 +20,7 @@ import type { Scene, SceneObject } from "@/core/scene/types"
 
 import { SURF, WORLD_ATTRIBUTES } from "../internal"
 import { BuildContext, buildLevel, BUCKETS } from "./index"
-import { doorLeafPose, doorLeaves, type DoorLeaf } from "./doors"
+import { DOOR_MARKER_ACCENT, DOOR_MARKER_LIFT, DOOR_MARKER_OVERHANG, doorLeafPose, doorLeaves, type DoorLeaf } from "./doors"
 import { updateTerrainGeometry } from "./floors"
 import { GroundSampler } from "./ground"
 import { pillarExtent, propPlacement } from "./props"
@@ -280,6 +280,45 @@ describe("level builders", () => {
       }
     }
     expect(meshes).toBeGreaterThan(10)
+  })
+
+  it("gives every door leaf a top-down marker on the wall top, wider than the wall", () => {
+    const scene = smallScene()
+    const ground = groundLevelId(scene)
+    const ctx = new BuildContext(scene)
+    const leaves = buildLevel(ctx, ground).doors.meshes.filter((m) => m.kind === "door")
+    expect(leaves.length).toBeGreaterThan(0)
+    for (const m of leaves) {
+      if (m.kind !== "door") continue
+      const door = scene.objects[m.leaf.doorId]
+      if (door.type !== "door") throw new Error("not a door")
+      const wall = scene.objects[door.wallId]
+      if (wall.type !== "wall") throw new Error("not a wall")
+      const marker = m.marker!
+      expect(marker).not.toBeNull()
+      marker.computeBoundingBox()
+      const box = marker.boundingBox!
+      // Pivot frame: y from the wall base, z across the wall.
+      expect(box.min.y).toBeCloseTo(wall.height + DOOR_MARKER_LIFT, 5)
+      expect(box.max.y - box.min.y).toBeLessThan(0.1)
+      expect(box.max.z - box.min.z).toBeGreaterThan(wall.thickness)
+      expect(box.min.z).toBeCloseTo(-(wall.thickness / 2 + DOOR_MARKER_OVERHANG), 5)
+      // Within the leaf's width (double doors: each leaf its half).
+      expect(box.min.x).toBeGreaterThanOrEqual(0)
+      expect(box.max.x).toBeLessThanOrEqual(m.leaf.width + 1e-6)
+      // Accent plate after the slab; owned by the door (hover / selection outlines).
+      const accent = marker.userData[DOOR_MARKER_ACCENT] as number
+      expect(accent).toBeGreaterThan(0)
+      expect(accent).toBeLessThan(marker.getAttribute("position").count)
+      expect((marker.userData.ranges as { id: string }[]).every((r) => r.id === door.id)).toBe(true)
+    }
+    // Double doors: one marker per leaf.
+    const wall = createWall(ground, { x: 0, z: 90 }, { x: 20, z: 90 })
+    const double = createDoor(wall, 10, { width: 4, leaves: "double" })
+    add(scene, wall, double)
+    const doubles = buildLevel(new BuildContext(scene), ground).doors.meshes.filter((m) => m.kind === "door" && m.leaf.doorId === double.id)
+    expect(doubles).toHaveLength(2)
+    for (const m of doubles) if (m.kind === "door") expect(m.marker).not.toBeNull()
   })
 
   it("builds every door leaf and the window glass", () => {

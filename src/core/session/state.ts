@@ -9,7 +9,8 @@ import { TOKEN_COLORS } from "../scene/defaults"
 import { levelById } from "../scene/queries"
 import type { Id, LightObject, Scene, SceneObject, Token } from "../scene/types"
 import { SUBCELLS, type VisibilityResult } from "../vision/types"
-import { GAME_STATE_VERSION, type GameState, type RequestResult } from "./types"
+import { GAME_STATE_VERSION, type GameState, type RequestResult, type SceneOrigin } from "./types"
+import { own } from "./util"
 
 /** Ids touched by a state change (drives vision updates, engine updates and dirty players). */
 export interface SceneDelta {
@@ -41,13 +42,10 @@ export function isEmptyDelta(d: SceneDelta): boolean {
   return !d.structure && d.objects.length === 0 && d.tokens.length === 0 && d.terrain.length === 0
 }
 
-/** Own-property lookup (records keyed by untrusted ids must never reach the prototype chain). */
-export function own<T>(rec: Readonly<Record<string, T>> | undefined, key: string): T | undefined {
-  return rec !== undefined && Object.hasOwn(rec, key) ? rec[key] : undefined
-}
+export { own }
 
-export function createGameState(args: { sessionId: string; roomCode: string; scene: Scene }): GameState {
-  return {
+export function createGameState(args: { sessionId: string; roomCode: string; scene: Scene; origin?: SceneOrigin | null }): GameState {
+  const state: GameState = {
     stateVersion: GAME_STATE_VERSION,
     sessionId: args.sessionId,
     roomCode: args.roomCode,
@@ -62,6 +60,8 @@ export function createGameState(args: { sessionId: string; roomCode: string; sce
     revealed: {},
     seq: 0,
   }
+  if (args.origin !== undefined) state.origin = args.origin && { ...args.origin }
+  return state
 }
 
 /** Colour for a newly added player (cycles through the token palette). */

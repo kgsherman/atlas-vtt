@@ -32,6 +32,7 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
   included). Atlas calibrates it to the grid, draws it under the lighting, and can trace a floor from the
   image's transparency and walls from its outline.
 - Undo / redo, copy / cut / paste / duplicate, multi-select and box select, move, rotate and nudge.
+  Ctrl+V pastes at the pointer, snapped like a drag; Ctrl+Alt+V pastes without snapping.
 - A free 3D orbit camera, a top view, and a player-view preview through any token's eyes.
 - Scenes are saved as versioned JSON with a version history. You can export and import `.atlas.json` files
   (map images embedded) and share read-only links.
@@ -49,13 +50,16 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
 
 **Play**
 - An orthographic or slightly tilted top-down camera with automatic cutaway: anything above the token's
-  level is hidden.
+  level (on the upper part of a staircase, the level it leads to) is hidden.
 - Drag a token to move it along an A* path, with a ruler in feet that follows the grid's diagonal rule.
-  Stairs and ramps are climbed by walking; ladders offer climb up / down.
+  To climb stairs or a ramp, drag the token past the top step, or use the **Go up** / **Go down** buttons
+  on the top step and the landing; ladders offer climb up / down.
 - Click a door next to your token to open or close it. There is also a standalone measure tool.
 - DM controls: lock movement (for everyone or per player), shared vision, speed enforcement, door and light
   toggles, hide or reveal tokens, reveal secret doors, assign tokens to players, reset fog, and kick
-  players. The DM can switch to "Edit map" mid-session, and players see the edits live.
+  players. The DM can switch to "Edit map" mid-session, and players see the edits live. Those edits stay
+  in the session until the DM chooses **Save map to library**, which saves them (with the current token,
+  door and light state) as a new version of the library scene, after a conflict check.
 
 **Multiplayer**
 - The DM hosts a session and players join with an 8-character room code. No accounts are needed: the app
@@ -75,8 +79,9 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
 **Rendering quality**
 - Four tiers: low, medium, high and ultra. High and ultra add bloom and a vignette. Ultra adds soft
   shadows from 1024² light tiles, screen-space ambient occlusion, filmic tone mapping and film grain.
-- At start-up a short GPU benchmark picks the tier, and adaptive quality steps down or up at runtime to
-  hold 60 fps.
+- On "Auto" (the default), a short GPU benchmark picks the tier when the editor, the host console or the
+  player page opens (cached per GPU), and adaptive quality steps down or up at runtime to hold 60 fps.
+  Each of those pages has a quality selector to pick a tier by hand.
 
 ## Quick start
 
@@ -107,6 +112,9 @@ with `?local=0`.
      anonymously.
    - **Realtime → Settings → "Allow public access"** (off), so that only private channels, which are
      authorised by the Realtime policies, can be joined.
+   - **Authentication → Rate Limits → anonymous sign-ins**: keep it low for a public deployment (the
+     default is 30 per hour per IP). Scene, version-history, session and asset quotas are enforced per
+     anonymous account, so this rate limit is what bounds abuse from many accounts.
 3. Create `.env.local` next to `package.json` (see `.env.example`):
 
    ```bash
@@ -176,16 +184,17 @@ budget.
 
 | GPU · tier | Scene | DM view: fps · GPU frame median / p95 | Player view: fps · GPU frame median / p95 |
 |---|---|---|---|
-| AMD Radeon iGPU · medium | The Crooked Lantern (4 levels, 15 lights) | 60 · 13.4 / 14.1 ms | 60 · 7.5 / 8.6 ms |
-| AMD Radeon iGPU · medium | Stress Test (20 lights, 15 tokens) | 60 · 8.3 / 8.7 ms | 60 · 6.1 / 6.9 ms |
-| AMD Radeon iGPU · medium | The Vineyard (3 battlemaps, 17 lights) | 60 · 5.3 / 6.3 ms | 60 · 13.3 / 14.6 ms |
-| NVIDIA RTX · ultra | The Crooked Lantern | 60 · 2.4 / 3.1 ms | 60 · 1.9 / 2.5 ms |
-| NVIDIA RTX · ultra | Stress Test | 60 · 2.4 / 3.1 ms | 60 · 1.8 / 2.7 ms |
-| NVIDIA RTX · ultra | The Vineyard | 60 · 2.1 / 2.7 ms | 60 · 2.1 / 2.5 ms |
+| AMD Radeon iGPU · medium | The Crooked Lantern (4 levels, 15 lights) | 60 · 13.0 / 13.5 ms | 60 · 8.0 / 8.8 ms |
+| AMD Radeon iGPU · medium | Stress Test (20 lights, 15 tokens) | 60 · 8.4 / 9.0 ms | 60 · 7.0 / 8.0 ms |
+| AMD Radeon iGPU · medium | The Vineyard (3 battlemaps, 17 lights) | 60 · 5.7 / 6.8 ms | 60 · 9.6 / 10.4 ms |
+| NVIDIA RTX · ultra | The Crooked Lantern | 60 · 2.2 / 2.9 ms | 60 · 1.8 / 2.3 ms |
+| NVIDIA RTX · ultra | Stress Test | 60 · 2.4 / 2.9 ms | 60 · 1.8 / 2.2 ms |
+| NVIDIA RTX · ultra | The Vineyard | 60 · 2.1 / 2.6 ms | 60 · 1.9 / 2.5 ms |
 
-Every view holds a steady 60 fps. The tightest cases are on the integrated GPU at medium: the Crooked Lantern
-DM view and the Vineyard player view use ~80–87% of the 16.7 ms budget at p95. The high tier costs ~23 ms
-on that GPU, so on such machines the start-up benchmark and adaptive quality keep medium. Details are in
+Every view holds a steady 60 fps (the higher of two runs is shown). The tightest case is the Crooked Lantern
+DM view on the integrated GPU at medium, at ~81% of the 16.7 ms budget at p95; the Vineyard player view
+depends on where the token stands and has measured up to ~14.6 ms. The high tier costs ~21–23 ms on that
+GPU, so on such machines the start-up benchmark and adaptive quality keep medium. Details are in
 [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
 ## Testing
@@ -199,7 +208,8 @@ The live Supabase tests (`src/net/live.supabase.test.ts`, `src/net/host/live.sup
 `src/net/assets/live.assets.supabase.test.ts`) create anonymous users that the publishable key cannot
 delete.
 
-**SQL tests** (`supabase/tests/*.sql`: RLS, RPCs, Realtime authorisation, Storage policies, tile chunks).
+**SQL tests** (`supabase/tests/*.sql`: RLS, RPCs, Realtime authorisation, Storage policies, tile chunks,
+per-account quotas).
 Run each file as `postgres`, in the SQL editor or with psql. Each file runs in one transaction that is
 rolled back, and its final row reports `passed` / `failed`.
 
@@ -207,16 +217,21 @@ rolled back, and its final row reports `passed` / `failed`.
 
 ```bash
 npx vite --port 5173 &
-ATLAS_URL=http://127.0.0.1:5173 node e2e/editor-smoke.mjs         # build a scene with the tools, undo/redo, save, reload
-ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-local.mjs    # DM + 2 players in local mode: oracle-equal views, moves, doors, lock, reloads, leak scan
-ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-supabase.mjs # the same against the real backend (+ Realtime / table / Storage RLS checks)
+ATLAS_URL=http://127.0.0.1:5173 node e2e/editor-smoke.mjs         # quality probe, menus, labels, options bar at 1280 px, the tools, undo/redo, shortcuts, save, reload
+ATLAS_URL=http://127.0.0.1:5173 node e2e/vineyard-build.mjs       # builds test_maps/vineyard.atlas.json from the battlemaps (see below)
+ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-local.mjs    # DM + 2 players in local mode: host menus, oracle-equal views, moves, doors, stairs, lock, reloads, leak scan
+ATLAS_SCENE=$PWD/test_maps/vineyard.atlas.json ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-local.mjs   # the same on the Vineyard
+ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-supabase.mjs # the same against the real backend (+ Realtime / table / Storage RLS checks, sub-cell chunk clipping)
+ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-latency.mjs  # move results on a 120×120 daylit field arrive well under the 5 s timeout
+ATLAS_URL=http://127.0.0.1:5173 node e2e/host-save-map.mjs        # "Save map to library" from a live session, including the conflict path
+ATLAS_URL=http://127.0.0.1:5173 node e2e/engine-leak.mjs          # editor ↔ library round trips release every WebGL context
 ATLAS_URL=http://127.0.0.1:5173 node e2e/perf.mjs                 # frame times per GPU / tier / scene
 ATLAS_URL=http://127.0.0.1:5173 node e2e/showcase.mjs             # regenerate docs/screenshots
 ```
 
 `e2e/vineyard-build.mjs` builds a large scene from three Forgotten Adventures battlemaps, and `perf.mjs` and
-`showcase.mjs` use it when it exists. Those images are third-party art: they are not in the repository
-(`test_maps/` is gitignored).
+`showcase.mjs` use it when it exists (the multiplayer scripts take it through `ATLAS_SCENE`). Those images
+are third-party art: they are not in the repository (`test_maps/` is gitignored).
 
 Environment variables for the scripts:
 - `ATLAS_URL`: the dev server.

@@ -25,12 +25,15 @@ export function HostEditorProviders({
   engine,
   onPreviewToken,
   onExit,
+  onSave,
   children,
 }: {
   editor: HostEditor | null
   engine: Engine | null
   onPreviewToken(id: Id): void
   onExit(): void
+  /** Save the live map to the library (Ctrl+S / File › Save). */
+  onSave(): void
   children: React.ReactNode
 }) {
   const confirm = useConfirm()
@@ -54,11 +57,7 @@ export function HostEditorProviders({
       )
     }
     return {
-      save: () =>
-        toast.info("Edits apply to the live session", {
-          id: "live-save",
-          description: "The session saves automatically.",
-        }),
+      save: onSave,
       newScene: unavailable("Creating a scene"),
       newFromImages: unavailable("Creating a scene"),
       openMapImport: unavailable("Importing map images"),
@@ -118,7 +117,7 @@ export function HostEditorProviders({
         store.getState().deleteSelection()
       },
     }
-  }, [store, controller, engine, confirm, onExit, onPreviewToken])
+  }, [store, controller, engine, confirm, onExit, onPreviewToken, onSave])
   const engineHandle = React.useMemo(() => ({ engine }), [engine])
   return (
     <EditorActionsContext.Provider value={actions}>

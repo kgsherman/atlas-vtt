@@ -16,7 +16,7 @@ import type { AABB3 } from "../geometry/box"
 import { createInterval, lineAABB3 } from "../geometry/ray"
 import type { OcclusionWorld } from "../occlusion/types"
 import type { Id, Vec3 } from "../scene/types"
-import { BlockerCache } from "./blockers"
+import { BlockerCache, hitEntersContaining } from "./blockers"
 import type { LightField } from "./lightField"
 import { SAMPLE_DX, SAMPLE_DZ, SUBS_PER_CELL, type InsideInfo, type SampleLayout } from "./layout"
 import { FULL_SUBMASK } from "./mask"
@@ -247,7 +247,7 @@ export class Evaluator {
     const len = Math.hypot(x - eye.x, y - eye.y, z - eye.z)
     const hit = this.world.raycast(eye, p, { channel: "sight" })
     if (hit === null) return len
-    if (ins.sight.has(hit.primitive.key)) return Math.max(0, hit.t * len - PROBE_PULLBACK)
+    if (hitEntersContaining(this.world, eye, p, hit, ins.sight, "sight")) return Math.max(0, hit.t * len - PROBE_PULLBACK)
     const top = ins.top
     if (top !== null && !this.sight.blocked(eye, top)) return Math.hypot(top.x - eye.x, top.y - eye.y, top.z - eye.z)
     return -1

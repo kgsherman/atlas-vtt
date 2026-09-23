@@ -40,6 +40,7 @@ import {
   isEmptyChange,
   previewDimmedTokens,
   previewHostMasks,
+  previewSeenTokens,
   sceneChangeBetween,
   setDirectionalPatches,
   setTokensHiddenPatches,
@@ -231,6 +232,65 @@ describe("MovePlanner", () => {
     ).toBe(true)
   })
 
+  describe("stairs top edge", () => {
+    // Stairs at cells i = 2, j = 1..4 ascending +Z to a full upper floor; the lower level has floor
+    // everywhere, including the cell just beyond the top edge (2,5) (the usual in-room layout).
+    const setup = () => {
+      const { scene, levelId } = flatScene(10, 10)
+      const upper = addLevel(scene, { elevation: 10 })
+      add(
+        scene,
+        createConnector(levelId, upper.id, { x: 10, z: 5, w: 5, d: 20 }, 0)
+      )
+      return { scene, levelId, upper }
+    }
+
+    it("goes up when the drop is just beyond the top edge", () => {
+      const { scene, levelId, upper } = setup()
+      const t = tokenAt(scene, levelId, { i: 2, j: 0 })
+      const planner = new MovePlanner()
+      planner.setScene(scene)
+      const plan = planner.plan(t.id, { i: 2, j: 5 }, levelId)
+      expect(plan?.target.levelId).toBe(upper.id)
+      expect(plan?.path?.slice(-2)).toEqual([
+        at(2, 4, levelId),
+        at(2, 5, upper.id),
+      ])
+    })
+
+    it("goes up from the top step too", () => {
+      const { scene, levelId, upper } = setup()
+      const t = tokenAt(scene, levelId, { i: 2, j: 4 })
+      const planner = new MovePlanner()
+      planner.setScene(scene)
+      const plan = planner.plan(t.id, { i: 2, j: 5 }, levelId)
+      expect(plan?.target.levelId).toBe(upper.id)
+      expect(plan?.path).toEqual([at(2, 4, levelId), at(2, 5, upper.id)])
+    })
+
+    it("stays on the lower level elsewhere", () => {
+      const { scene, levelId } = setup()
+      const t = tokenAt(scene, levelId, { i: 2, j: 0 })
+      const planner = new MovePlanner()
+      planner.setScene(scene)
+      const plan = planner.plan(t.id, { i: 2, j: 7 }, levelId)
+      expect(plan?.target.levelId).toBe(levelId)
+      expect(plan?.path?.every((st) => st.levelId === levelId)).toBe(true)
+    })
+
+    it("falls back to the lower level when the landing is walled off", () => {
+      const { scene, levelId, upper } = setup()
+      add(scene, createWall(upper.id, { x: 0, z: 25 }, { x: 50, z: 25 }))
+      const t = tokenAt(scene, levelId, { i: 2, j: 0 })
+      const planner = new MovePlanner()
+      planner.setScene(scene)
+      const plan = planner.plan(t.id, { i: 2, j: 5 }, levelId)
+      expect(plan?.path).not.toBeNull()
+      expect(plan?.target.levelId).toBe(levelId)
+      expect(plan?.path?.every((st) => st.levelId === levelId)).toBe(true)
+    })
+  })
+
   it("updates the occlusion world incrementally and rebuilds on structure changes", () => {
     const { scene, levelId } = flatScene(10, 10)
     const t = tokenAt(scene, levelId, { i: 1, j: 1 })
@@ -304,6 +364,64 @@ describe("connectors", () => {
     expect(opts[0].path).toEqual([at(4, 4, levelId), at(4, 4, upper.id)])
     const away = tokenAt(scene, levelId, { i: 0, j: 0 })
     expect(climbOptions(scene, away)).toEqual([])
+  })
+
+  describe("stairs and ramps", () => {
+    const setup = () => {
+      const { scene, levelId } = flatScene(10, 10)
+      const upper = addLevel(scene, { elevation: 10 })
+      const stairs = add(
+        scene,
+        createConnector(levelId, upper.id, { x: 10, z: 5, w: 5, d: 20 }, 0)
+      )
+      return { scene, levelId, upper, stairs }
+    }
+
+    it("offers going up from the top step", () => {
+      const { scene, levelId, upper, stairs } = setup()
+      const opts = climbOptions(scene, tokenAt(scene, levelId, { i: 2, j: 4 }))
+      expect(opts).toHaveLength(1)
+      expect(opts[0]).toMatchObject({
+        direction: "up",
+        style: stairs.style,
+        connectorId: stairs.id,
+        toLevelId: upper.id,
+      })
+      expect(opts[0].path).toEqual([at(2, 4, levelId), at(2, 5, upper.id)])
+    })
+
+    it("offers nothing lower on the run", () => {
+      const { scene, levelId } = setup()
+      expect(
+        climbOptions(scene, tokenAt(scene, levelId, { i: 2, j: 2 }))
+      ).toEqual([])
+    })
+
+    it("offers going down from the cell beyond the top edge", () => {
+      const { scene, levelId, upper } = setup()
+      const opts = climbOptions(scene, tokenAt(scene, upper.id, { i: 2, j: 5 }))
+      expect(opts).toHaveLength(1)
+      expect(opts[0].direction).toBe("down")
+      expect(opts[0].toLevelId).toBe(levelId)
+      expect(opts[0].path).toEqual([at(2, 5, upper.id), at(2, 4, levelId)])
+    })
+
+    it("labels ladders as ladders", () => {
+      const { scene, levelId } = flatScene(10, 10)
+      const upper = addLevel(scene, { elevation: 10 })
+      add(
+        scene,
+        createConnector(
+          levelId,
+          upper.id,
+          { x: 20, z: 20, w: 5, d: 5 },
+          0,
+          "ladder"
+        )
+      )
+      const opts = climbOptions(scene, tokenAt(scene, levelId, { i: 4, j: 4 }))
+      expect(opts.map((o) => o.style)).toEqual(["ladder"])
+    })
   })
 
   it("finds stairs under a token", () => {
@@ -438,6 +556,13 @@ describe("host helpers", () => {
     const explored = decodeMask(masks[levelId].explored)
     expect(explored.bits[0] & (1 << 5)).toBeTruthy()
     expect(previewDimmedTokens(scene, [a.id], result)).toEqual([c.id])
+    expect(previewSeenTokens(scene, [a.id], result)).toEqual([b.id])
+    // A hidden token in plain sight: players never receive it, so it is dimmed and not counted.
+    scene.tokens[b.id] = { ...b, hidden: true }
+    expect(previewDimmedTokens(scene, [a.id], result)).toEqual(
+      [b.id, c.id].sort()
+    )
+    expect(previewSeenTokens(scene, [a.id], result)).toEqual([])
   })
 
   it("makes scene patches for play-view edits", () => {
@@ -574,6 +699,29 @@ describe("PlayController", () => {
     f.controller.pointerDown(ev(10, 10, pick({ x: 40, z: 40 })))
     f.controller.pointerUp(ev(10, 10, pick({ x: 40, z: 40 })))
     expect(f.selections[f.selections.length - 1]).toBeNull()
+  })
+
+  it("hovers a door wherever a click would toggle it (walls seen edge-on)", () => {
+    const { scene, levelId } = flatScene(10, 10)
+    // A wall running up/down the screen: from above it is a thin line.
+    const wall = add(
+      scene,
+      createWall(levelId, { x: 25, z: 0 }, { x: 25, z: 50 })
+    )
+    const door = add(scene, createDoor(wall, 22.5, { width: 5 }))
+    const t = tokenAt(scene, levelId, { i: 1, j: 1 })
+    const c = controllerFixture("player", scene, levelId).controller
+    // The pick hit the wall, 1 ft from the door segment: the door is hovered.
+    c.pointerMove(ev(0, 0, pick({ x: 26, z: 22 }, { objectId: wall.id })))
+    expect(c.overlays().hoveredId).toBe(door.id)
+    // 3 ft away: nothing.
+    c.pointerMove(ev(0, 0, pick({ x: 28, z: 22 }, { objectId: wall.id })))
+    expect(c.overlays().hoveredId).toBeNull()
+    // A token pick wins over a nearby door.
+    c.pointerMove(
+      ev(0, 0, pick({ x: 26, z: 22 }, { objectId: wall.id, tokenId: t.id }))
+    )
+    expect(c.overlays().hoveredId).toBe(t.id)
   })
 
   it("routes door clicks and measures with the measure tool", () => {

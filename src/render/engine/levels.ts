@@ -6,14 +6,16 @@
  */
 import * as THREE from "three"
 
-import type { Id } from "@/core/scene/types"
+import type { DoorState, Id } from "@/core/scene/types"
 
-import { doorLeafPose, type DoorLeaf } from "../builders/doors"
+import { DOOR_MARKER_ACCENT, doorLeafPose, type DoorLeaf } from "../builders/doors"
 import { isSharedGeometry } from "../builders/shared"
 import { BUCKETS, type BucketBuild, type BucketKind, type FlameAnimation, type MeshBuild } from "../builders/types"
 import type { TriRange } from "../builders/writer"
+import { LAYER } from "../internal"
 import { disposeCachedEdges, type ObjectMeshRef } from "../overlays/highlight"
 import type { LevelDrawMode } from "./levelPlan"
+import { trackShared } from "./sharedResources"
 
 export interface LevelMaterials {
   opaque: THREE.ShaderMaterial
@@ -39,7 +41,21 @@ export interface DoorLeafState {
   mesh: THREE.Mesh
   /** Last applied open fraction (NaN = never applied). */
   applied: number
+  /** Top-down marker (second child of the pivot; builders/doors.ts doorMarkerGeometry), null if none. */
+  marker: THREE.Mesh | null
+  /** The marker's built vertex colours (the style colour), recoloured per door state. */
+  markerBase: Float32Array | null
+  /** Door state the marker colours show ("" = never applied). */
+  markerState: DoorState | ""
 }
+
+/** userData.slot of door markers (drawn with the world material, shown only in top-down views). */
+export const DOOR_MARKER_SLOT = "doorMarker"
+
+/** Linear red of a locked door's marker plate. */
+const LOCKED_ACCENT: readonly [number, number, number] = [0.8, 0.06, 0.04]
+/** Colour scale of an open door's marker. */
+const OPEN_MARKER_SCALE = 0.45
 
 export interface FlameState {
   mesh: THREE.InstancedMesh
@@ -69,6 +85,7 @@ function glowQuadGeometry(): THREE.BufferGeometry {
     glowQuad = new THREE.PlaneGeometry(1, 1)
     glowQuad.userData.shared = true
     glowQuad.name = "fixture:glow"
+    trackShared(glowQuad)
   }
   return glowQuad
 }
@@ -84,6 +101,9 @@ export class LevelView {
   private readonly shared: SharedMaterials
   private readonly buckets = new Map<BucketKind, BucketState>()
   private _mode: LevelDrawMode = "solid"
+  private markersVisible = false
+  /** Render layer of flames and glow sprites (see setEmissiveLayer). */
+  private emissiveLayer: number = LAYER.VISUAL
 
   constructor(id: Id, materials: LevelMaterials, shared: SharedMaterials) {
     this.id = id
@@ -114,6 +134,21 @@ export class LevelView {
     this.applyModeTo(b)
   }
 
+  /**
+   * Render layer of flames and glow sprites: VISUAL (the world pass; into the HDR target with bloom on
+   * high / ultra) or OVERLAY (medium's bloom-less post: drawn onto the canvas after the composite, so
+   * they blend in display space and look exactly as when the world was drawn straight to the canvas).
+   */
+  setEmissiveLayer(layer: number): void {
+    if (layer === this.emissiveLayer) return
+    this.emissiveLayer = layer
+    for (const b of this.buckets.values()) for (const mesh of b.meshes) this.applyEmissiveLayer(mesh)
+  }
+
+  private applyEmissiveLayer(mesh: THREE.Mesh): void {
+    if (mesh.userData.slot === "flame" || mesh.userData.slot === "glow") mesh.layers.set(this.emissiveLayer)
+  }
+
   private addMesh(b: BucketState, m: MeshBuild): void {
     switch (m.kind) {
       case "merged": {
@@ -126,6 +161,7 @@ export class LevelView {
         mesh.userData.ranges = m.geometry.userData.ranges as TriRange[]
         if (m.slot === "glass") mesh.renderOrder = ORDER_GLASS
         mesh.matrixAutoUpdate = false
+        this.applyEmissiveLayer(mesh)
         b.root.add(mesh)
         b.meshes.push(mesh)
         if (m.terrainOffsets) b.terrain = { mesh, offsets: m.terrainOffsets }
@@ -144,6 +180,7 @@ export class LevelView {
         mesh.computeBoundingSphere()
         mesh.computeBoundingBox()
         mesh.matrixAutoUpdate = false
+        this.applyEmissiveLayer(mesh)
         b.root.add(mesh)
         b.meshes.push(mesh)
         if (m.flames) {
@@ -161,6 +198,7 @@ export class LevelView {
             glow.frustumCulled = false
             glow.matrixAutoUpdate = false
             glow.raycast = () => {}
+            this.applyEmissiveLayer(glow)
             b.root.add(glow)
             b.meshes.push(glow)
           }
@@ -175,9 +213,21 @@ export class LevelView {
         mesh.userData.slot = "world"
         mesh.userData.objectId = m.leaf.doorId
         pivot.add(mesh)
+        let marker: THREE.Mesh | null = null
+        if (m.marker) {
+          // Second child of the pivot: follows the leaf's swing / slide (an open swing door shows as a
+          // bar at right angles to the wall). Outlined on hover / selection like the leaf (objectRefs).
+          marker = new THREE.Mesh(m.marker, this.materials.opaque)
+          marker.name = `${m.name}:marker`
+          marker.userData.slot = DOOR_MARKER_SLOT
+          marker.userData.objectId = m.leaf.doorId
+          pivot.add(marker)
+          b.meshes.push(marker)
+        }
         b.root.add(pivot)
         b.meshes.push(mesh)
-        b.doors.push({ leaf: m.leaf, pivot, mesh, applied: Number.NaN })
+        const base = m.marker?.getAttribute("color")?.array
+        b.doors.push({ leaf: m.leaf, pivot, mesh, applied: Number.NaN, marker, markerBase: base ? Float32Array.from(base) : null, markerState: "" })
         break
       }
     }
@@ -210,11 +260,27 @@ export class LevelView {
     for (const b of this.buckets.values()) this.applyModeTo(b)
   }
 
+  /** Door markers are for top-down views only (the engine follows ViewState.camera). */
+  setDoorMarkersVisible(visible: boolean): void {
+    if (visible === this.markersVisible) return
+    this.markersVisible = visible
+    for (const b of this.buckets.values()) for (const d of b.doors) this.syncMarker(d.marker)
+  }
+
+  private syncMarker(marker: THREE.Mesh | null): void {
+    if (marker) marker.visible = this.markersVisible && this._mode === "solid" && marker.userData.liftHidden !== true
+  }
+
   private applyModeTo(b: BucketState): void {
     const mode = this._mode
     this.group.visible = mode !== "hidden"
     for (const mesh of b.meshes) {
       const inst = (mesh as THREE.InstancedMesh).isInstancedMesh === true
+      if (mesh.userData.slot === DOOR_MARKER_SLOT) {
+        // Never ghosted: shown on solid levels in top-down views.
+        this.syncMarker(mesh)
+        continue
+      }
       if (mesh.userData.slot !== "world") {
         // Glass, flames and fixture holders are not ghosted.
         mesh.visible = mode === "solid"
@@ -281,7 +347,12 @@ export class LevelView {
     const out: THREE.Mesh[] = []
     for (const [kind, b] of this.buckets) {
       if (kind === "floors") continue
-      for (const m of b.meshes) if (m.userData.slot !== "glass" && m.userData.slot !== "glow") out.push(m)
+      for (const m of b.meshes) {
+        if (m.userData.slot === "glass" || m.userData.slot === "glow") continue
+        // THREE.Raycaster ignores .visible: hidden door markers (orbit views) must not be picked.
+        if (m.userData.slot === DOOR_MARKER_SLOT && !m.visible) continue
+        out.push(m)
+      }
     }
     return out
   }
@@ -308,6 +379,35 @@ export class LevelView {
     state.pivot.updateMatrix()
     state.pivot.updateMatrixWorld(true)
     state.applied = t
+  }
+
+  /**
+   * Door marker for the door's state: the style colour when closed, a red centre plate when locked,
+   * dimmed when open; hidden while a lifting door is more than half raised (lifting is not visible from
+   * above). Cheap when nothing changed.
+   */
+  applyDoorMarker(state: DoorLeafState, doorState: DoorState, t: number): void {
+    const marker = state.marker
+    if (!marker) return
+    const liftHidden = state.leaf.motion === "lift" && t > 0.5
+    if (marker.userData.liftHidden !== liftHidden) {
+      marker.userData.liftHidden = liftHidden
+      this.syncMarker(marker)
+    }
+    const base = state.markerBase
+    if (state.markerState === doorState || !base) return
+    state.markerState = doorState
+    const attr = marker.geometry.getAttribute("color") as THREE.BufferAttribute | undefined
+    if (!attr) return
+    const arr = attr.array as Float32Array
+    const accentStart = (marker.geometry.userData[DOOR_MARKER_ACCENT] as number | undefined) ?? attr.count
+    const scale = doorState === "open" ? OPEN_MARKER_SCALE : 1
+    for (let v = 0; v < attr.count; v++) {
+      for (let c = 0; c < 3; c++) {
+        arr[v * 3 + c] = doorState === "locked" && v >= accentStart ? LOCKED_ACCENT[c] : base[v * 3 + c] * scale
+      }
+    }
+    attr.needsUpdate = true
   }
 
   /** Update flame instances for flicker (visual only). */

@@ -36,6 +36,7 @@ import { tokenDisplayName } from "@/play"
 
 import type { HostActions } from "./hostActions"
 import type { MenuTarget } from "./menuTarget"
+import { playerLabels } from "./playerLabels"
 
 export function HostContextMenuContent({
   target,
@@ -51,9 +52,10 @@ export function HostContextMenuContent({
   onSelect(tokenId: Id): void
 }) {
   const scene = state.scene
-  const players = Object.values(state.players).sort((a, b) =>
-    a.displayName.localeCompare(b.displayName)
-  )
+  const labels = playerLabels(Object.values(state.players))
+  const players = Object.values(state.players)
+    .map((p) => ({ ...p, displayName: labels.get(p.userId) ?? p.displayName }))
+    .sort((a, b) => a.displayName.localeCompare(b.displayName))
 
   if (target.kind === "token") {
     const t = Object.hasOwn(scene.tokens, target.id)
@@ -105,21 +107,24 @@ export function HostContextMenuContent({
             <UserPlus /> Controlled by
           </ContextMenuSubTrigger>
           <ContextMenuSubContent className="w-48">
-            {players.length === 0 ? (
-              <ContextMenuLabel>No players have joined yet</ContextMenuLabel>
-            ) : null}
-            {players.map((p) => (
-              <ContextMenuCheckboxItem
-                key={p.userId}
-                checked={owners.includes(p.userId)}
-                onCheckedChange={(checked) =>
-                  actions.assign(t.id, p.userId, checked)
-                }
-                closeOnClick={false}
-              >
-                {p.displayName}
-              </ContextMenuCheckboxItem>
-            ))}
+            {/* Base UI labels throw outside a group (and crash the host console). */}
+            <ContextMenuGroup>
+              {players.length === 0 ? (
+                <ContextMenuLabel>No players have joined yet</ContextMenuLabel>
+              ) : null}
+              {players.map((p) => (
+                <ContextMenuCheckboxItem
+                  key={p.userId}
+                  checked={owners.includes(p.userId)}
+                  onCheckedChange={(checked) =>
+                    actions.assign(t.id, p.userId, checked)
+                  }
+                  closeOnClick={false}
+                >
+                  {p.displayName}
+                </ContextMenuCheckboxItem>
+              ))}
+            </ContextMenuGroup>
           </ContextMenuSubContent>
         </ContextMenuSub>
       </ContextMenuContent>
@@ -199,18 +204,20 @@ export function HostContextMenuContent({
   if (!l || l.type !== "light") return null
   return (
     <ContextMenuContent className="w-52">
-      <ContextMenuLabel className="truncate">
-        {l.name || "Light"}
-      </ContextMenuLabel>
-      <ContextMenuItem onClick={() => actions.setLight(l.id, !l.on)}>
-        <Flame /> {l.on ? "Put out" : "Light it"}
-      </ContextMenuItem>
-      <ContextMenuItem
-        onClick={() => actions.setObjectsHidden([l.id], !l.hidden)}
-      >
-        {l.hidden ? <Eye /> : <EyeOff />}{" "}
-        {l.hidden ? "Reveal to players" : "Hide from players"}
-      </ContextMenuItem>
+      <ContextMenuGroup>
+        <ContextMenuLabel className="truncate">
+          {l.name || "Light"}
+        </ContextMenuLabel>
+        <ContextMenuItem onClick={() => actions.setLight(l.id, !l.on)}>
+          <Flame /> {l.on ? "Put out" : "Light it"}
+        </ContextMenuItem>
+        <ContextMenuItem
+          onClick={() => actions.setObjectsHidden([l.id], !l.hidden)}
+        >
+          {l.hidden ? <Eye /> : <EyeOff />}{" "}
+          {l.hidden ? "Reveal to players" : "Hide from players"}
+        </ContextMenuItem>
+      </ContextMenuGroup>
     </ContextMenuContent>
   )
 }

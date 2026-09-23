@@ -119,7 +119,10 @@ export function previewHostMasks(
   return out
 }
 
-/** Tokens a previewed viewer set cannot see (drawn dimmed): everything except viewers and visible tokens. */
+/**
+ * Tokens drawn dimmed (DM-only markers) in a vision preview: those the viewers cannot see, and hidden
+ * tokens, which players never receive even in plain sight. Viewers themselves are never dimmed.
+ */
 export function previewDimmedTokens(
   scene: Pick<SceneLike, "tokens">,
   viewerIds: readonly Id[],
@@ -127,7 +130,28 @@ export function previewDimmedTokens(
 ): Id[] {
   const keep = new Set<Id>(viewerIds)
   return Object.keys(scene.tokens)
-    .filter((id) => !keep.has(id) && !result.visibleTokenIds.has(id))
+    .filter(
+      (id) =>
+        !keep.has(id) &&
+        (!result.visibleTokenIds.has(id) || scene.tokens[id].hidden)
+    )
+    .sort()
+}
+
+/** Tokens the previewed viewers' player would actually see: visible, not a viewer, not hidden. */
+export function previewSeenTokens(
+  scene: Pick<SceneLike, "tokens">,
+  viewerIds: readonly Id[],
+  result: Pick<VisibilityResult, "visibleTokenIds">
+): Id[] {
+  const viewers = new Set<Id>(viewerIds)
+  return [...result.visibleTokenIds]
+    .filter(
+      (id) =>
+        !viewers.has(id) &&
+        Object.hasOwn(scene.tokens, id) &&
+        !scene.tokens[id].hidden
+    )
     .sort()
 }
 

@@ -3,10 +3,13 @@
  * the explored part of every level's battlemap in square chunks of TILE_CHUNK × TILE_CHUNK grid cells:
  * `session-tiles/{sessionId}/{userId}/{levelId}/{ci}_{cj}.webp`, readable only by that player (while
  * an active member) and the DM. A chunk image is TILE_CHUNK·tilePx pixels square; it holds the pixels
- * of the cells that player has explored (whole cells) and is transparent elsewhere.
+ * of the sub-cells (4×4 per cell, core/vision) that player has explored — a fully explored cell whole,
+ * a partly explored one only its explored sub-cells — and is transparent everywhere else.
  *
  * The host tells the player which cells each uploaded chunk holds with `{t: "tiles"}` messages:
- * `[ci, cj, mask]` entries whose mask has bit (j mod 4)·4 + (i mod 4) set for every cell in the object.
+ * `[ci, cj, mask, rev]` entries whose mask has bit (j mod 4)·4 + (i mod 4) set for every cell with
+ * pixels in the object, and whose `rev` (a non-zero hash of the cells' sub-cell masks) changes whenever
+ * the object is re-cut, e.g. when a partly explored cell grows. Removals are `[ci, cj, 0]`.
  * Uploading per player chunk (instead of one object per cell) keeps an open outdoor map's first view at
  * ~70 uploads/downloads instead of ~1000, which Storage rate-limits.
  */
@@ -19,8 +22,11 @@ export const FULL_CHUNK_MASK = (1 << (TILE_CHUNK * TILE_CHUNK)) - 1
 /** Chunk coordinates stay below this (grids are ≤ 200 cells: ≤ 50 chunks per side). */
 export const MAX_CHUNK_COORD = 64
 
-/** `[ci, cj, mask]`: the cells (mask bits) whose pixels the uploaded chunk (ci, cj) holds. */
-export type ChunkEntry = [ci: number, cj: number, mask: number]
+/**
+ * `[ci, cj, mask, rev?]`: the cells (mask bits) whose pixels the uploaded chunk (ci, cj) holds, and the
+ * version of its content (absent from older hosts: treat as 0).
+ */
+export type ChunkEntry = [ci: number, cj: number, mask: number] | [ci: number, cj: number, mask: number, rev: number]
 
 export interface CellChunk {
   ci: number
@@ -45,14 +51,15 @@ export function chunkFromKey(key: number): { ci: number; cj: number } {
 /** Storage path of one player's chunk. */
 export const chunkPath = (sessionId: string, userId: string, levelId: Id, ci: number, cj: number): string => `${sessionId}/${userId}/${levelId}/${ci}_${cj}.webp`
 
-/** A well-formed wire entry (integers in range, mask within 16 bits). */
+/** A well-formed wire entry (integers in range, mask within 16 bits, rev a uint32). */
 export function isChunkEntry(e: unknown): e is ChunkEntry {
   return (
     Array.isArray(e) &&
-    e.length === 3 &&
+    (e.length === 3 || e.length === 4) &&
     e.every((n) => Number.isInteger(n) && n >= 0) &&
     (e[0] as number) < MAX_CHUNK_COORD &&
     (e[1] as number) < MAX_CHUNK_COORD &&
-    (e[2] as number) <= FULL_CHUNK_MASK
+    (e[2] as number) <= FULL_CHUNK_MASK &&
+    (e.length === 3 || (e[3] as number) < 2 ** 32)
   )
 }

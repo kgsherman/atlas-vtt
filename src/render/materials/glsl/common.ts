@@ -61,6 +61,8 @@ uniform float uTime;
 // x = emissive scale of flames / glows (> 1 when the main pass renders HDR for bloom), y = glow sprite
 // strength, z = 1 when the main pass renders into the HDR post target, w = unused.
 uniform vec4 uRenderParams;
+// World Y of the cutaway plane (underside of the slab above the active level); 1e9 = no cutaway.
+uniform float uCutawayY;
 `
 
 export const COMMON_FUNCTIONS_GLSL = /* glsl */ `
@@ -89,6 +91,11 @@ export const COMMON_FUNCTIONS_GLSL = /* glsl */ `
 // normal offset: a cap touching the underside of a slab lies ON the slab's back face (the stored
 // "second depth"), so the offset would read it as lit through the floor above (§4.2 deviation, see
 // render/shadows/octahedral.ts receiverOffset).
+// Cutaway views: a shadowed light of the hidden storey above never lights a cap that lies above the
+// cutaway plane (atPointLights). The inset rule cannot save those caps: with the storey hidden its wall
+// bases sit over the cap with WALL_BOTTOM_MARGIN below the inset point, the coverage probe steps off a
+// wall-width footprint, and the stored depth's error at grazing angles exceeds the inset, which together
+// gave a texel sawtooth of light along every wall top under a lit storey that no inset or margin removes.
 #define AT_CAP_INSET 0.03
 #define AT_CAP_EPS 0.01
 // Depth bias of the directional maps in feet (lighting/system.ts DIRECTIONAL_BIAS_FT): uSunParams.y /
@@ -274,7 +281,8 @@ float atPcss(sampler2D atlas, vec3 tile, vec3 q, float eps, float srcRadius) {
 // measured from the tile's capture origin (l3.xyz). Taps compare the receiver's own distance: receiver-plane
 // distances would leak light at contacts (a floor's plane runs under the wall standing on it, and taps aimed
 // there pass). Caps use the inset rule (AT_CAP_INSET): covered (probed on the cap's plane, see atCapCovered)
-// → dark, else the same filter. l2 = (tile x, tile y, tile size, flags), l3.w = source radius.
+// → dark, else the same filter. l2 = (tile x, tile y, tile size, flags), l3.w = source radius. In cutaway
+// views atPointLights skips this for caps above the cutaway plane lit from above it (see AT_CAP_INSET).
 float atShadowIn(sampler2D atlas, vec4 l2, vec4 l3, vec3 p, vec3 n, bool cap) {
   vec3 rel = p - l3.xyz;
   float d = length(rel);
@@ -335,7 +343,9 @@ vec3 atPointLights(vec3 p, vec3 n, vec3 nb, bool shadows, bool cap, out float li
     float fall = atLightFalloff(d, l1.w, l0.w);
     float a = fall * lam;
     float sh = 1.0;
-    if (shadows && l2.z > 0.5) sh = atPointShadow(l2, uLights[i * 4 + 3], p, n, cap);
+    // Caps strictly above the cutaway plane (walls reaching into the hidden storey's slab) get no light
+    // from shadowed lights above it; walkable and vertical surfaces keep light coming down stairwells.
+    if (shadows && l2.z > 0.5) sh = (cap && p.y > uCutawayY + AT_CAP_INSET && l0.y > uCutawayY) ? 0.0 : atPointShadow(l2, uLights[i * 4 + 3], p, n, cap);
     lit = max(lit, inRange * sh);
     sum += l1.rgb * (a * sh);
 #if AT_TIER >= 2

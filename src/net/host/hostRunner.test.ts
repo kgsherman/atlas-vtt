@@ -17,11 +17,13 @@ import type { PlayerDoor, PlayerView } from "@/core/session/types"
 import { deepEqual } from "@/core/session/util"
 import { cellTouched, decodeMask } from "@/core/vision/mask"
 
+import { createLocalScenesRepo } from "../scenesRepo"
 import { NetError } from "../supabase"
 import type { HostRunnerImpl } from "./hostRunner"
 import { createSessionFixture, DM, FakeWorker, Mirror, P1, P2, P3, recordingAssets, sleep, startHost, TEST_TIMING, waitFor, type SessionFixture } from "./test-utils"
 import type { TileCodec } from "./tiles"
-import { createInThreadVisionClient, createWorkerVisionClient } from "./visionClient"
+import { createInThreadVisionClient, createWorkerVisionClient, type WorkerLike } from "./visionClient"
+import { responseTransferables, VisionWorkerCore, type VisionRequest } from "./visionProtocol"
 
 const walk = (levelId: Id, cells: Array<[number, number]>): PathStep[] => cells.map(([i, j]) => ({ cell: { i, j }, levelId }))
 const json = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T
@@ -94,8 +96,11 @@ function corridor() {
   return { scene, ground, eve, fay }
 }
 
-/** In-thread vision whose computes resolve `delay()` ms late (to hold requests "in flight"). */
-function slowVision(delay: () => number) {
+/**
+ * In-thread vision whose computes resolve `delay()` ms late (to hold requests "in flight"), and whose
+ * step probes take `probeDelay()` ms (while they run, the foreground lane is blocked like a busy worker).
+ */
+function slowVision(delay: () => number, probeDelay: () => number = () => 0, log?: string[]) {
   return () => {
     const inner = createInThreadVisionClient()
     return {
@@ -103,18 +108,95 @@ function slowVision(delay: () => number) {
       get lastComputeMs() {
         return inner.lastComputeMs
       },
+      get pendingProbes() {
+        return inner.pendingProbes
+      },
       onFailure: inner.onFailure,
       setScene: inner.setScene,
       update: inner.update,
       dispose: inner.dispose,
       compute: async (ids: Id[], tag: number) => {
+        log?.push(`compute ${ids.join(",")}`)
         const r = await inner.compute(ids, tag)
         const ms = delay()
         if (ms > 0) await sleep(ms)
         return r
       },
+      probe: async (scene: Scene, change: { objects?: Id[]; tokens?: Id[] }, sets: Id[][]) => {
+        log?.push("probe")
+        const r = await inner.probe(scene, change, sets)
+        const ms = probeDelay()
+        if (ms > 0) await sleep(ms)
+        log?.push("probe done")
+        return r
+      },
     }
   }
+}
+
+/**
+ * A vision "worker" that handles messages strictly one after another (like a real worker) and spends
+ * `probeMs` on each step probe; records the ops in posting order.
+ */
+class SerialWorker implements WorkerLike {
+  private readonly core = new VisionWorkerCore()
+  private readonly listeners = new Map<string, Set<(ev: Event) => void>>()
+  private readonly queue: VisionRequest[] = []
+  private busy = false
+  private readonly probeMs: number
+  readonly ops: string[] = []
+  probesDone = 0
+
+  constructor(probeMs: number) {
+    this.probeMs = probeMs
+  }
+
+  postMessage(message: unknown): void {
+    const req = structuredClone(message) as VisionRequest
+    this.ops.push(req.op)
+    this.queue.push(req)
+    this.pump()
+  }
+
+  private pump(): void {
+    if (this.busy) return
+    const req = this.queue.shift()
+    if (!req) return
+    this.busy = true
+    setTimeout(
+      () => {
+        const res = this.core.handle(req)
+        if (req.op === "probe") this.probesDone++
+        const data = structuredClone(res, { transfer: responseTransferables(res) })
+        for (const l of [...(this.listeners.get("message") ?? [])]) l({ data } as unknown as Event)
+        this.busy = false
+        this.pump()
+      },
+      req.op === "probe" ? this.probeMs : 0
+    )
+  }
+
+  addEventListener(type: string, listener: (ev: Event) => void): void {
+    let set = this.listeners.get(type)
+    if (!set) this.listeners.set(type, (set = new Set()))
+    set.add(listener)
+  }
+
+  removeEventListener(type: string, listener: (ev: Event) => void): void {
+    this.listeners.get(type)?.delete(listener)
+  }
+
+  terminate(): void {}
+}
+
+/** Dark 12×5 hall: a wall along z = 10 with a closed door at x = 27.5; Eve (darkvision 10 ft) in row 2, Fay far east. */
+function hall() {
+  const { scene, ground } = flatScene(12, 5, "dark")
+  const wall = add(scene, createWall(ground, { x: 0, z: 10 }, { x: 60, z: 10 }))
+  const door = add(scene, createDoor(wall, 27.5))
+  const eve = addToken(scene, ground, 7.5, 12.5, { name: "Eve", vision: { darkvision: 10, blindsight: 0, blind: false } })
+  const fay = addToken(scene, ground, 57.5, 22.5, { name: "Fay" })
+  return { scene, ground, door, eve, fay }
 }
 
 async function hosted(scene: Scene, players: string[], extra: Parameters<typeof startHost>[1] = {}) {
@@ -365,12 +447,37 @@ describe("host runner — requests", () => {
     }, "results settle")
     const limited = m.results.filter((r) => r.reason === "rate-limited").length
     const handled = m.results.filter((r) => r.reason === "cannot").length
-    // Burst 16 (the join hello took one; a little refill while the flood arrives); the rest is refused.
-    // Pending results are capped per player, so a flooding client cannot grow the host's queues either.
-    expect(handled).toBeGreaterThanOrEqual(14)
-    expect(handled).toBeLessThanOrEqual(18)
-    expect(limited).toBeGreaterThanOrEqual(10)
-    expect(m.results.length).toBeLessThanOrEqual(40)
+    // Burst 16 (hellos have their own budget; a little refill while the flood arrives); the rest is
+    // refused, and only a few refusals are answered (2/s, burst 4): the others are dropped silently.
+    expect(handled).toBeGreaterThanOrEqual(15)
+    expect(handled).toBeLessThanOrEqual(19)
+    expect(limited).toBeGreaterThanOrEqual(1)
+    expect(limited).toBeLessThanOrEqual(6)
+    expect(m.results.length).toBeLessThanOrEqual(handled + 6)
+  })
+
+  it("bounds hello floods: at most a few snapshots, no backlog, later hellos still answered", async () => {
+    const k = keep()
+    const { fx, h } = await hosted(k.scene, [P1])
+    h.dispatch({ t: "assign-token", tokenId: k.bo.id, userId: P1, assigned: true })
+    const m = mirror(fx, P1)
+    await settle(h, [[P1, m]])
+    const snapshots = () => m.messages.filter((x) => x.t === "snapshot").length
+    const before = snapshots()
+    for (let n = 0; n < 40; n++) void m.ch.req.send({ t: "hello", nonce: `flood-${n}`, epoch: null, lastSeq: null })
+    await sleep(300)
+    const during = snapshots() - before
+    // Burst 4 of the hello budget; the queued one coalesces the rest (latest wins).
+    expect(during).toBeGreaterThanOrEqual(1)
+    expect(during).toBeLessThanOrEqual(5)
+    // Nothing trickles in afterwards (no queue of 40 snapshots behind the flood).
+    await sleep(700)
+    expect(snapshots() - before).toBe(during)
+    // Refilled: a hello 2 s later is answered.
+    await sleep(1000)
+    const mark = m.messages.length
+    await m.hello()
+    await waitFor(() => m.messages.slice(mark).some((x) => x.t === "sync" || x.t === "snapshot"), "answer after the flood")
   })
 
   it("allows one in-flight move per token", async () => {
@@ -393,6 +500,282 @@ describe("host runner — requests", () => {
     const c = m.move(k.bo.id, walk(k.ground, [[1, 2], [1, 3]]))
     await waitFor(() => m.result(c) !== undefined, "third move")
     expect(m.result(c)).toMatchObject({ ok: true, applied: 1 })
+  })
+})
+
+describe("host runner — step probes", () => {
+  it("answers a long move before evaluating its intermediate steps; their exploration follows", async () => {
+    const c = corridor()
+    const worker = new SerialWorker(60)
+    const { fx, h } = await hosted(c.scene, [P1], { createVisionClient: () => createWorkerVisionClient(worker) })
+    h.dispatch({ t: "assign-token", tokenId: c.eve.id, userId: P1, assigned: true })
+    const m = mirror(fx, P1)
+    await settle(h, [[P1, m]])
+    const mark = worker.ops.length
+    const r = m.move(c.eve.id, walk(c.ground, [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1], [6, 1], [7, 1], [8, 1]]))
+    await waitFor(() => m.result(r) !== undefined, "move result")
+    // The result did not wait for the six step probes (60 ms each).
+    expect(worker.probesDone).toBeLessThan(6)
+    expect(m.result(r)).toMatchObject({ ok: true, applied: 7 })
+    await settle(h, [[P1, m]])
+    const ops = worker.ops.slice(mark)
+    const probes = ops.flatMap((op, k) => (op === "probe" ? [k] : []))
+    expect(probes).toHaveLength(6)
+    // The mover's final-view compute went to the worker before the second probe.
+    expect(ops.indexOf("compute")).toBeGreaterThanOrEqual(0)
+    expect(ops.indexOf("compute")).toBeLessThan(probes[1])
+    // Exploration from the intermediate steps arrived in a follow-up patch.
+    expect(m.explored(c.ground, 4, 1)).toBe(true)
+    expect(m.explored(c.ground, 5, 1)).toBe(true)
+  })
+
+  it("another player's short move does not wait for a long move's step backlog", async () => {
+    const c = corridor()
+    const worker = new SerialWorker(150)
+    const { fx, h } = await hosted(c.scene, [P1, P2], { createVisionClient: () => createWorkerVisionClient(worker) })
+    h.dispatch({ t: "assign-token", tokenId: c.eve.id, userId: P1, assigned: true })
+    h.dispatch({ t: "assign-token", tokenId: c.fay.id, userId: P2, assigned: true })
+    const m1 = mirror(fx, P1)
+    const m2 = mirror(fx, P2)
+    await settle(h, [
+      [P1, m1],
+      [P2, m2],
+    ])
+    const long = m1.move(c.eve.id, walk(c.ground, [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1], [6, 1], [7, 1], [8, 1]]))
+    await waitFor(() => m1.result(long) !== undefined, "long move result")
+    const t0 = Date.now()
+    const short = m2.move(c.fay.id, walk(c.ground, [[12, 1], [11, 1]]))
+    await waitFor(() => m2.result(short) !== undefined, "short move result")
+    // Six probes × 150 ms are queued; the short move waited for at most the one in flight.
+    expect(Date.now() - t0).toBeLessThan(500)
+    expect(m2.result(short)).toMatchObject({ ok: true, applied: 1 })
+    await settle(h, [
+      [P1, m1],
+      [P2, m2],
+    ])
+  })
+
+  it("discards steps evaluated after a door opened or the fog was reset", async () => {
+    const hl = hall()
+    const worker = new SerialWorker(80)
+    const { fx, h } = await hosted(hl.scene, [P1], { createVisionClient: () => createWorkerVisionClient(worker) })
+    h.dispatch({ t: "assign-token", tokenId: hl.eve.id, userId: P1, assigned: true })
+    const m = mirror(fx, P1)
+    await settle(h, [[P1, m]])
+    const path = walk(hl.ground, [[1, 2], [2, 2], [3, 2], [4, 2], [5, 2], [6, 2], [7, 2], [8, 2], [9, 2], [10, 2]])
+    // Past the closed door; the DM opens it while the steps are still being evaluated.
+    const r = m.move(hl.eve.id, path)
+    await waitFor(() => m.result(r) !== undefined, "move result")
+    expect(worker.probesDone).toBeLessThan(4)
+    h.dispatch({ t: "set-door", doorId: hl.door.id, state: "open" })
+    await settle(h, [[P1, m]])
+    // Cell (5, 1), behind the door, would only have been seen from the step next to the door — with
+    // the door open, which it was not when Eve walked past.
+    expect(m.explored(hl.ground, 5, 1)).toBe(false)
+    expect(m.explored(hl.ground, 10, 2)).toBe(true)
+
+    // Walk back past the (now open) door, then reset the fog while the steps are evaluated.
+    const back = m.move(hl.eve.id, [...path].reverse())
+    await waitFor(() => m.result(back) !== undefined, "move back")
+    h.dispatch({ t: "reset-fog", userId: P1 })
+    await settle(h, [[P1, m]])
+    // Refilled from what Eve sees now only; nothing from the steps before the reset.
+    expect(m.explored(hl.ground, 5, 2)).toBe(false)
+    expect(m.explored(hl.ground, 5, 1)).toBe(false)
+    expect(m.explored(hl.ground, 1, 2)).toBe(true)
+  })
+})
+
+describe("host runner — in-flight moves", () => {
+  it("a player moving someone else's token learns nothing about its owner's move in flight", async () => {
+    const k = keep()
+    let delay = 0
+    const { fx, h } = await hosted(k.scene, [P1, P2], { createVisionClient: slowVision(() => delay) })
+    h.dispatch({ t: "assign-token", tokenId: k.bo.id, userId: P1, assigned: true })
+    const m1 = mirror(fx, P1)
+    const m2 = mirror(fx, P2)
+    await settle(h, [
+      [P1, m1],
+      [P2, m2],
+    ])
+    delay = 150
+    const own = m1.move(k.bo.id, walk(k.ground, [[1, 1], [1, 2]]))
+    await sleep(30)
+    // Bo's move is in flight: the owner is told to wait, anyone else only that it is not theirs.
+    const probe = m2.move(k.bo.id, walk(k.ground, [[1, 2], [1, 3]]))
+    const again = m1.move(k.bo.id, walk(k.ground, [[1, 2], [1, 3]]))
+    await waitFor(() => [own, again].every((r) => m1.result(r) !== undefined) && m2.result(probe) !== undefined, "results")
+    expect(m2.result(probe)).toEqual({ reqId: probe, ok: false, reason: "not-owner" })
+    expect(m1.result(again)).toMatchObject({ ok: false, reason: "rate-limited" })
+    delay = 0
+  })
+})
+
+describe("host runner — saving the map to the library", () => {
+  async function librarySession() {
+    const k = keep()
+    const fx = await fixture(k.scene, [P1])
+    const scenes = createLocalScenesRepo(fx.store)
+    const sceneId = (await fx.dmRepo.listMySessions()).find((s) => s.id === fx.sessionId)!.sceneId!
+    const { host: h } = host(fx, { scenes })
+    await h.start()
+    return { k, fx, h, scenes, sceneId }
+  }
+
+  it("seeds the origin, saves a new version and clears the dirty flag", async () => {
+    const { k, h, scenes, sceneId } = await librarySession()
+    expect(h.getSnapshot().library).toEqual({ sceneId, version: 1, dirty: false })
+    // An edit in "Edit map" marks the live map as changed.
+    h.applyScenePatches([{ op: "replace", path: ["objects", k.door.id, "state"], value: "open" }])
+    await waitFor(() => h.getSnapshot().library?.dirty === true, "dirty")
+    const v = await h.saveMapToLibrary()
+    expect(v).toBe(2)
+    expect(h.getSnapshot().library).toEqual({ sceneId, version: 2, dirty: false })
+    const saved = await scenes.load(sceneId)
+    expect(saved.version).toBe(2)
+    expect(saved.parsed.ok && saved.parsed.scene.objects[k.door.id]).toMatchObject({ state: "open" })
+    // The origin is part of the saved game (a reloaded host keeps it).
+    await h.save()
+    await h.stop()
+  })
+
+  it("refuses to overwrite a newer library version unless forced; works after the session ended", async () => {
+    const { h, scenes, sceneId, fx } = await librarySession()
+    // The DM saved the scene from the editor meanwhile.
+    const loaded = await scenes.load(sceneId)
+    if (!loaded.parsed.ok) throw new Error("fixture")
+    await scenes.saveVersion(sceneId, loaded.parsed.scene)
+    await expect(h.saveMapToLibrary()).rejects.toMatchObject({ code: "version_conflict" })
+    await h.endSession()
+    expect(h.getSnapshot().status).toBe("ended")
+    expect(await h.saveMapToLibrary({ force: true })).toBe(3)
+    expect(h.getSnapshot().library).toMatchObject({ version: 3, dirty: false })
+    // A deleted library scene: nothing to save to.
+    await scenes.remove(sceneId)
+    await expect(h.saveMapToLibrary({ force: true })).rejects.toMatchObject({ code: "not_found" })
+    void fx
+  })
+})
+
+describe("host runner — stored player views", () => {
+  it("stores the view soon after an assignment or a move, not on the 5 s throttle", async () => {
+    const k = keep()
+    const { fx, h } = await hosted(k.scene, [P1, P2], { timing: { ...TEST_TIMING, viewSaveIntervalMs: 5000, moveSaveGapMs: 50 } })
+    const m1 = mirror(fx, P1)
+    const m2 = mirror(fx, P2)
+    await settle(h, [
+      [P1, m1],
+      [P2, m2],
+    ])
+    const row = () => fx.repoOf(P1).loadPlayerView(fx.sessionId, P1)
+    const t0 = Date.now()
+    h.dispatch({ t: "assign-token", tokenId: k.ada.id, userId: P1, assigned: true })
+    await settle(h, [
+      [P1, m1],
+      [P2, m2],
+    ])
+    let stored = await row()
+    for (let n = 0; n < 100 && (!stored || stored.seq !== m1.seq); n++) {
+      await sleep(10)
+      stored = await row()
+    }
+    expect(stored?.seq).toBe(m1.seq)
+    expect(stored?.view.controlledTokenIds).toEqual([k.ada.id])
+    expect(Date.now() - t0).toBeLessThan(1000)
+    // The player's own move: stored soon as well.
+    const r = m1.move(k.ada.id, walk(k.ground, [[5, 3], [4, 3]]))
+    await waitFor(() => m1.result(r) !== undefined, "move")
+    await settle(h, [
+      [P1, m1],
+      [P2, m2],
+    ])
+    for (let n = 0; n < 100 && (!stored || stored.seq !== m1.seq); n++) {
+      await sleep(10)
+      stored = await row()
+    }
+    expect(stored?.seq).toBe(m1.seq)
+    expect(stored?.view.tokens[k.ada.id].position).toEqual({ x: 22.5, z: 17.5 })
+    // Only another token moving in view (Bo, P2's): no early save.
+    h.dispatch({ t: "assign-token", tokenId: k.bo.id, userId: P2, assigned: true })
+    await sleep(200)
+    const before = (await row())!.seq
+    h.dispatch({ t: "move-token", tokenId: k.bo.id, levelId: k.ground, x: 12.5, z: 12.5 })
+    await settle(h, [
+      [P1, m1],
+      [P2, m2],
+    ])
+    expect(m1.view!.tokens[k.bo.id].position).toEqual({ x: 12.5, z: 12.5 })
+    await sleep(300)
+    expect((await row())!.seq).toBe(before)
+  })
+})
+
+describe("host runner — link rejoins and lost results", () => {
+  async function linked() {
+    const k = keep()
+    const fx = await fixture(k.scene, [P1])
+    const ht = fx.newTransport()
+    const { host: h } = host(fx, { transport: ht })
+    await h.start()
+    h.dispatch({ t: "assign-token", tokenId: k.ada.id, userId: P1, assigned: true })
+    const m = mirror(fx, P1)
+    await settle(h, [[P1, m]])
+    const dropLink = (rejoinMs: number, which: RegExp = new RegExp(`:(view|req):${P1}$`)) => ht.simulateDrop((topic) => which.test(topic), rejoinMs)
+    return { k, fx, h, m, dropLink }
+  }
+
+  it("a host-side rejoin with nothing changed sends sync, not a snapshot", async () => {
+    const { h, m, dropLink } = await linked()
+    const view = m.view
+    const mark = m.messages.length
+    dropLink(80)
+    await sleep(200)
+    await settle(h, [[P1, m]])
+    const after = m.messages.slice(mark).map((x) => x.t)
+    expect(after).toContain("sync")
+    expect(after).not.toContain("snapshot")
+    expect(m.view).toBe(view)
+  })
+
+  it("changes made while the link was down arrive as one catch-up patch", async () => {
+    const { k, h, m, dropLink } = await linked()
+    const mark = m.messages.length
+    dropLink(150)
+    await sleep(20)
+    h.dispatch({ t: "move-token", tokenId: k.ada.id, levelId: k.ground, x: 22.5, z: 17.5 })
+    await sleep(250)
+    await settle(h, [[P1, m]])
+    const after = m.messages.slice(mark)
+    expect(after.some((x) => x.t === "snapshot")).toBe(false)
+    expect(after.filter((x) => x.t === "patch")).toHaveLength(1)
+    expect(m.view!.tokens[k.ada.id].position).toEqual({ x: 22.5, z: 17.5 })
+  })
+
+  it("a move whose result could not be sent is still answered after the rejoin", async () => {
+    const { k, h, m, dropLink } = await linked()
+    // The view channel drops; the request still reaches the host.
+    dropLink(150, new RegExp(`:view:${P1}$`))
+    await sleep(20)
+    const r = m.move(k.ada.id, walk(k.ground, [[5, 3], [4, 3]]))
+    await waitFor(() => m.result(r) !== undefined, "result after the rejoin", 3000)
+    expect(m.result(r)).toMatchObject({ ok: true, applied: 1 })
+    await settle(h, [[P1, m]])
+    expect(m.view!.tokens[k.ada.id].position).toEqual({ x: 22.5, z: 17.5 })
+  })
+
+  it("re-delivers the results of a lost patch with the catch-up", async () => {
+    const { k, h, m } = await linked()
+    m.dropPatches = 1
+    const r = m.move(k.ada.id, walk(k.ground, [[5, 3], [4, 3]]))
+    await waitFor(() => h.debugIdle() && h.debugPlayer(P1)!.seq === m.seq + 1, "patch sent (and lost)")
+    expect(m.result(r)).toBeUndefined()
+    // The client's pending timeout → hello with its old seq.
+    const mark = m.messages.length
+    await m.hello()
+    await settle(h, [[P1, m]])
+    const catchUp = m.messages.slice(mark).find((x) => x.t === "patch")
+    expect(catchUp && catchUp.t === "patch" && catchUp.results?.map((x) => x.reqId)).toEqual([r])
+    expect(m.result(r)).toMatchObject({ ok: true, applied: 1 })
   })
 })
 

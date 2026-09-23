@@ -58,7 +58,7 @@ import {
 } from "./settings"
 import { effectiveSnapMode } from "./snapping"
 import type { ToolId } from "./tools/types"
-import { alignDelta, applyMove, applyRotation, planMove, rotateQuarter, rotationPivot, type MovePlan } from "./transform"
+import { alignDelta, applyMove, applyRotation, planMove, rotateQuarter, rotationPivot, snapPasteAt, type MovePlan } from "./transform"
 import { validateEdit } from "./validate"
 
 export type SceneRecipe = (draft: Draft<Scene>) => void
@@ -91,9 +91,28 @@ export interface PasteOptions {
   hostWallId?: Id
   /** Paste this clipboard instead of the stored one. */
   clipboard?: AtlasClipboard
+  /**
+   * Snap mode for a paste `at` the pointer: the translation is snapped like a drag (transform.ts
+   * snapPasteAt). Without it, `at` places the clipboard's origin exactly.
+   */
+  snap?: SnapMode
 }
 
 export type PasteTextResult = { ok: true; ids: Id[] } | { ok: false; issues: string[] }
+
+/** A document set aside by detachDocument() (opaque apart from its scene). */
+export interface DocumentStash {
+  readonly scene: Scene
+  /** @internal */
+  readonly _state: unknown
+}
+
+interface StashState {
+  history: ReturnType<typeof createHistory>
+  savedHead: number
+  selection: Id[]
+  activeLevelId: Id
+}
 
 export interface EditorState {
   // ---- document -----------------------------------------------------------
@@ -144,6 +163,13 @@ export interface EditorState {
   undo(): boolean
   redo(): boolean
   loadScene(scene: Scene, opts?: { readOnly?: boolean }): void
+  /**
+   * Set the current document aside with its undo history (e.g. before viewing an old version
+   * read-only); the store continues with a fresh, empty history. restoreDocument() brings it back.
+   */
+  detachDocument(): DocumentStash
+  /** Return to a document set aside by detachDocument(), undo/redo history included. */
+  restoreDocument(stash: DocumentStash): void
   newScene(opts?: Parameters<typeof createScene>[0]): void
   /** Adopt a scene changed outside the editor (live host state) without touching history. */
   syncScene(scene: Scene): void
@@ -353,7 +379,8 @@ const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
 // ---------------------------------------------------------------------------
 
 export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorStore {
-  const history = createHistory(opts.history)
+  // Replaced (not cleared) by detachDocument, which keeps the old instance in its stash.
+  let history = createHistory(opts.history)
   const systemClipboard = opts.systemClipboard === undefined ? browserClipboard() : opts.systemClipboard
   let patchSink: PatchSink | null = null
   let playSink: PlaySink | null = null
@@ -432,6 +459,12 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
       const s = get()
       const c = s.scene.grid.cellSize
       return s.activeLevelId === clip.sourceLevelId ? { x: clip.origin.x + c, z: clip.origin.z + c } : { ...clip.origin }
+    }
+
+    /** The origin's landing point: the (snapped) pointer when given, else the default offset. */
+    const pasteAt = (clip: AtlasClipboard, o: Pick<PasteOptions, "at" | "snap">): Vec2 => {
+      if (!o.at) return defaultPasteAt(clip)
+      return o.snap ? snapPasteAt(get().scene, clip, o.at, o.snap) : o.at
     }
 
     /** Emit move-token commands for tokens in a plan (live) and drop them from the document edit. */
@@ -569,6 +602,37 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
           history: history.state(),
           selection: [],
           activeLevelId: defaultActiveLevel(scene),
+          view: { ...s.view, levelVisibility: {} },
+        })
+      },
+
+      detachDocument() {
+        if (history.inTransaction) get().cancelTransaction()
+        const cur = get()
+        const state: StashState = { history, savedHead, selection: cur.selection, activeLevelId: cur.activeLevelId }
+        history = createHistory(opts.history)
+        savedHead = history.state().head
+        txnChanged = false
+        set({ history: history.state(), dirty: false })
+        return { scene: cur.scene, _state: state }
+      },
+
+      restoreDocument(stash) {
+        const st = stash._state as StashState
+        history = st.history
+        savedHead = st.savedHead
+        txnChanged = false
+        const s = get()
+        const scene = stash.scene
+        set({
+          scene,
+          readOnly: false,
+          revision: s.revision + 1,
+          lastChange: null,
+          history: history.state(),
+          dirty: isDirty(),
+          selection: st.selection.filter((id) => itemExists(scene, id)),
+          activeLevelId: Object.hasOwn(scene.levels, st.activeLevelId) ? st.activeLevelId : defaultActiveLevel(scene),
           view: { ...s.view, levelVisibility: {} },
         })
       },
@@ -904,7 +968,7 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
         const s = get()
         const clip = pasteOpts.clipboard ?? s.clipboard
         if (!clip || !hasOwn(s.scene.levels, s.activeLevelId)) return []
-        const at = pasteOpts.at ?? defaultPasteAt(clip)
+        const at = pasteAt(clip, pasteOpts)
         let ids: Id[] = []
         const patches = apply((d) => {
           ids = pasteClipboard(d, clip, { targetLevelId: s.activeLevelId, at, hostWallId: pasteOpts.hostWallId })
@@ -918,7 +982,7 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
         const clip = parseClipboardText(text)
         if (!clip) return { ok: false, issues: ["the clipboard does not contain Atlas objects"] }
         const s = get()
-        const at = pasteOpts.at ?? defaultPasteAt(clip)
+        const at = pasteAt(clip, pasteOpts)
         let ids: Id[] = []
         let patches: Patch[]
         try {

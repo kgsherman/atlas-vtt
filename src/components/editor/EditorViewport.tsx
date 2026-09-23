@@ -13,7 +13,7 @@ import { toast } from "sonner"
 import { EngineCanvas } from "@/components/canvas/EngineCanvas"
 import { useEngine } from "@/components/canvas/engineContext"
 import { useServices } from "@/app/services"
-import { groundHeightAt } from "@/core/scene/queries"
+import { groundHeightAt, tokenViewLevelId } from "@/core/scene/queries"
 import type { Id } from "@/core/scene/types"
 import { editorViewState } from "@/editor/store"
 import type { Engine, Quality, ViewState } from "@/render/contracts"
@@ -155,7 +155,8 @@ function ViewportBridge({
       const view: Partial<ViewState> = {
         mode: "player",
         camera: "topdown",
-        activeLevelId: token.levelId,
+        // The level the player's view cuts away at (the upper room from the top of a stair run).
+        activeLevelId: tokenViewLevelId(result.scene, token),
         levelVisibility: {},
         ghostAdjacent: false,
         cutaway: true,

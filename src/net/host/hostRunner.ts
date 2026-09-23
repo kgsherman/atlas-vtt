@@ -5,8 +5,11 @@
  *   epoch) → random wire epoch → load/seed the GameState → main-thread OcclusionWorld + vision Worker →
  *   host channels (DM presence, status broadcast) → one player link per active member.
  *
- *   request (req:{uid}) → parseClientMessage → rate limit → reduceRequest(world = main-thread world of
- *   the CURRENT scene) → per-step visibility passes for moves → vision update → dirty players.
+ *   request (req:{uid}) → parseClientMessage → rate limit (hellos: own budget, coalesced) →
+ *   reduceRequest(world = main-thread world of the CURRENT scene) → vision update → dirty players →
+ *   low-priority vision probes for a move's intermediate steps (their exploration follows in a later
+ *   patch; the move's result never waits for them, and a probe resolved after anything else changed
+ *   the scene or reduced visibility is discarded).
  *   DM command → reduceDm → vision update → dirty players (+ urgent save when it hides things).
  *
  *   flush (per player, ≤ 10 Hz, event-driven): vision compute for the player's viewers (tag-checked:
@@ -16,6 +19,11 @@
  * All per-player sends go through one promise chain per player (flush, hello replies, snapshots), so
  * messages leave in seq order. Every async continuation checks the run generation (`gen`), so nothing
  * from a stopped/superseded run is ever sent.
+ *
+ * A host-side channel rejoin of a player the host already sent a view to answers with `sync` (plus
+ * the tile table), not a full snapshot: a client that missed patches asks for a catch-up. Results
+ * whose send failed while the link was down are sent again once it is back, and the last results
+ * sent ride along with hello catch-ups (a lost patch no longer means "DM not responding").
  */
 import type { Patch } from "immer"
 
@@ -45,14 +53,14 @@ import {
   type SceneDelta,
 } from "@/core/session"
 import { parseGameStateDetailed } from "@/core/session/persist"
-import { createGameState, isEmptyDelta } from "@/core/session/state"
+import { createGameState, isEmptyDelta, ownsToken } from "@/core/session/state"
 import type { VisibilityResult } from "@/core/vision/types"
 
 import type { ChunkEntry } from "../assets/chunks"
-import { isNetError } from "../supabase"
+import { isNetError, NetError } from "../supabase"
 import type { SessionMember } from "../sessionsRepo"
 import { encodePayload, MAX_BROADCAST_BYTES, sendFailure, utf8Length, type HostChannels, type HostPlayerLink, type PresenceEntry, type SendResult, type Unsubscribe } from "../transport"
-import { hostEpochOfWire, HOST_TIMING, makeWireEpoch, MAX_PENDING_RESULTS, OpLog, REQUEST_RATE, RequestLimiter } from "./flush"
+import { HELLO_RATE, hostEpochOfWire, HOST_TIMING, makeWireEpoch, MAX_PENDING_RESULTS, OpLog, REJECT_REPLY_RATE, REQUEST_RATE, RequestLimiter, ResultLog, viewSaveUrgency } from "./flush"
 import { fencingFailure, ThrottledTask } from "./persistence"
 import { BackdropTiler, createCanvasTileCodec, type TileCodec } from "./tiles"
 import { createHostTimers, type HostTimers } from "./timers"
@@ -103,13 +111,26 @@ class PlayerConn {
   /** The player's view may have changed since lastSent. */
   dirty = true
   needsSnapshot = true
+  /**
+   * A send failed because the link was (re)joining after lastSent was delivered: on the rejoin the
+   * client gets `sync` + the tile table (it asks for a catch-up if it missed patches), not a snapshot.
+   */
+  needsResume = false
   chain: Promise<void> = Promise.resolve()
   flushQueued = false
   timer: number | "micro" | null = null
   lastFlushAt = -Infinity
   lastMessageAt = 0
   pendingResults: RequestResult[] = []
+  /** Results sent recently, with their seq (re-delivered with hello catch-ups). */
+  readonly resultLog = new ResultLog()
   readonly limiter: RequestLimiter
+  /** Hellos have their own budget (each may cost a snapshot) … */
+  readonly helloLimiter: RequestLimiter
+  /** … and so do "rate-limited" replies (beyond it, over-budget requests are dropped silently). */
+  readonly rejectLimiter: RequestLimiter
+  /** The latest hello not handled yet (coalesced: at most one queued per player). */
+  pendingHello: Extract<ClientToHost, { t: "hello" }> | null = null
   lastVis: VisibilityResult | null = null
   lastVisTag = -1
   lastVisKey = ""
@@ -127,6 +148,8 @@ class PlayerConn {
   constructor(userId: string, now: () => number) {
     this.userId = userId
     this.limiter = new RequestLimiter(REQUEST_RATE, now)
+    this.helloLimiter = new RequestLimiter(HELLO_RATE, now)
+    this.rejectLimiter = new RequestLimiter(REJECT_REPLY_RATE, now)
   }
 
   takeResults(): RequestResult[] {
@@ -195,6 +218,14 @@ export class HostRunnerImpl implements HostRunner {
   /** Tag of the last revision posted to the vision client, and of the revision = state.scene. */
   private visionTag = 0
   private sceneTag = 0
+  /**
+   * Bumped by every change after which a move's pending step probes no longer describe what the token
+   * could see then (objects, terrain or structure changed; visibility-reducing DM commands): their
+   * results are discarded instead of adding exploration.
+   */
+  private knowledgeRev = 0
+  /** Editor edits applied so far (tells a library save whether the map changed while it ran). */
+  private sceneEdits = 0
 
   private readonly conns = new Map<string, PlayerConn>()
   private members: SessionMember[] = []
@@ -248,6 +279,7 @@ export class HostRunnerImpl implements HostRunner {
         }
       })
       this.stats.pendingSends = this.o.transport.pendingSends()
+      const origin = this.state?.origin
       this.snap = {
         status: this.status,
         error: this.error,
@@ -257,6 +289,7 @@ export class HostRunnerImpl implements HostRunner {
         state: this.state,
         members,
         stats: { ...this.stats },
+        library: origin ? { sceneId: origin.sceneId, version: origin.version, dirty: origin.dirty } : null,
       }
     }
     return this.snap
@@ -357,12 +390,18 @@ export class HostRunnerImpl implements HostRunner {
       this.hostEpoch = hostEpoch
       this.wireEpoch = makeWireEpoch(hostEpoch)
       // 4. Load the game (or seed it from the scene).
-      const { state, seeded } = await this.loadState(info.roomCode)
+      const loaded = await this.loadState(info.roomCode)
+      let state = loaded.state
+      const seeded = loaded.seeded
       if (gen !== this.gen) return
-      if (!this.sceneRowId && Object.values(state.scene.levels).some((l) => l.backdrop)) {
-        // Backdrop images may be stored under the scene's library id (only the seed carries it).
+      const needsOrigin = state.origin === undefined
+      if (!this.sceneRowId && (needsOrigin || Object.values(state.scene.levels).some((l) => l.backdrop))) {
+        // Backdrop images may be stored under the scene's library id (only the seed carries it), and
+        // games saved before the library link was recorded learn it here.
         try {
-          this.sceneRowId = (await this.o.repo.listMySessions()).find((s) => s.id === sid)?.sceneId ?? null
+          const sceneId = (await this.o.repo.listMySessions()).find((s) => s.id === sid)?.sceneId ?? null
+          this.sceneRowId = sceneId
+          if (needsOrigin) state = { ...state, origin: sceneId ? { sceneId, version: null, dirty: false } : null }
         } catch (err) {
           this.log("looking up the session's scene failed", err)
         }
@@ -386,7 +425,7 @@ export class HostRunnerImpl implements HostRunner {
         assets: this.o.assets,
         sessionId: sid,
         codec: this.o.tileCodec === undefined ? createCanvasTileCodec() : this.o.tileCodec,
-        assetSceneIds: () => [this.state?.scene.id, this.sceneRowId].filter((s): s is string => typeof s === "string"),
+        assetSceneIds: () => [this.state?.scene.id, this.sceneRowId, this.state?.origin?.sceneId].filter((s): s is string => typeof s === "string"),
         onChunks: (uid, levelId, entries, reset) => this.queueTileNotice(uid, levelId, entries, reset, gen),
         now: () => Date.now(),
         timers: { setTimeout: (fn, ms) => clock.setTimeout(fn, ms), clearTimeout: (h) => clock.clearTimeout(h as number) },
@@ -441,6 +480,42 @@ export class HostRunnerImpl implements HostRunner {
     await this.stateSaver.flush(true)
   }
 
+  /**
+   * Save the live map as a new version of the library scene the session was started from (edits made
+   * in "Edit map" during the session are otherwise lost for the next one). Optimistic: fails with
+   * NetError("version_conflict") when the library scene got a version since the one the session is
+   * based on (unless `force`). Also works right after endSession(), while the state is still here.
+   * Returns the new version.
+   */
+  async saveMapToLibrary(opts: { force?: boolean } = {}): Promise<number> {
+    const scenes = this.o.scenes
+    if (!scenes) throw new Error("No scene library is available here.")
+    const state = this.state
+    const origin = state?.origin
+    if (!state || !origin?.sceneId) throw new NetError("not_found", "The library scene this session was started from no longer exists.")
+    const summary = await scenes.get(origin.sceneId)
+    if (!summary) throw new NetError("not_found", "The library scene this session was started from no longer exists.")
+    const edits = this.sceneEdits
+    const doc = { ...state.scene, updatedAt: new Date().toISOString() }
+    const base = opts.force || origin.version === null ? {} : { baseVersion: origin.version }
+    // Keep the library entry's own name (it may have been renamed since the session started).
+    const version = await scenes.saveVersion(origin.sceneId, doc, { ...base, name: summary.name })
+    const cur = this.state
+    if (cur) {
+      // Edits made while the save was on its way are not in the saved version.
+      this.state = { ...cur, origin: { sceneId: origin.sceneId, version, dirty: this.sceneEdits !== edits }, seq: cur.seq + 1 }
+      this.notify()
+      if (this.stateSaver && this.status === "hosting") {
+        try {
+          await this.stateSaver.flush(true)
+        } catch (err) {
+          this.log("saving the session after the library save failed", err)
+        }
+      }
+    }
+    return version
+  }
+
   /** Flush the state save and every player's view upsert (bounded wait). */
   private async persistAll(timeoutMs: number): Promise<void> {
     const work = Promise.allSettled([this.stateSaver?.flush() ?? Promise.resolve(), ...[...this.conns.values()].map((c) => c.viewSaver?.flush() ?? Promise.resolve())])
@@ -453,6 +528,9 @@ export class HostRunnerImpl implements HostRunner {
     this.gen++
     this.status = status
     this.error = message
+    // Ended elsewhere (library, another device): tell the players now rather than leaving them to find
+    // out through their membership checks.
+    if (status === "ended" && this.channels) await this.channels.host.broadcast({ t: "ended" }).catch(() => undefined)
     await this.teardown()
     this.notify()
   }
@@ -547,7 +625,8 @@ export class HostRunnerImpl implements HostRunner {
       this.sceneRowId = content.sceneId
       const parsed = parseScene(content.scene)
       if (!parsed.ok) throw new Error(`The session's map cannot be loaded (${parsed.error}${parsed.issues[0] ? `: ${parsed.issues[0]}` : ""}).`)
-      return { state: createGameState({ sessionId: sid, roomCode, scene: parsed.scene }), seeded: true }
+      const origin = content.sceneId ? { sceneId: content.sceneId, version: content.sceneVersion, dirty: false } : null
+      return { state: createGameState({ sessionId: sid, roomCode, scene: parsed.scene, origin }), seeded: true }
     }
     const parsed = parseGameStateDetailed(content.state)
     if (!parsed.ok) throw new Error(`The saved game cannot be loaded (${parsed.issues[0] ?? "invalid"}).`)
@@ -611,11 +690,16 @@ export class HostRunnerImpl implements HostRunner {
     }
   }
 
-  /** Bring the occlusion world, vision and tiles to the current state.scene. */
-  private applyDelta(delta: SceneDelta, fullRebuild = false): void {
+  /**
+   * Bring the occlusion world, vision and tiles to the current state.scene. `fromMove`: a player's
+   * token move (its attached lights travel with it), which does not invalidate that move's own step
+   * probes; any other change of objects, terrain or structure does.
+   */
+  private applyDelta(delta: SceneDelta, fullRebuild = false, fromMove = false): void {
     const state = this.state
     if (!state || !this.vision) return
     const scene = state.scene
+    if (fullRebuild || (!fromMove && (delta.objects.length > 0 || delta.terrain.length > 0 || delta.structure))) this.knowledgeRev++
     if (fullRebuild) {
       const tag = ++this.visionTag
       this.world = buildOcclusionWorld(scene)
@@ -788,6 +872,9 @@ export class HostRunnerImpl implements HostRunner {
     conn.viewSaver = new ThrottledTask({
       run: () => this.saveView(conn, gen),
       intervalMs: this.t.viewSaveIntervalMs,
+      // The player's own tokens / exploration changed: stored as soon as the state is (viewSaveUrgency).
+      soonGapMs: this.t.moveSaveGapMs,
+      urgentGapMs: this.t.urgentSaveGapMs,
       onError: (err) => this.onPersistError(err, gen, "storing a player view"),
       now: this.now,
       timers: this.clock ?? undefined,
@@ -844,6 +931,9 @@ export class HostRunnerImpl implements HostRunner {
     if (r.state === state) return r
     const prevName = state.scene.name
     this.state = r.state
+    // Step probes of earlier moves must not add what the token saw before this change.
+    if (reducesVisibility(cmd)) this.knowledgeRev++
+    if (cmd.t === "apply-scene-patches") this.sceneEdits++
     if (cmd.t === "load-scene") {
       this.applyDelta(r.delta, true)
       for (const conn of this.conns.values()) conn.lastVis = null
@@ -875,12 +965,24 @@ export class HostRunnerImpl implements HostRunner {
     if (!this.hosting(gen) || conn.closed) return
     const msg = parseClientMessage(raw)
     if (!msg) return
-    if (!conn.limiter.tryTake()) {
-      if (msg.t !== "hello") this.pushResult(conn, { reqId: msg.reqId, ok: false, reason: "rate-limited" })
+    if (msg.t === "hello") {
+      // Each hello may cost a full snapshot (+ a tile table per backdrop level): its own budget, and at
+      // most one queued per player (latest wins). A dropped hello is retried by the client (2.5 s → 15 s).
+      if (!conn.helloLimiter.tryTake()) return
+      const queued = conn.pendingHello !== null
+      conn.pendingHello = msg
+      if (!queued) {
+        this.enqueue(conn, gen, () => {
+          const h = conn.pendingHello
+          conn.pendingHello = null
+          return h ? this.handleHello(conn, h, gen) : Promise.resolve()
+        })
+      }
       return
     }
-    if (msg.t === "hello") {
-      this.enqueue(conn, gen, () => this.handleHello(conn, msg, gen))
+    if (!conn.limiter.tryTake()) {
+      // Replies to a flood are rate-limited too; the rest is dropped without a word.
+      if (conn.rejectLimiter.tryTake()) this.pushResult(conn, { reqId: msg.reqId, ok: false, reason: "rate-limited" })
       return
     }
     this.handleRequest(conn, msg, gen)
@@ -890,7 +992,9 @@ export class HostRunnerImpl implements HostRunner {
     const state = this.state
     const world = this.world
     if (!state || !world || !Object.hasOwn(state.players, conn.userId)) return
-    if (msg.t === "move") {
+    // Only for the token's owners: anyone else gets "not-owner" from reduceRequest, never a hint that
+    // someone else's token is moving right now.
+    if (msg.t === "move" && ownsToken(state, conn.userId, msg.tokenId)) {
       const busy = this.inFlightMoves.get(msg.tokenId)
       if (busy && this.now() - busy.at < this.t.inFlightMoveTimeoutMs) {
         this.pushResult(conn, { reqId: msg.reqId, ok: false, reason: "rate-limited" })
@@ -904,13 +1008,15 @@ export class HostRunnerImpl implements HostRunner {
     })
     if (out.state !== state) {
       this.state = out.state
-      if (msg.t === "move" && out.tokenId) {
-        this.inFlightMoves.set(out.tokenId, { uid: conn.userId, reqId: msg.reqId, at: this.now() })
-        // Intermediate steps first: they must reach the vision client before the final revision.
+      const move = msg.t === "move" && out.tokenId ? out.tokenId : null
+      // The final revision (and so the flush carrying the result) goes to the vision client first.
+      this.applyDelta(out.delta, false, move !== null)
+      this.markDirty(out.dirtyPlayers)
+      if (move !== null) {
+        this.inFlightMoves.set(move, { uid: conn.userId, reqId: msg.reqId, at: this.now() })
+        // Then the intermediate steps, as low-priority probes (exploration follows in a later patch).
         if (out.visited.length > 1) this.stepPasses(out, gen)
       }
-      this.applyDelta(out.delta)
-      this.markDirty(out.dirtyPlayers)
       // Token moves are saved soon: a reloaded host tab must not put tokens back where they were.
       this.stateSaver?.request(msg.t === "move" ? "soon" : false)
       this.notify()
@@ -921,6 +1027,12 @@ export class HostRunnerImpl implements HostRunner {
   /**
    * ARCHITECTURE §5.2 "Moves": visibility at every intermediate step of an applied path, ORed into the
    * knowledge of every player seeing through the moved token (corridors walked past are explored).
+   *
+   * One low-priority probe per step for all affected players, posted after the move's final revision:
+   * the result and every other player's flush go first, the step exploration arrives in a follow-up
+   * patch. A probe resolving after the scene changed in a way that matters (a door opened, fog reset,
+   * a map edit…: `knowledgeRev`) is discarded, so a late step can never see through a door opened after
+   * the token walked past.
    */
   private stepPasses(out: RequestOutcome, gen: number): void {
     const state = this.state!
@@ -928,21 +1040,22 @@ export class HostRunnerImpl implements HostRunner {
     const tokenId = out.tokenId!
     const affected = [...this.conns.keys()].filter((uid) => Object.hasOwn(state.players, uid) && viewerTokenIds(state, uid).includes(tokenId))
     if (affected.length === 0) return
-    const viewersOf = new Map(affected.map((uid) => [uid, viewerTokenIds(state, uid)]))
+    const viewerSets = affected.map((uid) => viewerTokenIds(state, uid))
+    const rev = this.knowledgeRev
     for (const step of out.visited.slice(0, -1)) {
       const scene = sceneWithTokenAt(state.scene, tokenId, step)
-      const tag = ++this.visionTag
-      void vision.update(scene, { tokens: [tokenId], objects: out.delta.objects }, tag).catch(() => undefined)
-      for (const uid of affected) {
-        vision
-          .compute(viewersOf.get(uid)!, tag)
-          .then((r) => {
-            if (gen === this.gen && r.stateSeq === tag) this.applyKnowledge(uid, r.result, scene, true)
+      vision
+        .probe(scene, { tokens: [tokenId], objects: out.delta.objects }, viewerSets)
+        .then((r) => {
+          if (gen !== this.gen || vision !== this.vision || this.knowledgeRev !== rev) return
+          affected.forEach((uid, k) => {
+            const vis = r.results[k]
+            if (vis) this.applyKnowledge(uid, vis, scene, true)
           })
-          .catch((err) => {
-            if (gen === this.gen) this.log("vision step pass failed", err)
-          })
-      }
+        })
+        .catch((err) => {
+          if (gen === this.gen && vision === this.vision) this.log("vision step pass failed", err)
+        })
     }
   }
 
@@ -955,6 +1068,30 @@ export class HostRunnerImpl implements HostRunner {
     if (results.length === 0) return
     const done = new Set(results.map((r) => r.reqId))
     for (const [tokenId, f] of this.inFlightMoves) if (done.has(f.reqId)) this.inFlightMoves.delete(tokenId)
+  }
+
+  /**
+   * After sending `results` at `seq`: delivered → remembered (for catch-ups) and their moves no longer
+   * in flight; the link was down → back in the queue, sent once it is up again (not lost).
+   */
+  private resultsSent(conn: PlayerConn, results: RequestResult[], seq: number, res: SendResult): void {
+    if (results.length === 0) return
+    if (!res.ok && (res.reason === "not-joined" || res.reason === "closed")) {
+      const queued = new Set(conn.pendingResults.map((r) => r.reqId))
+      conn.pendingResults = [...results.filter((r) => !queued.has(r.reqId)), ...conn.pendingResults].slice(0, MAX_PENDING_RESULTS)
+      return
+    }
+    conn.resultLog.push(seq, results)
+    this.clearInFlight(results)
+  }
+
+  /** Standalone `result` messages (no view change), each one requeued if the link is down. */
+  private async sendResults(conn: PlayerConn, results: RequestResult[]): Promise<void> {
+    const epoch = this.wireEpoch!
+    for (const result of results) {
+      const res = await this.send(conn, { t: "result", epoch, seq: conn.seq, result })
+      this.resultsSent(conn, [result], conn.seq, res)
+    }
   }
 
   // =========================================================================
@@ -1018,6 +1155,10 @@ export class HostRunnerImpl implements HostRunner {
     if (conn.needsSnapshot || conn.lastSent === null) {
       await this.pushSnapshot(conn, gen)
       return
+    }
+    if (conn.needsResume) {
+      await this.resumeLink(conn, gen)
+      if (!this.hosting(gen) || conn.closed || !conn.link?.isReady()) return
     }
     conn.lastFlushAt = this.now()
     let view: PlayerView | null = null
@@ -1162,12 +1303,12 @@ export class HostRunnerImpl implements HostRunner {
   private async sendUpdate(conn: PlayerConn, view: PlayerView | null, gen: number): Promise<void> {
     const epoch = this.wireEpoch!
     const t0 = this.now()
-    const ops = view && conn.lastSent ? diffViews(conn.lastSent, view) : []
+    const prev = conn.lastSent
+    const ops = view && prev ? diffViews(prev, view) : []
     if (view) this.stats.flushMs = conn.buildMs + (this.now() - t0)
     const results = conn.takeResults()
     if (ops.length === 0 || !view) {
-      for (const result of results) await this.send(conn, { t: "result", epoch, seq: conn.seq, result })
-      this.clearInFlight(results)
+      await this.sendResults(conn, results)
       return
     }
     const baseSeq = conn.seq
@@ -1178,19 +1319,22 @@ export class HostRunnerImpl implements HostRunner {
     conn.lastSent = view
     if (enc.ok) {
       conn.log.push({ baseSeq, seq: conn.seq, ops, bytes: enc.bytes, at: this.now() })
-      await this.send(conn, msg, enc.bytes)
+      const res = await this.send(conn, msg, enc.bytes)
+      this.resultsSent(conn, results, conn.seq, res)
     } else {
       // Too large for one broadcast: store the view, then point the client at the database.
       conn.log.clear()
       await this.snapshotViaDatabase(conn, gen, undefined)
-      for (const result of results) await this.send(conn, { t: "result", epoch, seq: conn.seq, result })
+      await this.sendResults(conn, results)
     }
-    this.clearInFlight(results)
-    conn.viewSaver?.request()
+    conn.viewSaver?.request(viewSaveUrgency(prev, view))
   }
 
-  /** A full view for a (re)joined or resyncing client: snapshot, or snapshot_ready via the database. */
-  private async pushSnapshot(conn: PlayerConn, gen: number, nonce?: string): Promise<void> {
+  /**
+   * A full view for a (re)joined or resyncing client: snapshot, or snapshot_ready via the database.
+   * `since` (answering a hello): also re-deliver the results sent after that seq (null: all remembered).
+   */
+  private async pushSnapshot(conn: PlayerConn, gen: number, nonce?: string, since?: number | null): Promise<void> {
     const link = conn.link
     if (!this.hosting(gen) || conn.closed || !link) return
     if (!link.isReady()) {
@@ -1222,31 +1366,39 @@ export class HostRunnerImpl implements HostRunner {
       }
     }
     conn.needsSnapshot = false
+    conn.needsResume = false
     const epoch = this.wireEpoch!
     const results = conn.takeResults()
+    const fresh = new Set(results.map((r) => r.reqId))
+    const earlier = since === undefined ? [] : conn.resultLog.since(since).filter((r) => !fresh.has(r.reqId))
     const msg: Extract<HostToClient, { t: "snapshot" }> = { t: "snapshot", epoch, seq: conn.seq, view: conn.lastSent }
     if (nonce !== undefined) msg.nonce = nonce
-    if (results.length > 0) msg.results = results
+    if (results.length + earlier.length > 0) msg.results = [...earlier, ...results]
     const enc = encodePayload(msg)
     // The client learns its backdrop chunks first, so it fetches them as soon as the view lands.
     await this.sendTileTable(conn, gen)
     if (enc.ok && enc.bytes <= this.maxSnapshotBytes) {
-      await this.send(conn, msg, enc.bytes)
+      const res = await this.send(conn, msg, enc.bytes)
+      this.resultsSent(conn, results, conn.seq, res)
     } else {
       await this.snapshotViaDatabase(conn, gen, nonce)
-      for (const result of results) await this.send(conn, { t: "result", epoch, seq: conn.seq, result })
+      for (const result of earlier) await this.send(conn, { t: "result", epoch, seq: conn.seq, result })
+      await this.sendResults(conn, results)
     }
-    this.clearInFlight(results)
-    conn.viewSaver?.request()
+    // A view with the player's own tokens (e.g. the first after an assignment) is stored soon.
+    conn.viewSaver?.request(conn.lastSent.controlledTokenIds.length > 0 && conn.savedSeq < conn.seq ? "soon" : false)
     if (conn.dirty) this.scheduleFlush(conn)
   }
 
   /** Awaited player_views upsert, then snapshot_ready (the client reloads its row). */
   private async snapshotViaDatabase(conn: PlayerConn, gen: number, nonce: string | undefined): Promise<void> {
-    try {
-      await conn.viewSaver?.flush(true)
-    } catch {
-      // Reported (and fencing handled) by the saver's onError; savedSeq tells whether it worked.
+    // The row may already hold this (epoch, seq): no second upload of a large view.
+    if (conn.savedSeq !== conn.seq) {
+      try {
+        await conn.viewSaver?.flush(true)
+      } catch {
+        // Reported (and fencing handled) by the saver's onError; savedSeq tells whether it worked.
+      }
     }
     if (!this.hosting(gen) || conn.closed) return
     if (conn.savedSeq !== conn.seq) {
@@ -1280,30 +1432,68 @@ export class HostRunnerImpl implements HostRunner {
   private async handleHello(conn: PlayerConn, msg: Extract<ClientToHost, { t: "hello" }>, gen: number): Promise<void> {
     if (!this.hosting(gen) || conn.closed || !conn.link) return
     const epoch = this.wireEpoch!
-    if (conn.lastSent !== null && !conn.needsSnapshot && msg.epoch === epoch && msg.lastSeq !== null) {
+    if (conn.lastSent !== null && msg.epoch === epoch && msg.lastSeq !== null) {
       if (msg.lastSeq === conn.seq) {
+        // Within one wire epoch a seq identifies a view: the client provably holds lastSent.
+        conn.needsSnapshot = false
         await this.send(conn, { t: "sync", epoch, seq: conn.seq })
         return
       }
-      const ops = conn.log.since(msg.lastSeq, conn.seq)
-      if (ops && ops.length > 0) {
-        const patch: Extract<HostToClient, { t: "patch" }> = { t: "patch", epoch, baseSeq: msg.lastSeq, seq: conn.seq, ops, nonce: msg.nonce }
-        const enc = encodePayload(patch)
-        if (enc.ok) {
-          await this.send(conn, patch, enc.bytes)
-          return
+      if (!conn.needsSnapshot) {
+        const ops = conn.log.since(msg.lastSeq, conn.seq)
+        if (ops && ops.length > 0) {
+          const patch: Extract<HostToClient, { t: "patch" }> = { t: "patch", epoch, baseSeq: msg.lastSeq, seq: conn.seq, ops, nonce: msg.nonce }
+          // Results that went out with the patches the client missed (it ignores ones it already has).
+          const results = conn.resultLog.since(msg.lastSeq)
+          if (results.length > 0) patch.results = results
+          let enc = encodePayload(patch)
+          if (!enc.ok && patch.results) {
+            delete patch.results
+            enc = encodePayload(patch)
+          }
+          if (enc.ok) {
+            await this.send(conn, patch, enc.bytes)
+            return
+          }
         }
       }
     }
-    await this.pushSnapshot(conn, gen, msg.nonce)
+    await this.pushSnapshot(conn, gen, msg.nonce, msg.epoch === epoch ? msg.lastSeq : null)
   }
 
   private onLinkReady(conn: PlayerConn, gen: number): void {
     if (!this.hosting(gen) || conn.closed) return
-    conn.needsSnapshot = true
     this.notify()
-    // Skipped when a flush queued before this already pushed the snapshot.
-    this.enqueue(conn, gen, () => (conn.needsSnapshot ? this.pushSnapshot(conn, gen) : Promise.resolve()))
+    if (conn.lastSent === null) {
+      conn.needsSnapshot = true
+      // Skipped when a flush queued before this already pushed the snapshot.
+      this.enqueue(conn, gen, () => (conn.needsSnapshot ? this.pushSnapshot(conn, gen) : Promise.resolve()))
+      return
+    }
+    // A rejoin (Realtime error, JWT refresh, network blip): the client most likely still holds its view.
+    conn.needsResume = true
+    this.enqueue(conn, gen, () => this.resumeLink(conn, gen))
+  }
+
+  /**
+   * After a host-side rejoin of a linked player: the tile table (replacing chunk notices lost while the
+   * link was down; the client has the blobs cached) and `sync` at the current seq — a client that missed
+   * patches answers with hello and gets a catch-up (or a snapshot if the log no longer covers it).
+   * Results whose send failed meanwhile go out with the next flush.
+   */
+  private async resumeLink(conn: PlayerConn, gen: number): Promise<void> {
+    if (!this.hosting(gen) || conn.closed || !conn.link?.isReady() || !conn.needsResume) return
+    if (conn.lastSent === null || conn.needsSnapshot) {
+      conn.needsResume = false
+      await this.pushSnapshot(conn, gen)
+      return
+    }
+    await this.sendTileTable(conn, gen)
+    if (!this.hosting(gen) || conn.closed || !conn.link?.isReady()) return
+    conn.needsResume = false
+    const res = await this.send(conn, { t: "sync", epoch: this.wireEpoch!, seq: conn.seq })
+    if (!res.ok) return
+    if (conn.dirty || conn.pendingResults.length > 0) this.scheduleFlush(conn)
   }
 
   /** `sync` to players that heard nothing for a while (a lost final patch is then detected). */
@@ -1311,7 +1501,7 @@ export class HostRunnerImpl implements HostRunner {
     if (!this.hosting(gen)) return
     const now = this.now()
     for (const conn of this.conns.values()) {
-      if (conn.closed || !conn.link?.isReady() || conn.lastSent === null || conn.needsSnapshot) continue
+      if (conn.closed || !conn.link?.isReady() || conn.lastSent === null || conn.needsSnapshot || conn.needsResume) continue
       if (now - conn.lastMessageAt < this.t.idleSyncMs) continue
       conn.lastMessageAt = now
       this.enqueue(conn, gen, async () => {
@@ -1331,8 +1521,9 @@ export class HostRunnerImpl implements HostRunner {
       this.stats.bytesSent += bytes ?? jsonBytes(msg)
       conn.lastMessageAt = this.now()
     } else if (res.reason === "not-joined" || res.reason === "closed") {
-      // The link is (re)joining: its onReady pushes a fresh snapshot.
-      conn.needsSnapshot = true
+      // The link is (re)joining: its onReady resyncs the client (a snapshot if it never got a view).
+      if (conn.lastSent === null) conn.needsSnapshot = true
+      else conn.needsResume = true
     } else if (res.reason === "too-large") {
       conn.needsSnapshot = true
       this.log(`message to ${conn.userId} too large (${res.detail ?? ""})`)
@@ -1351,10 +1542,11 @@ export class HostRunnerImpl implements HostRunner {
     return c ? { seq: c.seq, view: c.lastSent, logSize: c.log.size } : null
   }
 
-  /** Whether every player is idle (nothing dirty, queued or pending) (tests). */
+  /** Whether every player is idle (nothing dirty, queued or pending, no step probe outstanding) (tests). */
   debugIdle(): boolean {
+    if ((this.vision?.pendingProbes ?? 0) > 0) return false
     for (const c of this.conns.values()) {
-      if (c.dirty || c.flushQueued || c.timer !== null || c.pendingResults.length > 0 || c.needsSnapshot) return false
+      if (c.dirty || c.flushQueued || c.timer !== null || c.pendingResults.length > 0 || c.needsSnapshot || c.needsResume || c.pendingHello !== null) return false
     }
     return true
   }

@@ -312,3 +312,38 @@ describe("encoded masks survive the state", () => {
     expect(round.p1[ground]).toEqual(encodeMask(m))
   })
 })
+
+describe("origin", () => {
+  it("scene patches mark the live map dirty; play commands do not", () => {
+    const { scene, door, light, pc, state: s0 } = setup()
+    const start: GameState = { ...s0, origin: { sceneId: "lib", version: 3, dirty: false } }
+    let state = start
+    const run = (cmd: DmCommand) => (state = reduceDm(state, cmd).state)
+    run({ t: "move-token", tokenId: pc.id, levelId: pc.levelId, x: 12.5, z: 7.5 })
+    run({ t: "set-door", doorId: door.id, state: "open" })
+    run({ t: "set-light", lightId: light.id, on: false })
+    run({ t: "set-shared-vision", enabled: true })
+    expect(state.origin).toEqual({ sceneId: "lib", version: 3, dirty: false })
+    // An empty patch list is a no-op.
+    run({ t: "apply-scene-patches", patches: [] })
+    expect(state.origin?.dirty).toBe(false)
+    run({ t: "apply-scene-patches", patches: [{ op: "replace", path: ["objects", light.id, "brightRadius"], value: 12 }] })
+    expect(state.origin).toEqual({ sceneId: "lib", version: 3, dirty: true })
+    expect(start.origin?.dirty).toBe(false)
+    // Saved back to the library: clean at the new version.
+    run({ t: "set-origin", origin: { sceneId: "lib", version: 4, dirty: false } })
+    expect(state.origin).toEqual({ sceneId: "lib", version: 4, dirty: false })
+    // Another map: the old origin no longer applies unless one is given.
+    run({ t: "load-scene", scene: structuredClone(scene) })
+    expect(state.origin).toBeNull()
+    run({ t: "load-scene", scene: structuredClone(scene), origin: { sceneId: "other", version: 1, dirty: false } })
+    expect(state.origin).toEqual({ sceneId: "other", version: 1, dirty: false })
+  })
+
+  it("scene patches on a state without an origin leave it absent", () => {
+    const { light, state: s0 } = setup()
+    const s1 = reduceDm(s0, { t: "apply-scene-patches", patches: [{ op: "replace", path: ["objects", light.id, "brightRadius"], value: 12 }] }).state
+    expect("origin" in s1).toBe(false)
+    expect(createGameState({ sessionId: "s", roomCode: "R", scene: s0.scene, origin: { sceneId: "x", version: null, dirty: false } }).origin).toEqual({ sceneId: "x", version: null, dirty: false })
+  })
+})

@@ -424,12 +424,29 @@ describe("stairs and ramps", () => {
     }
   })
 
-  it("stepping off the side stays on the lower level; walking past the top edge on it is rejected", () => {
+  it("the sides of a run can be crossed only where the ground difference is small; walking past the top edge on the lower level is rejected", () => {
     const { scene, lower } = stairsScene()
     const t = tokenAt(scene, lower, { i: 2, j: 2 })
-    expect(stepResult(scene, t, at(2, 2, lower), at(3, 2, lower))).toBe("ok")
-    expect(stepResult(scene, t, at(3, 2, lower), at(2, 2, lower))).toBe("ok")
-    expect(stepResult(scene, t, at(2, 4, lower), at(3, 4, lower))).toBe("ok")
+    // Row 1 (ground 1.25 ft): on and off the side, both ways, on both sides.
+    for (const side of [1, 3]) {
+      expect(stepResult(scene, t, at(2, 1, lower), at(side, 1, lower))).toBe("ok")
+      expect(stepResult(scene, t, at(side, 1, lower), at(2, 1, lower))).toBe("ok")
+    }
+    // Rows 2–4 (3.75 … 8.75 ft): no stepping off or on the side.
+    for (const row of [2, 3, 4]) {
+      for (const side of [1, 3]) {
+        expect(stepResult(scene, t, at(2, row, lower), at(side, row, lower)), `off row ${row}`).toBe("connector-edge")
+        expect(stepResult(scene, t, at(side, row, lower), at(2, row, lower)), `on row ${row}`).toBe("connector-edge")
+      }
+    }
+    // Diagonals: into the bottom row across the bottom edge is fine; across a side into row 2 is not.
+    expect(stepResult(scene, t, at(1, 0, lower), at(2, 1, lower))).toBe("ok")
+    expect(stepResult(scene, t, at(3, 0, lower), at(2, 1, lower))).toBe("ok")
+    expect(stepResult(scene, t, at(1, 1, lower), at(2, 2, lower))).toBe("connector-edge")
+    expect(stepResult(scene, t, at(2, 2, lower), at(3, 1, lower))).toBe("connector-edge")
+    // Up and down the run is unaffected.
+    expect(stepResult(scene, t, at(2, 2, lower), at(2, 3, lower))).toBe("ok")
+    expect(stepResult(scene, t, at(2, 2, lower), at(2, 1, lower))).toBe("ok")
     expect(stepResult(scene, t, at(2, 4, lower), at(2, 5, lower))).toBe("connector-edge")
     expect(stepResult(scene, t, at(2, 5, lower), at(2, 4, lower))).toBe("connector-edge")
     expect(stepResult(scene, t, at(3, 5, lower), at(2, 4, lower))).toBe("connector-edge")
@@ -491,6 +508,10 @@ describe("stairs and ramps", () => {
     // Down again.
     place(scene, big, at(2, 5, upper))
     expect(check(scene, big, [at(2, 5, upper), at(2, 4, upper), at(2, 3, lower), at(2, 2, lower)]).ok).toBe(true)
+    // Off the side of the run halfway up: too high.
+    place(scene, big, at(2, 2, lower))
+    expect(stepResult(scene, big, at(2, 2, lower), at(3, 2, lower))).toBe("connector-edge")
+    expect(stepResult(scene, big, at(2, 2, lower), at(1, 2, lower))).toBe("connector-edge")
     // Too wide for single-width stairs.
     const narrow = stairsScene(1)
     const b2 = tokenAt(narrow.scene, narrow.lower, { i: 2, j: 3 }, { size: "large" })

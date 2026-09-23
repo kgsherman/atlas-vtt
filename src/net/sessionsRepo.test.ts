@@ -26,6 +26,7 @@ vi.mock("@/core/scene/schema", () => ({
 const DM = "d0000000-0000-4000-8000-000000000001"
 const P1 = "a1000000-0000-4000-8000-000000000001"
 const P2 = "a2000000-0000-4000-8000-000000000002"
+const P3 = "a3000000-0000-4000-8000-000000000003"
 
 async function expectNetError(p: Promise<unknown>, code: string) {
   const err = await p.then(
@@ -105,17 +106,25 @@ describe("local sessions repo (dev mode, mirrors the SQL rules)", () => {
     await expectNetError(repo.joinSession("nope", "Alice"), "invalid_room_code")
     await expectNetError(repo.joinSession(roomCode, " "), "invalid_display_name")
     expect(await repo.sessionInfo(sessionId)).toMatchObject({ role: "player", memberStatus: "active", displayName: "Alice" })
+    // Names: no posing as the DM, no duplicates (any case); renaming yourself is fine.
+    as = P2
+    await expectNetError(repo.joinSession(roomCode, "alice"), "name_taken")
+    await expectNetError(repo.joinSession(roomCode, "Dungeon Master"), "name_taken")
+    expect(await repo.joinSession(roomCode, "Bob")).toBe(sessionId)
+    as = P1
+    expect(await repo.joinSession(roomCode, "ALICE")).toBe(sessionId)
+    await expectNetError(repo.joinSession(roomCode, "bob"), "name_taken")
     await expectNetError(repo.listSessionMembers(sessionId), "forbidden")
     await expectNetError(repo.claimHost(sessionId), "not_found")
 
     as = DM
     expect(await repo.setMemberStatus(sessionId, P1, "kicked")).toBe(true)
     expect(await repo.setMemberStatus(sessionId, P1, "kicked")).toBe(false)
-    expect(await repo.listSessionMembers(sessionId)).toEqual([expect.objectContaining({ userId: P1, status: "kicked" })])
+    expect(await repo.listSessionMembers(sessionId)).toEqual([expect.objectContaining({ userId: P1, status: "kicked" }), expect.objectContaining({ userId: P2, status: "active" })])
     as = P1
     await expectNetError(repo.joinSession(roomCode, "Alice"), "kicked")
     expect((await repo.sessionInfo(sessionId))?.memberStatus).toBe("kicked")
-    as = P2
+    as = P3
     expect(await repo.sessionInfo(sessionId)).toBeNull()
   })
 

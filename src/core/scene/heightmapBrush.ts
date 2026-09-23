@@ -101,10 +101,13 @@ const clampHeight = (h: number) => Math.max(-MAX_TERRAIN_HEIGHT, Math.min(MAX_TE
  * Apply one dab at `center` (world feet). Mutates `lattice.heights` and returns the world rect whose
  * SURFACE changed (bounding box of the modified samples grown by one sample spacing, because every
  * lattice triangle touching a modified sample moves), clamped to the lattice; null if nothing changed.
+ * Non-finite centres, radii or strengths change nothing (null); a non-finite flatten target means
+ * "the height under the centre", like an absent one.
  */
 export function applyDab(lattice: HeightLattice, center: Vec2, brush: BrushSettings): Rect | null {
   const { samplesX, samplesZ, heights, spacing } = lattice
   const r = brush.radius
+  if (!Number.isFinite(center.x) || !Number.isFinite(center.z) || !Number.isFinite(r) || !Number.isFinite(brush.strength)) return null
   if (!(r > 0) || !(brush.strength > 0) || samplesX < 1 || samplesZ < 1) return null
   const falloff = brush.falloff ?? "smooth"
   const sx0 = Math.max(0, Math.ceil((center.x - r) / spacing))
@@ -131,7 +134,7 @@ export function applyDab(lattice: HeightLattice, center: Vec2, brush: BrushSetti
     }
   }
   const snapAt = (x: number, z: number) => snapshot![(z - snapZ0) * snapW + (x - snapX0)]
-  const target = brush.mode === "flatten" ? clampHeight(brush.target ?? sampleLattice(lattice, center)) : 0
+  const target = brush.mode === "flatten" ? clampHeight(brush.target !== undefined && Number.isFinite(brush.target) ? brush.target : sampleLattice(lattice, center)) : 0
 
   let dx0 = Infinity
   let dz0 = Infinity
@@ -223,7 +226,8 @@ export interface BrushStroke {
  * A flatten stroke without an explicit target flattens to the height under the start point.
  */
 export function beginStroke(lattice: HeightLattice, brush: BrushSettings, start: Vec2, opts: { spacing?: number } = {}): BrushStroke {
-  const settings: BrushSettings = brush.mode === "flatten" && brush.target === undefined ? { ...brush, target: sampleLattice(lattice, start) } : { ...brush }
+  const settings: BrushSettings =
+    brush.mode === "flatten" && !(brush.target !== undefined && Number.isFinite(brush.target)) ? { ...brush, target: sampleLattice(lattice, start) } : { ...brush }
   const spacing = opts.spacing ?? defaultDabSpacing(settings.radius)
   let last = { x: start.x, z: start.z }
   let carry = 0

@@ -147,6 +147,20 @@ describe("world / token shaders", () => {
   })
 })
 
+describe("cutaway cap rule", () => {
+  it("declares uCutawayY (default: no cutaway) and uses it only for caps", () => {
+    expect(SHARED_UNIFORMS_GLSL).toMatch(/uniform float uCutawayY;/)
+    expect(createSharedUniforms().uCutawayY.value).toBe(1e9)
+    const body = COMMON_FUNCTIONS_GLSL.slice(COMMON_FUNCTIONS_GLSL.indexOf("vec3 atPointLights("))
+    const uses = body.split("\n").filter((line) => /\buCutawayY\b/.test(line) && !line.trim().startsWith("//"))
+    expect(uses.length).toBeGreaterThan(0)
+    // Walkable / vertical surfaces keep light coming down stairwells: the cutaway test is gated on `cap`.
+    for (const line of uses) expect(line).toMatch(/\(cap && p\.y > uCutawayY \+ AT_CAP_INSET && l0\.y > uCutawayY\)/)
+    // Nothing else in the shared functions reads it.
+    expect(COMMON_FUNCTIONS_GLSL.split("\n").filter((line) => /\buCutawayY\b/.test(line) && !line.trim().startsWith("//"))).toEqual(uses)
+  })
+})
+
 describe("GLSL constants mirror the TypeScript side", () => {
   const define = (src: string, name: string) => Number(new RegExp(`#define ${name} ([-0-9.e]+)`).exec(src)?.[1])
   it("keeps epsilons, cap inset and directional bias in sync", () => {

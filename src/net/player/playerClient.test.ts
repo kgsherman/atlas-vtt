@@ -415,7 +415,11 @@ describe("PlayerClient: stored views", () => {
     cleanups.push(() => second.stop())
     second.start()
     await waitFor(() => client.getSnapshot().status === "live" && client.getSnapshot().epoch === second.epoch, "live with the new host")
-    expect(second.received.some((r) => r.msg.t === "hello")).toBe(true)
+    // Resynced from the new run, either by our hello or by the snapshot the host pushes when our link
+    // becomes ready. A hello sent before the new host's link subscribed is lost, and that snapshot
+    // answers it, so which of the two happened is timing (asserting the hello was flaky).
+    expect(client.getSnapshot().viewSource).toBe("live")
+    expect(client.getSnapshot().seq).toBe(second.currentSeq(P1))
   })
 
   it("starts from the stored view when no DM is connected", async () => {
@@ -431,6 +435,52 @@ describe("PlayerClient: stored views", () => {
     await waitFor(() => client.getSnapshot().view !== null, "row")
     expect(client.getSnapshot()).toMatchObject({ epoch: "old", seq: 7, viewSource: "row" })
     expect(client.getSnapshot().scene).not.toBeNull()
+  })
+
+  async function liveThenOffline() {
+    const newTab = tabs()
+    const { sim } = world()
+    const session = await sessionWithMember()
+    const first = new FakeHost({ transport: newTab(), sessionId: session.realSid, sim, dmUserId: DM, persist: { repo: session.repo, hostEpoch: session.hostEpoch } })
+    cleanups.push(() => first.stop())
+    first.start()
+    const client = createPlayerClient({ sessionId: session.realSid, transport: newTab(), repo: session.playerRepo, identity, tiles: stubTiles(), timings: FAST, backdrop: { createCanvas: fakeCanvas } })
+    cleanups.push(() => client.stop())
+    await client.start()
+    await waitFor(() => client.getSnapshot().status === "live", "live")
+    await first.stop()
+    await waitFor(() => client.getSnapshot().status === "host-offline" && client.getSnapshot().view !== null, "host offline with a view")
+    return { ...session, client }
+  }
+
+  it("learns that the session ended from the library while the DM is away (no broadcast)", async () => {
+    const { repo, realSid, client } = await liveThenOffline()
+    await repo.endSession(realSid)
+    await waitFor(() => client.getSnapshot().status === "ended", "ended", 2000)
+  })
+
+  it("learns about a kick while the DM is away", async () => {
+    const { kick, client } = await liveThenOffline()
+    await kick()
+    await waitFor(() => client.getSnapshot().status === "kicked", "kicked", 2000)
+  })
+
+  it("does not poll membership while live", async () => {
+    const newTab = tabs()
+    const { sim } = world()
+    const { repo, playerRepo, realSid, hostEpoch } = await sessionWithMember()
+    const host = new FakeHost({ transport: newTab(), sessionId: realSid, sim, dmUserId: DM, persist: { repo, hostEpoch } })
+    cleanups.push(() => host.stop())
+    host.start()
+    const spy = vi.spyOn(playerRepo, "sessionInfo")
+    const client = createPlayerClient({ sessionId: realSid, transport: newTab(), repo: playerRepo, identity, tiles: stubTiles(), timings: FAST, backdrop: { createCanvas: fakeCanvas } })
+    cleanups.push(() => client.stop())
+    await client.start()
+    await waitFor(() => client.getSnapshot().status === "live", "live")
+    const calls = spy.mock.calls.length
+    await sleep(FAST.membershipCheckMs! * 4)
+    expect(client.getSnapshot().status).toBe("live")
+    expect(spy.mock.calls.length).toBe(calls)
   })
 
   it("detects being kicked while the DM is away (no row, membership says kicked)", async () => {
@@ -454,6 +504,20 @@ describe("PlayerClient: membership", () => {
     await client.start()
     expect(client.getSnapshot().status).toBe("connecting")
     await waitFor(() => client.getSnapshot().status === "kicked", "kicked")
+  })
+
+  it("notices a kick while syncing with a host that never answers (local mode: channels still join)", async () => {
+    const newTab = tabs()
+    let kicked = false
+    const repo = stubRepo({
+      sessionInfo: async () => ({ sessionId: SID, status: "active", roomCode: "ABCD1234", role: "player", memberStatus: kicked ? "kicked" : "active", displayName: "Alice", dmDisplayName: null, createdAt: "" }),
+    })
+    const host = rawHost(newTab())
+    const client = makeClient(newTab(), { repo })
+    await client.start()
+    await waitFor(() => host.hellos().length >= 1 && client.getSnapshot().status === "syncing", "syncing")
+    kicked = true
+    await waitFor(() => client.getSnapshot().status === "kicked", "kicked", 2000)
   })
 
   it("reports an ended session and non-members while stuck connecting", async () => {
@@ -531,6 +595,64 @@ describe("PlayerClient: requests", () => {
     await host.send(P1, { t: "sync", epoch: host.epoch, seq: host.currentSeq(P1) })
     await waitFor(() => !client.getSnapshot().hostUnresponsive, "responsive again")
     void token
+  })
+
+  it("keeps view, scene and pending overlays on a snapshot at the (epoch, seq) it holds", async () => {
+    const { client, token, host } = await live()
+    host.autoReply = false
+    const before = client.getSnapshot()
+    const reqId = client.requestMove(token.id, [{ cell: { i: 2, j: 2 }, levelId: token.levelId }, { cell: { i: 3, j: 2 }, levelId: token.levelId }])
+    const other = client.requestDoor("door-1", "open")
+    const view = JSON.parse(JSON.stringify(host.lastView(P1))) as PlayerView
+    // E.g. the host re-linked us after a channel rejoin: same view, one result on board.
+    await host.send(P1, { t: "snapshot", epoch: before.epoch!, seq: before.seq, view, results: [{ reqId: other, ok: false, reason: "cannot" }] })
+    await waitFor(() => client.getSnapshot().results.some((r) => r.reqId === other), "result applied")
+    const after = client.getSnapshot()
+    expect(after.scene).toBe(before.scene)
+    expect(after.view).toBe(before.view)
+    expect(after.revision).toBe(before.revision)
+    expect(client.sceneChangeSince(before.scene)).toEqual({})
+    expect(after.pending.map((p) => p.reqId)).toEqual([reqId])
+    expect(after.status).toBe("live")
+  })
+
+  it("blames its own network, not the DM, while offline", async () => {
+    const newTab = tabs()
+    const w = world()
+    const host = fakeHost(newTab(), w.sim)
+    const transport = newTab()
+    let online = true
+    const listeners = new Set<(online: boolean) => void>()
+    const setOnline = (v: boolean) => {
+      online = v
+      for (const cb of [...listeners]) cb(v)
+    }
+    Object.assign(transport, {
+      networkOnline: () => online,
+      onNetworkChange: (cb: (online: boolean) => void) => {
+        listeners.add(cb)
+        return () => listeners.delete(cb)
+      },
+    })
+    const client = makeClient(transport)
+    await client.start()
+    await waitFor(() => client.getSnapshot().status === "live", "live")
+    host.autoReply = false
+    const pending = client.requestMove(w.token.id, [{ cell: { i: 2, j: 2 }, levelId: w.token.levelId }])
+    setOnline(false)
+    await Promise.resolve()
+    let snap = client.getSnapshot()
+    expect(snap.networkOffline).toBe(true)
+    expect(snap.pending).toEqual([])
+    expect(snap.results.at(-1)).toEqual({ reqId: pending, ok: false, local: "not-connected" })
+    const refused = client.requestDoor("door-1", "open")
+    snap = client.getSnapshot()
+    expect(snap.results.at(-1)).toEqual({ reqId: refused, ok: false, local: "not-connected" })
+    expect(snap.hostUnresponsive).toBe(false)
+    host.autoReply = true
+    setOnline(true)
+    await waitFor(() => client.getSnapshot().status === "live" && !client.getSnapshot().networkOffline, "back")
+    expect(client.getSnapshot().hostUnresponsive).toBe(false)
   })
 
   it("clears pending overlays on a snapshot from a new host run", async () => {
@@ -632,15 +754,20 @@ describe("PlayerClient: backdrops", () => {
     const calls: unknown[][] = []
     bindBackdropsToEngine(fake, { setLevelImage: (...a) => calls.push(["set", ...a]), updateLevelImage: (...a) => calls.push(["update", ...a]) })
     const layer = { levelId: "l", canvas: fakeCanvas(10, 10), rect: { x: 0, z: 0, w: 5, d: 5 }, opacity: 1, tintWalls: false, tilePx: 10, pxPerCell: 10, announced: true, stats: { wanted: 1, drawn: 1, pending: 0, missing: 0 } }
-    const dirty = { x: 0, z: 0, w: 5, d: 5 }
+    const dirty = { x: 0, z: 0, w: 105, d: 205 }
+    const dirtyRects = [
+      { x: 0, z: 0, w: 5, d: 5 },
+      { x: 100, z: 200, w: 5, d: 5 },
+    ]
     // An update for a level the engine has not seen yet is promoted to a set.
-    emit({ kind: "update", levelId: "l", layer, dirty })
-    emit({ kind: "update", levelId: "l", layer, dirty })
+    emit({ kind: "update", levelId: "l", layer, dirty, dirtyRects })
+    // Later updates pass the per-chunk list through (not the bounding box).
+    emit({ kind: "update", levelId: "l", layer, dirty, dirtyRects })
     emit({ kind: "remove", levelId: "l" })
     emit({ kind: "remove", levelId: "l" })
     expect(calls).toEqual([
       ["set", "l", layer.canvas, layer.rect],
-      ["update", "l", dirty],
+      ["update", "l", dirtyRects],
       ["set", "l", null, null],
     ])
   })

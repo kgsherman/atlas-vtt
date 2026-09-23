@@ -35,20 +35,13 @@ function LevelRow({ level, active, visible, count, onActivate }: { level: Level;
   const readOnly = useEditorState((s) => s.readOnly)
   const levelCount = useEditorState((s) => Object.keys(s.scene.levels).length)
 
+  // The radio is the name/elevation part only, so the row's buttons are not nested inside it
+  // (nested-interactive); a click anywhere on the row still activates the level.
   return (
     <div
-      role="radio"
-      aria-checked={active}
-      tabIndex={0}
       onClick={onActivate}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
-          e.preventDefault()
-          onActivate()
-        }
-      }}
       className={cn(
-        "group flex h-9 cursor-pointer items-center gap-1.5 rounded-md border border-transparent pr-1 pl-1 text-xs transition-colors outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring/40",
+        "group flex h-9 cursor-pointer items-center gap-1.5 rounded-md border border-transparent pr-1 pl-1 text-xs transition-colors hover:bg-muted/60 has-[[role=radio]:focus-visible]:ring-2 has-[[role=radio]:focus-visible]:ring-ring/40",
         active && "border-primary/30 bg-primary/10 hover:bg-primary/15"
       )}
     >
@@ -71,13 +64,26 @@ function LevelRow({ level, active, visible, count, onActivate }: { level: Level;
         </TooltipTrigger>
         <TooltipContent side="left">{visible ? "Hide in the editor" : "Show in the editor"}</TooltipContent>
       </Tooltip>
-      <span className={cn("size-1.5 shrink-0 rounded-full", active ? "bg-primary" : "bg-transparent")} />
-      <span className={cn("min-w-0 flex-1 truncate", active ? "font-medium text-foreground" : "text-foreground/80", !visible && "opacity-50")}>{level.name}</span>
-      {level.backdrop ? <ImageIcon className="size-3 shrink-0 text-muted-foreground" aria-label="Has a map image" /> : null}
-      {level.heightmap ? <Mountain className="size-3 shrink-0 text-muted-foreground" aria-label="Has terrain" /> : null}
-      <span className="w-14 shrink-0 text-right text-[0.6875rem] text-muted-foreground tabular-nums">{formatElevation(level.elevation)}</span>
-      <span className="w-6 shrink-0 text-right text-[0.625rem] text-muted-foreground/70 tabular-nums" title={`${count} objects`}>
-        {count}
+      <span
+        role="radio"
+        aria-checked={active}
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault()
+            onActivate()
+          }
+        }}
+        className="flex h-full min-w-0 flex-1 items-center gap-1.5 outline-none"
+      >
+        <span className={cn("size-1.5 shrink-0 rounded-full", active ? "bg-primary" : "bg-transparent")} />
+        <span className={cn("min-w-0 flex-1 truncate", active ? "font-medium text-foreground" : "text-foreground/80", !visible && "opacity-50")}>{level.name}</span>
+        {level.backdrop ? <ImageIcon className="size-3 shrink-0 text-muted-foreground" aria-label="Has a map image" /> : null}
+        {level.heightmap ? <Mountain className="size-3 shrink-0 text-muted-foreground" aria-label="Has terrain" /> : null}
+        <span className="w-14 shrink-0 text-right text-[0.6875rem] text-muted-foreground tabular-nums">{formatElevation(level.elevation)}</span>
+        <span className="w-6 shrink-0 text-right text-[0.625rem] text-muted-foreground tabular-nums" title={`${count} objects`}>
+          {count}
+        </span>
       </span>
       <DropdownMenu>
         <DropdownMenuTrigger

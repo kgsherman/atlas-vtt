@@ -12,13 +12,20 @@
  *  - sync: seq > local (or another epoch) → hello.
  *  - Replies carrying a nonce that is not ours (another tab of the same user) are dropped.
  *  - Epochs superseded by a HostBroadcast `status` from a newer host are ignored for good.
+ *  - snapshot at the (epoch, seq) we already hold (the host re-linked us after a channel rejoin): keeps
+ *    the view, scene and pending overlays, only applies the results it carries.
  *  - Host liveness = DM presence on the host topic. Offline: load our own row, status "host-offline",
  *    requests are rejected locally. Back online: hello.
+ *  - While not live (connecting, syncing, host offline) the client re-checks session_info every
+ *    membershipCheckMs, so a session ended from the library (no host to broadcast `ended`) or a kick
+ *    that the channels cannot report still reaches the player.
+ *  - Our own network (transport.networkOnline, e.g. navigator.onLine) down: requests are refused locally
+ *    as "not-connected" and expiring requests are not blamed on the DM (`networkOffline` in the snapshot).
  *  - Pending requests are overlays only: cleared by their result, by a snapshot / epoch change, or
  *    after 5 s ("DM not responding").
  */
 import type { PathStep } from "@/core/movement/types"
-import type { Id, Level, SceneLike } from "@/core/scene/types"
+import type { Cell, Id, Level, SceneLike } from "@/core/scene/types"
 import { applyPatchOps } from "@/core/session/diff"
 import { parsePlayerView } from "@/core/session/playerViewSchema"
 import type { HostBroadcast, HostToClient, PatchOp, PlayerBackdrop, PlayerView, RejectReason, RequestResult } from "@/core/session/types"
@@ -64,6 +71,11 @@ export interface PlayerClientSnapshot extends PlayerSnapshot {
   hostUnresponsive: boolean
   /** Where the current view came from: live messages, or the persisted row (host offline / snapshot_ready). */
   viewSource: "live" | "row" | null
+  /**
+   * This device lost its own network connection (the transport says so, e.g. `navigator.onLine`): show
+   * "You're offline, reconnecting…" rather than blaming the DM. Requests are refused as "not-connected".
+   */
+  networkOffline: boolean
 }
 
 export type ClientClock = CompositorClock
@@ -80,7 +92,7 @@ export interface PlayerClientTimings {
   requestRate: { max: number; windowMs: number }
   /** Retry delays for loading our row while the host is offline. */
   rowRetryMs: readonly number[]
-  /** While stuck connecting (or offline without a row), re-check membership this often (kicked/ended). */
+  /** While not live (connecting, syncing, host offline), re-check membership this often (kicked/ended). */
   membershipCheckMs: number
   /** Results kept in the snapshot (newest last). */
   maxResults: number
@@ -125,6 +137,12 @@ export interface AtlasPlayerClient extends PlayerClient {
   backdropCanvas(levelId: Id): BackdropCanvas | null
   /** Retry backdrop tiles that were given up on. */
   retryBackdropTiles(): void
+  /**
+   * Pixel budget of a level's full backdrop canvas (default 32 MP). Pass the engine's texel budget
+   * (`backdropTexelBudget(engine.getQualityCeiling())`) so each canvas is uploaded as is; layers whose
+   * scale changes are redrawn and announced again with a "set" event.
+   */
+  setBackdropBudget(maxPixels: number): void
 }
 
 // ---------------------------------------------------------------------------
@@ -383,6 +401,9 @@ class PlayerClientImpl implements AtlasPlayerClient {
   private readonly seenEpochs = new Set<string>()
   private readonly retired = new Set<string>()
 
+  // own network (transport.networkOnline)
+  private networkOffline = false
+
   // host liveness
   private hostOnline = false
   private presenceSettled = false
@@ -401,6 +422,8 @@ class PlayerClientImpl implements AtlasPlayerClient {
   private pendingTimer: unknown = null
   private results: ClientRequestResult[] = []
   private readonly ourReqIds = new Set<string>()
+  /** Requests the host already gave its verdict on (results re-delivered with catch-ups are skipped). */
+  private readonly hostSettled = new Set<string>()
   private readonly reqOrder: string[] = []
   private sendTimes: number[] = []
   private hostUnresponsive = false
@@ -441,6 +464,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
     this.backdropLayers = this.backdropLayers.bind(this)
     this.backdropCanvas = this.backdropCanvas.bind(this)
     this.retryBackdropTiles = this.retryBackdropTiles.bind(this)
+    this.setBackdropBudget = this.setBackdropBudget.bind(this)
     this.compositor = new BackdropCompositor({
       ...opts.backdrop,
       tiles: opts.tiles,
@@ -481,6 +505,11 @@ class PlayerClientImpl implements AtlasPlayerClient {
       ch.host.onHostPresence((online) => this.onHostPresence(online)),
       ch.host.onBroadcast((msg) => this.onHostBroadcast(msg))
     )
+    const transport = this.opts.transport
+    if (typeof transport.networkOnline === "function") {
+      this.networkOffline = !transport.networkOnline()
+      if (typeof transport.onNetworkChange === "function") this.offs.push(transport.onNetworkChange((online) => this.onNetworkChange(online)))
+    }
     this.hostOnline = ch.host.hostOnline()
     if (this.hostOnline) this.presenceSettled = true
     else if (ch.host.status() === "SUBSCRIBED") this.armPresenceGrace()
@@ -571,11 +600,37 @@ class PlayerClientImpl implements AtlasPlayerClient {
     this.lastStatus = status
     if (status === "host-offline") this.enterHostOffline()
     if (prev === "host-offline") this.cancelRowLoad()
-    if (status === "connecting") this.armMembershipCheck()
-    else if (prev === "connecting" && this.membershipTimer !== null) {
+    // Not live: nothing else would tell us that the session ended (from the library, with no host
+    // running to broadcast it) or that we were kicked (local mode: the channels still join).
+    if (status !== "live") this.armMembershipCheck()
+    else if (this.membershipTimer !== null) {
       this.clock.clearTimeout(this.membershipTimer)
       this.membershipTimer = null
     }
+    this.changed()
+  }
+
+  /** Our own connection went down / came back (the transport's view: navigator.onLine, socket state). */
+  private onNetworkChange(online: boolean): void {
+    if (this.stopped || this.terminal) return
+    const offline = !online
+    if (offline === this.networkOffline) return
+    this.networkOffline = offline
+    if (offline) {
+      // Nothing we send now arrives; the DM is not the one who is unresponsive.
+      for (const p of this.pending) this.pushResult({ reqId: p.reqId, ok: false }, "not-connected")
+      if (this.pending.length) {
+        this.pending = []
+        this.armPendingTimer()
+      }
+      this.hostUnresponsive = false
+      this.synced = false
+    } else {
+      // Back: make sure nothing was missed meanwhile.
+      this.resync()
+      this.compositor.retryMissing()
+    }
+    this.evaluate()
     this.changed()
   }
 
@@ -751,7 +806,9 @@ class PlayerClientImpl implements AtlasPlayerClient {
       return
     }
     if (!this.opts.tiles.setChunks) return
-    this.opts.tiles.setChunks(msg.levelId, msg.chunks, msg.reset === true)
+    const refreshed: Cell[] | void = this.opts.tiles.setChunks(msg.levelId, msg.chunks, msg.reset === true)
+    // Chunks re-cut with more of a partly explored cell: draw those cells again over the old pixels.
+    if (Array.isArray(refreshed) && refreshed.length > 0) this.compositor.refreshCells(msg.levelId, refreshed)
     this.compositor.retryMissing(msg.levelId)
   }
 
@@ -764,6 +821,16 @@ class PlayerClientImpl implements AtlasPlayerClient {
     // Same run, older than what we hold (can only be a late duplicate): keep ours.
     if (msg.epoch === this.epoch && msg.seq < this.seq && this.view) {
       if (ours) this.helloAnswered()
+      this.applyResults(msg.results)
+      return
+    }
+    // Same run, same seq: within one wire epoch a seq identifies a view (the rule the host's hello
+    // handling uses too), so we already hold it. Keep view, scene and pending overlays (a full
+    // replaceView would rebuild the renderer for nothing, e.g. after a DM-side channel rejoin).
+    if (msg.epoch === this.epoch && msg.seq === this.seq && this.view) {
+      this.viewSource = "live"
+      this.synced = true
+      this.helloAnswered()
       this.applyResults(msg.results)
       return
     }
@@ -947,8 +1014,10 @@ class PlayerClientImpl implements AtlasPlayerClient {
     if (this.membershipTimer !== null || this.stopped || this.terminal) return
     this.membershipTimer = this.clock.setTimeout(() => {
       this.membershipTimer = null
-      if (this.stopped || this.terminal || this.computeStatus() !== "connecting") return
-      void this.checkMembership().then(() => this.armMembershipCheck())
+      if (this.stopped || this.terminal || this.computeStatus() === "live") return
+      void this.checkMembership().then(() => {
+        if (!this.stopped && !this.terminal && this.computeStatus() !== "live") this.armMembershipCheck()
+      })
     }, this.t.membershipCheckMs)
   }
 
@@ -999,13 +1068,18 @@ class PlayerClientImpl implements AtlasPlayerClient {
     const reqId = this.newId()
     this.ourReqIds.add(reqId)
     this.reqOrder.push(reqId)
-    if (this.reqOrder.length > MAX_REQ_IDS) this.ourReqIds.delete(this.reqOrder.shift() as string)
+    if (this.reqOrder.length > MAX_REQ_IDS) {
+      const old = this.reqOrder.shift() as string
+      this.ourReqIds.delete(old)
+      this.hostSettled.delete(old)
+    }
     return reqId
   }
 
   /** Why a request cannot be sent right now (null = send). */
   private gate(): LocalRejectReason | null {
     if (this.stopped || this.terminal || !this.started) return "closed"
+    if (this.networkOffline) return "not-connected"
     const status = this.computeStatus()
     if (status === "connecting") return "not-connected"
     if (status === "host-offline") return "host-offline"
@@ -1048,6 +1122,9 @@ class PlayerClientImpl implements AtlasPlayerClient {
     if (!Array.isArray(results)) return
     for (const r of results) {
       if (!validResult(r) || !this.ourReqIds.has(r.reqId)) continue
+      // The host re-sends recent results with catch-ups (a patch carrying them may have been lost).
+      if (this.hostSettled.has(r.reqId)) continue
+      this.hostSettled.add(r.reqId)
       const clean: RequestResult = { reqId: r.reqId, ok: r.ok }
       if (typeof r.reason === "string") clean.reason = r.reason
       if (isFiniteNum(r.applied)) clean.applied = r.applied
@@ -1079,8 +1156,9 @@ class PlayerClientImpl implements AtlasPlayerClient {
     const expired = this.pending.filter((p) => now - p.sentAt >= this.t.pendingTimeoutMs)
     if (expired.length) {
       this.pending = this.pending.filter((p) => now - p.sentAt < this.t.pendingTimeoutMs)
-      for (const p of expired) this.pushResult({ reqId: p.reqId, ok: false }, "timeout")
-      this.hostUnresponsive = true
+      // Our own connection is down: that is not the DM's fault.
+      for (const p of expired) this.pushResult({ reqId: p.reqId, ok: false }, this.networkOffline ? "not-connected" : "timeout")
+      if (!this.networkOffline) this.hostUnresponsive = true
       // Maybe we silently lost sync (a dropped patch): make sure.
       this.resync()
       this.changed()
@@ -1126,6 +1204,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
         results: this.results,
         hostUnresponsive: this.hostUnresponsive,
         viewSource: this.viewSource,
+        networkOffline: this.networkOffline,
       })
     }
     return this.snap
@@ -1170,6 +1249,10 @@ class PlayerClientImpl implements AtlasPlayerClient {
   retryBackdropTiles(): void {
     this.compositor.retryMissing()
   }
+
+  setBackdropBudget(maxPixels: number): void {
+    this.compositor.setMaxCanvasPixels(maxPixels)
+  }
 }
 
 export function createAtlasPlayerClient(opts: PlayerClientRuntimeOptions): AtlasPlayerClient {
@@ -1194,7 +1277,8 @@ export function bindBackdropsToEngine(client: Pick<AtlasPlayerClient, "onBackdro
       engine.setLevelImage(ev.levelId, ev.layer.canvas, ev.layer.rect)
       shown.add(ev.levelId)
     } else {
-      engine.updateLevelImage(ev.levelId, ev.dirty)
+      // One region per touched chunk: a box around distant cells would re-upload everything between.
+      engine.updateLevelImage(ev.levelId, ev.dirtyRects)
     }
   })
   return () => {

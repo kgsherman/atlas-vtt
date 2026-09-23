@@ -2,21 +2,36 @@
  * Player-side battlemap compositing (ARCHITECTURE §9).
  *
  * Players never receive a whole map image. For every level in `PlayerView.backdrops` this module keeps
- * one canvas covering the backdrop rect (`cellsX·pxPerCell × cellsZ·pxPerCell`, transparent where
- * nothing was drawn) and, whenever the player's explored mask grows, fetches the tiles of the newly
- * explored cells from a `BackdropTileSource` (retrying with backoff while the host is still
- * publishing them), draws them, and reports what changed so the play page can call
- * `engine.setLevelImage(levelId, canvas, rect)` (first content) / `engine.updateLevelImage(levelId, dirty)`.
+ * one canvas (transparent where nothing was drawn) and, whenever the player's explored mask grows,
+ * fetches the tiles of the newly explored cells from a `BackdropTileSource` (retrying with backoff while
+ * the host is still publishing them), draws them, and reports what changed so the play page can call
+ * `engine.setLevelImage(levelId, canvas, rect)` (first content, or a new canvas) /
+ * `engine.updateLevelImage(levelId, dirtyRects)`.
  *
- * Cells that stop being explored (DM fog reset) are cleared again. Everything here is main-thread
- * canvas work but cheap: one `drawImage` of a ~140² bitmap per explored cell, coalesced into one
- * change event per level every `flushMs`.
+ * Canvas size: the scale (`pxPerCell`, a whole number of pixels per cell so cell edges land on whole
+ * pixels) is fixed per layer from the FULL backdrop rect within the size budgets, but the canvas itself
+ * only covers the explored part: the cell bounding box of the explored cells, expanded to 4×4-cell chunk
+ * boundaries (net/assets/chunks.ts) and clipped to the backdrop rect. It is created on the first explored
+ * cell and grows (by at least half its size per axis, copying the pixels already drawn at an integer
+ * offset) when exploration leaves it; a grown canvas is announced with a new "set". It never shrinks
+ * (a fog reset clears cells); a level whose explored cells all disappear loses its canvas ("remove").
+ * `BackdropLayer.rect` is therefore the world rect of the canvas, a sub-rect of the backdrop.
+ *
+ * Change events carry `dirty` (the bounding box of everything drawn or cleared since the last event)
+ * and `dirtyRects` (one rect per touched 4×4-cell chunk): the engine uploads the list region by region,
+ * so exploring two distant spots never re-uploads everything between them.
+ *
+ * Cells that stop being explored (DM fog reset) are cleared again. `refreshCells` redraws cells whose
+ * tile changed (a partly explored cell the host re-cut with more of its sub-cells). Everything here is
+ * main-thread canvas work but cheap: one `drawImage` of a ~140² bitmap per explored cell, coalesced into
+ * one change event per level every `flushMs`.
  */
-import type { Id, Rect } from "@/core/scene/types"
+import type { Cell, Id, Rect } from "@/core/scene/types"
 import type { PlayerBackdrop, PlayerView } from "@/core/session/types"
 import { cellTouched, decodeMask } from "@/core/vision/mask"
 import type { CellMask, EncodedMask } from "@/core/vision/types"
 
+import { chunkKey, TILE_CHUNK } from "../assets/chunks"
 import type { BackdropTileSource } from "../assets/types"
 
 /** What a level image is drawn into (both are valid `TexImageSource`s for the engine). */
@@ -26,13 +41,16 @@ export type BackdropCanvas = OffscreenCanvas | HTMLCanvasElement
 export interface BackdropLayer {
   levelId: Id
   canvas: BackdropCanvas
-  /** World rect (feet) the canvas covers: the backdrop rect. */
+  /**
+   * World rect (feet) the canvas covers: the explored part of the backdrop rect (chunk-aligned, grown
+   * as exploration spreads), so usually a sub-rect of the level's backdrop rect.
+   */
   rect: Rect
   opacity: number
   tintWalls: boolean
   /** Tile edge length announced by the host. */
   tilePx: number
-  /** Canvas pixels per grid cell (tilePx, scaled down if the canvas would exceed the size budget). */
+  /** Canvas pixels per grid cell (a whole number: tilePx, scaled down if the full backdrop would exceed the size budget). */
   pxPerCell: number
   /** True once the layer has been announced with a "set" event (the engine holds the canvas). */
   announced: boolean
@@ -50,10 +68,16 @@ export interface BackdropStats {
 }
 
 export type BackdropEvent =
-  /** First content for a (new) canvas: `engine.setLevelImage(levelId, layer.canvas, layer.rect)`. */
-  | { kind: "set"; levelId: Id; layer: BackdropLayer; dirty: Rect }
-  /** More tiles drawn / cleared: `engine.updateLevelImage(levelId, dirty)` (world rect). */
-  | { kind: "update"; levelId: Id; layer: BackdropLayer; dirty: Rect }
+  /**
+   * First content for a (new or grown) canvas: `engine.setLevelImage(levelId, layer.canvas, layer.rect)`.
+   * `dirty` / `dirtyRects` describe what was drawn (informational: the whole canvas is uploaded).
+   */
+  | { kind: "set"; levelId: Id; layer: BackdropLayer; dirty: Rect; dirtyRects: Rect[] }
+  /**
+   * More tiles drawn / cleared: `engine.updateLevelImage(levelId, dirtyRects)` (world rects, one per
+   * touched chunk). `dirty` is their bounding box (kept for older consumers).
+   */
+  | { kind: "update"; levelId: Id; layer: BackdropLayer; dirty: Rect; dirtyRects: Rect[] }
   /** The level lost its backdrop (or its canvas was replaced): `engine.setLevelImage(levelId, null, null)`. */
   | { kind: "remove"; levelId: Id }
 
@@ -76,7 +100,10 @@ export interface BackdropCompositorOptions {
   createCanvas?: (width: number, height: number) => BackdropCanvas
   /** Longest canvas side in pixels (default 8192, the common WebGL max texture size). */
   maxCanvasSide?: number
-  /** Canvas pixel budget per level (default 32 MP ≈ 128 MB RGBA). Larger backdrops are scaled down. */
+  /**
+   * Pixel budget of a level's FULL backdrop (default 32 MP ≈ 128 MB RGBA): larger backdrops are scaled
+   * down. Pass the engine's texel budget (`backdropTexelBudget(quality)`) so canvas and texture match.
+   */
   maxCanvasPixels?: number
   /** Concurrent getTile() calls over all levels (default 6). */
   concurrency?: number
@@ -84,7 +111,7 @@ export interface BackdropCompositorOptions {
   flushMs?: number
   /**
    * Coalescing window while more tiles are still on their way (default 250 ms). Each event means a
-   * texture upload of the dirty rect, so bursts (a newly explored room) are batched harder.
+   * texture upload of the dirty rects, so bursts (a newly explored room) are batched harder.
    */
   busyFlushMs?: number
   /** Delays between attempts for a tile the source does not have yet (default 0.3 s … 15 s, 7 retries). */
@@ -139,6 +166,11 @@ export function backdropLayout(rect: Rect, cellSize: number, tilePx: number, max
   }
 }
 
+/** Whole canvas pixels per cell for a backdrop (the layout's scale rounded down, at least 1). */
+export function backdropPxPerCell(rect: Rect, cellSize: number, tilePx: number, maxSide = BACKDROP_DEFAULTS.maxCanvasSide, maxPixels = BACKDROP_DEFAULTS.maxCanvasPixels): number {
+  return Math.max(1, Math.floor(backdropLayout(rect, cellSize, tilePx, maxSide, maxPixels).pxPerCell + 1e-9))
+}
+
 /** Pixel rect of grid cell (i, j) in a canvas covering `rect` (edges rounded so neighbours abut exactly). */
 export function cellPixelRect(i: number, j: number, cellSize: number, rect: Rect, width: number, height: number): { x: number; y: number; w: number; h: number } {
   const sx = width / rect.w
@@ -172,6 +204,46 @@ export function exploredCellsInRect(explored: CellMask, cellSize: number, rect: 
   return out
 }
 
+/** Inclusive cell range. */
+interface CellRange {
+  i0: number
+  j0: number
+  i1: number
+  j1: number
+}
+
+/**
+ * One axis of a canvas cell range that has to cover [lo, hi] (inclusive): the union with the current
+ * range, grown to at least 1.5× the current size in the direction(s) it grew, aligned to chunk
+ * boundaries and clipped to [min, max].
+ */
+function growAxis(lo: number, hi: number, cur: [number, number] | null, min: number, max: number): [number, number] {
+  let a = lo
+  let b = hi
+  if (cur) {
+    a = Math.min(a, cur[0])
+    b = Math.max(b, cur[1])
+    const size = cur[1] - cur[0] + 1
+    const grown = b - a + 1
+    if (grown > size) {
+      const extra = Math.ceil(size * 1.5) - grown
+      if (extra > 0) {
+        const low = a < cur[0]
+        const high = b > cur[1]
+        if (high && !low) b += extra
+        else if (low && !high) a -= extra
+        else {
+          a -= Math.floor(extra / 2)
+          b += Math.ceil(extra / 2)
+        }
+      }
+    }
+  }
+  a = Math.floor(a / TILE_CHUNK) * TILE_CHUNK
+  b = Math.ceil((b + 1) / TILE_CHUNK) * TILE_CHUNK - 1
+  return [Math.max(min, a), Math.min(max, b)]
+}
+
 interface Bounds {
   x0: number
   z0: number
@@ -179,19 +251,39 @@ interface Bounds {
   z1: number
 }
 
+const boundsRect = (b: Bounds): Rect => ({ x: b.x0, z: b.z0, w: b.x1 - b.x0, d: b.z1 - b.z0 })
+
 interface LayerState {
   levelId: Id
+  /** Stable layout inputs (a different key rebuilds the layer). */
   key: string
-  rect: Rect
+  /** The backdrop rect (world feet). */
+  backdrop: Rect
   cellSize: number
-  /** Width of the mask grid (cell index = j·gridW + i). */
+  /** Width / depth of the mask grid (cell index = j·gridW + i). */
   gridW: number
+  gridD: number
   tilePx: number
   opacity: number
   tintWalls: boolean
-  layout: BackdropLayout
-  canvas: BackdropCanvas
-  ctx: Ctx2D
+  /** Whole canvas pixels per cell (fixed for the layer, except through setMaxCanvasPixels). */
+  ppc: number
+  /** Cells the backdrop overlaps (clamped to the grid): a canvas never extends beyond them. */
+  limits: CellRange
+  /** Cell (bi0, bj0)'s top-left corner is pixel (0, 0) of the layer's pixel space. */
+  bi0: number
+  bj0: number
+  /** The backdrop rect in that pixel space (rounded): canvases are clipped to it. */
+  clip: { x0: number; y0: number; x1: number; y1: number }
+  canvas: BackdropCanvas | null
+  ctx: Ctx2D | null
+  /** Cells the canvas covers, its pixel origin in the layer's pixel space, and its world rect. */
+  cells: CellRange | null
+  px0: number
+  py0: number
+  width: number
+  height: number
+  rect: Rect | null
   alive: boolean
   announced: boolean
   /** Explored mask object last synced (identity fast path). */
@@ -201,16 +293,21 @@ interface LayerState {
   queue: number[]
   queued: Set<number>
   inflight: Set<number>
+  /** In flight while their tile changed: fetch again once the old one landed. */
+  refetch: Set<number>
   attempts: Map<number, number>
   retryTimers: Map<number, unknown>
   missing: Set<number>
+  /** Union of everything drawn / cleared since the last event (drives "set"/"update"). */
   dirty: Bounds | null
+  /** The same per touched chunk (chunkKey → bounds). */
+  dirtyChunks: Map<number, Bounds>
   /** Focus points (controlled tokens on this level) for fetch ordering. */
   focus: Array<{ x: number; z: number }>
 }
 
-function layoutKey(b: PlayerBackdrop, cellSize: number, gridW: number, gridD: number, layout: BackdropLayout): string {
-  return [b.rect.x, b.rect.z, b.rect.w, b.rect.d, b.tilePx, cellSize, gridW, gridD, layout.width, layout.height].join(",")
+function layoutKey(b: PlayerBackdrop, cellSize: number, gridW: number, gridD: number, ppc: number): string {
+  return [b.rect.x, b.rect.z, b.rect.w, b.rect.d, b.tilePx, cellSize, gridW, gridD, ppc].join(",")
 }
 
 function isUsableBackdrop(b: PlayerBackdrop | undefined): b is PlayerBackdrop {
@@ -225,6 +322,8 @@ function isUsableBackdrop(b: PlayerBackdrop | undefined): b is PlayerBackdrop {
   )
 }
 
+const EPS = 1e-9
+
 /**
  * Keeps one composited canvas per backdrop level in sync with a PlayerView (see module doc).
  * Call `sync(view)` after every view change; `dispose()` when done.
@@ -234,7 +333,7 @@ export class BackdropCompositor {
   private readonly onEvent: (ev: BackdropEvent) => void
   private readonly createCanvas: (width: number, height: number) => BackdropCanvas
   private readonly maxSide: number
-  private readonly maxPixels: number
+  private maxPixels: number
   private readonly concurrency: number
   private readonly flushMs: number
   private readonly busyFlushMs: number
@@ -278,15 +377,15 @@ export class BackdropCompositor {
       const explored = Object.hasOwn(view.masks, levelId) ? view.masks[levelId].explored : null
       const gridW = explored?.width ?? grid.width
       const gridD = explored?.depth ?? grid.depth
-      const layout = backdropLayout(b.rect, grid.cellSize, b.tilePx, this.maxSide, this.maxPixels)
-      const key = layoutKey(b, grid.cellSize, gridW, gridD, layout)
+      const ppc = backdropPxPerCell(b.rect, grid.cellSize, b.tilePx, this.maxSide, this.maxPixels)
+      const key = layoutKey(b, grid.cellSize, gridW, gridD, ppc)
       let layer = this.byLevel.get(levelId)
       if (layer && layer.key !== key) {
         this.removeLayer(levelId)
         layer = undefined
       }
       if (!layer) {
-        const created = this.createLayer(levelId, key, b, grid.cellSize, gridW, layout)
+        const created = this.createLayer(levelId, key, b, grid.cellSize, gridW, gridD, ppc)
         if (!created) continue
         layer = created
       }
@@ -320,13 +419,51 @@ export class BackdropCompositor {
     this.pump()
   }
 
+  /**
+   * The tiles of these cells changed (the host re-cut their chunk, e.g. a partly explored cell grew):
+   * fetch and draw them again. The old pixels stay until the new tile lands on top of them.
+   */
+  refreshCells(levelId: Id, cells: readonly Cell[]): void {
+    if (this.disposed) return
+    const layer = this.byLevel.get(levelId)
+    if (!layer) return
+    const redo: number[] = []
+    for (const c of cells) {
+      if (!Number.isInteger(c.i) || !Number.isInteger(c.j) || c.i < 0 || c.j < 0 || c.i >= layer.gridW || c.j >= layer.gridD) continue
+      const k = c.j * layer.gridW + c.i
+      if (!layer.wanted.has(k)) continue
+      if (layer.inflight.has(k)) layer.refetch.add(k)
+      else if (layer.drawn.delete(k)) redo.push(k)
+      // Queued or waiting for a retry: that fetch gets the new tile anyway.
+    }
+    if (redo.length === 0) return
+    this.enqueue(layer, redo)
+    this.pump()
+  }
+
+  /**
+   * Change the pixel budget of a level's full backdrop (e.g. the engine's texel budget after a quality
+   * change). Layers whose scale changes are redrawn scaled into a new canvas and announced again.
+   */
+  setMaxCanvasPixels(maxPixels: number): void {
+    if (this.disposed || !(maxPixels > 0) || maxPixels === this.maxPixels) return
+    this.maxPixels = maxPixels
+    for (const layer of this.byLevel.values()) {
+      const b: PlayerBackdrop = { rect: layer.backdrop, opacity: layer.opacity, tintWalls: layer.tintWalls, tilePx: layer.tilePx }
+      const ppc = backdropPxPerCell(layer.backdrop, layer.cellSize, layer.tilePx, this.maxSide, this.maxPixels)
+      if (ppc === layer.ppc) continue
+      layer.key = layoutKey(b, layer.cellSize, layer.gridW, layer.gridD, ppc)
+      this.rescale(layer, ppc)
+    }
+  }
+
   layers(): BackdropLayer[] {
-    return [...this.byLevel.values()].map((l) => this.describe(l))
+    return [...this.byLevel.values()].filter((l) => l.canvas !== null).map((l) => this.describe(l))
   }
 
   layer(levelId: Id): BackdropLayer | null {
     const l = this.byLevel.get(levelId)
-    return l ? this.describe(l) : null
+    return l && l.canvas ? this.describe(l) : null
   }
 
   dispose(): void {
@@ -342,12 +479,12 @@ export class BackdropCompositor {
   private describe(l: LayerState): BackdropLayer {
     return {
       levelId: l.levelId,
-      canvas: l.canvas,
-      rect: { ...l.rect },
+      canvas: l.canvas as BackdropCanvas,
+      rect: l.rect ? { ...l.rect } : { x: 0, z: 0, w: 0, d: 0 },
       opacity: l.opacity,
       tintWalls: l.tintWalls,
       tilePx: l.tilePx,
-      pxPerCell: l.layout.pxPerCell,
+      pxPerCell: l.ppc,
       announced: l.announced,
       stats: {
         wanted: l.wanted.size,
@@ -358,31 +495,38 @@ export class BackdropCompositor {
     }
   }
 
-  private createLayer(levelId: Id, key: string, b: PlayerBackdrop, cellSize: number, gridW: number, layout: BackdropLayout): LayerState | null {
-    let canvas: BackdropCanvas
-    let ctx: Ctx2D | null
-    try {
-      canvas = this.createCanvas(layout.width, layout.height)
-      ctx = (canvas as unknown as { getContext(kind: "2d"): Ctx2D | null }).getContext("2d")
-    } catch (err) {
-      console.error("[atlas backdrop] cannot create a canvas", err)
-      return null
-    }
-    if (!ctx) return null
-    ctx.imageSmoothingEnabled = true
-    ctx.imageSmoothingQuality = "high"
+  /** Layer bookkeeping only: the canvas is created with the first explored cell. */
+  private createLayer(levelId: Id, key: string, b: PlayerBackdrop, cellSize: number, gridW: number, gridD: number, ppc: number): LayerState | null {
+    const r = b.rect
+    const i0 = Math.max(0, Math.floor(r.x / cellSize + EPS))
+    const j0 = Math.max(0, Math.floor(r.z / cellSize + EPS))
+    const i1 = Math.min(gridW - 1, Math.ceil((r.x + r.w) / cellSize - EPS) - 1)
+    const j1 = Math.min(gridD - 1, Math.ceil((r.z + r.d) / cellSize - EPS) - 1)
+    const bi0 = Math.floor(r.x / cellSize + EPS)
+    const bj0 = Math.floor(r.z / cellSize + EPS)
     const layer: LayerState = {
       levelId,
       key,
-      rect: { ...b.rect },
+      backdrop: { x: r.x, z: r.z, w: r.w, d: r.d },
       cellSize,
       gridW,
+      gridD,
       tilePx: b.tilePx,
       opacity: b.opacity,
       tintWalls: b.tintWalls,
-      layout,
-      canvas,
-      ctx,
+      ppc,
+      limits: { i0, j0, i1, j1 },
+      bi0,
+      bj0,
+      clip: { x0: 0, y0: 0, x1: 0, y1: 0 },
+      canvas: null,
+      ctx: null,
+      cells: null,
+      px0: 0,
+      py0: 0,
+      width: 0,
+      height: 0,
+      rect: null,
       alive: true,
       announced: false,
       explored: null,
@@ -391,14 +535,181 @@ export class BackdropCompositor {
       queue: [],
       queued: new Set(),
       inflight: new Set(),
+      refetch: new Set(),
       attempts: new Map(),
       retryTimers: new Map(),
       missing: new Set(),
       dirty: null,
+      dirtyChunks: new Map(),
       focus: [],
     }
+    this.setScale(layer, ppc)
     this.byLevel.set(levelId, layer)
     return layer
+  }
+
+  /** Pixel-space constants of a layer at `ppc` pixels per cell. */
+  private setScale(layer: LayerState, ppc: number): void {
+    const cs = layer.cellSize
+    const r = layer.backdrop
+    const ox = layer.bi0 * cs
+    const oz = layer.bj0 * cs
+    layer.ppc = ppc
+    layer.clip = {
+      x0: Math.round(((r.x - ox) / cs) * ppc),
+      y0: Math.round(((r.z - oz) / cs) * ppc),
+      x1: Math.round(((r.x + r.w - ox) / cs) * ppc),
+      y1: Math.round(((r.z + r.d - oz) / cs) * ppc),
+    }
+  }
+
+  /** Pixel bounds (layer pixel space) and world rect of a canvas covering `cells`. */
+  private canvasGeometry(layer: LayerState, cells: CellRange): { px0: number; py0: number; width: number; height: number; rect: Rect } {
+    const ppc = layer.ppc
+    const c = layer.clip
+    const px0 = Math.max((cells.i0 - layer.bi0) * ppc, c.x0)
+    const py0 = Math.max((cells.j0 - layer.bj0) * ppc, c.y0)
+    const px1 = Math.max(px0 + 1, Math.min((cells.i1 + 1 - layer.bi0) * ppc, c.x1))
+    const py1 = Math.max(py0 + 1, Math.min((cells.j1 + 1 - layer.bj0) * ppc, c.y1))
+    const width = Math.min(this.maxSide, px1 - px0)
+    const height = Math.min(this.maxSide, py1 - py0)
+    const k = layer.cellSize / ppc
+    return {
+      px0,
+      py0,
+      width,
+      height,
+      rect: { x: layer.bi0 * layer.cellSize + px0 * k, z: layer.bj0 * layer.cellSize + py0 * k, w: width * k, d: height * k },
+    }
+  }
+
+  private newCanvas(width: number, height: number): { canvas: BackdropCanvas; ctx: Ctx2D } | null {
+    try {
+      const canvas = this.createCanvas(width, height)
+      const ctx = (canvas as unknown as { getContext(kind: "2d"): Ctx2D | null }).getContext("2d")
+      if (!ctx) return null
+      ctx.imageSmoothingEnabled = true
+      ctx.imageSmoothingQuality = "high"
+      return { canvas, ctx }
+    } catch (err) {
+      console.error("[atlas backdrop] cannot create a canvas", err)
+      return null
+    }
+  }
+
+  private static release(canvas: BackdropCanvas): void {
+    // Release the backing store now rather than whenever the engine lets go of the canvas.
+    try {
+      canvas.width = 0
+      canvas.height = 0
+    } catch {
+      // detached/transferred canvases may refuse; nothing to free then
+    }
+  }
+
+  /**
+   * Make the canvas cover every wanted cell: create it (first explored cell) or grow it, copying what
+   * was drawn at an integer pixel offset. false when no canvas could be created.
+   */
+  private ensureCanvas(layer: LayerState): boolean {
+    let ci0 = Infinity
+    let cj0 = Infinity
+    let ci1 = -Infinity
+    let cj1 = -Infinity
+    for (const k of layer.wanted) {
+      const i = k % layer.gridW
+      const j = Math.floor(k / layer.gridW)
+      if (i < ci0) ci0 = i
+      if (i > ci1) ci1 = i
+      if (j < cj0) cj0 = j
+      if (j > cj1) cj1 = j
+    }
+    if (!Number.isFinite(ci0)) return layer.canvas !== null
+    const cur = layer.cells
+    if (cur && layer.canvas && ci0 >= cur.i0 && ci1 <= cur.i1 && cj0 >= cur.j0 && cj1 <= cur.j1) return true
+    const lim = layer.limits
+    const [i0, i1] = growAxis(ci0, ci1, cur ? [cur.i0, cur.i1] : null, lim.i0, lim.i1)
+    const [j0, j1] = growAxis(cj0, cj1, cur ? [cur.j0, cur.j1] : null, lim.j0, lim.j1)
+    const cells = { i0, j0, i1, j1 }
+    const geo = this.canvasGeometry(layer, cells)
+    const made = this.newCanvas(geo.width, geo.height)
+    if (!made) return false
+    const old = layer.canvas
+    if (old && layer.drawn.size > 0) {
+      try {
+        made.ctx.drawImage(old as CanvasImageSource, layer.px0 - geo.px0, layer.py0 - geo.py0, layer.width, layer.height)
+      } catch (err) {
+        console.error("[atlas backdrop] copying the canvas failed", err)
+      }
+    }
+    if (old) BackdropCompositor.release(old)
+    this.install(layer, made, cells, geo)
+    if (layer.announced) {
+      // The engine held the old canvas: hand it the new one (everything drawn so far is in it).
+      layer.dirty = null
+      layer.dirtyChunks.clear()
+      const rect = { ...geo.rect }
+      this.emit({ kind: "set", levelId: layer.levelId, layer: this.describe(layer), dirty: rect, dirtyRects: [rect] })
+    }
+    return true
+  }
+
+  private install(layer: LayerState, made: { canvas: BackdropCanvas; ctx: Ctx2D }, cells: CellRange, geo: { px0: number; py0: number; width: number; height: number; rect: Rect }): void {
+    layer.canvas = made.canvas
+    layer.ctx = made.ctx
+    layer.cells = cells
+    layer.px0 = geo.px0
+    layer.py0 = geo.py0
+    layer.width = geo.width
+    layer.height = geo.height
+    layer.rect = geo.rect
+  }
+
+  /** A new pixel scale for a layer: redraw its canvas scaled into a new one and announce it. */
+  private rescale(layer: LayerState, ppc: number): void {
+    const old = layer.canvas
+    const oldGeo = { px0: layer.px0, py0: layer.py0, width: layer.width, height: layer.height, ppc: layer.ppc }
+    this.setScale(layer, ppc)
+    if (!old || !layer.cells) return
+    const geo = this.canvasGeometry(layer, layer.cells)
+    const made = this.newCanvas(geo.width, geo.height)
+    if (!made) {
+      this.dropCanvas(layer)
+      return
+    }
+    if (layer.drawn.size > 0) {
+      const k = ppc / oldGeo.ppc
+      try {
+        made.ctx.drawImage(old as CanvasImageSource, oldGeo.px0 * k - geo.px0, oldGeo.py0 * k - geo.py0, oldGeo.width * k, oldGeo.height * k)
+      } catch (err) {
+        console.error("[atlas backdrop] rescaling the canvas failed", err)
+      }
+    }
+    BackdropCompositor.release(old)
+    this.install(layer, made, layer.cells, geo)
+    if (layer.announced) {
+      layer.dirty = null
+      layer.dirtyChunks.clear()
+      const rect = { ...geo.rect }
+      this.emit({ kind: "set", levelId: layer.levelId, layer: this.describe(layer), dirty: rect, dirtyRects: [rect] })
+    }
+  }
+
+  /** No explored cell left: release the canvas and tell the engine. */
+  private dropCanvas(layer: LayerState): void {
+    const canvas = layer.canvas
+    const announced = layer.announced
+    layer.canvas = null
+    layer.ctx = null
+    layer.cells = null
+    layer.rect = null
+    layer.width = layer.height = 0
+    layer.announced = false
+    layer.drawn.clear()
+    layer.dirty = null
+    layer.dirtyChunks.clear()
+    if (canvas) BackdropCompositor.release(canvas)
+    if (announced) this.emit({ kind: "remove", levelId: layer.levelId })
   }
 
   /** Remove a layer and tell the engine (if it was announced). */
@@ -417,19 +728,15 @@ export class BackdropCompositor {
     layer.queue = []
     layer.queued.clear()
     this.byLevel.delete(levelId)
-    // Release the backing store now rather than whenever the engine lets go of the canvas.
-    try {
-      layer.canvas.width = 0
-      layer.canvas.height = 0
-    } catch {
-      // detached/transferred canvases may refuse; nothing to free then
-    }
+    if (layer.canvas) BackdropCompositor.release(layer.canvas)
+    layer.canvas = null
+    layer.ctx = null
   }
 
   private reconcileCells(layer: LayerState, explored: EncodedMask | null): void {
     let wanted: Set<number>
     try {
-      wanted = explored ? exploredCellsInRect(decodeMask(explored), layer.cellSize, layer.rect) : new Set()
+      wanted = explored ? exploredCellsInRect(decodeMask(explored), layer.cellSize, layer.backdrop) : new Set()
     } catch (err) {
       console.error("[atlas backdrop] bad explored mask", err)
       return
@@ -441,6 +748,7 @@ export class BackdropCompositor {
       layer.queued.delete(k)
       layer.missing.delete(k)
       layer.attempts.delete(k)
+      layer.refetch.delete(k)
       const t = layer.retryTimers.get(k)
       if (t !== undefined) {
         this.clock.clearTimeout(t)
@@ -453,7 +761,13 @@ export class BackdropCompositor {
       if (!layer.wanted.has(k)) added.push(k)
     }
     layer.wanted = wanted
+    if (wanted.size === 0) {
+      // Nothing explored on this backdrop any more: no canvas (created again with the next cell).
+      if (layer.canvas) this.dropCanvas(layer)
+      return
+    }
     if (added.length === 0) return
+    if (!this.ensureCanvas(layer)) return
     // New exploration: the host is publishing again, so earlier give-ups get another chance.
     if (layer.missing.size) {
       for (const k of layer.missing) {
@@ -544,8 +858,9 @@ export class BackdropCompositor {
   private finish(layer: LayerState, k: number, bitmap: ImageBitmap | null): void {
     this.active--
     layer.inflight.delete(k)
+    const refetch = layer.refetch.delete(k)
     const current = layer.alive && !this.disposed && this.byLevel.get(layer.levelId) === layer
-    if (!current || !layer.wanted.has(k)) {
+    if (!current || !layer.wanted.has(k) || !layer.canvas) {
       bitmap?.close()
       this.pump()
       return
@@ -553,6 +868,11 @@ export class BackdropCompositor {
     if (bitmap) {
       this.drawCell(layer, k, bitmap)
       layer.attempts.delete(k)
+      if (refetch) {
+        // Its tile changed while this (older) one was on its way: fetch the new one too.
+        layer.drawn.delete(k)
+        this.enqueue(layer, [k])
+      }
     } else {
       this.scheduleRetry(layer, k)
     }
@@ -575,15 +895,18 @@ export class BackdropCompositor {
     layer.retryTimers.set(k, handle)
   }
 
+  /** Cell k's pixel rect on the layer's canvas (whole pixels; may extend past a clipped canvas edge). */
   private cellRect(layer: LayerState, k: number) {
-    return cellPixelRect(k % layer.gridW, Math.floor(k / layer.gridW), layer.cellSize, layer.rect, layer.layout.width, layer.layout.height)
+    const i = k % layer.gridW
+    const j = Math.floor(k / layer.gridW)
+    return { x: (i - layer.bi0) * layer.ppc - layer.px0, y: (j - layer.bj0) * layer.ppc - layer.py0, w: layer.ppc, h: layer.ppc }
   }
 
   private drawCell(layer: LayerState, k: number, bitmap: ImageBitmap): void {
     const r = this.cellRect(layer, k)
     try {
-      layer.ctx.clearRect(r.x, r.y, r.w, r.h)
-      layer.ctx.drawImage(bitmap, r.x, r.y, r.w, r.h)
+      layer.ctx!.clearRect(r.x, r.y, r.w, r.h)
+      layer.ctx!.drawImage(bitmap, r.x, r.y, r.w, r.h)
       layer.drawn.add(k)
       this.markDirty(layer, k)
     } catch (err) {
@@ -594,25 +917,30 @@ export class BackdropCompositor {
   }
 
   private clearCell(layer: LayerState, k: number): void {
+    if (!layer.ctx) return
     const r = this.cellRect(layer, k)
     layer.ctx.clearRect(r.x, r.y, r.w, r.h)
     this.markDirty(layer, k)
   }
 
-  /** Grow the level's pending dirty region by cell k (world feet, clipped to the rect). */
+  /** Grow the level's pending dirty region (and its chunk's) by cell k (world feet, clipped to the canvas rect). */
   private markDirty(layer: LayerState, k: number): void {
+    const r = layer.rect
+    if (!r) return
     const cs = layer.cellSize
     const i = k % layer.gridW
     const j = Math.floor(k / layer.gridW)
-    const r = layer.rect
     const b: Bounds = {
       x0: Math.max(r.x, i * cs),
       z0: Math.max(r.z, j * cs),
       x1: Math.min(r.x + r.w, (i + 1) * cs),
       z1: Math.min(r.z + r.d, (j + 1) * cs),
     }
-    const d = layer.dirty
-    layer.dirty = d ? { x0: Math.min(d.x0, b.x0), z0: Math.min(d.z0, b.z0), x1: Math.max(d.x1, b.x1), z1: Math.max(d.z1, b.z1) } : b
+    if (!(b.x1 > b.x0 && b.z1 > b.z0)) return
+    const grow = (d: Bounds | null | undefined): Bounds => (d ? { x0: Math.min(d.x0, b.x0), z0: Math.min(d.z0, b.z0), x1: Math.max(d.x1, b.x1), z1: Math.max(d.z1, b.z1) } : { ...b })
+    layer.dirty = grow(layer.dirty)
+    const ck = chunkKey(Math.floor(i / TILE_CHUNK), Math.floor(j / TILE_CHUNK))
+    layer.dirtyChunks.set(ck, grow(layer.dirtyChunks.get(ck)))
     if (this.flushTimer === null) {
       // First content fast; later batches wait longer while the burst is still arriving.
       const busy = layer.announced && (layer.queue.length > 0 || layer.inflight.size > 0)
@@ -629,14 +957,17 @@ export class BackdropCompositor {
       const d = layer.dirty
       if (!d) continue
       layer.dirty = null
-      const dirty: Rect = { x: d.x0, z: d.z0, w: d.x1 - d.x0, d: d.z1 - d.z0 }
+      const dirty = boundsRect(d)
+      const dirtyRects = [...layer.dirtyChunks.entries()].sort((a, b) => a[0] - b[0]).map(([, c]) => boundsRect(c))
+      layer.dirtyChunks.clear()
+      if (!layer.canvas) continue
       if (!layer.announced) {
         // Nothing to show until the first tile lands: announce with content, not an empty texture.
         if (layer.drawn.size === 0) continue
         layer.announced = true
-        this.emit({ kind: "set", levelId: layer.levelId, layer: this.describe(layer), dirty })
+        this.emit({ kind: "set", levelId: layer.levelId, layer: this.describe(layer), dirty, dirtyRects })
       } else {
-        this.emit({ kind: "update", levelId: layer.levelId, layer: this.describe(layer), dirty })
+        this.emit({ kind: "update", levelId: layer.levelId, layer: this.describe(layer), dirty, dirtyRects })
       }
     }
   }

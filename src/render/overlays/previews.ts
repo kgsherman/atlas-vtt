@@ -16,7 +16,8 @@ import type { GroundSampler } from "../builders/ground"
 import { writeFrameBox, writePrism } from "../builders/shapes"
 import { MeshWriter } from "../builders/writer"
 import type { ToolPreview } from "../contracts"
-import { circlePoints, ribbonPositions } from "./ribbon"
+import { createEdgeAAMaterial, edgeGeometry } from "../materials/edgeAAMaterial"
+import { circlePoints, ribbonEdgeGeometry } from "./ribbon"
 
 export const ACCENT = "#34d399"
 export const INVALID = "#f87171"
@@ -50,10 +51,10 @@ function lineFrom(points: readonly { x: number; y: number; z: number }[], materi
   return loop ? new THREE.LineLoop(g, material) : new THREE.Line(g, material)
 }
 
-function ribbonMesh(points: readonly { x: number; y: number; z: number }[], width: number, material: THREE.Material): THREE.Mesh {
-  const g = new THREE.BufferGeometry()
-  g.setAttribute("position", new THREE.BufferAttribute(ribbonPositions(points, width, LIFT), 3))
-  return new THREE.Mesh(g, material)
+/** Ribbon with analytic edge anti-aliasing (the canvas has no MSAA); `width` is the nominal width. */
+function ribbonMesh(points: readonly { x: number; y: number; z: number }[], width: number, worldPerPixel: number, color: string, opacity: number): THREE.Mesh {
+  // + half a pixel per side: the edge fade is centred on the nominal edge.
+  return new THREE.Mesh(edgeGeometry(ribbonEdgeGeometry(points, width + worldPerPixel, LIFT)), createEdgeAAMaterial(color, { opacity }))
 }
 
 /** A rect draped on the ground (sampled on the terrain lattice). */
@@ -198,9 +199,9 @@ export function buildToolPreview(p: ToolPreview, ctx: PreviewContext): THREE.Obj
       const ground = ctx.ground(p.levelId)
       const color = BRUSH_COLORS[p.mode] ?? ACCENT
       const pts = circlePoints(p.center.x, p.center.z, p.radius, 72, (x, z) => ground.heightAt(x, z))
-      root.add(ribbonMesh(pts, Math.max(0.15, ctx.worldPerPixel * 2.5), fillMaterial(color, 0.9)))
+      root.add(ribbonMesh(pts, Math.max(0.15, ctx.worldPerPixel * 2.5), ctx.worldPerPixel, color, 0.9))
       const inner = circlePoints(p.center.x, p.center.z, p.radius * 0.5, 48, (x, z) => ground.heightAt(x, z))
-      root.add(ribbonMesh(inner, Math.max(0.08, ctx.worldPerPixel * 1.2), fillMaterial(color, 0.45)))
+      root.add(ribbonMesh(inner, Math.max(0.08, ctx.worldPerPixel * 1.2), ctx.worldPerPixel, color, 0.45))
       break
     }
     case "ghost-objects":

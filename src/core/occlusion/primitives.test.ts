@@ -228,4 +228,20 @@ describe("bounds, tops, footprints, push-out", () => {
     expect(pushOutOfPrimitive(hf, { x: 1.5, y: 1.8, z: 1.5 }, 0.3).y).toBeCloseTo(2.3)
     expect(pushOutOfPrimitive(b, { x: 5, y: 5, z: 5 }, 0.3)).toEqual({ x: 5, y: 5, z: 5 })
   })
+
+  it("pushes points on a face or within EPS of it (segments from there ignore the primitive)", () => {
+    // Box top at y = 2; a point on the top face and one 1e-7 above it both count as contained.
+    const b = box()
+    for (const y of [2, 2 + 1e-7]) {
+      expect(primitiveContains(b, { x: 0, y, z: 0 })).toBe(true)
+      expect(pushOutOfPrimitive(b, { x: 0, y, z: 0 }, 0.3).y).toBeCloseTo(2.3, 9)
+    }
+    // Heightfield with top 2: same rule, vertically.
+    const hf = field(4, 1, () => 2)
+    for (const y of [2, 2 + 1e-7]) expect(pushOutOfPrimitive(hf, { x: 1.5, y, z: 1.5 }, 0.3).y).toBeCloseTo(2.3, 6)
+    // Cylinder side: a point on the curved face goes radially out.
+    expect(pushOutOfPrimitive(cyl(), { x: 1 + 1e-7, y: 1.5, z: 0 }, 0.3).x).toBeCloseTo(1.3, 9)
+    // Points clearly outside are untouched.
+    expect(pushOutOfPrimitive(b, { x: 0, y: 2.001, z: 0 }, 0.3)).toEqual({ x: 0, y: 2.001, z: 0 })
+  })
 })

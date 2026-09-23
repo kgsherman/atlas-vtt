@@ -148,6 +148,19 @@ export interface SessionPlayer {
 
 export const GAME_STATE_VERSION = 1 as const
 
+/**
+ * The library scene a live session's map comes from, so the DM can save map edits made during play
+ * back to the library (and be warned before ending a session with unsaved edits).
+ */
+export interface SceneOrigin {
+  /** Library scene row id (`scenes.id`, not `Scene.id`). */
+  sceneId: string
+  /** Library version the live map is based on (null = unknown). */
+  version: number | null
+  /** The live map was edited ("apply-scene-patches") since that version. Play actions never set it. */
+  dirty: boolean
+}
+
 export interface GameState {
   stateVersion: typeof GAME_STATE_VERSION
   sessionId: string
@@ -169,6 +182,8 @@ export interface GameState {
   revealed: Record<string, Id[]>
   /** Internal monotonic counter (never on the wire). */
   seq: number
+  /** Library scene the map comes from (absent / null: unknown, e.g. states saved before this field). */
+  origin?: SceneOrigin | null
 }
 
 // ===========================================================================
@@ -211,12 +226,17 @@ export type HostToClient =
   | { t: "result"; epoch: string; seq: number; result: RequestResult }
   /**
    * Backdrop tiles (ARCHITECTURE §9): the player's uploaded chunks of explored cells on a level, as
-   * [ci, cj, cellMask] (net/assets/chunks.ts; mask 0 = removed). `reset`: the list replaces everything
-   * known for the level. Outside the seq order (idempotent; sent before the patch revealing the cells
-   * when the uploads finish in time, else when they do).
+   * [ci, cj, cellMask] or [ci, cj, cellMask, rev] (net/assets/chunks.ts; mask 0 = removed). `rev` is an
+   * optional content revision of the chunk image: a chunk can change without its cell mask changing
+   * (a partly explored cell drawn with more of its sub-cells), so clients refetch when it changes.
+   * `reset`: the list replaces everything known for the level. Outside the seq order (idempotent; sent
+   * before the patch revealing the cells when the uploads finish in time, else when they do).
    */
-  | { t: "tiles"; epoch: string; levelId: Id; chunks: Array<[number, number, number]>; reset?: boolean }
+  | { t: "tiles"; epoch: string; levelId: Id; chunks: Array<TileChunkEntry>; reset?: boolean }
   | { t: "kicked"; reason: string }
+
+/** One `{t: "tiles"}` chunk entry: [ci, cj, cellMask] or [ci, cj, cellMask, content rev]. */
+export type TileChunkEntry = [number, number, number] | [number, number, number, number]
 
 /** host → everyone on topic `session:{sid}:host` (DM-only writers). Host liveness = DM presence there. */
 export type HostBroadcast =
@@ -235,8 +255,10 @@ export type DmCommand =
   | { t: "reveal-object"; objectId: Id; userId?: string }
   /** Editor edits during a live session (immer patches against GameState.scene). */
   | { t: "apply-scene-patches"; patches: Patch[] }
-  /** Switch to a different map; resets explored/memory/revealed. */
-  | { t: "load-scene"; scene: Scene }
+  /** Switch to a different map; resets explored/memory/revealed. `origin`: its library scene (default: none). */
+  | { t: "load-scene"; scene: Scene; origin?: SceneOrigin | null }
+  /** Record where the live map comes from (e.g. after saving it back to the library: clean, new version). */
+  | { t: "set-origin"; origin: SceneOrigin | null }
   | { t: "add-player"; userId: string; displayName: string }
   | { t: "remove-player"; userId: string }
   | { t: "rebind-player"; fromUserId: string; toUserId: string }
