@@ -174,3 +174,57 @@ export function circleOverlapsAABB2(p: Vec2, r: number, box: AABB2): boolean {
   const qz = Math.max(box.minZ, Math.min(box.maxZ, p.z))
   return (p.x - qx) ** 2 + (p.z - qz) ** 2 < r * r
 }
+
+/** Squared distance from point p to an axis-aligned box on XZ (0 inside). */
+function pointAABB2Distance2(p: Vec2, box: AABB2): number {
+  const dx = p.x < box.minX ? box.minX - p.x : p.x > box.maxX ? p.x - box.maxX : 0
+  const dz = p.z < box.minZ ? box.minZ - p.z : p.z > box.maxZ ? p.z - box.maxZ : 0
+  return dx * dx + dz * dz
+}
+
+/** Squared distance between segment a→b and an axis-aligned box on XZ (0 when they meet). */
+export function segmentAABB2Distance2(a: Vec2, b: Vec2, box: AABB2): number {
+  // Clip the segment against the box (Liang–Barsky): any surviving part means they meet.
+  const dx = b.x - a.x
+  const dz = b.z - a.z
+  let t0 = 0
+  let t1 = 1
+  const clip = (p: number, q: number): boolean => {
+    if (p === 0) return q >= 0
+    const t = q / p
+    if (p < 0) {
+      if (t > t1) return false
+      if (t > t0) t0 = t
+    } else {
+      if (t < t0) return false
+      if (t < t1) t1 = t
+    }
+    return true
+  }
+  if (clip(-dx, a.x - box.minX) && clip(dx, box.maxX - a.x) && clip(-dz, a.z - box.minZ) && clip(dz, box.maxZ - a.z) && t0 <= t1) return 0
+  // Disjoint convex shapes: the closest pair involves an endpoint of the segment or a corner of the box.
+  let best = Math.min(pointAABB2Distance2(a, box), pointAABB2Distance2(b, box))
+  const len2 = dx * dx + dz * dz
+  for (const cx of [box.minX, box.maxX]) {
+    for (const cz of [box.minZ, box.maxZ]) {
+      let t = len2 > 0 ? ((cx - a.x) * dx + (cz - a.z) * dz) / len2 : 0
+      t = t < 0 ? 0 : t > 1 ? 1 : t
+      const ex = a.x + dx * t - cx
+      const ez = a.z + dz * t - cz
+      best = Math.min(best, ex * ex + ez * ez)
+    }
+  }
+  return best
+}
+
+/** Oriented rectangle vs capsule (a disc of radius r swept from a to b) on XZ (strict overlap: distance < r). */
+export function orientedRectOverlapsCapsule(center: Vec2, halfX: number, halfZ: number, yaw: number, a: Vec2, b: Vec2, r: number): boolean {
+  const la = unrotateXZ(a.x - center.x, a.z - center.z, yaw)
+  const lb = unrotateXZ(b.x - center.x, b.z - center.z, yaw)
+  return segmentAABB2Distance2(la, lb, { minX: -halfX, minZ: -halfZ, maxX: halfX, maxZ: halfZ }) < r * r
+}
+
+/** Axis-aligned box vs capsule on XZ (strict overlap). */
+export function capsuleOverlapsAABB2(a: Vec2, b: Vec2, r: number, box: AABB2): boolean {
+  return segmentAABB2Distance2(a, b, box) < r * r
+}

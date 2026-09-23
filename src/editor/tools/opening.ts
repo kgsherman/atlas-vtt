@@ -55,7 +55,7 @@ export function createOpeningTool(deps: ToolDeps, kind: "door" | "window"): Tool
     const p = e.pick.hitPoint ?? e.ground
     if (!p) return null
     const { width, height } = dims(wall)
-    const placement = placeOpening(s.scene, wall, offsetOnWall(wall, p), width, { mode: pointerSnapMode(store, e) })
+    const placement = placeOpening(s.scene, wall, offsetOnWall(wall, p), width, { mode: pointerSnapMode(store, e), kind })
     return { wallId: wall.id, offset: placement.offset, valid: placement.valid && height > 0 }
   }
 

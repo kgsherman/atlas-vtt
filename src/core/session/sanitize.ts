@@ -6,9 +6,17 @@
  * Memory convention for static lights: `position.y` is the light's WORLD Y at observation time (the
  * filter converts it to "relative to the ground the player's client computes"), so a remembered
  * light keeps its height even if terrain under it is edited out of sight.
+ *
+ * Memory convention for masked floors (ARCHITECTURE §9): the remembered floor keeps its `mask`
+ * (host-side only — GameState.memory never leaves the DM), so the filter can clip the floor's real
+ * shape (`floorRects`) to explored cells. The filter builds floor pieces field by field and never
+ * copies a mask into a PlayerView.
  */
-import type { DoorObject, Id, LightObject, SceneObject } from "../scene/types"
+import type { DoorObject, FloorMask, Id, LightObject, SceneObject } from "../scene/types"
 import type { PlayerDoor, PlayerFloor, PlayerLight, PlayerObject } from "./types"
+
+/** A remembered floor: the wire fields plus its coverage mask (host memory only, never sent). */
+export type MemoryFloor = PlayerFloor & { mask?: FloorMask }
 
 /** Whether an object may be remembered by (and so ever sent to) a player right now. */
 export function memorable(o: SceneObject, revealed: ReadonlySet<Id>): boolean {
@@ -64,8 +72,9 @@ export function sanitizeObject(o: SceneObject, lightWorldY: (light: LightObject)
 function sanitizeStatic(o: Exclude<SceneObject, LightObject>): PlayerObject {
   switch (o.type) {
     case "floor": {
-      const out: PlayerFloor = { id: o.id, type: "floor", levelId: o.levelId, rect: { x: o.rect.x, z: o.rect.z, w: o.rect.w, d: o.rect.d }, material: o.material }
+      const out: MemoryFloor = { id: o.id, type: "floor", levelId: o.levelId, rect: { x: o.rect.x, z: o.rect.z, w: o.rect.w, d: o.rect.d }, material: o.material }
       if (o.thickness !== undefined) out.thickness = o.thickness
+      if (o.mask) out.mask = { spacing: o.mask.spacing, cols: o.mask.cols, rows: o.mask.rows, b64: o.mask.b64 }
       return out
     }
     case "wall":

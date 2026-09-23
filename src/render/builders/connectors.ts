@@ -13,6 +13,7 @@ import { materialColor, scaleRgb, tint } from "./color"
 import { writeFrameBox, writeQuadOutward } from "./shapes"
 import type { BucketBuild } from "./types"
 import { MeshWriter, type V3 } from "./writer"
+import { surfaceOf } from "../materials/surface"
 
 /** Target riser height of visual stairs (feet). */
 export const STAIR_RISER = 0.75
@@ -135,6 +136,7 @@ export function buildConnectorsBucket(ctx: BuildContext, levelId: Id): BucketBui
   const w = new MeshWriter()
   for (const c of ctx.ofType(levelId, "connector")) {
     w.begin(c.id)
+    w.material = surfaceOf(c.material)
     if (c.style === "ladder") writeLadder(w, ctx, c)
     else if (ctx.level(c.toLevelId)) writeStairsOrRamp(w, ctx, c)
     w.end()

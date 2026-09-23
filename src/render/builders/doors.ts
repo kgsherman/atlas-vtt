@@ -15,6 +15,7 @@ import { writeBox } from "./shapes"
 import type { BucketBuild, DoorLeafBuild } from "./types"
 import { openingSpan, wallFrame, type WallFrame } from "./walls"
 import { MeshWriter } from "./writer"
+import { doorSurface } from "../materials/surface"
 
 export interface DoorLeaf {
   doorId: Id
@@ -115,6 +116,7 @@ export function doorLeafGeometry(f: WallFrame, door: DoorObject, leaf: DoorLeaf)
   const wallT = f.wall.thickness
   const key = `${door.id}:${leaf.index}`
   w.begin(door.id)
+  w.material = doorSurface(door.style, f.wall.material)
   switch (door.style) {
     case "secret": {
       // Flush with the wall faces and full width: indistinguishable from the wall when closed.

@@ -15,6 +15,7 @@ import type { Id, SceneLike, Vec3 } from "@/core/scene/types"
 import type { GroundSampler } from "../builders/ground"
 import type { OverlayState, RulerOverlay, ToolPreview, ViewState } from "../contracts"
 import type { LevelPlanEntry } from "../engine/levelPlan"
+import { LAYER } from "../internal"
 import { GridOverlay } from "./grid"
 import { buildOutlines, disposeOutlines, type ObjectMeshRef } from "./highlight"
 import { TextLabel } from "./label"
@@ -101,6 +102,8 @@ export class OverlayManager {
   private pending: THREE.Object3D | null = null
   private pendingDirty = false
   private gridVersion = 0
+  /** Something was (re)built: move it to the OVERLAY layer before the next draw. */
+  private layersDirty = true
 
   constructor(host: OverlayHost) {
     this.host = host
@@ -168,12 +171,25 @@ export class OverlayManager {
       const f = this.host.fade()
       this.grid.setFade(f.x, f.z, f.radius)
     }
+    if (this.outlinesDirty || this.helpersDirty || this.rulerDirty || this.pendingDirty) this.layersDirty = true
     if (this.outlinesDirty) this.rebuildOutlines()
     if (this.helpersDirty) this.rebuildHelpers()
     if (this.rulerDirty) this.rebuildRuler()
     if (this.pendingDirty) this.rebuildPending()
+    if (this.layersDirty) this.markLayers()
     // Keep the ruler label at a constant pixel size.
     if (this.rulerLabel?.sprite.visible) this.rulerLabel.updateScale(this.host.worldPerPixelAt(this.rulerLabel.sprite.position))
+  }
+
+  /**
+   * Overlays live on the OVERLAY layer: the engine draws them after post-processing (exact colours,
+   * no bloom / tone mapping), depth-tested against the composited scene. Outlines attached to world
+   * meshes are marked individually.
+   */
+  private markLayers(): void {
+    this.layersDirty = false
+    this.root.traverse((o) => o.layers.set(LAYER.OVERLAY))
+    for (const o of [...this.outlines, ...this.helperOutlines]) o.line.traverse((c) => c.layers.set(LAYER.OVERLAY))
   }
 
   // -------------------------------------------------------------------------
@@ -211,6 +227,7 @@ export class OverlayManager {
     if (!p || !this.host.scene()) return
     this.preview = buildToolPreview(p, { ground: (id) => this.host.ground(id), scene: this.host.scene(), worldPerPixel: this.host.worldPerPixel() })
     this.root.add(this.preview)
+    this.layersDirty = true
   }
 
   private rebuildRuler(): void {

@@ -176,14 +176,24 @@ export interface Engine {
    * (the level's backdrop rect). DM modes pass the whole decoded image; player mode passes a canvas the
    * player client composites explored-cell tiles into (unfilled texels are transparent), then calls
    * updateLevelImage() after drawing more tiles. null removes the image.
+   * `opts` overrides the level document's `backdrop.opacity` / `tintWalls` (players' scenes may lack
+   * them: pass PlayerBackdrop's values). ImageBitmaps should be decoded with premultiplyAlpha
+   * "premultiply". Oversized images are downscaled to the tier's texel budget (≤ 8192 px per side).
    */
-  setLevelImage(levelId: Id, image: TexImageSource | null, rect: Rect | null): void
+  setLevelImage(levelId: Id, image: TexImageSource | null, rect: Rect | null, opts?: { opacity?: number; tintWalls?: boolean }): void
   /** Re-upload a level image after its canvas changed (optionally only `dirty`, world rect). */
   updateLevelImage(levelId: Id, dirty?: Rect): void
   setView(view: Partial<ViewState>): void
   getView(): ViewState
   setOverlays(overlays: Partial<OverlayState>): void
   setQuality(q: Quality): void
+  /**
+   * Pick the quality tier for this device (renderer heuristics + a short synthetic benchmark, cached per
+   * GPU; see render/engine/autoQuality.ts), apply it as the quality ceiling and return it. Optional:
+   * callers that create engines before knowing the tier can call it once after creation (or use the
+   * exported pickInitialQuality() before createEngine).
+   */
+  benchmarkQuality?(): Promise<Quality>
 
   pick(clientX: number, clientY: number, opts: PickOptions): PickResult
   /** Project a world point to canvas-relative CSS pixels (for HTML labels). */

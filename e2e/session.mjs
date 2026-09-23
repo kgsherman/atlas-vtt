@@ -1,0 +1,464 @@
+// Session helpers shared by the multiplayer end-to-end scripts: wire capture, host / player handles,
+// the "expected view" oracle and the leak scanner.
+import { BASE, sleep, waitFor, jsonDiff, watchPage } from "./lib.mjs"
+
+/**
+ * Init script for player pages (local mode): records every broadcast frame the page's
+ * BroadcastChannels receive, i.e. everything LocalTransport delivers to this tab (its own view / req
+ * topics, the host topic, the lobby). `window.__atlasWire` = [{ name, event, json }].
+ */
+export function captureBroadcastChannel() {
+  const Orig = window.BroadcastChannel
+  const log = (window.__atlasWire = [])
+  window.BroadcastChannel = class extends Orig {
+    constructor(name) {
+      super(name)
+      this.addEventListener("message", (ev) => {
+        const d = ev.data
+        if (d && d.k === "b" && typeof d.json === "string")
+          log.push({ name, event: d.event, json: d.json })
+      })
+    }
+  }
+}
+
+/** Drain the frames captured so far on a player page. */
+export async function drainWire(page) {
+  return page.evaluate(() => (window.__atlasWire ?? []).splice(0))
+}
+
+// ---- setting up a game ---------------------------------------------------------------------------------
+
+/**
+ * From the library, open a scene in the editor: a copy of a sample (`sample`: its display name) or an
+ * imported .atlas.json (`file`: a path). `mode` is "local" (?local=1) or "supabase" (?local=0).
+ */
+export async function openSceneInEditor(
+  page,
+  { mode = "local", sample = "The Crooked Lantern", file = null } = {}
+) {
+  await page.goto(`${BASE}/?local=${mode === "local" ? 1 : 0}`, {
+    waitUntil: "domcontentloaded",
+  })
+  if (file) {
+    await page.locator('input[type="file"]').first().setInputFiles(file)
+    // The success toast offers to open the imported scene.
+    await page
+      .getByRole("button", { name: "Open", exact: true })
+      .first()
+      .click({ timeout: 120000 })
+  } else {
+    await page
+      .locator("[data-slot=card]", { hasText: sample })
+      .getByRole("button", { name: "Open a copy" })
+      .click({ timeout: 30000 })
+  }
+  await waitFor(
+    page,
+    () =>
+      /^\/editor\/(?!new)/.test(location.pathname) &&
+      window.__atlasEditor?.engine != null,
+    null,
+    { timeout: 90000, label: "editor on the scene" }
+  )
+  return page.evaluate(() => location.pathname.split("/").pop())
+}
+
+/** Editor → "Start session" → the host console is hosting. Returns the session id, room code and state. */
+export async function startSession(dm) {
+  await sleep(300)
+  await dm.getByRole("button", { name: "Start session" }).click()
+  await waitFor(dm, () => location.pathname.startsWith("/host/"), null, {
+    timeout: 30000,
+    label: "host route",
+  })
+  await waitHosting(dm, 60000)
+  const h = await hostState(dm)
+  return {
+    sessionId: await dm.evaluate(() => location.pathname.split("/").pop()),
+    roomCode: h.roomCode,
+    state: h.state,
+  }
+}
+
+/**
+ * A player joins by room code in a new tab of `context` (local mode: same context as the DM, since
+ * BroadcastChannel does not cross contexts) and goes live. `capture` records the tab's BroadcastChannel
+ * frames (see captureBroadcastChannel).
+ */
+export async function joinGame(
+  context,
+  { roomCode, name, mode = "local", capture = false, logs = null }
+) {
+  const page = await context.newPage()
+  if (logs) watchPage(page, name, logs)
+  if (capture) await page.addInitScript(captureBroadcastChannel)
+  await page.goto(
+    `${BASE}/join/${roomCode}?local=${mode === "local" ? 1 : 0}`,
+    { waitUntil: "domcontentloaded" }
+  )
+  await page.getByPlaceholder("e.g. Morgana").fill(name)
+  await page.getByRole("button", { name: "Join game" }).click()
+  await waitFor(page, () => location.pathname.startsWith("/play/"), null, {
+    timeout: 30000,
+    label: `${name}: play route`,
+  })
+  await waitPlayerLive(page, 45000)
+  return { page, name, uid: (await playerSnap(page)).userId }
+}
+
+/** DM: Players tab → "Assign" on the player's card → tick the token; waits until the player controls it. */
+export async function assignToken(dm, player, token) {
+  await dm.getByRole("tab", { name: /Players/ }).click()
+  const row = dm.locator("div.rounded-lg.border", {
+    has: dm.getByRole("button", { name: `More for ${player.name}` }),
+  })
+  await row.getByRole("button", { name: /Assign/ }).click()
+  const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const names = [token.name, token.label].filter(Boolean).map(esc).join("|")
+  await dm
+    .getByRole("menuitemcheckbox", { name: new RegExp(`^\\s*(${names})\\b`) })
+    .first()
+    .click()
+  await dm.keyboard.press("Escape")
+  await waitFor(
+    player.page,
+    (id) =>
+      window.__atlasPlayer.client
+        .getSnapshot()
+        .view?.controlledTokenIds.includes(id),
+    token.id,
+    {
+      timeout: 20000,
+      label: `${player.name} controls ${token.name}`,
+    }
+  )
+}
+
+// ---- host (DM tab) ----------------------------------------------------------------------------------
+
+export async function waitHosting(dm, timeout = 45000) {
+  await waitFor(
+    dm,
+    () => window.__atlasHost?.runner.getSnapshot().status === "hosting",
+    null,
+    { timeout, label: "host status 'hosting'" }
+  )
+}
+
+export async function hostState(dm) {
+  return dm.evaluate(() => {
+    const snap = window.__atlasHost.runner.getSnapshot()
+    return {
+      status: snap.status,
+      roomCode: snap.roomCode,
+      epoch: snap.epoch,
+      state: JSON.parse(JSON.stringify(snap.state)),
+      members: snap.members,
+    }
+  })
+}
+
+/**
+ * What `uid` should see right now according to the authoritative pipeline, recomputed from scratch in
+ * the DM tab: a FRESH core/vision engine (no worker caches) → updateKnowledge on a copy of the host
+ * state → filterForPlayer. The player's view must equal it once the host has flushed.
+ */
+export async function expectedView(dm, uid) {
+  return dm.evaluate(async (uid) => {
+    const [vision, session] = await Promise.all([
+      import("/src/core/vision/index.ts"),
+      import("/src/core/session/index.ts"),
+    ])
+    const state = structuredClone(window.__atlasHost.runner.getSnapshot().state)
+    const engine = vision.createVisionEngine(state.scene)
+    const viewers = session
+      .viewerTokenIds(state, uid)
+      .map((id) => engine.viewerFor(state.scene.tokens[id]))
+    const vis = engine.compute(viewers)
+    const view = session.filterForPlayer(
+      session.updateKnowledge(state, uid, vis),
+      uid,
+      vis
+    )
+    return JSON.parse(JSON.stringify(view))
+  }, uid)
+}
+
+// ---- player tab -----------------------------------------------------------------------------------
+
+export async function waitPlayerLive(page, timeout = 30000) {
+  await waitFor(
+    page,
+    () =>
+      window.__atlasPlayer?.client.getSnapshot().status === "live" &&
+      window.__atlasPlayer.client.getSnapshot().view != null,
+    null,
+    {
+      timeout,
+      label: "player client live",
+    }
+  )
+}
+
+export async function playerView(page) {
+  return page.evaluate(() =>
+    JSON.parse(JSON.stringify(window.__atlasPlayer.client.getSnapshot().view))
+  )
+}
+
+export async function playerSnap(page) {
+  return page.evaluate(() => {
+    const s = window.__atlasPlayer.client.getSnapshot()
+    return {
+      status: s.status,
+      epoch: s.epoch,
+      seq: s.seq,
+      results: JSON.parse(JSON.stringify(s.results ?? [])),
+      userId: s.view?.userId ?? null,
+    }
+  })
+}
+
+/** Poll until the player's view equals the oracle; returns the remaining differences (empty = match). */
+export async function viewConverges(dm, page, uid, timeout = 10000) {
+  const t0 = Date.now()
+  let diff = []
+  while (Date.now() - t0 < timeout) {
+    const [want, got] = await Promise.all([
+      expectedView(dm, uid),
+      playerView(page),
+    ])
+    diff = jsonDiff(want, got, 8)
+    if (diff.length === 0) return diff
+    await sleep(250)
+  }
+  return diff
+}
+
+/** Request a move along the planner's path to `cell` (same code path as a drag release). */
+export async function requestMoveTo(page, tokenId, cell) {
+  return page.evaluate(
+    ({ tokenId, cell }) => {
+      const p = window.__atlasPlayer
+      const snap = p.client.getSnapshot()
+      const t = snap.scene.tokens[tokenId]
+      const plan = p.planner.plan(tokenId, cell, t.levelId)
+      if (!plan?.path) return { reqId: null, plan: null }
+      return {
+        reqId: p.client.requestMove(tokenId, plan.path),
+        steps: plan.path.length,
+        feet: plan.distance,
+      }
+    },
+    { tokenId, cell }
+  )
+}
+
+export async function waitResult(page, reqId, timeout = 8000) {
+  await waitFor(
+    page,
+    (id) =>
+      (window.__atlasPlayer.client.getSnapshot().results ?? []).some(
+        (r) => r.reqId === id
+      ),
+    reqId,
+    { timeout, label: `result of ${reqId}` }
+  )
+  return page.evaluate(
+    (id) =>
+      JSON.parse(
+        JSON.stringify(
+          window.__atlasPlayer.client
+            .getSnapshot()
+            .results.find((r) => r.reqId === id)
+        )
+      ),
+    reqId
+  )
+}
+
+/**
+ * The nearest door (among `doorIds`) a player's token can walk up to, chosen in the player's own scene:
+ * a cell within one square of the door segment (the host's reach rule) that the planner can reach —
+ * beside the door for axis-aligned walls, in the opening for rotated ones. Returns the door id, its
+ * width, centre and direction along the wall, and the cell to walk to; null when none is reachable.
+ */
+export async function reachableDoor(page, tokenId, doorIds) {
+  return page.evaluate(
+    async ({ id, doorIds }) => {
+      const [{ openingSegment }, { segmentRectDistance }] = await Promise.all([
+        import("/src/core/scene/queries.ts"),
+        import("/src/core/session/index.ts"),
+      ])
+      const p = window.__atlasPlayer
+      const scene = p.client.getSnapshot().scene
+      const t = scene.tokens[id]
+      const cs = scene.grid.cellSize
+      const doors = Object.values(scene.objects)
+        .filter(
+          (o) =>
+            o.type === "door" &&
+            o.levelId === t.levelId &&
+            doorIds.includes(o.id)
+        )
+        .map((d) => {
+          const seg = openingSegment(scene.objects[d.wallId], d)
+          const c = { x: (seg.a.x + seg.b.x) / 2, z: (seg.a.z + seg.b.z) / 2 }
+          return {
+            d,
+            seg,
+            c,
+            dist: Math.hypot(c.x - t.position.x, c.z - t.position.z),
+          }
+        })
+        .sort((a, b) => a.dist - b.dist)
+      for (const { d, seg, c } of doors) {
+        let best = null
+        for (
+          let i = Math.floor(c.x / cs) - 2;
+          i <= Math.floor(c.x / cs) + 2;
+          i++
+        ) {
+          for (
+            let j = Math.floor(c.z / cs) - 2;
+            j <= Math.floor(c.z / cs) + 2;
+            j++
+          ) {
+            if (
+              segmentRectDistance(seg.a, seg.b, {
+                x: i * cs,
+                z: j * cs,
+                w: cs,
+                d: cs,
+              }) > cs
+            )
+              continue
+            const plan = p.planner.plan(id, { i, j }, t.levelId)
+            if (plan?.path && (!best || plan.path.length < best.steps))
+              best = { cell: { i, j }, steps: plan.path.length }
+          }
+        }
+        const len = Math.hypot(seg.b.x - seg.a.x, seg.b.z - seg.a.z)
+        if (best)
+          return {
+            id: d.id,
+            width: d.width,
+            cell: best.cell,
+            c,
+            u: { x: (seg.b.x - seg.a.x) / len, z: (seg.b.z - seg.a.z) / len },
+          }
+      }
+      return null
+    },
+    { id: tokenId, doorIds }
+  )
+}
+
+/** Click a door's leaf beside its centre (a token standing in a doorway covers the centre). */
+export async function clickDoor(page, door, elevation) {
+  const along = Math.min(2.6, door.width / 2 - 0.3)
+  const p = await projectIn(page, "__atlasPlayer", {
+    x: door.c.x + door.u.x * along,
+    y: elevation + 3,
+    z: door.c.z + door.u.z * along,
+  })
+  await page.mouse.move(p.x, p.y, { steps: 3 })
+  await sleep(150)
+  await page.mouse.click(p.x, p.y)
+}
+
+/** Screen (client px) position of a world point in a page whose automation handle has an engine. */
+export async function projectIn(page, handle, p) {
+  return page.evaluate(
+    ({ handle, p }) => {
+      const engine = window[handle].engine
+      const q = engine.project(p)
+      const r = document
+        .querySelector("canvas[data-slot=engine-canvas]")
+        .getBoundingClientRect()
+      return { x: r.left + q.x, y: r.top + q.y, visible: q.visible }
+    },
+    { handle, p }
+  )
+}
+
+/** Drag the mouse in small steps (pointer events the play controller sees as a drag). */
+export async function mouseDrag(page, from, to, steps = 14) {
+  await page.mouse.move(from.x, from.y)
+  await page.mouse.down()
+  for (let k = 1; k <= steps; k++) {
+    await page.mouse.move(
+      from.x + ((to.x - from.x) * k) / steps,
+      from.y + ((to.y - from.y) * k) / steps
+    )
+    await sleep(25)
+  }
+  await sleep(150)
+  await page.mouse.up()
+}
+
+// ---- leak scanning ---------------------------------------------------------------------------------
+
+/**
+ * Secrets of a scene that no player may ever receive: ids of hidden tokens (and their attached lights),
+ * ids of hidden objects, unrevealed secret doors, backdrop asset ids / names, and DM-only strings:
+ * every dmNotes, hidden tokens' names, and object names (objects never travel with a name; names that
+ * are also public — a level, the scene or a visible token — are skipped, as are short ones).
+ */
+export function sceneSecrets(scene) {
+  const ids = new Set()
+  const strings = new Set()
+  const hiddenTokens = new Set()
+  const publicNames = new Set([
+    scene.name,
+    ...Object.values(scene.levels).map((l) => l.name),
+  ])
+  for (const t of Object.values(scene.tokens)) {
+    if (t.dmNotes) strings.add(t.dmNotes)
+    if (t.hidden) {
+      hiddenTokens.add(t.id)
+      ids.add(t.id)
+      strings.add(t.name)
+    } else {
+      publicNames.add(t.name)
+      if (t.label) publicNames.add(t.label)
+    }
+  }
+  for (const o of Object.values(scene.objects)) {
+    if (o.dmNotes) strings.add(o.dmNotes)
+    if (o.name && o.name.length >= 8 && !publicNames.has(o.name))
+      strings.add(o.name)
+    if (o.hidden) ids.add(o.id)
+    if (o.type === "door" && o.style === "secret") ids.add(o.id)
+    if (
+      o.type === "light" &&
+      o.attachedTokenId &&
+      hiddenTokens.has(o.attachedTokenId)
+    )
+      ids.add(o.id)
+  }
+  for (const a of Object.values(scene.assets ?? {})) {
+    ids.add(a.id)
+    if (a.name && a.name.length >= 4) strings.add(a.name)
+  }
+  for (const l of Object.values(scene.levels))
+    if (l.backdrop) ids.add(l.backdrop.assetId)
+  return {
+    ids: [...ids].filter((s) => s.length >= 4),
+    strings: [...strings].filter((s) => typeof s === "string" && s.length >= 4),
+  }
+}
+
+/** Occurrences of any secret inside the given payload texts: [{ secret, where }]. */
+export function findLeaks(texts, secrets, allow = new Set()) {
+  const hits = []
+  for (const { where, text } of texts) {
+    for (const s of [...secrets.ids, ...secrets.strings]) {
+      if (allow.has(s)) continue
+      if (text.includes(s) || text.includes(JSON.stringify(s).slice(1, -1)))
+        hits.push({ secret: s.slice(0, 60), where })
+    }
+  }
+  return hits
+}

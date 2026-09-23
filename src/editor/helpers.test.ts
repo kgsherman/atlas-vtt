@@ -1,7 +1,9 @@
 import { produce } from "immer"
 import { describe, expect, it } from "vitest"
 
-import { createConnector, createFloor, createLight, createPillar, createProp, createScene, createToken, createWall } from "@/core/scene/factory"
+import { findPath } from "@/core/movement"
+import { buildOcclusionWorld } from "@/core/occlusion"
+import { createConnector, createDoor, createFloor, createLight, createPillar, createProp, createScene, createToken, createWall } from "@/core/scene/factory"
 import { copySelection } from "@/core/scene/integrity"
 import type { ConnectorObject, DoorObject, GridSettings, LightObject, PropObject, Scene, WallObject } from "@/core/scene/types"
 
@@ -89,6 +91,50 @@ describe("snapping", () => {
     // Too wide for any gap.
     expect(placeOpening(f.scene, wall, 10, 12, { mode: "free" }).valid).toBe(false)
     expect(placeOpening(f.scene, wall, 10, 40, { mode: "free" }).valid).toBe(false)
+  })
+
+  it("snaps doors in rotated walls to where a medium token can walk through on the grid", () => {
+    let moved = 0
+    let placed = 0
+    for (const deg of [12, 29, 38, 45, 52, 61, 77, 142]) {
+      for (const width of [4, 6.5]) {
+        for (const desired of [30, 33.3, 36.1, 41.7]) {
+          const scene = createScene({ width: 20, depth: 20 })
+          const levelId = Object.keys(scene.levels)[0]
+          const u = { x: Math.cos((deg * Math.PI) / 180), z: Math.sin((deg * Math.PI) / 180) }
+          // An 80 ft wall through the middle of the map (a battlemap building's side, off the grid).
+          const a = { x: 51.3 - 40 * u.x, z: 48.9 - 40 * u.z }
+          const wall = createWall(levelId, a, { x: a.x + 80 * u.x, z: a.z + 80 * u.z }, { thickness: 0.75 })
+          scene.objects[wall.id] = wall
+          const { offset, valid } = placeOpening(scene, wall, desired, width, { mode: "center", kind: "door" })
+          expect(valid).toBe(true)
+          expect(Math.abs(offset - desired)).toBeLessThanOrEqual(3)
+          placed++
+          if (Math.abs(offset - desired) > 1e-9) moved++
+          const door = createDoor(wall, offset, { width, state: "open" })
+          scene.objects[door.id] = door
+          // From 8 ft in front of the door to 8 ft behind it in a few steps: through the doorway.
+          const c = { x: a.x + u.x * offset, z: a.z + u.z * offset }
+          const side = (k: number) => ({ i: Math.floor((c.x - u.z * 8 * k) / 5), j: Math.floor((c.z + u.x * 8 * k) / 5) })
+          const token = createToken(levelId, { x: (side(1).i + 0.5) * 5, z: (side(1).j + 0.5) * 5 })
+          scene.tokens[token.id] = token
+          const path = findPath(scene, buildOcclusionWorld(scene), token, { cell: side(-1), levelId }, { maxSteps: 6 })
+          expect(path, `${deg}° ${width} ft door at ${offset.toFixed(2)}`).not.toBeNull()
+        }
+      }
+    }
+    // Most placements need no nudge at all.
+    expect(moved).toBeLessThan(placed / 2)
+    // Free placement (Alt) and windows keep the usual rules; so do grid-aligned walls.
+    const scene = createScene({ width: 40, depth: 40 })
+    const levelId = Object.keys(scene.levels)[0]
+    const wall = createWall(levelId, { x: 97.5, z: 33.5 }, { x: 121.5, z: 57 })
+    scene.objects[wall.id] = wall
+    expect(placeOpening(scene, wall, 12.3, 6.5, { mode: "free", kind: "door" }).offset).toBeCloseTo(12.3)
+    expect(placeOpening(scene, wall, 12.3, 3, { mode: "center", kind: "window" }).offset).toBeCloseTo(12.5)
+    const straight = createWall(levelId, { x: 0, z: 10 }, { x: 30, z: 10 })
+    scene.objects[straight.id] = straight
+    expect(placeOpening(scene, straight, 11, 4, { mode: "vertex", kind: "door" }).offset).toBe(10)
   })
 })
 

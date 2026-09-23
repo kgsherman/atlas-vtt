@@ -4,7 +4,7 @@ import { buildOcclusionWorld } from "../occlusion"
 import { createConnector, createDoor, createFloor, createPillar, createProp, createWall, createWindow } from "../scene/factory"
 import type { Scene, Token } from "../scene/types"
 import { anchorPosition, footprintCells, measurePath, tokenAnchor, validateMove } from "./index"
-import { add, addLevel, at, check, flatScene, paintHeightmap, place, stepResult, tokenAt, walk } from "./test-utils"
+import { add, addLevel, at, check, flatScene, paintHeightmap, path, place, stepResult, tokenAt, walk } from "./test-utils"
 
 describe("footprints and anchors", () => {
   it("footprint side in cells is max(1, SIZE_FOOTPRINT)", () => {
@@ -172,6 +172,54 @@ describe("walls, doors and windows", () => {
     expect(stepResult(scene, m, at(3, 3, levelId), at(4, 3, levelId))).toBe("ok")
   })
 
+  it("open doors in rotated walls (battlemap buildings) let a token through the doorway, not beside it", () => {
+    const { scene, levelId } = flatScene(20, 20)
+    // A 38° wall through the centre of cell (10, 10) with a 4 ft door centred there.
+    const u = { x: Math.cos((38 * Math.PI) / 180), z: Math.sin((38 * Math.PI) / 180) }
+    const c = { x: 52.5, z: 52.5 }
+    const wall = add(scene, createWall(levelId, { x: c.x - 40 * u.x, z: c.z - 40 * u.z }, { x: c.x + 40 * u.x, z: c.z + 40 * u.z }, { thickness: 0.75 }))
+    const door = add(scene, createDoor(wall, 40, { width: 4, height: 7, state: "open" }))
+    const t = tokenAt(scene, levelId, { i: 12, j: 8 })
+    // Straight across (the diagonal nearest the wall's normal), and back.
+    const across: [number, number][] = [
+      [12, 8],
+      [11, 9],
+      [10, 10],
+      [9, 11],
+      [8, 12],
+    ]
+    expect(check(scene, t, walk(levelId, across))).toMatchObject({ ok: true, legalSteps: 4 })
+    place(scene, t, at(8, 12, levelId))
+    expect(check(scene, t, walk(levelId, [...across].reverse())).ok).toBe(true)
+    place(scene, t, at(12, 8, levelId))
+    expect(path(scene, t, at(8, 12, levelId), { maxSteps: 6 })).not.toBeNull()
+    // One cell further along the wall (7 ft from the door's centre) the wall blocks.
+    const beside = walk(levelId, [
+      [13, 9],
+      [12, 10],
+      [11, 11],
+      [10, 12],
+    ])
+    place(scene, t, at(13, 9, levelId))
+    expect(check(scene, t, beside)).toMatchObject({ ok: false, legalSteps: 1 })
+    // Closed, narrower than the token, too low, or a large token: blocked.
+    place(scene, t, at(12, 8, levelId))
+    door.state = "closed"
+    expect(check(scene, t, walk(levelId, across)).ok).toBe(false)
+    door.state = "open"
+    door.width = 3
+    expect(check(scene, t, walk(levelId, across)).ok).toBe(false)
+    door.width = 4
+    const tall = tokenAt(scene, levelId, { i: 12, j: 8 }, { height: 10 })
+    expect(check(scene, tall, walk(levelId, across)).ok).toBe(false)
+    // A large (10 ft tall) token needs a wide, full-height opening.
+    const big = tokenAt(scene, levelId, { i: 12, j: 8 }, { size: "large" })
+    door.height = 10
+    expect(path(scene, big, at(7, 12, levelId), { maxSteps: 6 })).toBeNull()
+    door.width = 10
+    expect(path(scene, big, at(7, 12, levelId), { maxSteps: 6 })).not.toBeNull()
+  })
+
   it("a tiny token fits a 2 ft gap that a medium token does not", () => {
     const { scene, levelId, wall } = wallScene()
     add(scene, createDoor(wall, 17.5, { width: 2, height: 7, state: "open" }))
@@ -276,6 +324,28 @@ describe("corner cutting", () => {
     expect(stepResult(scene, t, at(1, 1, levelId), at(2, 1, levelId))).toBe("blocked")
     expect(check(scene, place(scene, t, at(1, 1, levelId)), walk(levelId, [[1, 1], [1, 2], [2, 2]])).ok).toBe(true)
     expect(stepResult(scene, t, at(1, 1, levelId), at(0, 2, levelId))).toBe("ok")
+  })
+
+  it("a 5 ft corridor at 45° (a rotated building) can be walked down its middle", () => {
+    const { scene, levelId } = flatScene()
+    // Walls 2.5 ft either side of the line x = z (faces 2.25 ft away): the token's disc (1.9 ft) fits,
+    // and the orthogonal legs of each diagonal step clip the rotated walls, which have no grid corner.
+    const k = 2.5 * Math.SQRT1_2
+    add(scene, createWall(levelId, { x: 5 + k, z: 5 - k }, { x: 45 + k, z: 45 - k }))
+    add(scene, createWall(levelId, { x: 5 - k, z: 5 + k }, { x: 45 - k, z: 45 + k }))
+    const t = tokenAt(scene, levelId, { i: 2, j: 2 })
+    const corridor: [number, number][] = [
+      [2, 2],
+      [3, 3],
+      [4, 4],
+      [5, 5],
+      [6, 6],
+    ]
+    expect(check(scene, t, walk(levelId, corridor))).toMatchObject({ ok: true, legalSteps: 4 })
+    expect(path(scene, t, at(7, 7, levelId), { maxSteps: 5 })).not.toBeNull()
+    // Not through the walls.
+    expect(stepResult(scene, t, at(3, 3, levelId), at(4, 3, levelId))).toBe("blocked")
+    expect(stepResult(scene, t, at(3, 3, levelId), at(3, 4, levelId))).toBe("blocked")
   })
 
   it("diagonals around a room corner are rejected", () => {

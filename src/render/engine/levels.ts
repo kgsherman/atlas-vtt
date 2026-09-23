@@ -29,6 +29,8 @@ export interface SharedMaterials {
   token: THREE.ShaderMaterial
   glass: THREE.Material
   flame: THREE.Material
+  /** Additive glow sprites around flames (optional: none when absent). */
+  glow?: THREE.Material
 }
 
 export interface DoorLeafState {
@@ -58,6 +60,18 @@ interface BucketState {
 const ORDER_GHOST_DEPTH = 1
 const ORDER_GHOST_COLOR = 2
 const ORDER_GLASS = 3
+const ORDER_GLOW = 4
+
+let glowQuad: THREE.BufferGeometry | null = null
+/** Unit quad in the XY plane (camera-facing in the glow shader), shared by every glow mesh. */
+function glowQuadGeometry(): THREE.BufferGeometry {
+  if (!glowQuad) {
+    glowQuad = new THREE.PlaneGeometry(1, 1)
+    glowQuad.userData.shared = true
+    glowQuad.name = "fixture:glow"
+  }
+  return glowQuad
+}
 
 const tmpMatrix = new THREE.Matrix4()
 /** Depth pre-pass clone of each ghosted mesh (kept out of userData so meshes stay clonable). */
@@ -135,6 +149,21 @@ export class LevelView {
         if (m.flames) {
           mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
           b.flames.push({ mesh, base: m.matrices.slice(), flames: m.flames })
+          if (this.shared.glow) {
+            // Glow sprites share the flames' instances (and so their flicker).
+            const glow = new THREE.InstancedMesh(glowQuadGeometry(), this.shared.glow, m.ids.length)
+            glow.name = `${m.name}:glow`
+            glow.instanceMatrix = mesh.instanceMatrix
+            glow.instanceColor = mesh.instanceColor
+            glow.userData.slot = "glow"
+            glow.userData.levelId = this.id
+            glow.renderOrder = ORDER_GLOW
+            glow.frustumCulled = false
+            glow.matrixAutoUpdate = false
+            glow.raycast = () => {}
+            b.root.add(glow)
+            b.meshes.push(glow)
+          }
         }
         break
       }
@@ -252,7 +281,7 @@ export class LevelView {
     const out: THREE.Mesh[] = []
     for (const [kind, b] of this.buckets) {
       if (kind === "floors") continue
-      for (const m of b.meshes) if (m.userData.slot !== "glass") out.push(m)
+      for (const m of b.meshes) if (m.userData.slot !== "glass" && m.userData.slot !== "glow") out.push(m)
     }
     return out
   }
@@ -318,6 +347,7 @@ function buildIndex(b: BucketState): Map<Id, ObjectMeshRef[]> {
     list.push(ref)
   }
   for (const mesh of b.meshes) {
+    if (mesh.userData.slot === "glow") continue
     if (mesh.userData.objectId) {
       push(mesh.userData.objectId as Id, { kind: "whole", mesh })
     } else if ((mesh as THREE.InstancedMesh).isInstancedMesh) {

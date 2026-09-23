@@ -13,6 +13,7 @@ import * as THREE from "three"
 import type { FloorObject, Id, MaterialId } from "@/core/scene/types"
 
 import { SURF } from "../internal"
+import { surfaceOf } from "../materials/surface"
 import type { BuildContext } from "./context"
 import { hashInts, materialColor, tintByHash, type RGB } from "./color"
 import type { GroundSampler } from "./ground"
@@ -40,7 +41,9 @@ const MATERIAL_INDEX: Record<MaterialId, number> = {
  * stronger tint reads as a checkerboard rather than as texture.
  */
 function cellVariation(m: MaterialId): number {
-  return m === "water" ? 0.01 : m === "grass" || m === "dirt" || m === "sand" ? 0.045 : 0.03
+  // Natural ground gets its variation from the shader's procedural detail (medium and up); a strong
+  // per-cell tint would read as a checkerboard on top of it.
+  return m === "water" ? 0.01 : m === "grass" || m === "dirt" || m === "sand" ? 0.025 : 0.03
 }
 
 export function floorThickness(ctx: BuildContext, floor: FloorObject): number {
@@ -67,6 +70,7 @@ function writeFlatSlab(w: MeshWriter, ctx: BuildContext, floor: FloorObject, rec
   const x1 = rect.x + rect.w
   const z1 = rect.z + rect.d
   const bottom = top - th
+  w.material = surfaceOf(floor.material)
   // Top: one quad per grid cell ∩ rect.
   const i0 = Math.floor(x0 / cs)
   const i1 = Math.ceil(x1 / cs) - 1
@@ -148,6 +152,7 @@ function writeTerrainSlab(tw: TerrainWriter, ctx: BuildContext, floor: FloorObje
     }
   }
   const isSolid = (i: number, j: number) => i >= 0 && j >= 0 && i < cellsX && j < cellsZ && solid[j * cellsX + i] === 1
+  tw.w.material = surfaceOf(floor.material)
   const base = materialColor(floor.material)
   const side: RGB = [base[0] * 0.75, base[1] * 0.75, base[2] * 0.75]
   const cs = ctx.scene.grid.cellSize

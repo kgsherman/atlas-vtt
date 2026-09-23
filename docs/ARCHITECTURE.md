@@ -29,20 +29,28 @@ src/
     lighting/           Light manager: culling, flicker, slot + tile assignment, update scheduling
     materials/          World material (custom GLSL: lighting + perception + fog in one pass), token material
     fog/                Host-mask textures (perception / explored / sunlit) as DataArrayTexture layers
+    post/               High / ultra post-processing (HDR MSAA target, AO, bloom, tone mapping, grain)
     cameras/            Editor orbit camera, player 2.5D camera
     overlays/           Grid, selection, tool previews, ruler, pending paths, ghost levels, gizmos
     picking/            Ground/object/token picking
   editor/               DM editor state (zustand) + tools
   play/                 Play-mode controllers (token selection, drag-to-move, ruler, level switching)
   net/                  Supabase client, auth, repositories, transports, host runner (+ vision worker), player client
-  components/           React + shadcn UI (app shell, editor panels, play HUD, lobby)
-  routes/               Page-level components
+    assets/             Map images: import (decode / resample / WebP), DM asset stores, per-player tile chunks
+    host/               DM-side host runner, vision worker client, flush pipeline, persistence, backdrop tiler
+    player/             Player client (sync rules, requests), backdrop compositor
+  app/                  Service wiring (Supabase or local mode), router + lazy routes, library, scene digests
+  components/           React + shadcn UI (app shell, editor panels, play HUD, host console, lobby)
+  routes/               Page-level components (home, editor, host, play, join, shared scene)
+  dev/                  Dev-only render harness (`dev/render.html`) and the Vineyard build helpers
   integration/          Cross-module consistency tests (render ↔ occlusion, vision ↔ movement, host → player, editor → session)
 supabase/migrations/    SQL: schema, RLS, RPCs, realtime policies
 ```
 
 Dependency rule: `core` imports nothing outside `core` (immer types allowed). `render` imports `core`.
 `editor`/`play`/`net` import `core` and `render/contracts.ts`. `components`/`routes` import everything.
+Bundling: `/editor`, `/host` and `/play` are lazy routes (`app/routes.ts`), so three.js and the renderer load
+only there; the home, join and shared-scene routes never download them.
 
 UI rule: compose from shadcn components in `src/components/ui` (preset `b5UKukPFuS` → style `base-mira`,
 Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme first.
@@ -227,8 +235,17 @@ Per level, the engine expands `HostLevelMasks` into R8 layers of `DataArrayTextu
 
 - Editor: perspective orbit (near 0.5 ft, far = 4× scene diagonal), focus on selection, optional top view.
 - Player: orthographic, tilt 0–35° (default 15°), pan/zoom, rotate by 90°, follows the selected token.
-- Pixel budget: cap physical pixels at ~2.1 MP (medium/high) / ~1.3 MP (low) instead of raw DPR. MSAA on
-  medium/high. Adaptive quality steps down when p95 frame time > 18 ms for 2 s, up when < 12 ms for 5 s.
+- Pixel budget: cap physical pixels at ~2.1 MP (medium) / ~1.3 MP (low) instead of raw DPR; high / ultra render
+  natively up to 2× DPR (§10). MSAA on medium and above.
+- Start-up tier: `render/engine/autoQuality.ts` classifies the GPU renderer string (software → low, mobile →
+  medium, Intel UHD → medium, Iris / integrated Radeon → ≤ high, discrete / Apple silicon → ultra) and times a
+  short synthetic world-shader workload in its own tiny WebGL2 context, then picks the highest tier whose
+  predicted frame cost leaves headroom (cached per GPU for 30 days). The user's choice ("Auto" or a tier) is
+  the ceiling.
+- Adaptive quality (`render/engine/quality.ts`) steps one **whole tier** down when p95 frame cost > 18 ms for
+  2 s and up when < 12 ms for 5 s, never above the ceiling; a step up that has to be undone soon doubles the
+  next wait (≤ 60 s). Frame cost is max(CPU time, GPU time from `EXT_disjoint_timer_query_webgl2`) when the
+  timer query exists, otherwise the frame interval (a steady vsync-locked interval counts as headroom).
 
 ---
 
@@ -302,11 +319,21 @@ and memory, so corridors walked past are explored.
 
 A path is a list of `PathStep {cell (anchor), levelId}` starting at the token's current anchor. Each step is to
 an 8-neighbour anchor on the same level, a ladder switch in place, or a stairs top-edge crossing. The token's
-footprint square, shrunk by a 0.6 ft clearance per side (`MOVE_CLEARANCE`: a medium token sweeps 3.8 ft, so it
-fits the default 4 ft door and passes 0.5 ft walls on its cell edges; a large token does not fit a 4 ft door),
-is swept along the step against movement blockers on the relevant level (plus the upper level near a stair top)
-whose vertical extent overlaps [ground + 0.5 ft step-up, ground + body height]; diagonals may not cut corners.
-Blockers the token already overlaps at the start are ignored (like occlusion's entry rule). Every target
+body, shrunk by a 0.6 ft clearance per side (`MOVE_CLEARANCE`), is swept as a **disc** (a medium token sweeps a
+3.8 ft disc, so it fits the default 4 ft door and passes 0.5 ft walls on its cell edges; a large token does not
+fit a 4 ft door) along the step against movement blockers on the relevant level (plus the upper level near a
+stair top) whose vertical extent overlaps [ground + 0.5 ft step-up, ground + body height]. A disc, not the
+body's square, so collisions do not depend on wall direction: battlemap buildings are often rotated, and a
+square's corners reach 1.4× further into a 45° wall. Diagonals may not cut corners: both L-shaped routes
+through the orthogonal neighbours must be free, counting grid-aligned architecture and other blockers only
+(rotated walls have no grid corner; in a rotated corridor the legs would clip its walls while the diagonal
+runs clear). Blockers the token already overlaps at the start are ignored (like occlusion's entry rule).
+**Doorways**: grid steps rarely cross a door at its centre (never exactly in a rotated wall). A step ignores
+the host wall's full-height pieces (not lintels or sills) when an open door at least as wide as the disc is on
+it and, over the part of the step where the disc can touch the wall, the centre stays 0.5 ft
+(`DOORWAY_MARGIN`) inside the opening; the legs of a diagonal through such a doorway ignore them too. With
+snapping on, the editor's door tool puts a door in a rotated wall where a straight grid walk goes through it
+(`walkableDoorOffset`: usually where the pointer is, else a foot or two along). Every target
 footprint needs ground (`hasGroundAt` at every footprint cell centre). The host applies the **legal prefix**
 ("bump into a wall") and replies
 `{ok:false, reason, applied}`; if the failing step's cell is not perceived by that player the reason is
@@ -334,8 +361,11 @@ exists (or became hidden) are deleted. Everything else is unchanged — DM edits
 
 - The DM's tab is the **host**: owns `GameState`, validates requests, runs vision (Worker), filters, diffs, sends.
 - Single host: same browser via `navigator.locks` (`atlas-host:{sid}`); across devices via `claim_host(sid)`
-  which bumps `sessions.host_epoch`. Each host start also creates a random `epoch` string used on the wire.
-  A host that sees a higher epoch (broadcast or failed fenced write) stops and offers "Take over".
+  which bumps `sessions.host_epoch`. Each host start also creates a random `epoch` string used on the wire,
+  formatted `${hostEpoch}.${uuid}` (`net/host/flush.ts` `makeWireEpoch`). Clients only compare wire epochs for
+  equality; hosts parse the number (`hostEpochOfWire`) to tell which of two hosts is newer from status
+  broadcasts and presence. A host that sees a higher epoch (broadcast, presence or failed fenced write) stands
+  down to "standby" and offers "Take over".
 - Transport interface `net/transport.ts`: `SupabaseTransport` (private channels only, via one helper that
   hard-codes `config.private = true`; view channels with `broadcast.ack = true`; never sends while not joined;
   token bucket ≈ 25 msg/s; size guard 200 KB) and `LocalTransport` (BroadcastChannel; dev/testing only, NOT secure).
@@ -343,7 +373,7 @@ exists (or became hidden) are deleted. Everything else is unchanged — DM edits
 | Topic                        | INSERT (send)                          | SELECT (receive)          | Carries |
 |------------------------------|----------------------------------------|---------------------------|---------|
 | `session:{sid}:req:{uid}`    | that player (active member), broadcast | DM + that player (active) | ClientToHost |
-| `session:{sid}:view:{uid}`   | DM, broadcast                          | that player (active) + DM | HostToClient |
+| `session:{sid}:view:{uid}`   | DM, broadcast                          | that player (active) + DM | HostToClient (incl. `tiles` chunk announcements, §9) |
 | `session:{sid}:host`         | DM, broadcast + presence               | active members + DM       | HostBroadcast; DM presence = host online |
 | `session:{sid}:lobby`        | active members, presence only          | active members + DM       | who's online (display only) |
 
@@ -402,16 +432,27 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
   `hello{nonce, epoch, lastSeq}`. Host answers: in-sync → `sync`; catch-up from log → one concatenated patch;
   otherwise → `snapshot` (≤ 200 KB) or awaited `player_views` upsert then `snapshot_ready{epoch, seq}` (client
   reloads the row, accepts only matching epoch and `seq ≥`). Replies echo `nonce` so other tabs ignore them.
+  Further client rules (`net/player/playerClient.ts`): a HostBroadcast `status` retires every other epoch the
+  client has seen (epochs are random, so this is how a stale host is told from a new one); a `nonce: null` is
+  treated as absent; same-epoch snapshots/patches older than the local seq are ignored without a hello; a
+  standalone `result` or `sync` with `seq` > local (or another epoch) triggers a hello. Hellos are coalesced and
+  retried with backoff (2.5 s doubling to 15 s).
 - Join order (client): subscribe `view:{uid}` → SUBSCRIBED → subscribe `req:{uid}` → send hello. Host: on every
   `req:{uid}` SUBSCRIBED (boot, reconnect, new member) push a snapshot/snapshot_ready. Host sends `sync` on idle
   (~10 s) so a lost final patch is detected.
-- Host liveness = DM presence on `session:{sid}:host`. On leave: the client loads its `player_views` row, shows
-  "Waiting for DM", disables moves. Pending optimistic moves are overlays only; they clear when their result is
-  applied, on snapshot/epoch change, or after 5 s ("DM not responding").
+- Host liveness = DM presence on `session:{sid}:host` (1.5 s grace after the host channel joins). On leave: the
+  client loads its `player_views` row (adopted only if it has no view, or the row is the same epoch with a
+  higher seq), shows "Waiting for DM", disables moves. Pending optimistic moves are overlays only; they clear
+  when their result is applied, on snapshot/epoch change, or after 5 s ("DM not responding").
+- Host timing (`HOST_TIMING`): per-player flush ≤ every 100 ms (so a move's result arrives ~75–100 ms after
+  the request), idle `sync` after 10 s, member re-read every 10 s and on lobby presence changes. In browsers
+  the host's timers run in a tiny worker (`net/host/timerWorker.ts`) because Chrome throttles main-thread timers
+  in hidden tabs.
 - Channel supervisor: CHANNEL_ERROR/TIMED_OUT → `realtime.setAuth()` then built-in rejoin; unexpected CLOSED →
   remove and recreate with backoff.
 - Persistence (fenced by epoch RPCs): `save_session_state(sid, host_epoch, state)` throttled ~5 s + immediately after
-  DM commands that reduce what players may see (hide token, remove token, reset fog, scene edits) + best-effort on
+  DM commands that reduce what players may see (hide token, remove token, reset fog, scene edits) + within ~1 s
+  after token moves and exploration (so a reloaded host tab resumes where the tokens were) + best-effort on
   `visibilitychange→hidden`; `upsert_player_view(sid, uid, host_epoch, epoch, seq, view)` throttled ≤ 5 s and awaited
   before `snapshot_ready`. `host_epoch` (bigint, from `claim_host`) is the database fence (a stale host gets
   `stale_epoch`); `epoch` (text) is the wire epoch stored with the view so a reloading client can match it.
@@ -509,16 +550,28 @@ per storey, transparent outside the drawn area on upper floors/basements).
   through `floorRects()` / `effectiveFloorRects()` (greedy-merged rects), so occlusion, vision, movement and
   render need no special cases. Player views never contain masks: the filter clips `floorRects()` to explored
   cells and sends rect pieces.
-- **Players never receive a whole image.** During a session the host cuts each backdrop into one tile per
-  grid cell (`tilePx` = stored px per cell) and publishes a tile only when a player has explored that cell:
-  - Supabase: private bucket `session-tiles`, object path `{sessionId}/{levelId}/{i}_{j}.webp`, uploaded by
-    the DM (storage policy: `is_session_dm(sid)`), readable by a player only if a row exists in
-    `player_tiles(session_id, user_id, level_id, i, j)` for them (storage RLS); the host inserts grants via the
-    fenced RPC `grant_tiles(sid, host_epoch, uid, level_id, cells jsonb)`. DM assets live in the private bucket
-    `scene-assets` under `{ownerId}/{sceneId}/{assetId}.webp` (owner-only policies).
+- **Players never receive a whole image.** During a session the host uploads, **per player**, the part of
+  each backdrop that player has explored, in chunks of 4×4 grid cells (`net/assets/chunks.ts`; `tilePx` =
+  stored px per cell, a chunk image is 4·tilePx square, ≤ 1024 px; only explored cells are drawn, the rest
+  is transparent):
+  - Supabase: private bucket `session-tiles`, object path `{sessionId}/{userId}/{levelId}/{ci}_{cj}.webp`,
+    written only by the DM of the active session, readable only by that user while an active member (and the
+    DM) — storage RLS, migration `*_tile_chunks.sql`. After each knowledge update the host re-draws the chunks
+    whose explored cells changed (smaller or deleted after a fog reset) and uploads them in the background
+    (nearest to the player's tokens first, 8 at a time, backing off on HTTP 429), then announces them on the
+    view topic: `{t: "tiles", epoch, levelId, chunks: [ci, cj, cellMask][], reset?}` (the full list, with
+    `reset`, precedes every snapshot). A view waits at most `tileWaitMs` (250 ms) for its chunks, so moves
+    usually arrive with their art, but the game never blocks on Storage. Why chunks: an open outdoor map's
+    first view is ~70 objects instead of ~1000 per-cell ones, which Storage rate-limits. (The earlier per-cell
+    layout `{sessionId}/{levelId}/{i}_{j}.webp` + `player_tiles` grants via `grant_tiles` still passes the
+    policies but is no longer used.) DM assets live in the private bucket `scene-assets` under
+    `{ownerId}/{sceneId}/{assetId}.webp` (owner-only policies), where `sceneId` is the document's `Scene.id`
+    (not the library row id; `AssetStore` in `net/assets/types.ts`). The DM deletes the session's chunks when
+    it ends.
   - Local mode: the tile source crops from the locally stored asset (dev only, insecure like LocalTransport).
-  - `PlayerView.backdrops[levelId] = {rect, opacity, tintWalls, tilePx}`; the player client composites
-    fetched tiles into a per-level canvas (transparent where missing) → `engine.setLevelImage/updateLevelImage`.
+  - `PlayerView.backdrops[levelId] = {rect, opacity, tintWalls, tilePx}`; the player client prefetches the
+    announced chunks, crops cell tiles from them and composites them into a per-level canvas (transparent
+    where missing) → `engine.setLevelImage/updateLevelImage`.
 - Export: `.atlas.json` embeds assets as data URLs (`assetsData: Record<id, dataUrl>`) so a file is portable.
 
 ## 10. Quality tiers
@@ -535,3 +588,85 @@ per storey, transparent outside the drawn area on upper floors/basements).
 
 Post-processing runs through a small composer that renders the main pass into a half-float MSAA target;
 the world material is compiled once per tier (a tier change is a deliberate one-time recompile).
+
+---
+
+## Appendix: Implementation status (2026-09-23)
+
+Everything above is implemented. The following checks pass on the current tree: `npx tsc -b`,
+`npx vitest run` (1137 tests; the opt-in live Supabase tests are skipped by default), `npx eslint .` and
+`npm run build`. The end-to-end scripts in `e2e/` were also run against a Vite dev server:
+
+| Script | Result |
+|---|---|
+| `editor-smoke` | 15/15 checks pass |
+| `multiplayer-local` | 38/38 checks pass (Crooked Lantern and the Vineyard) |
+| `multiplayer-supabase` | 22/22 on the Crooked Lantern, 28/28 on the Vineyard with map chunks |
+
+The SQL suites pass on the linked project, each run in a transaction that is rolled back:
+
+| Suite | Result |
+|---|---|
+| `rls_test.sql` | 321/321 |
+| `assets_storage_test.sql` | 64/64 |
+| `tile_chunks_test.sql` | 21/21 |
+
+Security advisors report only the intentional warnings:
+- signed-in users can execute the `SECURITY DEFINER` RPCs;
+- RLS policies also apply to anonymous sign-ins;
+- leaked-password protection is off, which is unused because sign-in is anonymous.
+
+Known gaps and deliberate limits:
+
+**Contracts vs. code**
+
+- `net/player/types.ts` is the minimal `PlayerClient` contract. The implemented client (`AtlasPlayerClient`
+  in `net/player/playerClient.ts`) adds backdrop events, `sceneChangeSince`, `hostUnresponsive`, `viewSource`
+  and local request outcomes, and the play page uses that type.
+- The host console likewise uses `HostRunnerImpl` from `net/host`, which adds `lastCommandError` and debug
+  helpers.
+- `HostRunner.stop()` leaves the status at `"standby"`, because there is no separate "stopped" status.
+- A second move request for a token whose move is still in flight is rejected with `"rate-limited"`. There is
+  no dedicated reason.
+- The superseded per-cell tile API (`AssetStore.publishTiles` / `grantTiles`, table `player_tiles`, RPCs
+  `grant_tiles` / `revoke_tiles`) is still deployed and tested but unused; sessions use per-player chunks (§9).
+
+**Map images**
+
+- A partly explored cell is drawn whole into the player's chunk, so up to one cell of art beyond what the
+  player has seen can be downloaded. The renderer's fog still hides it.
+- Chunk images are cropped and encoded on the DM's main thread (OffscreenCanvas → WebP, ~2 ms per tile),
+  not in a worker.
+- Players composite a full-resolution backdrop canvas per level: up to 32 MP, ~100 MB for a Forgotten
+  Adventures storey. The engine downsizes the texture per tier, but the play page does not yet pass a smaller
+  canvas budget on the low tier.
+- Local mode crops tiles from the locally stored image. It is dev only and not a security boundary, like
+  `LocalTransport`.
+
+**Multiplayer**
+
+- A move's result arrives ~75–100 ms after the request because of the 100 ms per-player flush throttle.
+- A flooding client gets at most 32 pending results per player; later ones are dropped.
+- Over Supabase, joining takes ~4 s (anonymous sign-in, Realtime private channel joins, first snapshot).
+- A player that was disconnected for a whole host restart keeps its older in-memory view while the DM is
+  offline, and only adopts the new host's view once the DM is back.
+- The host's timer worker, which keeps a hidden DM tab ticking, is verified to work. Its benefit could not be
+  measured headless, because headless Chromium reports hidden pages as visible.
+- Anonymous users created by the live tests and `e2e/multiplayer-supabase.mjs` cannot be deleted with the
+  publishable key. They accumulate in the project.
+
+**Rendering**
+
+- The Crooked Lantern DM view on an integrated GPU (Radeon iGPU, medium) takes ~13–14 ms of GPU time, about 80%
+  of the frame budget. The high tier costs ~23 ms there, so mid-range laptops depend on the start-up
+  benchmark and adaptive quality choosing medium.
+- Only Chromium has been tested, on NVIDIA and AMD through WSL d3d12 and on SwiftShader. Firefox and Safari
+  are untested.
+
+**Bundle** (`npm run build`, minified)
+
+- The home route loads ~1.1 MB of JavaScript (~340 kB gzip): React, Base UI, zod, supabase-js and the
+  `core` modules the library needs.
+- three.js and the renderer are a separate ~920 kB chunk (~262 kB gzip), loaded only by the editor, host and
+  play routes. Rolldown names it after a shadcn component (`toggle-group-*.js`); a `codeSplitting` group in
+  `vite.config.ts` would give it a clearer name.

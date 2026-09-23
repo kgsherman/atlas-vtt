@@ -5,7 +5,7 @@ import { createLevel, createLight, createScene, createToken } from "@/core/scene
 import type { Scene } from "@/core/scene/types"
 
 import { cullAndRankLights, cutawayPlaneY, linearColor, resolveLights, screenCoverage } from "./lights"
-import { LIGHT_VEC4S, packLight, packViewer, VIEWER_VEC4S } from "./uniforms"
+import { LIGHT_FLAG_HI_ATLAS, LIGHT_FLAG_SOFT, LIGHT_FLAG_WIDE_PCF, LIGHT_VEC4S, packLight, packViewer, VIEWER_VEC4S } from "./uniforms"
 
 function twoLevelScene(): { scene: Scene; ground: string; upper: string } {
   const scene = createScene({ width: 40, depth: 40 })
@@ -147,6 +147,21 @@ describe("uniform packing", () => {
     // Unshadowed: tile size 0; capture falls back to the position.
     expect(lights[10]).toBe(0)
     expect(Array.from(lights.subarray(12, 15))).toEqual([4, 5, 6])
+
+    // Ultra: hi-res atlas and soft shadows are flag bits; the source radius rides in the capture slot's w.
+    packLight(lights, 1, {
+      position: { x: 0, y: 0, z: 0 },
+      dim: 10,
+      bright: 5,
+      radiance: [1, 1, 1],
+      tile: { x: 0, y: 0, size: 1024 },
+      capture: null,
+      widePcf: true,
+      hiAtlas: true,
+      softRadius: 0.5,
+    })
+    expect(lights[16 + 11]).toBe(LIGHT_FLAG_WIDE_PCF + LIGHT_FLAG_HI_ATLAS + LIGHT_FLAG_SOFT)
+    expect(lights[16 + 15]).toBe(0.5)
 
     const viewers = new Float32Array(8 * VIEWER_VEC4S * 4)
     packViewer(viewers, 1, { eye: { x: 7, y: 8, z: 9 }, darkvision: 60, blindsight: 10, tile: { x: 1024, y: 0, size: 1024 }, capture: null, far: 500 })

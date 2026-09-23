@@ -5,8 +5,21 @@
  * object shapes with neutral defaults for the fields players never receive.
  */
 import { PROP_LIBRARY, SIZE_BODY } from "../scene/defaults"
-import type { FloorObject, Id, Level, SceneLike, SceneObject, Token } from "../scene/types"
-import type { PlayerLevel, PlayerObject, PlayerToken, PlayerView } from "./types"
+import type { FloorObject, Id, Level, LevelBackdrop, SceneLike, SceneObject, Token } from "../scene/types"
+import type { PlayerBackdrop, PlayerLevel, PlayerObject, PlayerToken, PlayerView } from "./types"
+
+/**
+ * Synthetic asset id of a level's backdrop in a player's scene. Players never learn the real asset id:
+ * the image is the canvas the player client composites explored-cell tiles into (net/assets tiles).
+ */
+export function playerBackdropAssetId(levelId: Id): Id {
+  return `tiles-${levelId}`
+}
+
+/** A PlayerBackdrop as a Level.backdrop (synthetic asset id). */
+export function backdropFromPlayer(levelId: Id, b: PlayerBackdrop): LevelBackdrop {
+  return { assetId: playerBackdropAssetId(levelId), rect: { x: b.rect.x, z: b.rect.z, w: b.rect.w, d: b.rect.d }, opacity: b.opacity, tintWalls: b.tintWalls }
+}
 
 /** A PlayerLevel as a scene Level; its heightmap holds exactly the chunks the player received. */
 export function levelFromPlayer(l: PlayerLevel, chunks: Readonly<Record<string, string>> | undefined): Level {
@@ -109,6 +122,7 @@ export function viewToScene(view: PlayerView): SceneLike {
   const levels: Record<Id, Level> = {}
   for (const id of Object.keys(view.scene.levels)) {
     levels[id] = levelFromPlayer(view.scene.levels[id], Object.hasOwn(view.terrain, id) ? view.terrain[id] : undefined)
+    if (view.backdrops && Object.hasOwn(view.backdrops, id)) levels[id].backdrop = backdropFromPlayer(id, view.backdrops[id])
   }
   const objects: Record<Id, SceneObject> = {}
   for (const id of Object.keys(view.objects)) {

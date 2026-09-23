@@ -307,6 +307,35 @@ describe("AtlasLightingSystem", () => {
     expect(u[10]).toBe(256)
   })
 
+  it("gives the highest-ranked lights hi-res tiles and soft shadows on ultra", () => {
+    const { sys, renderer, camera } = setup(5)
+    sys.setQuality("ultra")
+    for (let k = 0; k < 4; k++) sys.beforeRender(renderer, camera, k)
+    const u = sys.shared.uLights.value
+    const count = sys.shared.uLightCount.value
+    let hi = 0
+    for (let k = 0; k < count; k++) {
+      const flags = u[k * 16 + 11]
+      if (u[k * 16 + 10] === 0) continue // unshadowed
+      expect(flags & 2).toBe(2)
+      expect(flags & 4).toBe(4)
+      expect(u[k * 16 + 10]).toBe(QUALITY_CONFIG.ultra.hiAtlas!.tileSize)
+      // Torch source radius for the penumbra.
+      expect(u[k * 16 + 15]).toBeCloseTo(0.5)
+      hi++
+    }
+    expect(hi).toBeGreaterThan(0)
+    expect(hi).toBeLessThanOrEqual(QUALITY_CONFIG.ultra.hiLights)
+    // The DM (vision off) also sees the hidden torch.
+    const hiTiles = ["t0", "t1", "t2", "t3", "t4", "hidden"].map((id) => sys.tileOf(`hi:light:${id}`)).filter((t) => t !== null)
+    expect(hiTiles.length).toBe(hi)
+    for (const t of hiTiles) expect(t.size).toBe(1024)
+    // Back to high: no hi-res atlas, hard shadows, every light recaptured in the 512² atlas.
+    sys.setQuality("high")
+    for (let k = 4; k < 8; k++) sys.beforeRender(renderer, camera, k)
+    for (let k = 0; k < sys.shared.uLightCount.value; k++) expect(u[k * 16 + 11] & 6).toBe(0)
+  })
+
   it("renders the static sun map once and again only after occluder changes", () => {
     const { sys, renderer, camera, scene, world, calls } = setup(1)
     scene.environment = { ...scene.environment, directional: { ...scene.environment.directional, enabled: true } }

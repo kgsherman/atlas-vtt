@@ -8,5 +8,10 @@ import { AtlasEngine } from "./engine/engine"
 export type * from "./contracts"
 /** The view a new engine starts with (editor, orbit camera, 15° player tilt, grid and helpers on). */
 export { DEFAULT_VIEW } from "./engine/defaults"
+/**
+ * Startup quality pick (ARCHITECTURE §10): `await pickInitialQuality()` before createEngine(canvas,
+ * { quality }). Renderer heuristics + a ~100 ms synthetic benchmark, cached per GPU (localStorage).
+ */
+export { pickInitialQuality, probeQuality, type ProbeOptions, type QualityProbe } from "./engine/autoQuality"
 
 export const createEngine: CreateEngine = (canvas, opts) => new AtlasEngine(canvas, opts)

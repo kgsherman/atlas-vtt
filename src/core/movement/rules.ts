@@ -118,15 +118,19 @@ export function crossesConnectorEdge(ctx: MoveContext, levelId: Id, a: Cell, di:
 
 /**
  * Diagonal steps may not cut corners: both L-shaped routes through the orthogonal intermediate
- * positions must be free of blockers.
+ * positions must be free of blockers. Architecture that is not grid-aligned (rotated walls, their doors
+ * and windows) and the jambs of an open doorway the diagonal goes through do not count here (see
+ * MoveContext.legBlocked): the diagonal's own sweep judges them.
  */
 export function cutsCorner(ctx: MoveContext, levelId: Id, a: Cell, di: number, dj: number): boolean {
-  return (
-    ctx.moveBlocked(levelId, a, di, 0) ||
-    ctx.moveBlocked(levelId, a, 0, dj) ||
-    ctx.moveBlocked(levelId, { i: a.i + di, j: a.j }, 0, dj) ||
-    ctx.moveBlocked(levelId, { i: a.i, j: a.j + dj }, di, 0)
-  )
+  const side = { i: a.i + di, j: a.j }
+  const other = { i: a.i, j: a.j + dj }
+  const legs = (blocked: (cell: Cell, di: number, dj: number) => boolean) =>
+    blocked(a, di, 0) || blocked(a, 0, dj) || blocked(side, 0, dj) || blocked(other, di, 0)
+  // Cheap first pass on the cached orthogonal steps: free legs are free under the corner rule too.
+  if (!legs((c, i, j) => ctx.moveBlocked(levelId, c, i, j))) return false
+  const diagonal = { a: ctx.center(a), b: ctx.center({ i: a.i + di, j: a.j + dj }) }
+  return legs((c, i, j) => ctx.legBlocked(levelId, c, i, j, diagonal))
 }
 
 /**

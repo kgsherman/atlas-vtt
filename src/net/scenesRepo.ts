@@ -9,9 +9,11 @@
  * exclusively through get_shared_scene(slug).
  */
 import { newId } from "@/core/scene/factory"
+import { base64ToBytes, bytesToBase64 } from "@/core/scene/heightmap"
 import { parseScene, serializeScene, type ParseSceneResult } from "@/core/scene/schema"
-import type { Scene } from "@/core/scene/types"
+import type { Id, Scene, SceneAsset } from "@/core/scene/types"
 
+import type { AssetStore } from "./assets/types"
 import type { Json } from "./database.types"
 import { getLocalStore, type LocalStore } from "./localStore"
 import { getSupabaseOrNull, NetError, toNetError, unwrap, type AtlasClient } from "./supabase"
@@ -339,8 +341,16 @@ export function createScenesRepo(opts: ScenesRepoOptions = {}): ScenesRepo {
 
 export const SCENE_FILE_EXTENSION = ".atlas.json"
 export const SCENE_FILE_MIME = "application/json"
-/** Refuse absurdly large files before parsing (the schema bounds the document anyway). */
-export const MAX_SCENE_FILE_BYTES = 64 * 1024 * 1024
+/**
+ * Refuse absurd files before parsing (the schema bounds the document anyway). Files may embed map
+ * images (a few MB each as WebP, ×4/3 as base64).
+ */
+export const MAX_SCENE_FILE_BYTES = 256 * 1024 * 1024
+
+/** Embedded map images of an `.atlas.json`: asset id → `data:image/(webp|png|jpeg);base64,…`. */
+export type SceneAssetsData = Record<Id, string>
+
+const ASSET_DATA_URL_RE = /^data:(image\/(?:webp|png|jpeg));base64,([A-Za-z0-9+/]*={0,2})$/u
 
 export function sceneFileName(name: string): string {
   const base =
@@ -355,24 +365,106 @@ export function sceneFileName(name: string): string {
   return `${base}${SCENE_FILE_EXTENSION}`
 }
 
-/** Serialise a scene for download as `<name>.atlas.json` (the document itself is the file format). */
-export function exportSceneFile(scene: Scene): { fileName: string; mimeType: string; text: string } {
-  return { fileName: sceneFileName(scene.name), mimeType: SCENE_FILE_MIME, text: serializeScene(scene) }
+/**
+ * Serialise a scene for download as `<name>.atlas.json`: the document itself, plus (optionally) a
+ * top-level `assetsData` with its map images as data URLs so the file is portable (ARCHITECTURE §9).
+ */
+export function exportSceneFile(scene: Scene, opts: { assetsData?: SceneAssetsData } = {}): { fileName: string; mimeType: string; text: string } {
+  const text = serializeScene(scene)
+  const data = opts.assetsData ?? {}
+  if (Object.keys(data).length === 0) return { fileName: sceneFileName(scene.name), mimeType: SCENE_FILE_MIME, text }
+  const doc = JSON.parse(text) as Record<string, unknown>
+  return { fileName: sceneFileName(scene.name), mimeType: SCENE_FILE_MIME, text: JSON.stringify({ ...doc, assetsData: data }) }
 }
 
 /**
- * Parse an imported `.atlas.json`. On success the scene gets a fresh `Scene.id` (imports never
- * collide with, or impersonate, the document they were exported from).
+ * exportSceneFile with every image of `scene.assets` read from the asset store and embedded.
+ * `missing` lists assets whose bytes could not be found (the file still references them).
  */
-export function importSceneFile(text: string): ParseSceneResult {
-  if (text.length > MAX_SCENE_FILE_BYTES) return { ok: false, error: "invalid", issues: [`file is larger than ${MAX_SCENE_FILE_BYTES} bytes`] }
+export async function exportSceneFileWithAssets(
+  scene: Scene,
+  assets: Pick<AssetStore, "getImage">
+): Promise<{ fileName: string; mimeType: string; text: string; missing: Id[] }> {
+  const assetsData: SceneAssetsData = {}
+  const missing: Id[] = []
+  for (const meta of Object.values(scene.assets ?? {}).sort((a, b) => a.id.localeCompare(b.id))) {
+    const blob = await assets.getImage(scene.id, meta.id)
+    if (!blob) {
+      missing.push(meta.id)
+      continue
+    }
+    const mime = blob.type === "image/webp" || blob.type === "image/png" || blob.type === "image/jpeg" ? blob.type : meta.mime
+    assetsData[meta.id] = `data:${mime};base64,${bytesToBase64(new Uint8Array(await blob.arrayBuffer()))}`
+  }
+  return { ...exportSceneFile(scene, { assetsData }), missing }
+}
+
+/**
+ * Parse an `.atlas.json` (with or without embedded images). On success the scene gets a fresh
+ * `Scene.id` (imports never collide with, or impersonate, the document they were exported from).
+ * `assetsData` holds the well-formed embedded images the document references.
+ */
+export function readSceneFile(text: string): { parsed: ParseSceneResult; assetsData: SceneAssetsData } {
+  if (text.length > MAX_SCENE_FILE_BYTES) {
+    return { parsed: { ok: false, error: "invalid", issues: [`file is larger than ${MAX_SCENE_FILE_BYTES} bytes`] }, assetsData: {} }
+  }
   let json: unknown
   try {
     json = JSON.parse(text)
   } catch (err) {
-    return { ok: false, error: "invalid", issues: [`not valid JSON: ${err instanceof Error ? err.message : String(err)}`] }
+    return { parsed: { ok: false, error: "invalid", issues: [`not valid JSON: ${err instanceof Error ? err.message : String(err)}`] }, assetsData: {} }
+  }
+  const assetsData: SceneAssetsData = {}
+  if (typeof json === "object" && json !== null && !Array.isArray(json) && Object.hasOwn(json, "assetsData")) {
+    // The document schema is strict: split the embedded images off before parsing.
+    const { assetsData: raw, ...doc } = json as Record<string, unknown>
+    json = doc
+    if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+      for (const [id, url] of Object.entries(raw)) {
+        if (typeof url === "string" && ASSET_DATA_URL_RE.test(url)) assetsData[id] = url
+      }
+    }
   }
   const parsed = parseScene(json)
-  if (parsed.ok) parsed.scene.id = newId()
-  return parsed
+  if (!parsed.ok) return { parsed, assetsData: {} }
+  parsed.scene.id = newId()
+  const referenced = parsed.scene.assets ?? {}
+  for (const id of Object.keys(assetsData)) if (!Object.hasOwn(referenced, id)) delete assetsData[id]
+  return { parsed, assetsData }
+}
+
+/** Parse an imported `.atlas.json` (embedded images are ignored; see importSceneFileWithAssets). */
+export function importSceneFile(text: string): ParseSceneResult {
+  return readSceneFile(text).parsed
+}
+
+/**
+ * Parse an `.atlas.json` and restore its embedded images into the asset store under the scene's
+ * fresh id (asset ids are kept, so backdrops still resolve). Files without images import as before.
+ * `restored` / `missing` list asset ids whose bytes were / were not in the file; a missing image keeps
+ * its metadata (the backdrop renders without an image until it is re-imported).
+ */
+export async function importSceneFileWithAssets(
+  text: string,
+  assets: Pick<AssetStore, "putImage">
+): Promise<{ parsed: ParseSceneResult; restored: Id[]; missing: Id[] }> {
+  const { parsed, assetsData } = readSceneFile(text)
+  const restored: Id[] = []
+  const missing: Id[] = []
+  if (!parsed.ok) return { parsed, restored, missing }
+  const scene = parsed.scene
+  for (const meta of Object.values(scene.assets ?? {}).sort((a, b) => a.id.localeCompare(b.id))) {
+    const url = Object.hasOwn(assetsData, meta.id) ? assetsData[meta.id] : undefined
+    const m = url ? ASSET_DATA_URL_RE.exec(url) : null
+    if (!m) {
+      missing.push(meta.id)
+      continue
+    }
+    const mime = m[1] as SceneAsset["mime"]
+    const blob = new Blob([base64ToBytes(m[2]) as Uint8Array<ArrayBuffer>], { type: mime })
+    const stored = await assets.putImage(scene.id, blob, { id: meta.id, kind: "image", name: meta.name, mime, width: meta.width, height: meta.height })
+    scene.assets![meta.id] = { ...meta, mime, bytes: stored.bytes }
+    restored.push(meta.id)
+  }
+  return { parsed, restored, missing }
 }

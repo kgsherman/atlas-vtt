@@ -28,6 +28,7 @@ export {
 export {
   ENTRY_CONTAINS_START,
   ENTRY_MISS,
+  footprintOverlapsCapsule,
   footprintOverlapsCircle,
   footprintOverlapsPolygon,
   footprintOverlapsRect,

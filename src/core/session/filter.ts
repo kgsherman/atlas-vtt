@@ -10,7 +10,11 @@
  *  - tokens: controlled + vision tokens always, others while visible, never hidden ones; DM names,
  *    senses and speed only for tokens the player controls or sees through;
  *  - levels: explored ("known") levels + stubs for levels referenced by sent connectors, tokens, lights;
- *  - terrain chunks overlapping explored cells with unexplored samples zeroed; masks.
+ *  - terrain chunks overlapping explored cells with unexplored samples zeroed; masks;
+ *  - backdrops: placement only (rect, opacity, tintWalls, tile size) for known levels with a map image —
+ *    never the asset id, its name or any pixels (tiles of explored cells travel separately, net/assets).
+ * Masked floors are clipped by their covered rects (floorRects) and sent as plain rect pieces: a floor
+ * mask never reaches a player.
  * Precondition: updateKnowledge(state, uid, vis) has been applied for the same `vis`.
  */
 import { groundHeightAt, levelById, lightEffectivelyHidden, lightWorldPosition, sortedLevels, wallLength } from "../scene/queries"
@@ -18,14 +22,15 @@ import type { ConnectorObject, Environment, Id, Level, LightObject, Scene, Scene
 import { encodeGrades, encodeMask, createCellMask, getCell, setCell } from "../vision/mask"
 import { objectFootprint } from "../vision/observe"
 import type { EncodedGrades, EncodedMask, VisibilityResult } from "../vision/types"
-import { clipTerrainChunk, exploredLevel, floorExploredRects, footprintTouchesExplored, mergeRuns, wallExploredRuns, type ExploredLevel, type Run } from "./clip"
+import { clipTerrainChunk, exploredLevel, footprintTouchesExplored, maskedFloorExploredRects, mergeRuns, wallExploredRuns, type ExploredLevel, type Run } from "./clip"
 import { emptyEncodedCellMask, emptyEncodedGrades, encodedMaskIsEmpty, maskMatchesGrid } from "./masks"
 import { connectorsOnly, rememberedFootprint } from "./memory"
-import { sanitizeLight } from "./sanitize"
+import { sanitizeLight, type MemoryFloor } from "./sanitize"
 import { controlledTokenIds, movementLockedFor, own, tokenExistsForPlayers, viewerTokenIds } from "./state"
 import {
   PLAYER_VIEW_VERSION,
   type GameState,
+  type PlayerBackdrop,
   type PlayerConnector,
   type PlayerDoor,
   type PlayerFloor,
@@ -197,6 +202,29 @@ function copyWhole(m: PlayerObject): PlayerObject | null {
   }
 }
 
+/** Largest tile edge a backdrop may announce (px per grid cell). */
+export const MAX_BACKDROP_TILE_PX = 1024
+
+/**
+ * A level's map image as a player sees it: placement + tile size (stored px per grid cell, from the
+ * asset metadata). null when the level has no backdrop or its asset metadata is missing.
+ */
+export function playerBackdrop(scene: Pick<Scene, "levels" | "assets" | "grid">, levelId: Id): PlayerBackdrop | null {
+  const level = own(scene.levels, levelId)
+  const b = level?.backdrop
+  if (!b || !(b.rect.w > 0 && b.rect.d > 0)) return null
+  const asset = own(scene.assets, b.assetId)
+  if (!asset) return null
+  const tilePx = Math.round((asset.width * scene.grid.cellSize) / b.rect.w)
+  if (!(tilePx >= 1)) return null
+  return {
+    rect: { x: b.rect.x, z: b.rect.z, w: b.rect.w, d: b.rect.d },
+    opacity: b.opacity,
+    tintWalls: b.tintWalls,
+    tilePx: Math.min(MAX_BACKDROP_TILE_PX, tilePx),
+  }
+}
+
 interface LightOut {
   base: PlayerLight
   levelId: Id
@@ -263,7 +291,8 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
       case "floor": {
         const ex = exploredOf(m.levelId)
         if (!ex) break
-        for (const r of memo(floorCache, ex, m, [], () => floorExploredRects(grid, m.rect, ex.mask))) {
+        // Masked floors clip their covered rects; the mask itself stays in host memory.
+        for (const r of memo(floorCache, ex, m, [], () => maskedFloorExploredRects(grid, m as MemoryFloor, ex.mask))) {
           const pid = pieceId(id, r.x, r.z)
           const piece: PlayerFloor = { id: pid, type: "floor", levelId: m.levelId, rect: { x: r.x, z: r.z, w: r.w, d: r.d }, material: m.material }
           if (m.thickness !== undefined) piece.thickness = m.thickness
@@ -456,7 +485,14 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
     masks[levelId] = { perception, explored, sunlit }
   }
 
-  return {
+  // ---- backdrops (placement only) --------------------------------------------------
+  const backdrops: Record<Id, PlayerBackdrop> = {}
+  for (const levelId of known) {
+    const b = playerBackdrop(scene, levelId)
+    if (b) backdrops[levelId] = b
+  }
+
+  const view: PlayerView = {
     viewVersion: PLAYER_VIEW_VERSION,
     sessionId: state.sessionId,
     userId,
@@ -478,4 +514,6 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
       enforceSpeed: state.enforceSpeed,
     },
   }
+  if (Object.keys(backdrops).length > 0) view.backdrops = backdrops
+  return view
 }

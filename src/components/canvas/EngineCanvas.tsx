@@ -56,7 +56,7 @@ export function EngineCanvas({ quality, className, onEngine, children }: EngineC
   return (
     <EngineContext.Provider value={value}>
       <div className={cn("relative size-full overflow-hidden bg-black", className)}>
-        <canvas ref={canvasRef} className="block size-full touch-none outline-none" tabIndex={0} />
+        <canvas ref={canvasRef} data-slot="engine-canvas" className="block size-full touch-none outline-none" tabIndex={0} />
         {error ? (
           <div className="absolute inset-0 grid place-items-center p-6 text-center text-sm text-muted-foreground">
             WebGL2 is required to render maps. {error}

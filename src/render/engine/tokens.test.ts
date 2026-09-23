@@ -7,6 +7,7 @@ import type { Scene } from "@/core/scene/types"
 import type { OverlayState } from "../contracts"
 import { DEFAULT_VIEW } from "./defaults"
 import type { LevelPlanEntry } from "./levelPlan"
+import { PortraitAtlas, slotUv } from "./portraits"
 import { TOKEN_FADE_MS, TokenLayer } from "./tokens"
 
 const overlays = (o: Partial<OverlayState> = {}): OverlayState => ({ selectedIds: [], hoveredId: null, preview: null, ruler: null, pendingMoves: {}, dragGhosts: {}, ...o })
@@ -42,8 +43,13 @@ describe("TokenLayer", () => {
     const { scene, ground, a, b, plan, layer, material } = setup()
     layer.syncScene(scene, 0, false)
     layer.update({ scene, plan, view: DEFAULT_VIEW, overlays: overlays() }, 0)
-    const solid = meshes(layer.root)
+    const all = meshes(layer.root)
+    // Base, ring, body and the portrait cap draw with the token material; the blob shadow has its own.
+    const solid = all.filter((m) => m.material === material && m.geometry.name !== "token:cap")
     expect(solid).toHaveLength(3)
+    expect(all.find((m) => m.userData.slot === "token-shadow")!.count).toBe(2)
+    // No portraits: the cap mesh draws nothing.
+    expect(all.find((m) => m.geometry.name === "token:cap")!.count).toBe(0)
     for (const m of solid) {
       expect(m.material).toBe(material)
       expect(m.count).toBe(2)
@@ -66,7 +72,7 @@ describe("TokenLayer", () => {
     layer.syncScene(next, 1000, true)
     const inputs = { scene: next, plan, view: DEFAULT_VIEW, overlays: overlays() }
     expect(layer.update(inputs, 1000 + TOKEN_FADE_MS / 2)).toBe(true)
-    const body = meshes(layer.root).find((m) => m.geometry.name === "token:body" || m.count === 3)!
+    const body = meshes(layer.root).find((m) => m.geometry.name === "token:body")!
     const k = (body.userData.tokenIds as string[]).indexOf(d.id)
     const fade = body.geometry.getAttribute("aFade").getX(k)
     expect(fade).toBeGreaterThan(0)
@@ -114,5 +120,18 @@ describe("TokenLayer", () => {
     expect(picks).toHaveLength(2)
     expect(picks[0].count).toBe(42)
     expect((picks[0].userData.tokenIds as string[]).length).toBe(42)
+  })
+})
+
+describe("portrait atlas", () => {
+  it("maps slots to atlas uv (8×8 grid, top row first)", () => {
+    expect(slotUv(0)).toEqual({ u: 0, v: 7 / 8, scale: 1 / 8 })
+    expect(slotUv(9)).toEqual({ u: 1 / 8, v: 6 / 8, scale: 1 / 8 })
+  })
+
+  it("draws no portrait while an image is unavailable", () => {
+    const atlas = new PortraitAtlas()
+    expect(atlas.lookup(null)).toBeNull()
+    expect(atlas.texture).toBeNull()
   })
 })

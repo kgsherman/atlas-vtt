@@ -1,11 +1,15 @@
 /**
  * MeshWriter accumulates non-indexed triangles with the world-mesh attributes (position, normal,
- * linear `color`, `aSurf`) and records which triangles belong to which scene object, so merged
+ * linear `color`, `aSurf`, `aMat`) and records which triangles belong to which scene object, so merged
  * per-level meshes can still be picked and highlighted per object (userData.ranges).
+ *
+ * `aMat` is the procedural surface material (MAT ids in materials/surface.ts) of the vertices written
+ * while `material` is set; the world shader adds per-material detail (grout, planks, grain, ripples).
  */
 import * as THREE from "three"
 
 import { SURF } from "../internal"
+import { MAT } from "../materials/surface"
 import type { RGB } from "./color"
 
 export type V3 = readonly [number, number, number]
@@ -75,7 +79,10 @@ export class MeshWriter {
   readonly normals = new F32()
   readonly colors = new F32()
   readonly surf = new F32(512)
+  readonly mats = new F32(512)
   readonly ranges: TriRange[] = []
+  /** Procedural surface material of the vertices written from now on (MAT.NONE = plain albedo). */
+  material: number = MAT.NONE
   private openId: string | null = null
   private openStart = 0
 
@@ -110,6 +117,7 @@ export class MeshWriter {
     this.normals.push3(n[0], n[1], n[2])
     this.colors.push3(c[0], c[1], c[2])
     this.surf.push1(s)
+    this.mats.push1(this.material)
   }
 
   /** Flat triangle; winding a→b→c counter-clockwise seen from the front. `n` defaults to the winding normal. */
@@ -134,7 +142,7 @@ export class MeshWriter {
     this.triangle(a, c, d, color, surf, nn)
   }
 
-  /** BufferGeometry with position/normal/color/aSurf, `userData.ranges`; null when empty. */
+  /** BufferGeometry with position/normal/color/aSurf/aMat, `userData.ranges`; null when empty. */
   build(): THREE.BufferGeometry | null {
     this.end()
     if (this.isEmpty()) return null
@@ -143,6 +151,7 @@ export class MeshWriter {
     g.setAttribute("normal", new THREE.BufferAttribute(this.normals.toArray(), 3))
     g.setAttribute("color", new THREE.BufferAttribute(this.colors.toArray(), 3))
     g.setAttribute("aSurf", new THREE.BufferAttribute(this.surf.toArray(), 1))
+    g.setAttribute("aMat", new THREE.BufferAttribute(this.mats.toArray(), 1))
     g.userData.ranges = this.ranges.slice()
     g.computeBoundingSphere()
     g.computeBoundingBox()

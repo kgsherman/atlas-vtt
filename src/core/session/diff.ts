@@ -1,7 +1,7 @@
 /**
  * PlayerView diffs (docs/ARCHITECTURE.md §6.2, §6.3). Path-based ops at a fixed granularity so a patch
  * only carries what changed:
- *   objects/{id}, tokens/{id}, scene/levels/{id}, terrain/{level}/{chunk}, masks/{level}/{kind},
+ *   objects/{id}, tokens/{id}, backdrops/{level}, scene/levels/{id}, terrain/{level}/{chunk}, masks/{level}/{kind},
  *   and whole values for everything else (scene name/grid/environment, id lists, flags…).
  * Invariant (property-tested): applyPatchOps(prev, diffViews(prev, next)) deep-equals next, and
  * identical views give no ops.
@@ -18,6 +18,7 @@ function isLeaf(path: readonly string[]): boolean {
       return n >= (path[1] === "levels" ? 3 : 2)
     case "objects":
     case "tokens":
+    case "backdrops":
       return n >= 2
     case "terrain":
     case "masks":

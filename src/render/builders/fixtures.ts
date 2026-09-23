@@ -15,6 +15,7 @@ import { writeBox, writePrism } from "./shapes"
 import { sharedGeometry } from "./shared"
 import type { BucketBuild, FlameAnimation, MeshBuild } from "./types"
 import { MeshWriter } from "./writer"
+import { MAT } from "../materials/surface"
 
 const IRON: RGB = hexToLinear("#2c2c30")
 const WOOD: RGB = hexToLinear("#5a3d22")
@@ -111,6 +112,7 @@ export function buildFixturesBucket(ctx: BuildContext, levelId: Id): BucketBuild
     const p = lightWorldPosition(scene, light)
     const ground = ctx.sampler(levelId).heightAt(p.x, p.z)
     holders.begin(light.id)
+    holders.material = light.preset === "candle" ? MAT.NONE : MAT.METAL
     writeHolder(holders, light.preset, p, ground)
     holders.end()
     flameMatrix(light.preset, p, m4)

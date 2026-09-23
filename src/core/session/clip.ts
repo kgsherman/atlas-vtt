@@ -3,13 +3,15 @@
  * dilation: only positive-area overlap with an explored cell (or explored sub-cell) counts.
  *  - walls → parametric runs along a→b whose thickness strip overlaps explored area;
  *  - floors → per-row runs of explored cells inside the floor rect, merged into rects (cell granularity);
+ *    masked floors are clipped by their covered rects (`floorRects`), never sent with their mask;
  *  - connectors / pillars / props / openings → whole or nothing (footprint overlap test);
  *  - terrain → chunks overlapping explored cells, samples touching no explored cell zeroed.
  */
 import { clipPolygonHalfPlane, polygonArea } from "../geometry/polygon"
 import { segmentCellIntervals } from "../grid/grid"
 import { chunkSamples, decodeChunk, encodeChunk, parseChunkKey } from "../scene/heightmap"
-import type { GridSettings, Id, Rect, Vec2 } from "../scene/types"
+import { decodeFloorMask, floorRects } from "../scene/queries"
+import type { FloorMask, GridSettings, Id, Rect, Vec2 } from "../scene/types"
 import { cellTouched, getCell } from "../vision/mask"
 import { maskTouchesShape, type ObjectFootprint } from "../vision/observe"
 import { SUBCELLS, type CellMask, type EncodedMask, type GradeMask } from "../vision/types"
@@ -192,6 +194,70 @@ export function floorExploredRects(grid: GridSettings, r: Rect, mask: CellMask):
     if (x1 > x0 && z1 > z0) out.push({ x: x0, z: z0, w: x1 - x0, d: z1 - z0 })
   }
   return out.sort((a, b) => a.z - b.z || a.x - b.x)
+}
+
+/**
+ * Explored parts of a floor given by its covered rects (`floorRects(floor)`: the rect, or a mask's
+ * merged cells). Every piece lies inside a covered rect AND inside explored cells (cell granularity,
+ * like floorExploredRects). Masks on the grid-aligned lattice (spacing divides the cell size, rect on
+ * the lattice — what core/scene/imageTrace produces) are clipped per mask cell and re-merged greedily,
+ * which keeps the piece count close to the mask's own rect count; other masks are clipped rect by rect.
+ * Pieces never carry the mask itself. Sorted by (z, x).
+ */
+export function maskedFloorExploredRects(grid: GridSettings, floor: { rect: Rect; mask?: FloorMask }, mask: CellMask): Rect[] {
+  const fm = floor.mask
+  if (!fm) return floorExploredRects(grid, floor.rect, mask)
+  const s = grid.cellSize
+  const q = fm.spacing
+  const per = s / q
+  const u0 = floor.rect.x / q
+  const v0 = floor.rect.z / q
+  const aligned = Math.abs(per - Math.round(per)) < 1e-9 && Math.abs(u0 - Math.round(u0)) < 1e-9 && Math.abs(v0 - Math.round(v0)) < 1e-9
+  if (!aligned) {
+    const out: Rect[] = []
+    for (const r of floorRects(floor)) out.push(...floorExploredRects(grid, r, mask))
+    return mergeAdjacent(mergeAdjacent(out, true), false).sort((a, b) => a.z - b.z || a.x - b.x)
+  }
+  const n = Math.round(per)
+  const U0 = Math.round(u0)
+  const V0 = Math.round(v0)
+  const cells = decodeFloorMask(fm)
+  // Greedy merge of kept mask cells: row runs, stacked while the run is identical.
+  const out: Rect[] = []
+  let open = new Map<number, Rect>()
+  for (let v = 0; v < fm.rows; v++) {
+    const j = Math.floor((V0 + v) / n)
+    const next = new Map<number, Rect>()
+    const rowOk = j >= 0 && j < mask.depth
+    let u = 0
+    while (u < fm.cols) {
+      const keep = (uu: number) => {
+        if (!rowOk || !cells[v * fm.cols + uu]) return false
+        const i = Math.floor((U0 + uu) / n)
+        return i >= 0 && i < mask.width && cellTouched(mask, j * mask.width + i)
+      }
+      if (!keep(u)) {
+        u++
+        continue
+      }
+      const start = u
+      while (u < fm.cols && keep(u)) u++
+      const key = start * 65536 + u
+      const prev = open.get(key)
+      if (prev) {
+        prev.d += 1
+        next.set(key, prev)
+        open.delete(key)
+      } else {
+        // In lattice units while merging (exact integers), converted to feet below.
+        const r = { x: start, z: v, w: u - start, d: 1 }
+        out.push(r)
+        next.set(key, r)
+      }
+    }
+    open = next
+  }
+  return out.map((r) => ({ x: (U0 + r.x) * q, z: (V0 + r.z) * q, w: r.w * q, d: r.d * q })).sort((a, b) => a.z - b.z || a.x - b.x)
 }
 
 /** Whether a footprint overlaps (positive area) explored cells on any of its levels. */

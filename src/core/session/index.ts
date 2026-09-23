@@ -4,7 +4,8 @@
  * player-side scene reconstruction.
  *
  * Host pipeline per player: parseClientMessage → reduceRequest / reduceDm → (vision) → updateKnowledge
- * → filterForPlayer → diffViews → send.
+ * → filterForPlayer → diffViews → send. Saved games (session_state) round-trip through
+ * serializeGameState / parseGameState.
  */
 export type * from "./types"
 export { GAME_STATE_VERSION, PLAYER_VIEW_VERSION } from "./types"
@@ -25,8 +26,16 @@ export { clientMessageSchema, parseClientMessage, PROTOCOL_LIMITS } from "./prot
 export { deltaFromPatches, reduceDm } from "./reduceDm"
 export { reduceRequest, segmentRectDistance, type RequestContext } from "./reduceRequest"
 export { updateKnowledge } from "./memory"
-export { filterForPlayer } from "./filter"
+export { filterForPlayer, MAX_BACKDROP_TILE_PX, playerBackdrop } from "./filter"
 export { applyPatchOps, diffViews } from "./diff"
-export { levelFromPlayer, objectFromPlayer, tokenFromPlayer, viewToScene } from "./viewToScene"
-export { parsePlayerView, playerObjectSchema, playerTokenSchema, playerViewSchema } from "./playerViewSchema"
-export { memorable, sanitizeObject } from "./sanitize"
+export { backdropFromPlayer, levelFromPlayer, objectFromPlayer, playerBackdropAssetId, tokenFromPlayer, viewToScene } from "./viewToScene"
+export { memoryObjectSchema, parsePlayerView, playerObjectSchema, playerTokenSchema, playerViewSchema } from "./playerViewSchema"
+export { memorable, sanitizeObject, type MemoryFloor } from "./sanitize"
+export {
+  GAME_STATE_LIMITS,
+  parseGameState,
+  parseGameStateDetailed,
+  parseGameStateJson,
+  serializeGameState,
+  type ParseGameStateResult,
+} from "./persist"

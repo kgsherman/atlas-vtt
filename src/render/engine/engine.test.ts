@@ -18,6 +18,9 @@ const calls = vi.hoisted(() => ({
   setView: [] as { mode: string; activeLevelId: string | null }[],
   setQuality: [] as string[],
   beforeRender: 0,
+  backdrops: [] as { levelId: string; texture: unknown; opacity: number; tintWalls: boolean }[],
+  renderParams: [] as { hdr: boolean; emissive: number; glow: number }[],
+  renders: [] as { target: unknown; layers: number; background: unknown }[],
   renderer: null as null | { loop: ((t: number) => void) | null; size: number[]; pixelRatio: number },
 }))
 
@@ -42,6 +45,8 @@ vi.mock("three", async (importOriginal) => {
     loop: ((t: number) => void) | null = null
     pixelRatio = 1
     size = [0, 0]
+    autoClear = true
+    target: unknown = null
     constructor(p: { canvas: HTMLCanvasElement }) {
       this.domElement = p.canvas
       calls.renderer = this
@@ -58,8 +63,18 @@ vi.mock("three", async (importOriginal) => {
     setSize(w: number, h: number) {
       this.size = [w, h]
     }
-    render(scene: import("three").Object3D) {
+    getDrawingBufferSize(v: import("three").Vector2) {
+      return v.set(this.size[0] * this.pixelRatio, this.size[1] * this.pixelRatio)
+    }
+    setRenderTarget(t: unknown) {
+      this.target = t
+    }
+    getRenderTarget() {
+      return this.target
+    }
+    render(scene: import("three").Scene, camera: import("three").Camera) {
       scene.updateMatrixWorld()
+      calls.renders.push({ target: this.target, layers: camera.layers.mask, background: scene.background })
       this.info.render.calls += 3
       this.info.render.triangles += 100
     }
@@ -94,6 +109,14 @@ vi.mock("../lighting/system", async () => {
         calls.beforeRender++
         return { activeLights: 2, tilesUpdated: 1, tilesTotal: 3, updateMs: 0.5 }
       },
+      setLevelBackdrop: (levelId: string, texture: unknown, _rect: unknown, opacity: number, tintWalls: boolean) => {
+        calls.backdrops.push({ levelId, texture, opacity, tintWalls })
+      },
+      setRenderParams: (p: { hdr: boolean; emissive: number; glow: number }) => {
+        calls.renderParams.push(p)
+      },
+      maskUniforms: () => ({ uMasks: { value: null }, uMaskGrid: { value: new T.Vector4() }, uVisionMode: { value: 0 } }),
+      maskLayerOf: () => -1,
       dispose: () => {},
     }),
   }
@@ -140,6 +163,9 @@ describe("engine", () => {
     calls.setView = []
     calls.setQuality = []
     calls.beforeRender = 0
+    calls.backdrops = []
+    calls.renderParams = []
+    calls.renders = []
   })
 
   it("builds levels, renders frames and reports stats", () => {
@@ -263,6 +289,50 @@ describe("engine", () => {
     engine.onFrame((s) => stats.push(s))
     frame(16)
     expect(stats[0].quality).toBe("low")
+    engine.dispose()
+  })
+
+  it("renders low / medium straight to the canvas and high / ultra through the post pipeline, overlays last", () => {
+    const { scene } = sampleScene()
+    const engine = createEngine(canvasEl(), { quality: "medium" })
+    engine.setScene(scene)
+    frame(0)
+    // Direct: one pass, world + overlay layers, no target, direct emissive parameters.
+    expect(calls.renders.map((r) => [r.target, r.layers])).toEqual([[null, 0b1001]])
+    expect(calls.renderParams.at(-1)).toMatchObject({ hdr: false, emissive: 1 })
+    engine.setQuality("ultra")
+    expect(calls.renderParams.at(-1)).toMatchObject({ hdr: true })
+    calls.renders = []
+    frame(16)
+    // World into the HDR target, post passes, then the OVERLAY layer onto the canvas without the
+    // background (which would force a clear).
+    const world = calls.renders[0]
+    expect(world.target).not.toBeNull()
+    expect(world.layers).toBe(0b0001)
+    const overlay = calls.renders.at(-1)!
+    expect(overlay.target).toBeNull()
+    expect(overlay.layers).toBe(0b1000)
+    expect(overlay.background).toBeNull()
+    // AO (3 passes) + bloom (1 + 5 + 5) + composite between them.
+    expect(calls.renders.length).toBe(2 + 3 + 11 + 1)
+    engine.dispose()
+  })
+
+  it("routes level images to the lighting system with the document's opacity and tint", () => {
+    const { scene, ground } = sampleScene()
+    scene.levels[ground].backdrop = { assetId: "a", rect: { x: 0, z: 0, w: 100, d: 100 }, opacity: 0.7, tintWalls: true }
+    const engine = createEngine(canvasEl())
+    engine.setScene(scene)
+    const image = { width: 64, height: 32 } as unknown as ImageBitmap
+    engine.setLevelImage(ground, image, { x: 0, z: 0, w: 100, d: 100 })
+    const set = calls.backdrops.at(-1)!
+    expect(set).toMatchObject({ levelId: ground, opacity: 0.7, tintWalls: true })
+    expect((set.texture as THREE.Texture).colorSpace).toBe(THREE.SRGBColorSpace)
+    // Explicit options win; a document change re-applies; null removes.
+    engine.setLevelImage(ground, image, { x: 0, z: 0, w: 100, d: 100 }, { opacity: 0.4 })
+    expect(calls.backdrops.at(-1)).toMatchObject({ opacity: 0.4, tintWalls: true })
+    engine.setLevelImage(ground, null, null)
+    expect(calls.backdrops.at(-1)).toMatchObject({ levelId: ground, texture: null, opacity: 0 })
     engine.dispose()
   })
 

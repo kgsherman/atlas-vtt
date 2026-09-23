@@ -7,21 +7,27 @@
  *  - `tokenIds: Id[]`  → InstancedMesh: per-instance dim flags written to the `aDim` instanced attribute
  *                        (one frame of latency: attributes upload before onBeforeRender runs)
  * Optional texture: material.uniforms.uMap.value = texture and uUseMap.value = 1 (uses the `uv` attribute).
+ * Portraits: material.uniforms.uPortraits.value = the portrait atlas; per instance `aPortrait`
+ * (u, v, scale, 1) selects a slot (engine/portraits.ts).
  */
 import * as THREE from "three"
 
 import type { Id } from "@/core/scene/types"
 import type { SharedUniforms } from "../lighting/uniforms"
 import { TOKEN_FRAGMENT_SHADER, TOKEN_VERTEX_SHADER } from "./glsl/token"
-import { placeholderWhiteTexture } from "./placeholders"
-import { keepSharedOnClone, setDefaultAttributes } from "./util"
+import { placeholderTransparentTexture, placeholderWhiteTexture } from "./placeholders"
+import { keepSharedOnClone, setDefaultAttributes, type TierRegistry } from "./util"
 
 export interface TokenMaterialContext {
   shared: SharedUniforms
   isDimmed(tokenId: Id): boolean
   /** Host-mask layer of a level, -1 when none. */
   layerOf(levelId: Id): number
+  tiers?: TierRegistry
 }
+
+/** Rim light strength / exponent and the colour ring's self-lit lift (uTokenParams). */
+export const TOKEN_RIM = { strength: 0.55, exponent: 2.6, lift: 0.035 }
 
 export function createTokenMaterial(ctx: TokenMaterialContext, opts: { instanced: boolean }): THREE.ShaderMaterial {
   const own = {
@@ -30,6 +36,8 @@ export function createTokenMaterial(ctx: TokenMaterialContext, opts: { instanced
     uOpacity: { value: 1 },
     uMap: { value: placeholderWhiteTexture() as THREE.Texture },
     uUseMap: { value: 0 },
+    uPortraits: { value: placeholderTransparentTexture() as THREE.Texture },
+    uTokenParams: { value: new THREE.Vector4(TOKEN_RIM.strength, TOKEN_RIM.exponent, TOKEN_RIM.lift, 0) },
   }
   const material = new THREE.ShaderMaterial({
     name: `atlas-token${opts.instanced ? ":instanced" : ""}`,
@@ -40,8 +48,9 @@ export function createTokenMaterial(ctx: TokenMaterialContext, opts: { instanced
     depthTest: true,
     depthWrite: true,
   })
-  setDefaultAttributes(material, { color: [1, 1, 1], aDim: [0], aFade: [1] })
+  setDefaultAttributes(material, { color: [1, 1, 1], aDim: [0], aFade: [1], aPortrait: [0, 0, 0, 0] })
   material.userData.atlas = { kind: "token", instanced: opts.instanced }
+  ctx.tiers?.track(material)
 
   material.onBeforeRender = (_renderer, _scene, _camera, geometry, object) => {
     const ud = object.userData as { tokenId?: unknown; levelId?: unknown; opacity?: unknown; tokenIds?: unknown }

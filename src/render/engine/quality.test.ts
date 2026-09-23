@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest"
 
-import { AdaptiveQuality, computePixelRatio, FrameTimeWindow, intervalFrameCost, MIN_PIXEL_RATIO, PIXEL_BUDGET, qualityDown, qualityUp } from "./quality"
+import { AdaptiveQuality, computePixelRatio, FrameTimeWindow, intervalFrameCost, MAX_PIXEL_RATIO, MIN_PIXEL_RATIO, PIXEL_BUDGET, qualityDown, qualityUp } from "./quality"
 
 describe("pixel budget", () => {
   it("keeps the device ratio when the canvas fits the budget", () => {
-    expect(computePixelRatio(800, 600, 2, PIXEL_BUDGET.high)).toBeCloseTo(Math.min(2, Math.sqrt(2.1e6 / (800 * 600))))
-    expect(computePixelRatio(640, 480, 1, PIXEL_BUDGET.high)).toBe(1)
+    expect(computePixelRatio(800, 600, 2, PIXEL_BUDGET.medium)).toBeCloseTo(Math.min(2, Math.sqrt(2.1e6 / (800 * 600))))
+    expect(computePixelRatio(640, 480, 1, PIXEL_BUDGET.medium)).toBe(1)
   })
 
   it("caps physical pixels on high-DPI screens", () => {
@@ -15,6 +15,14 @@ describe("pixel budget", () => {
     const low = computePixelRatio(1920, 1080, 2, PIXEL_BUDGET.low)
     expect(1920 * 1080 * low * low).toBeLessThanOrEqual(1.3e6 + 1)
     expect(low).toBeLessThan(pr)
+  })
+
+  it("renders high / ultra at native resolution up to 2× DPR", () => {
+    expect(computePixelRatio(1920, 1080, 2, PIXEL_BUDGET.high, MAX_PIXEL_RATIO.high)).toBe(2)
+    expect(computePixelRatio(1920, 1080, 3, PIXEL_BUDGET.ultra, MAX_PIXEL_RATIO.ultra)).toBe(2)
+    // 5K at 2×: the budget guards absurd pixel counts.
+    const pr = computePixelRatio(2560, 1440, 2, PIXEL_BUDGET.high, MAX_PIXEL_RATIO.high)
+    expect(2560 * 1440 * pr * pr).toBeLessThanOrEqual(PIXEL_BUDGET.high + 1)
   })
 
   it("never goes below the minimum ratio and survives bad input", () => {
@@ -84,7 +92,9 @@ describe("adaptive quality", () => {
     const a = new AdaptiveQuality("high")
     a.setCeiling("low")
     expect(a.current).toBe("low")
-    expect(qualityUp("high")).toBe("high")
+    expect(qualityUp("high")).toBe("ultra")
+    expect(qualityUp("ultra")).toBe("ultra")
+    expect(qualityDown("ultra")).toBe("high")
     expect(qualityDown("low")).toBe("low")
   })
 })

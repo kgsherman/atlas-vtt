@@ -15,7 +15,7 @@ import type { MoveOptions, MoveRejectReason, MoveValidation, PathStep } from "./
 export type * from "./types"
 
 export { footprintCells, tokenAnchor } from "./footprint"
-export { MOVE_CLEARANCE, MoveContext, STEP_UP_HEIGHT } from "./context"
+export { DOORWAY_MARGIN, MOVE_CLEARANCE, MoveContext, STEP_UP_HEIGHT, sweepRadius, walkableDoorOffset } from "./context"
 export { PATH_NODE_LIMIT } from "./pathfind"
 export { candidateSteps, checkStep } from "./rules"
 

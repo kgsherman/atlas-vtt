@@ -1,6 +1,9 @@
 /**
- * Frame pacing and quality control (ARCHITECTURE §4.5, PERFORMANCE §7):
- *  - pixel budget: cap physical pixels (~2.1 MP medium/high, ~1.3 MP low) instead of raw DPR;
+ * Frame pacing and quality control (ARCHITECTURE §4.5, §10, PERFORMANCE §7):
+ *  - pixel budget: cap physical pixels (~2.1 MP medium, ~1.3 MP low) instead of raw DPR; high / ultra
+ *    render at native resolution up to 2× DPR (the budget only guards absurd displays);
+ *  - MSAA: context MSAA for low (off) / medium (4×); high / ultra render the world into the post
+ *    pipeline's 4× MSAA half-float target (render/post/pipeline.ts POST_SETTINGS);
  *  - frame-time window: fps and p95 over the last ~2 s;
  *  - adaptive quality: step down when p95 > 18 ms for 2 s, up when p95 < 12 ms for 5 s, never above
  *    the quality the user asked for.
@@ -10,9 +13,25 @@ import type { Quality } from "../contracts"
 export const PIXEL_BUDGET: Record<Quality, number> = {
   low: 1.3e6,
   medium: 2.1e6,
-  high: 2.1e6,
-  // Ultra renders at native resolution up to 2× DPR (the budget only guards absurd displays).
-  ultra: 8.3e6,
+  // Native resolution up to 2× DPR; the budget only guards absurd displays (4K / 5K at 2×).
+  high: 8.3e6,
+  ultra: 14.8e6,
+}
+
+/** Highest render scale per tier (high / ultra: native up to 2× DPR). */
+export const MAX_PIXEL_RATIO: Record<Quality, number> = {
+  low: 2,
+  medium: 2,
+  high: 2,
+  ultra: 2,
+}
+
+/** MSAA samples of the world per tier (context MSAA on medium, the post target's on high / ultra). */
+export const MSAA_SAMPLES: Record<Quality, number> = {
+  low: 0,
+  medium: 4,
+  high: 4,
+  ultra: 4,
 }
 
 /** Lowest render scale (fraction of CSS pixels) the budget may impose. */
@@ -20,13 +39,13 @@ export const MIN_PIXEL_RATIO = 0.5
 
 /**
  * Device pixel ratio to render at so that cssW·cssH·ratio² ≤ budget, never above the device's own
- * ratio and never below MIN_PIXEL_RATIO.
+ * ratio (nor `maxRatio`) and never below MIN_PIXEL_RATIO.
  */
-export function computePixelRatio(cssWidth: number, cssHeight: number, devicePixelRatio: number, budget: number): number {
+export function computePixelRatio(cssWidth: number, cssHeight: number, devicePixelRatio: number, budget: number, maxRatio = Infinity): number {
   const dpr = devicePixelRatio > 0 && Number.isFinite(devicePixelRatio) ? devicePixelRatio : 1
   const area = Math.max(1, cssWidth) * Math.max(1, cssHeight)
   const cap = Math.sqrt(budget / area)
-  return Math.max(MIN_PIXEL_RATIO, Math.min(dpr, cap))
+  return Math.max(MIN_PIXEL_RATIO, Math.min(dpr, maxRatio, cap))
 }
 
 /**
@@ -42,7 +61,7 @@ export function intervalFrameCost(dtMs: number, medianMs: number, p95Ms: number,
   return steady ? Math.min(dtMs, upThresholdMs - 1) : dtMs
 }
 
-const ORDER: readonly Quality[] = ["low", "medium", "high"]
+const ORDER: readonly Quality[] = ["low", "medium", "high", "ultra"]
 
 export const qualityRank = (q: Quality): number => ORDER.indexOf(q)
 export const qualityDown = (q: Quality): Quality => ORDER[Math.max(0, qualityRank(q) - 1)]

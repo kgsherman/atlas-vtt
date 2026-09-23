@@ -1,12 +1,15 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  capsuleOverlapsAABB2,
   circleOverlapsAABB2,
   orientedRectBounds,
   orientedRectCorners,
   orientedRectOverlapsAABB2,
+  orientedRectOverlapsCapsule,
   orientedRectOverlapsCircle,
   rotateLocalXZ,
+  segmentAABB2Distance2,
   unrotateXZ,
   yawFromDirection,
 } from "./box"
@@ -86,6 +89,31 @@ describe("yaw frames", () => {
     expect(orientedRectOverlapsCircle({ x: 0, z: 0 }, 1, 1, 0, { x: 1.5, z: 0 }, 1)).toBe(true)
     expect(circleOverlapsAABB2({ x: 2, z: 0.5 }, 1, box)).toBe(false)
     expect(circleOverlapsAABB2({ x: 1.9, z: 0.5 }, 1, box)).toBe(true)
+  })
+
+  it("segment–box distance and capsule overlap (strict)", () => {
+    const box = { minX: 0, minZ: 0, maxX: 2, maxZ: 1 }
+    // Crossing, touching and inside: 0.
+    expect(segmentAABB2Distance2({ x: -1, z: 0.5 }, { x: 3, z: 0.5 }, box)).toBe(0)
+    expect(segmentAABB2Distance2({ x: 0.5, z: 0.2 }, { x: 1, z: 0.8 }, box)).toBe(0)
+    // Parallel above the box, past a corner (closest pair = corner to segment), and endpoint to face.
+    expect(segmentAABB2Distance2({ x: -1, z: 3 }, { x: 3, z: 3 }, box)).toBeCloseTo(4)
+    expect(segmentAABB2Distance2({ x: 4, z: 0 }, { x: 0, z: 4 }, box)).toBeCloseTo(0.5)
+    expect(segmentAABB2Distance2({ x: 4, z: 0.5 }, { x: 6, z: 0.5 }, box)).toBeCloseTo(4)
+    // Degenerate segment = point.
+    expect(segmentAABB2Distance2({ x: 3, z: 2 }, { x: 3, z: 2 }, box)).toBeCloseTo(2)
+    expect(capsuleOverlapsAABB2({ x: -1, z: 3 }, { x: 3, z: 3 }, 2, box)).toBe(false) // touching
+    expect(capsuleOverlapsAABB2({ x: -1, z: 2.9 }, { x: 3, z: 2.9 }, 2, box)).toBe(true)
+    // A rotated wall (45°, 4 × 0.5): a disc of radius 1 sweeping past its long face (at 0.25).
+    const c = { x: 10, z: 10 }
+    const n = { x: Math.SQRT1_2, z: Math.SQRT1_2 } // normal of a box with yaw π/4 (local +Z)
+    const along = { x: Math.SQRT1_2, z: -Math.SQRT1_2 }
+    const at = (u: number, v: number) => ({ x: c.x + along.x * u + n.x * v, z: c.z + along.z * u + n.z * v })
+    expect(orientedRectOverlapsCapsule(c, 2, 0.25, Math.PI / 4, at(-5, 1.26), at(5, 1.26), 1)).toBe(false)
+    expect(orientedRectOverlapsCapsule(c, 2, 0.25, Math.PI / 4, at(-5, 1.2), at(5, 1.2), 1)).toBe(true)
+    // Beyond the wall's end, the disc passes close to its corner.
+    expect(orientedRectOverlapsCapsule(c, 2, 0.25, Math.PI / 4, at(2.9, -3), at(2.9, 3), 1)).toBe(true)
+    expect(orientedRectOverlapsCapsule(c, 2, 0.25, Math.PI / 4, at(3.1, -3), at(3.1, 3), 1)).toBe(false)
   })
 })
 

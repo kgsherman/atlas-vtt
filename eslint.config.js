@@ -27,4 +27,12 @@ export default defineConfig([
     files: ['src/components/ui/**/*.{ts,tsx}'],
     rules: { 'react-refresh/only-export-components': 'off' },
   },
+  {
+    // Playwright end-to-end scripts: Node, with page.evaluate callbacks running in the browser
+    files: ['e2e/**/*.mjs', 'scripts/**/*.mjs'],
+    extends: [js.configs.recommended],
+    languageOptions: {
+      globals: { ...globals.node, ...globals.browser },
+    },
+  },
 ])

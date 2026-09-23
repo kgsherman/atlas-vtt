@@ -7,10 +7,12 @@
  * penetrates by more than EPS.
  */
 import {
+  capsuleOverlapsAABB2,
   circleOverlapsAABB2,
   orientedRectBounds,
   orientedRectCorners,
   orientedRectOverlapsAABB2,
+  orientedRectOverlapsCapsule,
   orientedRectOverlapsCircle,
   type AABB2,
   type AABB3,
@@ -431,6 +433,29 @@ export function footprintOverlapsCircle(p: OccluderPrimitive, center: Vec2, radi
         p,
         { minX: center.x - radius, minZ: center.z - radius, maxX: center.x + radius, maxZ: center.z + radius },
         (c) => circleOverlapsAABB2(center, radius, c)
+      )
+  }
+}
+
+/** Strict overlap of a primitive's XZ footprint with a capsule: a disc of `radius` swept from a to b. */
+export function footprintOverlapsCapsule(p: OccluderPrimitive, a: Vec2, b: Vec2, radius: number): boolean {
+  switch (p.shape) {
+    case "box":
+      return orientedRectOverlapsCapsule({ x: p.center.x, z: p.center.z }, p.halfExtents.x, p.halfExtents.z, p.yaw, a, b, radius)
+    case "cylinder": {
+      const c = { x: p.base.x, z: p.base.z }
+      return distancePointSegment2(c, a, b) < p.radius + radius
+    }
+    case "heightfield":
+      return someSolidCell(
+        p,
+        {
+          minX: Math.min(a.x, b.x) - radius,
+          minZ: Math.min(a.z, b.z) - radius,
+          maxX: Math.max(a.x, b.x) + radius,
+          maxZ: Math.max(a.z, b.z) + radius,
+        },
+        (c) => capsuleOverlapsAABB2(a, b, radius, c)
       )
   }
 }

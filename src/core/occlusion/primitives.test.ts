@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  footprintOverlapsCapsule,
   footprintOverlapsCircle,
   footprintOverlapsPolygon,
   footprintOverlapsRect,
@@ -202,6 +203,14 @@ describe("bounds, tops, footprints, push-out", () => {
     const hf = field(4, 1, () => 0, [[2, 2]])
     expect(footprintOverlapsRect(hf, { x: 2.1, z: 2.1, w: 0.5, d: 0.5 })).toBe(false)
     expect(footprintOverlapsRect(hf, { x: 1.5, z: 2.1, w: 1, d: 0.5 })).toBe(true)
+    // Capsules (a token's disc swept along a step): box, rotated box, cylinder, heightfield cells.
+    expect(footprintOverlapsCapsule(box(), { x: -5, z: 1.5 }, { x: 5, z: 1.5 }, 1)).toBe(false)
+    expect(footprintOverlapsCapsule(box(), { x: -5, z: 1.4 }, { x: 5, z: 1.4 }, 1)).toBe(true)
+    expect(footprintOverlapsCapsule(box({ yaw: Math.PI / 2 }), { x: -5, z: 1.5 }, { x: 5, z: 1.5 }, 1)).toBe(true)
+    expect(footprintOverlapsCapsule(cyl(), { x: -5, z: 2 }, { x: 5, z: 2 }, 1)).toBe(false)
+    expect(footprintOverlapsCapsule(cyl(), { x: -5, z: 1.9 }, { x: 5, z: 1.9 }, 1)).toBe(true)
+    expect(footprintOverlapsCapsule(hf, { x: 2.5, z: 2.5 }, { x: 2.5, z: 2.5 }, 0.4)).toBe(false)
+    expect(footprintOverlapsCapsule(hf, { x: 2.5, z: 2.5 }, { x: 2.5, z: 2.5 }, 0.6)).toBe(true)
   })
 
   it("pushes contained points out past the nearest face", () => {

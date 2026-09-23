@@ -24,6 +24,7 @@ import type { BucketBuild, InstancedBuild } from "./types"
 import { sharedGeometry } from "./shared"
 import type { MeshWriter } from "./writer"
 import { SURF } from "../internal"
+import { MAT, surfaceOf, type SurfaceMaterial } from "../materials/surface"
 
 const WHITE: RGB = [1, 1, 1]
 const shade = (f: number): RGB => [f, f, f]
@@ -38,6 +39,25 @@ interface PropPiece {
   tinted: boolean
   uniformXZ: boolean
   build: (w: MeshWriter) => void
+}
+
+/** Procedural surface of a prop piece (by piece name; kinds without an entry use the kind's default). */
+const PIECE_SURFACE: Record<string, SurfaceMaterial> = {
+  wood: MAT.WOOD,
+  frame: MAT.WOOD,
+  body: MAT.WOOD,
+  wheels: MAT.WOOD,
+  trunk: MAT.WOOD,
+  books: MAT.NONE,
+  linen: MAT.FABRIC,
+  stone: MAT.STONE,
+  base: MAT.STONE,
+  figure: MAT.MARBLE,
+  canopy: MAT.FOLIAGE,
+  leaves: MAT.FOLIAGE,
+  rock: MAT.ROCK,
+  wall: MAT.STONE,
+  water: MAT.WATER,
 }
 
 const BROWN_TRUNK: RGB = hexToLinear("#5a3d22")
@@ -320,7 +340,10 @@ const PROP_PIECES: Record<PropKind, PropPiece[]> = {
 
 /** Unit geometry of one prop piece (local unscaled feet, base at y = 0). */
 export function propPieceGeometry(kind: PropKind, piece: PropPiece): THREE.BufferGeometry {
-  return sharedGeometry(`prop:${kind}:${piece.name}`, piece.build)
+  return sharedGeometry(`prop:${kind}:${piece.name}`, (w) => {
+    w.material = PIECE_SURFACE[piece.name] ?? MAT.NONE
+    piece.build(w)
+  })
 }
 
 export function propPieces(kind: PropKind): readonly PropPiece[] {
@@ -436,12 +459,16 @@ export function buildPropsBucket(ctx: BuildContext, levelId: Id): BucketBuild {
   return { meshes: [...groups.entries()].map(([name, g]) => toBuild(name, g.geometry, g.acc)) }
 }
 
-export function pillarGeometry(shape: PillarObject["shape"]): THREE.BufferGeometry {
+export function pillarGeometry(shape: PillarObject["shape"], material: SurfaceMaterial = MAT.NONE): THREE.BufferGeometry {
   return shape === "square"
-    ? sharedGeometry("pillar:square", (w) => {
+    ? sharedGeometry(`pillar:square:${material}`, (w) => {
+        w.material = material
         writeBox(w, -0.5, 0, -0.5, 0.5, 1, 0.5, facet("pillar:square", 0.03))
       })
-    : sharedGeometry("pillar:round", (w) => writePrism(w, 0, 0, 0.5, 0, 1, 16, WHITE, { smooth: true }))
+    : sharedGeometry(`pillar:round:${material}`, (w) => {
+        w.material = material
+        writePrism(w, 0, 0, 0.5, 0, 1, 16, WHITE, { smooth: true })
+      })
 }
 
 /** Pillar extent per the Terrain rule; null height = up to the level's ceiling. */
@@ -453,18 +480,22 @@ export function pillarExtent(ctx: BuildContext, p: PillarObject): { bottom: numb
   return { bottom, top }
 }
 
-/** Pillars bucket: one instanced mesh per shape. */
+/** Pillars bucket: one instanced mesh per (shape, surface material). */
 export function buildPillarsBucket(ctx: BuildContext, levelId: Id): BucketBuild {
-  const groups = new Map<PillarObject["shape"], InstanceAccumulator>()
+  const groups = new Map<string, { shape: PillarObject["shape"]; material: SurfaceMaterial; acc: InstanceAccumulator }>()
   for (const p of ctx.ofType(levelId, "pillar")) {
     if (!(p.size > 0)) continue
     const { bottom, top } = pillarExtent(ctx, p)
     if (!(top - bottom > 1e-6)) continue
     const shape = p.shape === "square" ? "square" : "round"
-    let acc = groups.get(shape)
-    if (!acc) groups.set(shape, (acc = accumulator()))
+    const material = surfaceOf(p.material)
+    const key = `${shape}:${material}`
+    let g = groups.get(key)
+    if (!g) groups.set(key, (g = { shape, material, acc: accumulator() }))
     m4.makeScale(p.size, top - bottom, p.size).setPosition(p.position.x, bottom, p.position.z)
-    pushInstance(acc, m4, tint(materialColor(p.material), p.id, 0.04), p.id)
+    pushInstance(g.acc, m4, tint(materialColor(p.material), p.id, 0.04), p.id)
   }
-  return { meshes: [...groups.entries()].map(([shape, acc]) => toBuild(`pillar:${shape}`, pillarGeometry(shape), acc)) }
+  return {
+    meshes: [...groups.values()].map((g) => toBuild(g.material === 0 ? `pillar:${g.shape}` : `pillar:${g.shape}:${g.material}`, pillarGeometry(g.shape, g.material), g.acc)),
+  }
 }

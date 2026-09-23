@@ -3,7 +3,8 @@
  * from URL parameters, for eyeballing the renderer and for browser automation. Not part of the app.
  *
  * Parameters (all optional):
- *   sample    crooked-lantern | stress-test | empty                 (crooked-lantern)
+ *   sample    crooked-lantern | stress-test | empty | vineyard-test (crooked-lantern). vineyard-test: the
+ *             Forgotten Adventures maps in test_maps/ as a 27×47, 3-level scene with backdrops (dev/vineyard.ts)
  *   mode      editor | dm-play | player                              (editor)
  *   vision    off | fog | preview                                    (player → fog, otherwise off)
  *   level     active level index in elevation order (0 = lowest)    (the first viewer's level, else the
@@ -12,7 +13,15 @@
  *             (fog/preview default: the first PC by name)
  *   place     "name@level:x,z;…" moves tokens before anything else (level = index in elevation order)
  *   camera    orbit | topdown                                        (editor → orbit, otherwise topdown)
- *   quality   low | medium | high                                    (high)
+ *   quality   low | medium | high | ultra | auto                     (high; auto = probeQuality(), cached per
+ *             GPU in localStorage; reprobe=1 ignores the cache)
+ *   backdrop  "<levelIndex>:<url>", repeatable: a battlemap image over the whole grid of that level
+ *             (decoded with createImageBitmap at 140 px per cell, e.g. /test_maps/<file>)
+ *   opacity   backdrop opacity 0..1 (1); tint 0 | 1 wall tint from the image (1)
+ *   adaptive  1 = adaptive quality on (default 0: the requested tier stays fixed for measurements)
+ *   portraits 1 = give every token a generated portrait image (token imageUrl)
+ *   postview  ao | bloom: show one post-processing buffer (high / ultra tuning)
+ *   floor     material id: every floor of the scene uses it (eyeballing procedural materials)
  *   tilt      player camera tilt, degrees                            (15)
  *   rotate    player camera quarter turns
  *   at        "x,z" look-at point on the active level                (player/dm-play: the first viewer)
@@ -33,16 +42,19 @@
  * editor's "preview player view"; ARCHITECTURE §7), with host masks computed here by core/vision, or,
  * with pipeline=1, the scene rebuilt from the filtered PlayerView.
  * Automation: window.__atlas = { engine, bench, stats, hostMasks, scene, view, frames, ready, error, info }.
+ * `ready` waits for the first frames AND every backdrop image; `info.quality` records an auto pick.
  */
 import { orInto, createCellMask, createGradeMask, encodeGrades, encodeMask, perceivedCells, setCell, createVisionEngine } from "@/core/vision"
 import type { CellMask, VisibilityResult } from "@/core/vision"
 import { effectiveFloorRects, sortedLevels, tokenGroundY } from "@/core/scene/queries"
 import { sampleById, SAMPLE_SCENES } from "@/core/scene/samples"
-import type { Id, Scene, SceneLike, Token, Vec2, Vec3 } from "@/core/scene/types"
+import { MATERIAL_COLORS } from "@/core/scene/defaults"
+import type { Id, MaterialId, Scene, SceneLike, Token, Vec2, Vec3 } from "@/core/scene/types"
 import { createGameState, filterForPlayer, reduceDm, updateKnowledge, viewerTokenIds, viewToScene, type GameState } from "@/core/session"
-import { createEngine, DEFAULT_VIEW } from "@/render"
+import { createEngine, DEFAULT_VIEW, pickInitialQuality, probeQuality, type QualityProbe } from "@/render"
 import type { Engine, FrameStats, HostLevelMasks, Quality, RenderMode, ViewState, VisionMode } from "@/render"
 import { AtlasEngine } from "@/render/engine/engine"
+import { buildVineyardScene, decodeMapImage } from "./vineyard"
 
 interface HarnessInfo {
   sample: string
@@ -53,6 +65,11 @@ interface HarnessInfo {
   visibleTokens: string[]
   visionMs: number
   gl: { renderer: string; vendor: string; version: string }
+  quality: Quality
+  /** Auto quality probe (quality=auto). */
+  probe: QualityProbe | null
+  /** Backdrop decode times (ms) by level index. */
+  backdrops: Record<number, number>
 }
 
 interface AtlasHandle {
@@ -65,6 +82,8 @@ interface AtlasHandle {
   view: ViewState
   frames: number
   ready: boolean
+  /** Images still loading. */
+  pending: number
   error: string | null
   info: HarnessInfo
 }
@@ -258,7 +277,7 @@ function formatStats(s: FrameStats, info: HarnessInfo): string {
     `fps ${s.fps.toFixed(1)}  frame ${s.frameMs.toFixed(1)} ms  p95 ${s.frameMsP95.toFixed(1)} ms`,
     `draws ${s.drawCalls}  tris ${(s.triangles / 1000).toFixed(1)}k`,
     `lights ${s.activeLights}  tiles ${s.shadowTilesUpdated}/${s.shadowTilesTotal}  shadow ${s.shadowUpdateMs.toFixed(2)} ms`,
-    `quality ${s.quality}  px ratio ${s.pixelRatio.toFixed(2)}`,
+    `quality ${s.quality}${info.probe ? ` (auto: ${info.probe.reason})` : ""}  px ratio ${s.pixelRatio.toFixed(2)}`,
     info.viewers.length > 0 ? `viewers ${info.viewers.join(", ")}  (vision ${info.visionMs.toFixed(0)} ms)` : "",
     `${info.gl.renderer}`,
   ]
@@ -266,7 +285,7 @@ function formatStats(s: FrameStats, info: HarnessInfo): string {
     .join("\n")
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const canvas = document.getElementById("atlas-canvas") as HTMLCanvasElement
   const statsEl = document.getElementById("atlas-stats") as HTMLDivElement
   if (!flag("stats", true)) statsEl.hidden = true
@@ -277,15 +296,22 @@ function main(): void {
     statsEl.hidden = !statsEl.hidden
   })
 
-  const sampleId = param("sample", SAMPLE_SCENES.map((s) => s.id), "crooked-lantern")
-  const scene = sampleById(sampleId)!.build()
+  const sampleId = param("sample", [...SAMPLE_SCENES.map((s) => s.id), "vineyard-test"], "crooked-lantern")
+  const vineyard = sampleId === "vineyard-test" ? await buildVineyardScene() : null
+  const scene = vineyard ? vineyard.scene : sampleById(sampleId)!.build()
   const mode = param<RenderMode>("mode", ["editor", "dm-play", "player"], "editor")
   const vision = param<VisionMode>("vision", ["off", "fog", "preview"], mode === "player" ? "fog" : "off")
-  const quality = param<Quality>("quality", ["low", "medium", "high"], "high")
+  const qualityParam = param<Quality | "auto">("quality", ["low", "medium", "high", "ultra", "auto"], "high")
+  const probe = qualityParam === "auto" ? await probeQuality({ force: flag("reprobe", false) }) : null
+  const quality: Quality = probe ? probe.tier : qualityParam === "auto" ? await pickInitialQuality() : qualityParam
   const camera = param("camera", ["orbit", "topdown"] as const, mode === "editor" ? "orbit" : "topdown")
   const levels = sortedLevels(scene)
   placeTokens(scene, params.get("place"))
   overrideEnvironment(scene)
+  const floorMaterial = params.get("floor")
+  if (floorMaterial && floorMaterial in MATERIAL_COLORS) {
+    for (const o of Object.values(scene.objects)) if (o.type === "floor") scene.objects[o.id] = { ...o, material: floorMaterial as MaterialId }
+  }
 
   let viewers = findTokens(scene, params.get("viewer"))
   if (viewers.length === 0 && vision !== "off") {
@@ -327,8 +353,15 @@ function main(): void {
     }
   }
 
+  if (flag("portraits", false)) {
+    for (const t of Object.values(scene.tokens)) scene.tokens[t.id] = { ...t, imageUrl: portraitUrl(t.name, t.color) }
+    if (engineScene !== scene) for (const t of Object.values(engineScene.tokens)) engineScene.tokens[t.id] = { ...t, imageUrl: portraitUrl(t.name, t.color) }
+  }
   const engine = createEngine(canvas, { quality })
+  if (engine instanceof AtlasEngine) engine.debugFreezeQuality(!flag("adaptive", false))
   engine.setScene(engineScene)
+  const postView = params.get("postview")
+  if (postView && engine instanceof AtlasEngine) engine.debugPostSettings({ view: postView === "ao" ? 1 : postView === "bloom" ? 2 : 0 })
   const view: Partial<ViewState> = {
     ...DEFAULT_VIEW,
     mode,
@@ -377,6 +410,9 @@ function main(): void {
     visibleTokens: visibleTokens.map((id) => scene.tokens[id]?.name ?? id),
     visionMs,
     gl: glInfo(canvas),
+    quality,
+    probe,
+    backdrops: {},
   }
   const handle: AtlasHandle = {
     engine,
@@ -387,16 +423,37 @@ function main(): void {
     view: engine.getView(),
     frames: 0,
     ready: false,
+    pending: 0,
     error: null,
     info,
   }
   window.__atlas = handle
 
+  // Battlemap backdrops: the vineyard sample's own images, plus backdrop=<levelIndex>:<url> parameters.
+  const rect = { x: 0, z: 0, w: scene.grid.width * scene.grid.cellSize, d: scene.grid.depth * scene.grid.cellSize }
+  const opacity = numParam("opacity")
+  const tint = params.get("tint")
+  const imageOpts = { opacity: opacity ?? undefined, tintWalls: tint === null ? undefined : tint !== "0" }
+  if (vineyard) for (const [levelId, img] of vineyard.images) engine.setLevelImage(levelId, img, vineyard.rect, imageOpts)
+  for (const spec of params.getAll("backdrop")) {
+    const m = /^(\d+):(.+)$/.exec(spec)
+    const level = m ? levels[Number(m[1])] : undefined
+    if (!m || !level) continue
+    handle.pending++
+    decodeMapImage(m[2], scene.grid)
+      .then((d) => {
+        info.backdrops[Number(m[1])] = d.ms
+        engine.setLevelImage(level.id, d.bitmap, rect, { opacity: opacity ?? 1, tintWalls: tint !== "0" })
+      })
+      .catch((err: unknown) => console.error("backdrop failed", spec, err))
+      .finally(() => handle.pending--)
+  }
+
   let lastText = 0
   engine.onFrame((s) => {
     handle.stats = s
     handle.frames++
-    if (handle.frames >= 2) handle.ready = true
+    if (handle.frames >= 2 && handle.pending === 0) handle.ready = true
     const now = performance.now()
     if (!statsEl.hidden && now - lastText > 250) {
       lastText = now
@@ -405,16 +462,26 @@ function main(): void {
   })
 }
 
+/** A generated portrait (initials on a gradient) as an SVG data URL, for testing token images. */
+function portraitUrl(name: string, color: string): string {
+  const initials = name
+    .split(/\s+/)
+    .map((w) => w[0] ?? "")
+    .join("")
+    .slice(0, 2)
+    .toUpperCase()
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><defs><radialGradient id="g" cx="35%" cy="30%" r="80%"><stop offset="0" stop-color="#fff" stop-opacity="0.55"/><stop offset="0.5" stop-color="${color}"/><stop offset="1" stop-color="#111"/></radialGradient></defs><rect width="256" height="256" fill="url(#g)"/><circle cx="128" cy="104" r="46" fill="#1c1917" fill-opacity="0.55"/><path d="M40 256c10-60 50-90 88-90s78 30 88 90z" fill="#1c1917" fill-opacity="0.55"/><text x="128" y="236" font-family="Georgia,serif" font-size="54" font-weight="700" text-anchor="middle" fill="#fafaf9">${initials}</text></svg>`
+  return `data:image/svg+xml;base64,${btoa(svg)}`
+}
+
 function center(scene: SceneLike): Vec2 {
   return { x: (scene.grid.width * scene.grid.cellSize) / 2, z: (scene.grid.depth * scene.grid.cellSize) / 2 }
 }
 
-try {
-  main()
-} catch (err) {
+main().catch((err: unknown) => {
   console.error("render harness failed", err)
   const msg = err instanceof Error ? `${err.message}\n${err.stack ?? ""}` : String(err)
   window.__atlas = { ...(window.__atlas ?? ({} as AtlasHandle)), error: msg, ready: false }
   const el = document.getElementById("atlas-stats")
   if (el) el.textContent = `harness error: ${msg}`
-}
+})

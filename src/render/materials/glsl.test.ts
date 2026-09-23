@@ -15,6 +15,10 @@ import { createOverlayMaterial, GLASS_OPACITY } from "./overlayMaterial"
 import { precompileScene } from "./util"
 import { createTokenMaterial } from "./tokenMaterial"
 import { createWorldMaterial } from "./worldMaterial"
+import { createBackdropUniforms, setBackdropUniforms } from "./backdrop"
+import { DETAIL_GLSL } from "./glsl/detail"
+import { doorSurface, MAT, SURFACE_TABLE, SURFACE_TABLE_ROWS, surfaceOf, surfaceTableUniform } from "./surface"
+import { TIER_DEFINE, TierRegistry } from "./util"
 
 /** Uniforms three.js declares or feeds itself. */
 const BUILTIN_UNIFORMS = new Set(["modelMatrix", "modelViewMatrix", "projectionMatrix", "viewMatrix", "normalMatrix", "cameraPosition", "isOrthographic"])
@@ -102,7 +106,7 @@ describe("world / token shaders", () => {
   it("world material variants declare exactly the uniforms they are given", () => {
     for (const variant of ["opaque", "ghost", "ghost-depth"] as const) {
       const m = createWorldMaterial({ shared, levelUniform: () => levelUniform }, { levelId: "L", variant, instanced: false })
-      checkMaterial(m, ["color", "aSurf"])
+      checkMaterial(m, ["color", "aSurf", "aMat"])
       expect(m.uniforms.uLevelLayer).toBe(levelUniform)
       // Shared by reference.
       expect(m.uniforms.uLights).toBe(shared.uLights)
@@ -138,7 +142,7 @@ describe("world / token shaders", () => {
 
   it("token material declares its uniforms and never discards", () => {
     const m = createTokenMaterial({ shared, isDimmed: () => false, layerOf: () => -1 }, { instanced: true })
-    checkMaterial(m, ["color", "aDim", "aFade"])
+    checkMaterial(m, ["color", "aDim", "aFade", "aPortrait"])
     expect(m.fragmentShader).not.toMatch(/\bdiscard\b/)
   })
 })
@@ -157,7 +161,7 @@ describe("overlay (glass / flame) shaders", () => {
   const shared = createSharedUniforms()
 
   it("declare their uniforms, share the globals and never discard", () => {
-    for (const kind of ["glass", "flame"] as const) {
+    for (const kind of ["glass", "flame", "glow"] as const) {
       const m = createOverlayMaterial({ shared, layerOf: () => 0 }, { kind })
       checkMaterial(m, ["color"])
       expect(m.uniforms.uMasks).toBe(shared.uMasks)
@@ -225,5 +229,87 @@ describe("precompileScene", () => {
     await precompileScene(serial as never, scene, camera)
     await precompileScene({} as never, scene, camera)
     expect(calls).toEqual(["async", "sync"])
+  })
+})
+
+describe("procedural surface materials", () => {
+  it("mirror MAT ids in the AT_MAT_* defines and size the parameter table to match", () => {
+    for (const [name, id] of Object.entries(MAT)) {
+      expect(Number(new RegExp(`#define AT_MAT_${name} (\\d+)`).exec(DETAIL_GLSL)?.[1]), name).toBe(id)
+    }
+    const count = Object.keys(MAT).length
+    expect(SURFACE_TABLE).toHaveLength(count)
+    for (const rows of SURFACE_TABLE) expect(rows).toHaveLength(SURFACE_TABLE_ROWS)
+    expect(DETAIL_GLSL).toContain(`#define AT_MAT_ROWS ${SURFACE_TABLE_ROWS}`)
+    expect(DETAIL_GLSL).toContain(`uniform vec4 uMatTable[${count * SURFACE_TABLE_ROWS}];`)
+    expect(surfaceTableUniform().value).toHaveLength(count * SURFACE_TABLE_ROWS * 4)
+    // Pattern types are 0..3 and cell sizes positive.
+    for (const [up, face] of SURFACE_TABLE) {
+      for (const p of [up, face]) {
+        expect([0, 1, 2, 3]).toContain(p[0])
+        expect(p[1]).toBeGreaterThan(0)
+        expect(p[2]).toBeGreaterThan(0)
+      }
+    }
+  })
+
+  it("maps scene materials and door styles to surfaces", () => {
+    expect(surfaceOf("wood")).toBe(MAT.WOOD)
+    expect(surfaceOf("cobble")).toBe(MAT.COBBLE)
+    expect(surfaceOf("nonsense")).toBe(MAT.NONE)
+    expect(doorSurface("wood", "stone")).toBe(MAT.WOOD)
+    expect(doorSurface("iron", "stone")).toBe(MAT.METAL)
+    expect(doorSurface("secret", "brick")).toBe(MAT.BRICK)
+  })
+})
+
+describe("quality tier defines", () => {
+  it("stamp AT_TIER on tracked materials and recompile them once per change", () => {
+    const tiers = new TierRegistry(TIER_DEFINE.medium)
+    const shared = createSharedUniforms()
+    const m = createWorldMaterial({ shared, levelUniform: () => ({ value: 0 }), tiers }, { levelId: "L", variant: "opaque", instanced: false })
+    expect(m.defines.AT_TIER).toBe("1")
+    const v = m.version
+    expect(tiers.set(TIER_DEFINE.ultra)).toBe(true)
+    expect(m.defines.AT_TIER).toBe("3")
+    expect(m.version).toBeGreaterThan(v)
+    expect(tiers.set(TIER_DEFINE.ultra)).toBe(false)
+    m.dispose()
+    expect(tiers.size).toBe(0)
+  })
+
+  it("compile the tier-only code paths behind AT_TIER", () => {
+    const shared = createSharedUniforms()
+    const m = createWorldMaterial({ shared, levelUniform: () => ({ value: 0 }) }, { levelId: "L", variant: "opaque", instanced: false })
+    // PCSS and the hi-res atlas exist only on ultra; bump mapping from high up.
+    expect(m.fragmentShader).toMatch(/#if AT_TIER >= 3\n\/\/ Rotated Poisson disc/)
+    expect(m.fragmentShader).toMatch(/#if AT_TIER >= 2\n {2}nb = atBumpNormal/)
+    // Unset tier: defaults to low.
+    expect(m.fragmentShader).toMatch(/#ifndef AT_TIER\n#define AT_TIER 0/)
+  })
+})
+
+describe("level backdrop uniforms", () => {
+  it("default to a transparent placeholder and switch without new uniforms", () => {
+    const u = createBackdropUniforms()
+    expect(u.uBackdropParams.value.x).toBe(0)
+    const tex = new THREE.Texture()
+    setBackdropUniforms(u, tex, { x: 10, z: 20, w: 100, d: 50 }, 0.8, true)
+    expect(u.uBackdrop.value).toBe(tex)
+    expect(u.uBackdropRect.value.toArray()).toEqual([10, 20, 0.01, 0.02])
+    expect(u.uBackdropParams.value.toArray()).toEqual([0.8, 1, 0, 0])
+    setBackdropUniforms(u, null, null, 1, false)
+    expect(u.uBackdrop.value).not.toBe(tex)
+    expect(u.uBackdropParams.value.x).toBe(0)
+  })
+
+  it("are shared by the level's world materials", () => {
+    const shared = createSharedUniforms()
+    const own = createBackdropUniforms()
+    const ctx = { shared, levelUniform: () => ({ value: 0 }), levelBackdrop: () => own }
+    const a = createWorldMaterial(ctx, { levelId: "L", variant: "opaque", instanced: false })
+    const b = createWorldMaterial(ctx, { levelId: "L", variant: "ghost", instanced: true })
+    expect(a.uniforms.uBackdrop).toBe(own.uBackdrop)
+    expect(b.uniforms.uBackdropParams).toBe(own.uBackdropParams)
   })
 })

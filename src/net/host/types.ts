@@ -4,6 +4,7 @@
  */
 import type { Patch } from "immer"
 
+import type { ReduceResult } from "@/core/session/state"
 import type { DmCommand, GameState } from "@/core/session/types"
 import type { Id } from "@/core/scene/types"
 import type { VisibilityResult } from "@/core/vision/types"
@@ -86,8 +87,12 @@ export interface HostRunner {
   takeOver(): Promise<void>
   getSnapshot(): HostSnapshot
   subscribe(listener: () => void): () => void
-  /** DM commands (move token, doors, lights, locks, shared vision, assign tokens, reveal, fog reset…). */
-  dispatch(cmd: DmCommand): void
+  /**
+   * DM commands (move token, doors, lights, locks, shared vision, assign tokens, reveal, fog reset…).
+   * Returns the reducer's result (its `error` explains a refused command, e.g. for a toast), or null
+   * when this tab is not hosting.
+   */
+  dispatch(cmd: DmCommand): ReduceResult | null
   /** Editor edits during the live session (immer patches against GameState.scene). */
   applyScenePatches(patches: Patch[]): void
   /** DM "preview token vision": visibility for these tokens against the live scene (no knowledge update). */

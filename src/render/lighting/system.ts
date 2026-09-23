@@ -8,21 +8,27 @@
  *  - static sun/moon shadow map and sky-exposure map, re-rendered only when occluders or the sun change;
  *  - light manager: resolve, cull (off/hidden, frustum ∩ dim sphere, cutaway), rank → 32 uniform slots,
  *    flicker on intensity only; shadowed lights without a captured tile are dropped (never unshadowed);
- *  - host-mask textures (render/fog) and the shared uniforms of world / token materials.
+ *  - host-mask textures (render/fog) and the shared uniforms of world / token materials;
+ *  - per-level backdrop uniforms (battlemap images) and the quality tier define of every material.
+ *
+ * Ultra tier: the 16 highest-ranked shadowed lights get 1024² tiles in a second (hi-res) atlas, and every
+ * light soft (PCSS-style) shadows. A light switching between the two atlases keeps drawing from whichever
+ * tile is captured until its new tile is ready (never unshadowed, never dropped for a frame).
  */
 import * as THREE from "three"
 
 import type { BlockChannel, DirtyRegion, OcclusionWorld } from "@/core/occlusion/types"
 import { levelCeilingY, nominalTokenEye, sortedLevels } from "@/core/scene/queries"
-import type { Id, SceneLike, Token, Vec3, VisionSettings } from "@/core/scene/types"
+import type { Id, Rect, SceneLike, Token, Vec3, VisionSettings } from "@/core/scene/types"
 import { resolveViewerEye } from "@/core/vision"
 import type { Quality, SceneChange, ViewState } from "../contracts"
 import { HostMaskTextures } from "../fog/hostMaskTextures"
 import { LAYER, type CreateLightingSystem, type LightingFrameStats, type LightingSystem, type WorldMaterialOptions } from "../internal"
+import { createBackdropUniforms, setBackdropUniforms, type BackdropUniforms } from "../materials/backdrop"
 import { createOccluderDepthMaterial, createOccluderDistanceMaterial, createReencodeMaterial } from "../materials/occluderMaterials"
 import { createOverlayMaterial } from "../materials/overlayMaterial"
 import { placeholderFloatTexture } from "../materials/placeholders"
-import { precompileScene } from "../materials/util"
+import { precompileScene, TIER_DEFINE, TierRegistry } from "../materials/util"
 import { createTokenMaterial } from "../materials/tokenMaterial"
 import { createWorldMaterial } from "../materials/worldMaterial"
 import { OccluderProxies } from "../occluders/proxies"
@@ -55,6 +61,11 @@ export interface QualityConfig {
    * them for ~0.1 ms on the stress scene (measured on an integrated GPU), so high uses it for every light.
    */
   widePcfLights: number
+  /** Hi-res atlas for the `hiLights` highest-ranked shadowed lights (ultra), null = none. */
+  hiAtlas: Omit<DistanceAtlasOptions, "name"> | null
+  hiLights: number
+  /** PCSS-style soft shadows (blocker search → penumbra-sized PCF). */
+  softShadows: boolean
 }
 
 export const QUALITY_CONFIG: Record<Quality, QualityConfig> = {
@@ -62,22 +73,34 @@ export const QUALITY_CONFIG: Record<Quality, QualityConfig> = {
     lightAtlas: { width: 2048, height: 1024, tileSize: 256, cubeSize: 256 },
     viewerAtlas: null,
     widePcfLights: 0,
+    hiAtlas: null,
+    hiLights: 0,
+    softShadows: false,
   },
   medium: {
     lightAtlas: { width: 4096, height: 2048, tileSize: 512, cubeSize: 256 },
     viewerAtlas: { width: 4096, height: 2048, tileSize: 1024, cubeSize: 512 },
     widePcfLights: 8,
+    hiAtlas: null,
+    hiLights: 0,
+    softShadows: false,
   },
   high: {
     lightAtlas: { width: 4096, height: 2048, tileSize: 512, cubeSize: 256 },
     viewerAtlas: { width: 4096, height: 2048, tileSize: 1024, cubeSize: 512 },
     widePcfLights: 32,
+    hiAtlas: null,
+    hiLights: 0,
+    softShadows: false,
   },
-  // Placeholder until the ultra pipeline (soft shadows, larger tiles, post) lands: same as high.
+  // 16 × 1024² tiles (cube faces 512²) for the highest-priority lights + the 512² atlas for the rest.
   ultra: {
     lightAtlas: { width: 4096, height: 2048, tileSize: 512, cubeSize: 256 },
     viewerAtlas: { width: 4096, height: 2048, tileSize: 1024, cubeSize: 512 },
     widePcfLights: 32,
+    hiAtlas: { width: 4096, height: 4096, tileSize: 1024, cubeSize: 512 },
+    hiLights: 16,
+    softShadows: true,
   },
 }
 
@@ -184,7 +207,11 @@ export class AtlasLightingSystem implements LightingSystem {
   private quality: Quality
   private config: QualityConfig
   private lightAtlas: DistanceAtlas
+  private hiAtlas: DistanceAtlas | null
   private viewerAtlas: DistanceAtlas | null
+  /** AT_TIER define of every world / token / overlay material. */
+  readonly tiers: TierRegistry
+  private readonly backdrops = new Map<Id, BackdropUniforms>()
   private scene: SceneLike | null = null
   private world: OcclusionWorld | null = null
   private view: ViewState = DEFAULT_VIEW_STATE
@@ -215,7 +242,9 @@ export class AtlasLightingSystem implements LightingSystem {
     this.config = QUALITY_CONFIG[quality]
     this.masks = new HostMaskTextures(this.shared)
     this.proxies = new OccluderProxies(this.distanceMaterial)
+    this.tiers = new TierRegistry(TIER_DEFINE[quality])
     this.lightAtlas = new DistanceAtlas({ name: "atlas-lights", ...this.config.lightAtlas }, this.reencodeMaterial)
+    this.hiAtlas = this.config.hiAtlas ? new DistanceAtlas({ name: "atlas-lights-hi", ...this.config.hiAtlas }, this.reencodeMaterial) : null
     this.viewerAtlas = this.config.viewerAtlas ? new DistanceAtlas({ name: "atlas-viewers", ...this.config.viewerAtlas }, this.reencodeMaterial) : null
     const canvas = (renderer as { domElement?: unknown }).domElement
     this.canvas = typeof HTMLCanvasElement !== "undefined" && canvas instanceof HTMLCanvasElement ? canvas : null
@@ -226,18 +255,44 @@ export class AtlasLightingSystem implements LightingSystem {
   // Materials
 
   createWorldMaterial(opts: WorldMaterialOptions): THREE.ShaderMaterial {
-    return createWorldMaterial({ shared: this.shared, levelUniform: (id) => this.masks.levelUniform(id) }, opts)
-  }
-
-  createTokenMaterial(opts: { instanced: boolean }): THREE.ShaderMaterial {
-    return createTokenMaterial(
-      { shared: this.shared, isDimmed: (id) => this.dimmed.has(id), layerOf: (id) => this.masks.layerOf(id) },
+    return createWorldMaterial(
+      { shared: this.shared, levelUniform: (id) => this.masks.levelUniform(id), levelBackdrop: (id) => this.backdropUniforms(id), tiers: this.tiers },
       opts
     )
   }
 
-  createOverlayMaterial(opts: { kind: "glass" | "flame" }): THREE.ShaderMaterial {
-    return createOverlayMaterial({ shared: this.shared, layerOf: (id) => this.masks.layerOf(id) }, opts)
+  createTokenMaterial(opts: { instanced: boolean }): THREE.ShaderMaterial {
+    return createTokenMaterial(
+      { shared: this.shared, isDimmed: (id) => this.dimmed.has(id), layerOf: (id) => this.masks.layerOf(id), tiers: this.tiers },
+      opts
+    )
+  }
+
+  createOverlayMaterial(opts: { kind: "glass" | "flame" | "glow" }): THREE.ShaderMaterial {
+    return createOverlayMaterial({ shared: this.shared, layerOf: (id) => this.masks.layerOf(id), tiers: this.tiers }, opts)
+  }
+
+  /** Shared backdrop uniforms of a level (created on first use; they outlive level rebuilds). */
+  private backdropUniforms(levelId: Id): BackdropUniforms {
+    let u = this.backdrops.get(levelId)
+    if (!u) this.backdrops.set(levelId, (u = createBackdropUniforms()))
+    return u
+  }
+
+  setLevelBackdrop(levelId: Id, texture: THREE.Texture | null, rect: Rect | null, opacity: number, tintWalls: boolean): void {
+    setBackdropUniforms(this.backdropUniforms(levelId), texture, rect, opacity, tintWalls)
+  }
+
+  setRenderParams(params: { hdr: boolean; emissive: number; glow: number }): void {
+    this.shared.uRenderParams.value.set(params.emissive, params.glow, params.hdr ? 1 : 0, 0)
+  }
+
+  maskUniforms(): { uMasks: THREE.IUniform; uMaskGrid: THREE.IUniform; uVisionMode: THREE.IUniform } {
+    return { uMasks: this.shared.uMasks, uMaskGrid: this.shared.uMaskGrid, uVisionMode: this.shared.uVisionMode }
+  }
+
+  maskLayerOf(levelId: Id): number {
+    return this.masks.layerOf(levelId)
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -248,6 +303,7 @@ export class AtlasLightingSystem implements LightingSystem {
     this.world = world
     this.proxies.rebuild(world)
     this.lightAtlas.invalidateAll()
+    this.hiAtlas?.invalidateAll()
     this.viewerAtlas?.invalidateAll()
     this.lights = null
     this.viewers = null
@@ -266,6 +322,7 @@ export class AtlasLightingSystem implements LightingSystem {
     const regions = dirty.concat(proxyDirty)
     for (const r of regions) {
       this.lightAtlas.invalidateRegion(r)
+      this.hiAtlas?.invalidateRegion(r)
       this.viewerAtlas?.invalidateRegion(r)
     }
     if (regions.length > 0 || change.structure || (change.terrain?.length ?? 0) > 0) {
@@ -298,18 +355,26 @@ export class AtlasLightingSystem implements LightingSystem {
     this.quality = q
     const next = QUALITY_CONFIG[q]
     const sameLights = JSON.stringify(next.lightAtlas) === JSON.stringify(this.config.lightAtlas)
+    const sameHi = JSON.stringify(next.hiAtlas) === JSON.stringify(this.config.hiAtlas)
     const sameViewers = JSON.stringify(next.viewerAtlas) === JSON.stringify(this.config.viewerAtlas)
     this.config = next
     if (!sameLights) {
       this.lightAtlas.dispose()
       this.lightAtlas = new DistanceAtlas({ name: "atlas-lights", ...next.lightAtlas }, this.reencodeMaterial)
     }
+    if (!sameHi) {
+      this.hiAtlas?.dispose()
+      this.hiAtlas = next.hiAtlas ? new DistanceAtlas({ name: "atlas-lights-hi", ...next.hiAtlas }, this.reencodeMaterial) : null
+    }
     if (!sameViewers) {
       this.viewerAtlas?.dispose()
       this.viewerAtlas = next.viewerAtlas ? new DistanceAtlas({ name: "atlas-viewers", ...next.viewerAtlas }, this.reencodeMaterial) : null
     }
+    // One-time recompile of every material for the new tier's shader features.
+    this.tiers.set(TIER_DEFINE[q])
     // beforeRender binds the new atlases once they hold captures.
     this.shared.uLightAtlas.value = placeholderFloatTexture()
+    this.shared.uLightAtlasHi.value = placeholderFloatTexture()
     this.shared.uViewerAtlas.value = placeholderFloatTexture()
   }
 
@@ -319,6 +384,8 @@ export class AtlasLightingSystem implements LightingSystem {
   beforeRender(renderer: THREE.WebGLRenderer, camera: THREE.Camera, timeSec: number): LightingFrameStats {
     const frame = ++this.frame
     const s = this.shared
+    // Wrapped so float precision stays fine for animated surfaces after hours of play.
+    s.uTime.value = timeSec % 3600
     const scene = this.scene
     const world = this.world
     if (!scene || !world) {
@@ -341,20 +408,28 @@ export class AtlasLightingSystem implements LightingSystem {
     const refine = this.refineActive()
 
     // Tile requests: every slotted shadowed light / viewer claims its tile (LRU keeps the rest cached).
+    // Ultra: the first `hiLights` shadowed lights by rank claim a hi-res tile instead.
     const requests: TileUpdateRequest[] = []
     const jobs = new Map<string, () => void>()
     const lightAtlas = this.lightAtlas
+    const hiAtlas = this.hiAtlas
+    const hiRanked = new Set<Id>()
     for (const l of ranked) {
       if (!l.castsShadows) continue
       const key = `light:${l.id}`
-      const tile = lightAtlas.tiles.acquire(key, frame)
+      const useHi = hiAtlas !== null && hiRanked.size < this.config.hiLights
+      if (useHi) hiRanked.add(l.id)
+      const atlas = useHi ? hiAtlas : lightAtlas
+      const tile = atlas.tiles.acquire(key, frame)
+      // Keep the other atlas' tile of this light cached as a fallback while the new one is captured.
+      ;(useHi ? lightAtlas : hiAtlas)?.tiles.touch(key, frame)
       if (!tile) continue
       const st = tile.state
       const moved = st !== null && DistanceAtlas.moved(st, l.position, l.dim)
       if (st === null || moved || st.dirty) {
-        requests.push({ key, kind: "light", forced: false, moved, uncaptured: st === null, dirty: st?.dirty ?? false, coverage: l.coverage })
-        jobs.set(key, () =>
-          lightAtlas.capture(renderer, tile, l.position, l.dim, LIGHT_LAYER_MASK, this.proxies.scene, this.distanceMaterial, this.excludeKeys(world, l.position, "light"))
+        requests.push({ key: useHi ? `hi:${key}` : key, kind: "light", forced: false, moved, uncaptured: st === null, dirty: st?.dirty ?? false, coverage: l.coverage })
+        jobs.set(useHi ? `hi:${key}` : key, () =>
+          atlas.capture(renderer, tile, l.position, l.dim, LIGHT_LAYER_MASK, this.proxies.scene, this.distanceMaterial, this.excludeKeys(world, l.position, "light"))
         )
       }
     }
@@ -404,17 +479,28 @@ export class AtlasLightingSystem implements LightingSystem {
     s.uEnvLevels.value.w = (this.skyEnabled && !this.skyDirty ? ENV_FLAG_SKY_MAP : 0) + (this.sunEnabled && !this.sunDirty ? ENV_FLAG_SUN_MAP : 0)
 
     // Light uniforms: shadowed lights need a captured tile, otherwise they are not drawn this frame.
+    // A light prefers its tile in the atlas it is ranked for; a current capture in the other atlas
+    // (it just switched) stands in until then.
     const packed = s.uLights.value
     let count = 0
     let wide = 0
+    const soft = this.config.softShadows
     for (const l of ranked) {
       let tile: { x: number; y: number; size: number } | null = null
       let capture: Vec3 | null = null
+      let hi = false
       if (l.castsShadows) {
-        const t = lightAtlas.tiles.get(`light:${l.id}`)
-        if (!t?.state) continue
-        tile = t
-        capture = t.state.origin
+        const key = `light:${l.id}`
+        const hiTile = hiAtlas?.tiles.get(key)
+        const loTile = lightAtlas.tiles.get(key)
+        const usable = (t: typeof hiTile) => (t?.state && !DistanceAtlas.moved(t.state, l.position, l.dim) ? t : undefined)
+        const pick = hiRanked.has(l.id)
+          ? (hiTile?.state ? hiTile : undefined) ?? usable(loTile)
+          : (loTile?.state ? loTile : undefined) ?? usable(hiTile)
+        if (!pick?.state) continue
+        tile = pick
+        capture = pick.state.origin
+        hi = pick === hiTile
       }
       const f = flickerFactor(l.seed, timeSec, l.flicker) * l.intensity
       const widePcf = tile !== null && wide < this.config.widePcfLights
@@ -427,6 +513,8 @@ export class AtlasLightingSystem implements LightingSystem {
         tile,
         capture,
         widePcf,
+        hiAtlas: hi,
+        softRadius: soft && tile !== null ? l.sourceRadius : 0,
       })
       count++
     }
@@ -448,10 +536,12 @@ export class AtlasLightingSystem implements LightingSystem {
     s.uGpuRefine.value = viewerAtlas ? 1 : 0
     // Atlases are allocated on their first capture; until then the samplers read a real placeholder.
     s.uLightAtlas.value = lightAtlas.captured ? lightAtlas.texture : placeholderFloatTexture()
+    s.uLightAtlasHi.value = hiAtlas?.captured ? hiAtlas.texture : placeholderFloatTexture()
     s.uViewerAtlas.value = viewerAtlas?.captured ? viewerAtlas.texture : placeholderFloatTexture()
 
     let tilesTotal = 0
     for (const t of lightAtlas.tiles.owned()) if (t.state) tilesTotal++
+    if (hiAtlas) for (const t of hiAtlas.tiles.owned()) if (t.state) tilesTotal++
     if (this.viewerAtlas) for (const t of this.viewerAtlas.tiles.owned()) if (t.state) tilesTotal++
     return { activeLights: count, tilesUpdated, tilesTotal, updateMs }
   }
@@ -459,6 +549,7 @@ export class AtlasLightingSystem implements LightingSystem {
   dispose(): void {
     this.canvas?.removeEventListener("webglcontextrestored", this.onContextRestored)
     this.lightAtlas.dispose()
+    this.hiAtlas?.dispose()
     this.viewerAtlas?.dispose()
     this.sun.dispose()
     this.sky.dispose()
@@ -482,9 +573,10 @@ export class AtlasLightingSystem implements LightingSystem {
     return this.viewerAtlas?.texture ?? null
   }
 
-  /** Current tile of a light / viewer ("light:<id>" / "viewer:<id>"), if captured. */
+  /** Current tile of a light / viewer ("light:<id>" / "viewer:<id>"; "hi:light:<id>" = hi-res atlas), if captured. */
   tileOf(key: string): { x: number; y: number; size: number; origin: Vec3; dirty: boolean } | null {
-    const atlas = key.startsWith("viewer:") ? this.viewerAtlas : this.lightAtlas
+    const atlas = key.startsWith("viewer:") ? this.viewerAtlas : key.startsWith("hi:") ? this.hiAtlas : this.lightAtlas
+    if (key.startsWith("hi:")) key = key.slice(3)
     const t = atlas?.tiles.get(key)
     return t?.state ? { x: t.x, y: t.y, size: t.size, origin: t.state.origin, dirty: t.state.dirty } : null
   }
@@ -628,6 +720,7 @@ export class AtlasLightingSystem implements LightingSystem {
 
   private resetGpuState(): void {
     this.lightAtlas.reset()
+    this.hiAtlas?.reset()
     this.viewerAtlas?.reset()
     this.sunDirty = true
     this.skyDirty = true

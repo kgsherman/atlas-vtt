@@ -43,3 +43,45 @@ export function precompileScene(renderer: THREE.WebGLRenderer, scene: THREE.Obje
   }
   return Promise.resolve()
 }
+
+/** Quality tier as the shaders' AT_TIER define (0 low … 3 ultra). */
+export const TIER_DEFINE = { low: 0, medium: 1, high: 2, ultra: 3 } as const
+
+/**
+ * Materials whose shaders depend on the quality tier (AT_TIER define). A tier change updates every
+ * live material once (a deliberate one-time recompile, ARCHITECTURE §10); disposed materials drop out.
+ */
+export class TierRegistry {
+  private tier: number
+  private readonly materials = new Set<THREE.ShaderMaterial>()
+
+  constructor(tier: number) {
+    this.tier = tier
+  }
+
+  get current(): number {
+    return this.tier
+  }
+
+  /** Stamp the current tier on a new material and keep it in step with later changes. */
+  track<T extends THREE.ShaderMaterial>(material: T): T {
+    material.defines = { ...material.defines, AT_TIER: String(this.tier) }
+    this.materials.add(material)
+    material.addEventListener("dispose", () => this.materials.delete(material))
+    return material
+  }
+
+  set(tier: number): boolean {
+    if (tier === this.tier) return false
+    this.tier = tier
+    for (const m of this.materials) {
+      m.defines = { ...m.defines, AT_TIER: String(tier) }
+      m.needsUpdate = true
+    }
+    return true
+  }
+
+  get size(): number {
+    return this.materials.size
+  }
+}

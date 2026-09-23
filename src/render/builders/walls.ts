@@ -9,6 +9,7 @@ import { MATERIAL_COLORS } from "@/core/scene/defaults"
 import { openingSegment, type Opening } from "@/core/scene/queries"
 import type { Id, WallObject } from "@/core/scene/types"
 
+import { MAT, surfaceOf } from "../materials/surface"
 import type { BuildContext } from "./context"
 import { hexToLinear, materialColor, scaleRgb, tint, type RGB } from "./color"
 import { orientedCorners } from "./ground"
@@ -178,6 +179,7 @@ function writeWindow(walls: MeshWriter, glass: MeshWriter, f: WallFrame, o: Open
   const box = (a: number, b: number, y0: number, y1: number, v: number) =>
     writeFrameBox(walls, wall.a.x, wall.a.z, dir.x, dir.z, a, b, y0, y1, -v, v, (face) => tint(wood, `${o.id}:${a}:${face}`, 0.04))
   walls.begin(o.id)
+  walls.material = MAT.WOOD
   // Jambs, head and (when raised) a protruding sill board; the mullion splits wide windows.
   box(u0, u0 + WINDOW_FRAME, yS, yH, t + 0.04)
   box(u1 - WINDOW_FRAME, u1, yS, yH, t + 0.04)
@@ -199,6 +201,7 @@ export function buildWallsBucket(ctx: BuildContext, levelId: Id): BucketBuild {
     if (!f) continue
     const base = materialColor(wall.material)
     walls.begin(wall.id)
+    walls.material = surfaceOf(wall.material)
     wallPieces(ctx, f).forEach((p, k) => {
       writeFrameBox(walls, wall.a.x, wall.a.z, f.dir.x, f.dir.z, p.u0, p.u1, p.y0, p.y1, -wall.thickness / 2, wall.thickness / 2, wallFaceColor(base, `${wall.id}:${k}`))
     })

@@ -6,7 +6,8 @@
  *   [0] xyz = current world position, w = dim radius
  *   [1] rgb = linear colour × intensity × flicker, w = bright radius
  *   [2] xy = atlas texel of the tile (guard included), z = tile size (0 = unshadowed), w = flags
- *   [3] xyz = capture origin of the tile (shadows are measured from it), w = 0
+ *       (LIGHT_FLAG_*: wide PCF, tile in the hi-res atlas, soft shadows)
+ *   [3] xyz = capture origin of the tile (shadows are measured from it), w = source radius (ft)
  * Viewer slot v occupies uViewers[3v .. 3v+2]:
  *   [0] xyz = current resolved eye, w = darkvision range
  *   [1] xy = atlas texel of the LOS tile, z = tile size (0 = no tile: cannot refine), w = blindsight range
@@ -24,6 +25,10 @@ export const VIEWER_VEC4S = 3
 
 /** Light flag bits (uLights[4i+2].w). */
 export const LIGHT_FLAG_WIDE_PCF = 1
+/** The tile lives in the hi-res light atlas (uLightAtlasHi, ultra tier). */
+export const LIGHT_FLAG_HI_ATLAS = 2
+/** PCSS-style soft shadows (ultra tier). */
+export const LIGHT_FLAG_SOFT = 4
 
 /** Rules light level as the shaders' numeric level (uEnvLevels). */
 export const LIGHT_LEVEL_NUMBER = { dark: 0, dim: 1, bright: 2 } as const
@@ -51,6 +56,10 @@ export interface PackedLight {
   tile: PackedTile | null
   capture: Vec3 | null
   widePcf: boolean
+  /** Tile in the hi-res atlas (ultra). */
+  hiAtlas?: boolean
+  /** Soft (PCSS) shadows with this light source radius in feet (ultra); 0 / undefined = hard. */
+  softRadius?: number
 }
 
 export function packLight(out: Float32Array, slot: number, l: PackedLight): void {
@@ -66,12 +75,13 @@ export function packLight(out: Float32Array, slot: number, l: PackedLight): void
   out[o + 8] = l.tile ? l.tile.x : 0
   out[o + 9] = l.tile ? l.tile.y : 0
   out[o + 10] = l.tile ? l.tile.size : 0
-  out[o + 11] = l.widePcf ? LIGHT_FLAG_WIDE_PCF : 0
+  const soft = (l.softRadius ?? 0) > 0
+  out[o + 11] = (l.widePcf ? LIGHT_FLAG_WIDE_PCF : 0) + (l.hiAtlas ? LIGHT_FLAG_HI_ATLAS : 0) + (soft ? LIGHT_FLAG_SOFT : 0)
   const c = l.capture ?? l.position
   out[o + 12] = c.x
   out[o + 13] = c.y
   out[o + 14] = c.z
-  out[o + 15] = 0
+  out[o + 15] = soft ? (l.softRadius ?? 0) : 0
 }
 
 export interface PackedViewer {
@@ -105,6 +115,8 @@ export interface SharedUniforms {
   uLights: THREE.IUniform<Float32Array>
   uLightCount: THREE.IUniform<number>
   uLightAtlas: THREE.IUniform<THREE.Texture | null>
+  /** Hi-res light atlas (ultra: 1024² tiles), a placeholder on the other tiers. */
+  uLightAtlasHi: THREE.IUniform<THREE.Texture | null>
   /** Fill under cover: ambientColor × (ambientIntensity + levelFill(ambientLevel)). */
   uAmbient: THREE.IUniform<THREE.Color>
   /** Fill where the sky is exposed: ambientColor × (ambientIntensity + levelFill(skyLevel)). */
@@ -136,6 +148,10 @@ export interface SharedUniforms {
   uMasks: THREE.IUniform<THREE.Texture | null>
   /** x = 1/(width·cellSize), y = 1/(depth·cellSize), z = texture width, w = texture height (texels). */
   uMaskGrid: THREE.IUniform<THREE.Vector4>
+  /** Seconds, wrapped (animated surfaces). */
+  uTime: THREE.IUniform<number>
+  /** x = emissive scale (flames, glows), y = glow sprite strength, z = HDR post target (0/1). */
+  uRenderParams: THREE.IUniform<THREE.Vector4>
 }
 
 /** Sampler uniforms start on real placeholder textures (see materials/placeholders), never null. */
@@ -144,6 +160,7 @@ export function createSharedUniforms(): SharedUniforms {
     uLights: { value: new Float32Array(MAX_LIGHTS * LIGHT_VEC4S * 4) },
     uLightCount: { value: 0 },
     uLightAtlas: { value: placeholderFloatTexture() },
+    uLightAtlasHi: { value: placeholderFloatTexture() },
     uAmbient: { value: new THREE.Color(0, 0, 0) },
     uSkyAmbient: { value: new THREE.Color(0, 0, 0) },
     uSkyMatrix: { value: new THREE.Matrix4() },
@@ -162,5 +179,7 @@ export function createSharedUniforms(): SharedUniforms {
     uGpuRefine: { value: 0 },
     uMasks: { value: placeholderMaskTexture() },
     uMaskGrid: { value: new THREE.Vector4(0, 0, 1, 1) },
+    uTime: { value: 0 },
+    uRenderParams: { value: new THREE.Vector4(1, 0.5, 0, 0) },
   }
 }

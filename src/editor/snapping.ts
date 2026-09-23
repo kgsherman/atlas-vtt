@@ -4,6 +4,7 @@
  * and opening placement along a host wall.
  */
 import { snapPoint, type SnapMode } from "@/core/grid/grid"
+import { walkableDoorOffset } from "@/core/movement"
 import { SIZE_FOOTPRINT } from "@/core/scene/defaults"
 import { OPENING_FIT_EPS } from "@/core/scene/integrity"
 import { objectsOfType, wallDirection, wallLength, wallOpenings } from "@/core/scene/queries"
@@ -177,14 +178,15 @@ export interface OpeningPlacement {
  * Nearest valid centre offset for an opening of `width` on `wall`, given a desired offset: inside
  * [width/2, length − width/2] and not overlapping other openings of the wall (touching is allowed).
  * With a snap mode, the snapped offset is preferred when valid (centre: cell centres along the wall,
- * vertex: whole cells, half: half cells, measured from a).
+ * vertex: whole cells, half: half cells, measured from a); a door (`kind: "door"`) in a wall that is not
+ * grid-aligned instead goes to the nearest offset a medium token can walk through on the grid.
  */
 export function placeOpening(
   scene: Pick<SceneLike, "objects" | "grid">,
   wall: WallObject,
   desired: number,
   width: number,
-  opts: { mode: SnapMode; excludeId?: Id } = { mode: "free" }
+  opts: { mode: SnapMode; excludeId?: Id; kind?: "door" | "window" } = { mode: "free" }
 ): OpeningPlacement {
   const len = wallLength(wall)
   const lo = width / 2
@@ -227,6 +229,12 @@ export function placeOpening(
 
   if (opts.mode !== "free") {
     const s = scene.grid.cellSize
+    // Doors in rotated walls (battlemap buildings) go where grid movement can walk straight through
+    // them (core/movement's doorway rule): usually where the pointer is, else a foot or two along.
+    if (opts.kind === "door") {
+      const walkable = walkableDoorOffset(scene.grid, wall, desired, width, "medium", isAllowed)
+      if (walkable !== null) return { offset: walkable, valid: true }
+    }
     const step = opts.mode === "half" ? s / 2 : s
     const shift = opts.mode === "center" ? s / 2 : 0
     const snapped = Math.round((desired - shift) / step) * step + shift

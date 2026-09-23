@@ -8,13 +8,13 @@
  *  - secret doors observed open are revealed to the player.
  * Hidden objects, attached lights and unrevealed secret doors are never remembered.
  */
-import { groundHeightAt } from "../scene/queries"
+import { floorRects, groundHeightAt } from "../scene/queries"
 import type { ConnectorObject, Id, LightObject, Scene, SceneLike, SceneObject } from "../scene/types"
 import { cloneCellMask, isEmptyMask, orInto, perceivedCells } from "../vision/mask"
 import { maskHasPoint, maskTouchesShape, objectFootprint, type ObjectFootprint } from "../vision/observe"
 import type { EncodedMask, GradeMask, VisibilityResult } from "../vision/types"
 import { decodeMaskCached, encodeMaskCached, maskMatchesGrid } from "./masks"
-import { memorable, sanitizeObject } from "./sanitize"
+import { memorable, sanitizeObject, type MemoryFloor } from "./sanitize"
 import { own } from "./state"
 import type { GameState, PlayerObject } from "./types"
 import { deepEqual } from "./util"
@@ -44,17 +44,16 @@ export function staticLightWorldY(scene: Pick<SceneLike, "levels" | "grid" | "ob
   return (l) => groundHeightAt(lite, l.levelId, l.position) + l.position.y
 }
 
-function rectFootprint(levelId: Id, x0: number, z0: number, x1: number, z1: number): ObjectFootprint {
-  return { levelIds: [levelId], shapes: [{ x0, z0, x1, z1, pts: null }] }
-}
-
 /** Footprint of a remembered object (openings use the remembered host wall, else the current one). */
 export function rememberedFootprint(entry: PlayerObject, memory: Readonly<Record<Id, PlayerObject>>, scene: Pick<Scene, "objects">): ObjectFootprint | null {
   switch (entry.type) {
     case "light":
       return null
-    case "floor":
-      return rectFootprint(entry.levelId, entry.rect.x, entry.rect.z, entry.rect.x + entry.rect.w, entry.rect.z + entry.rect.d)
+    case "floor": {
+      // Masked floors: the remembered coverage (a perceived cell outside the mask does not see the floor).
+      const shapes = floorRects(entry as MemoryFloor).map((r) => ({ x0: r.x, z0: r.z, x1: r.x + r.w, z1: r.z + r.d, pts: null }))
+      return { levelIds: [entry.levelId], shapes }
+    }
     case "door":
     case "window": {
       const host = own(memory, entry.wallId)?.type === "wall" ? { objects: memory as unknown as Record<Id, SceneObject> } : scene

@@ -129,3 +129,13 @@
     @apply font-sans;
     }
 }
+/* ---- App shell utilities (ui-app) ---------------------------------------------------------- */
+
+/* Faint map grid that fades out from the top centre (hero / join backgrounds). */
+@utility atlas-grid-backdrop {
+  background-image:
+    linear-gradient(to right, color-mix(in oklch, var(--foreground) 6%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in oklch, var(--foreground) 6%, transparent) 1px, transparent 1px);
+  background-size: 28px 28px;
+  mask-image: radial-gradient(ellipse 75% 65% at 50% 0%, #000 25%, transparent 75%);
+}

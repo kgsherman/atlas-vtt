@@ -156,9 +156,10 @@ export class OrbitCameraController implements CameraController {
   frame(bounds: Bounds3, immediate = false): void {
     const center = boundsCenter(bounds)
     const target = { x: center.x, y: bounds.min.y + Math.min(2, bounds.max.y - bounds.min.y), z: center.z }
-    // A pleasant default angle when framing from scratch: from the south-east, ~50° above the horizon;
-    // otherwise keep the current viewing direction.
-    const dir = immediate ? new THREE.Vector3(0.45, 1.1, 0.8).normalize() : this.camera.position.clone().sub(this.controls.target).normalize()
+    // A pleasant default angle when framing from scratch: from the south, slightly east (depth cues on
+    // the walls), ~48° above the horizon, so a rectangular map fills the screen instead of standing on a
+    // corner; otherwise keep the current viewing direction.
+    const dir = immediate ? new THREE.Vector3(0.28, 1.15, 1.0).normalize() : this.camera.position.clone().sub(this.controls.target).normalize()
     const fovY = THREE.MathUtils.degToRad(FOV)
     // Fit the box's corners (tighter than its bounding sphere), never closer than the sphere-based
     // distance halved, so very flat scenes still keep some context.

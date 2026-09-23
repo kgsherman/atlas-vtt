@@ -13,6 +13,7 @@ let shadow: THREE.DepthTexture | null = null
 let float: THREE.DataTexture | null = null
 let maskArray: THREE.DataArrayTexture | null = null
 let white: THREE.DataTexture | null = null
+let transparent: THREE.DataTexture | null = null
 
 /** Depth texture with compare mode, for sampler2DShadow uniforms (sun / sky before their first render). */
 export function placeholderShadowTexture(): THREE.DepthTexture {
@@ -61,4 +62,14 @@ export function placeholderWhiteTexture(): THREE.DataTexture {
     white.needsUpdate = true
   }
   return white
+}
+
+/** Fully transparent texel, for optional overlay images (level backdrops, token portraits). */
+export function placeholderTransparentTexture(): THREE.DataTexture {
+  if (!transparent) {
+    transparent = new THREE.DataTexture(new Uint8Array([0, 0, 0, 0]), 1, 1, THREE.RGBAFormat)
+    transparent.name = "atlas-placeholder-transparent"
+    transparent.needsUpdate = true
+  }
+  return transparent
 }

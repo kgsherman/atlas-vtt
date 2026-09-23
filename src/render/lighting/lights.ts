@@ -6,7 +6,7 @@
 import * as THREE from "three"
 
 import { adjacentLevels, levelById, lightEffectivelyHidden, lightLevelId, lightWorldPosition } from "@/core/scene/queries"
-import type { FlickerSettings, Id, LightObject, SceneLike, Vec3 } from "@/core/scene/types"
+import type { FlickerSettings, Id, LightObject, LightPreset, SceneLike, Vec3 } from "@/core/scene/types"
 
 import { flickerSeed } from "./flicker"
 
@@ -22,6 +22,18 @@ export interface ResolvedLight {
   flicker: FlickerSettings
   seed: number
   castsShadows: boolean
+  /** Radius of the emitting body (feet): penumbra size of the ultra tier's soft shadows. */
+  sourceRadius: number
+}
+
+/** Emitter radius per preset (a torch head, a lantern's flame, a brazier's coals, a magical orb). */
+export const LIGHT_SOURCE_RADIUS: Record<LightPreset, number> = {
+  torch: 0.5,
+  lantern: 0.35,
+  brazier: 0.9,
+  candle: 0.15,
+  magical: 0.6,
+  custom: 0.5,
 }
 
 const colorCache = new Map<string, [number, number, number]>()
@@ -73,6 +85,7 @@ function resolveLight(scene: SceneLike, o: LightObject, dim: number): ResolvedLi
     flicker: o.flicker,
     seed: flickerSeed(o.id),
     castsShadows: o.castsShadows,
+    sourceRadius: LIGHT_SOURCE_RADIUS[o.preset] ?? 0.3,
   }
 }
 

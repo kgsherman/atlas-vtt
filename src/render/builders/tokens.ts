@@ -35,10 +35,39 @@ export function writeAnnulus(w: MeshWriter, ri: number, ro: number, y: number, s
   }
 }
 
-/** Base disc: radius 0.5, y ∈ [0, TOKEN_BASE_HEIGHT]. */
+/** Base disc: radius 0.5, y ∈ [0, TOKEN_BASE_HEIGHT], with a bevelled rim (multiplies the token colour). */
 export function tokenBaseGeometry(): THREE.BufferGeometry {
-  return sharedGeometry("token:base", (w) => writePrism(w, 0, 0, 0.5, 0, TOKEN_BASE_HEIGHT, 28, [0.35, 0.35, 0.35], { smooth: true }))
+  return sharedGeometry("token:base", (w) => {
+    writePrism(w, 0, 0, 0.5, 0, TOKEN_BASE_HEIGHT * 0.7, 36, [0.16, 0.16, 0.17], { smooth: true, capTop: false })
+    writePrism(w, 0, 0, 0.5, TOKEN_BASE_HEIGHT * 0.7, TOKEN_BASE_HEIGHT, 36, [0.2, 0.2, 0.21], { radiusTop: 0.46, smooth: true, capBottom: false })
+  })
 }
+
+/** Portrait disc (radius 0.5, facing up, uv over [0,1]²; image top toward −Z), drawn on top of the body. */
+export function tokenCapGeometry(): THREE.BufferGeometry {
+  let g = capCache
+  if (!g) {
+    g = new THREE.CircleGeometry(0.5, 48).rotateX(-Math.PI / 2)
+    g.userData.shared = true
+    g.name = "token:cap"
+    capCache = g
+  }
+  return g
+}
+let capCache: THREE.BufferGeometry | null = null
+
+/** Unit ground quad (1 × 1, facing up, uv over [0,1]²) for blob shadows and soft rings. */
+export function tokenQuadGeometry(): THREE.BufferGeometry {
+  let g = quadCache
+  if (!g) {
+    g = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2)
+    g.userData.shared = true
+    g.name = "token:quad"
+    quadCache = g
+  }
+  return g
+}
+let quadCache: THREE.BufferGeometry | null = null
 
 /** Coloured ring on top of the base (outer radius 0.5). */
 export function tokenRingGeometry(): THREE.BufferGeometry {
@@ -105,16 +134,25 @@ export interface TokenTransforms {
   body: THREE.Matrix4
   /** Outline ring just above the base (markers, selection). */
   outline: THREE.Matrix4
+  /** Portrait disc on top of the body. */
+  cap: THREE.Matrix4
+  /** Soft blob shadow on the ground (unit quad). */
+  shadow: THREE.Matrix4
 }
 
 /** Instance transforms of a token at scale factor `s` (appear/disappear animation). */
 export function tokenTransforms(v: Pick<TokenVisual, "x" | "y" | "z" | "side" | "height">, s = 1, out?: TokenTransforms): TokenTransforms {
-  const o = out ?? { base: new THREE.Matrix4(), body: new THREE.Matrix4(), outline: new THREE.Matrix4() }
+  const o = out ?? { base: new THREE.Matrix4(), body: new THREE.Matrix4(), outline: new THREE.Matrix4(), cap: new THREE.Matrix4(), shadow: new THREE.Matrix4() }
   const d = v.side * 0.9 * s
   o.base.makeScale(d, s, d).setPosition(v.x, v.y, v.z)
   const bd = v.side * 0.45 * s
-  o.body.makeScale(bd, Math.max(0.1, v.height - TOKEN_BASE_HEIGHT) * s, bd).setPosition(v.x, v.y + TOKEN_BASE_HEIGHT * s, v.z)
+  const bodyH = Math.max(0.1, v.height - TOKEN_BASE_HEIGHT) * s
+  o.body.makeScale(bd, bodyH, bd).setPosition(v.x, v.y + TOKEN_BASE_HEIGHT * s, v.z)
   const od = v.side * 1.02 * s
   o.outline.makeScale(od, 1, od).setPosition(v.x, v.y + TOKEN_BASE_HEIGHT + 0.03, v.z)
+  const cd = bd * 1.02
+  o.cap.makeScale(cd, 1, cd).setPosition(v.x, v.y + TOKEN_BASE_HEIGHT * s + bodyH + 0.02, v.z)
+  const sd = v.side * 1.3 * s
+  o.shadow.makeScale(sd, 1, sd).setPosition(v.x, v.y + 0.03, v.z)
   return o
 }

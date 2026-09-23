@@ -86,8 +86,9 @@ export interface PlayerSceneInfo {
 }
 
 /**
- * A level's battlemap image as a player sees it: only its placement. Pixels arrive as one tile per
- * grid cell, and only for cells in this player's explored mask (net/assets BackdropTileSource).
+ * A level's battlemap image as a player sees it: only its placement. Pixels arrive separately, only
+ * for cells in this player's explored mask (Supabase: per-player chunks announced by `{t: "tiles"}`,
+ * see net/assets/chunks.ts; cropped per cell by net/assets BackdropTileSource).
  */
 export interface PlayerBackdrop {
   rect: Rect
@@ -208,6 +209,13 @@ export type HostToClient =
   | { t: "patch"; epoch: string; baseSeq: number; seq: number; ops: PatchOp[]; nonce?: string; results?: RequestResult[] }
   | { t: "sync"; epoch: string; seq: number }
   | { t: "result"; epoch: string; seq: number; result: RequestResult }
+  /**
+   * Backdrop tiles (ARCHITECTURE §9): the player's uploaded chunks of explored cells on a level, as
+   * [ci, cj, cellMask] (net/assets/chunks.ts; mask 0 = removed). `reset`: the list replaces everything
+   * known for the level. Outside the seq order (idempotent; sent before the patch revealing the cells
+   * when the uploads finish in time, else when they do).
+   */
+  | { t: "tiles"; epoch: string; levelId: Id; chunks: Array<[number, number, number]>; reset?: boolean }
   | { t: "kicked"; reason: string }
 
 /** host → everyone on topic `session:{sid}:host` (DM-only writers). Host liveness = DM presence there. */

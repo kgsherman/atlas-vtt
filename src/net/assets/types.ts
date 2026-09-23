@@ -3,11 +3,14 @@
  *
  * DM side: images are stored owner-private (Supabase Storage bucket `scene-assets`, or IndexedDB in
  * local mode) and referenced from the scene by id (`Scene.assets`, `Level.backdrop`).
- * Player side: players NEVER receive a whole image. During a session the host cuts the backdrop into
- * one tile per grid cell and publishes a tile only for cells that player has explored (Supabase:
- * bucket `session-tiles` + `player_tiles` grants enforced by storage RLS).
+ * Player side: players NEVER receive a whole image. During a session the host uploads, per player,
+ * chunks of the cells that player has explored (Supabase: bucket `session-tiles`, path
+ * `{sessionId}/{userId}/{levelId}/{ci}_{cj}.webp`, readable only by that player and the DM; see
+ * ./chunks.ts) and announces them with `{t: "tiles"}` messages.
  */
 import type { Cell, Id } from "@/core/scene/types"
+
+import type { ChunkEntry } from "./chunks"
 
 export type AssetMime = "image/webp" | "image/png" | "image/jpeg"
 
@@ -22,6 +25,11 @@ export interface AssetMeta {
   bytes: number
 }
 
+/**
+ * `sceneId` is always the document's own `Scene.id` (not the library's storage row id): the editor,
+ * the importer and duplicate/import in the library store and copy images under it, and the host reads
+ * them with it (then, as a fallback, with the session's scene row id).
+ */
 export interface AssetStore {
   readonly mode: "supabase" | "local"
   /** Store an (already normalised) image for a scene. */
@@ -32,14 +40,30 @@ export interface AssetStore {
   copyImages(fromSceneId: Id, toSceneId: Id, assetIds: Id[]): Promise<void>
 
   // ---- host side, during a session -------------------------------------------------------------
-  /** Upload tiles (idempotent; skips tiles already published this session). */
+  /**
+   * Upload (replace) one player's chunk of explored-cell tiles (Supabase; a no-op in local mode, where
+   * the player's tile source crops the locally stored image itself).
+   */
+  putTileChunk(sessionId: string, userId: string, levelId: Id, ci: number, cj: number, blob: Blob): Promise<void>
+  /** Delete a player's chunks (a fog reset emptied them). */
+  deleteTileChunks(sessionId: string, userId: string, levelId: Id, chunks: Array<{ ci: number; cj: number }>): Promise<void>
+  /** Delete every tile chunk of a session (the DM, after ending it). Returns the number removed. */
+  removeSessionTiles(sessionId: string): Promise<number>
+  /**
+   * Superseded per-cell tile API (one shared object per cell + `player_tiles` grants): kept for the
+   * storage policies' compatibility tests; the host no longer uses it.
+   */
   publishTiles(sessionId: string, levelId: Id, tiles: Array<{ cell: Cell; blob: Blob }>): Promise<void>
-  /** Grant a player read access to published tiles (fenced by the host epoch). */
   grantTiles(sessionId: string, hostEpoch: number, userId: string, levelId: Id, cells: Cell[]): Promise<void>
 }
 
-/** Player side: fetch the tile for an explored cell (null if not (yet) granted / not published). */
+/** Player side: fetch the tile for an explored cell (null if not (yet) available). */
 export interface BackdropTileSource {
   getTile(levelId: Id, cell: Cell): Promise<ImageBitmap | null>
+  /**
+   * The host's `{t: "tiles"}` announcement: which cells each of this player's chunks holds (reset = the
+   * level's list replaces what was known). Sources that crop locally ignore it.
+   */
+  setChunks?(levelId: Id, chunks: ChunkEntry[], reset: boolean): void
   dispose(): void
 }

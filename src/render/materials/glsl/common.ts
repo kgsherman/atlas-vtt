@@ -18,10 +18,13 @@ export const SHARED_UNIFORMS_GLSL = /* glsl */ `
 
 // Point lights, 4 vec4 per slot (see render/lighting/uniforms.ts):
 //   [0] position.xyz, dimRadius  [1] radiance.rgb, brightRadius
-//   [2] tile.xy, tile size (0 = unshadowed), flags (1 = wide PCF)  [3] capture origin.xyz, 0
+//   [2] tile.xy, tile size (0 = unshadowed), flags (1 = wide PCF, 2 = hi-res atlas, 4 = soft shadows)
+//   [3] capture origin.xyz, source radius (ft, soft shadows)
 uniform vec4 uLights[AT_MAX_LIGHTS * 4];
 uniform int uLightCount;
 uniform sampler2D uLightAtlas;
+// Ultra tier: 1024² tiles of the highest-priority lights (flag 2); a 1×1 placeholder otherwise.
+uniform sampler2D uLightAtlasHi;
 
 // Ambient fill under cover / under open sky, sky exposure map (straight-down depth map).
 uniform vec3 uAmbient;
@@ -52,20 +55,35 @@ uniform float uGpuRefine;
 // Host masks, one RGBA layer per level: r = perceived, g = explored, b = sunlit, a = grade / 3.
 uniform sampler2DArray uMasks;
 uniform vec4 uMaskGrid; // 1/(width·cell), 1/(depth·cell), texture width, texture height
+
+// Seconds (wrapped), for animated surfaces (water).
+uniform float uTime;
+// x = emissive scale of flames / glows (> 1 when the main pass renders HDR for bloom), y = glow sprite
+// strength, z = 1 when the main pass renders into the HDR post target, w = unused.
+uniform vec4 uRenderParams;
 `
 
 export const COMMON_FUNCTIONS_GLSL = /* glsl */ `
+// Quality tier (0 low, 1 medium, 2 high, 3 ultra), defined per material by the lighting system.
+#ifndef AT_TIER
+#define AT_TIER 0
+#endif
 #define AT_DIM_FLOOR 0.22
 #define AT_BRIGHT_FLOOR 0.5
 // Monochrome senses, scaled by atSenseTone (0.25 to 1): darkness seen by darkvision reads as dim light, so its
-// grey stays below a darkvision-lifted colour cell (AT_BRIGHT_FLOOR × albedo); blindsight is darker.
+// grey stays below a darkvision-lifted colour cell (AT_BRIGHT_FLOOR × albedo, raised to the grey's luma
+// for dark albedo, see atGradeColour); blindsight is darker.
 #define AT_DARKVISION_LEVEL 0.16
 #define AT_BLINDSIGHT_LEVEL 0.11
 #define AT_BLINDSIGHT_TINT vec3(0.02, 0.05, 0.09)
 #define AT_MEMORY_SCALE 0.17
 #define AT_PREVIEW_SCALE 0.3
-// DM views (vision off): unlit areas keep this much reflected light so dark rooms stay readable.
-#define AT_DM_FLOOR 0.05
+// DM views (vision off): unlit areas keep this much reflected light so dark rooms stay readable, and
+// lit ones (a light, the sky or the sun/moon reaches them) at least AT_DM_LIT_FLOOR — between a
+// normal-sighted player's dim colour (AT_DIM_FLOOR) and darkvision's (AT_BRIGHT_FLOOR): the DM reads a
+// moonlit battlemap at least as well as their players, and still sees where the light ends.
+#define AT_DM_FLOOR 0.08
+#define AT_DM_LIT_FLOOR 0.4
 // Caps (surface class 2: tops of walls, doors, pillars, props) are tested for light / sky / sun from
 // AT_CAP_INSET ft inside their solid, with a strict comparison (AT_CAP_EPS), instead of the outward
 // normal offset: a cap touching the underside of a slab lies ON the slab's back face (the stored
@@ -198,34 +216,102 @@ bool atCapCovered(sampler2D atlas, vec3 tile, vec3 q, vec3 n) {
   return atPlaneDist(i, s, q, n, dist) > stored - AT_CAP_EPS;
 }
 
-// Point-light shadow: receiver normal offset q = p + n·k·d, k = 1.5·sqrt(4π)/(tile − 2), measured from
-// the tile's capture origin (l3.xyz). Taps compare the receiver's own distance: receiver-plane distances
-// would leak light at contacts (a floor's plane runs under the wall standing on it, and taps aimed there
-// pass). Caps use the inset rule (AT_CAP_INSET): covered (probed on the cap's plane, see atCapCovered)
-// → dark, else the same filter. l2 = (tile x, tile y, tile size, flags).
-float atPointShadow(vec4 l2, vec3 origin, vec3 p, vec3 n, bool cap) {
-  vec3 rel = p - origin;
+#if AT_TIER >= 3
+// Rotated Poisson disc for the soft-shadow taps (unit disc).
+const vec2 AT_POISSON[12] = vec2[12](
+  vec2(-0.326, -0.406), vec2(-0.840, -0.074), vec2(-0.696, 0.457), vec2(-0.203, 0.621),
+  vec2(0.962, -0.195), vec2(0.473, -0.480), vec2(0.519, 0.767), vec2(0.185, -0.893),
+  vec2(0.507, 0.064), vec2(0.896, 0.412), vec2(-0.322, -0.933), vec2(-0.792, -0.598)
+);
+
+// Interleaved gradient noise (per-pixel tap rotation; the grain hides the pattern).
+float atIgn(vec2 px) {
+  return fract(52.9829189 * fract(dot(px, vec2(0.06711056, 0.00583715))));
+}
+
+// PCSS-style soft shadow in a distance tile: a blocker search over the directions through which the
+// light's disc (radius srcRadius ft) can be hidden from q, then a PCF disc sized by the penumbra
+// estimate srcRadius·(d − dBlocker)/dBlocker (contact-hardening). Taps are clamped to the tile
+// interior; with no blocker in the search disc it falls back to the 2x2 bilinear filter.
+float atPcss(sampler2D atlas, vec3 tile, vec3 q, float eps, float srcRadius) {
+  float dist = length(q);
+  if (dist < 1e-4) return 1.0;
+  vec2 uv = atOctEncode(q / dist);
+  float s = tile.z - 2.0;
+  vec2 f = (uv * 0.5 + 0.5) * s - 0.5;
+  ivec2 base = ivec2(tile.xy) + ivec2(1);
+  // Radians per texel of the octahedral map (average; the map is close to equal-area).
+  float texAng = AT_SQRT_4PI / s;
+  float a = atIgn(gl_FragCoord.xy) * 6.2831853;
+  vec2 rx = vec2(cos(a), sin(a));
+  vec2 ry = vec2(-rx.y, rx.x);
+  float searchTex = clamp(2.0 * srcRadius / (dist * texAng), 1.0, 16.0);
+  float sum = 0.0;
+  float n = 0.0;
+  for (int i = 0; i < 8; i++) {
+    vec2 o = (rx * AT_POISSON[i].x + ry * AT_POISSON[i].y) * searchTex;
+    float d = texelFetch(atlas, base + ivec2(clamp(floor(f + o + 0.5), vec2(0.0), vec2(s - 1.0))), 0).r;
+    if (d + eps < dist) {
+      sum += d;
+      n += 1.0;
+    }
+  }
+  if (n < 0.5) return atPcf(atlas, tile, q, eps, false);
+  float dB = sum / n;
+  float r = clamp(srcRadius * (dist - dB) / max(dB, 0.05) / (dist * texAng), 0.0, 14.0);
+  if (r < 1.25) return atPcf(atlas, tile, q, eps, true);
+  float lit = 0.0;
+  for (int i = 0; i < 12; i++) {
+    vec2 o = (rx * AT_POISSON[i].x + ry * AT_POISSON[i].y) * r;
+    float d = texelFetch(atlas, base + ivec2(clamp(floor(f + o + 0.5), vec2(0.0), vec2(s - 1.0))), 0).r;
+    lit += step(dist, d + eps);
+  }
+  return lit / 12.0;
+}
+#endif
+
+// Point-light shadow in one atlas: receiver normal offset q = p + n·k·d, k = 1.5·sqrt(4π)/(tile − 2),
+// measured from the tile's capture origin (l3.xyz). Taps compare the receiver's own distance: receiver-plane
+// distances would leak light at contacts (a floor's plane runs under the wall standing on it, and taps aimed
+// there pass). Caps use the inset rule (AT_CAP_INSET): covered (probed on the cap's plane, see atCapCovered)
+// → dark, else the same filter. l2 = (tile x, tile y, tile size, flags), l3.w = source radius.
+float atShadowIn(sampler2D atlas, vec4 l2, vec4 l3, vec3 p, vec3 n, bool cap) {
+  vec3 rel = p - l3.xyz;
   float d = length(rel);
   float k = 1.5 * AT_SQRT_4PI / (l2.z - 2.0);
-  bool wide = (int(l2.w + 0.5) & 1) != 0;
+  int flags = int(l2.w + 0.5);
+  bool wide = (flags & 1) != 0;
   if (cap) {
     vec3 qc = rel - n * AT_CAP_INSET;
     // Probe coverage one filter footprint toward the light (octahedral.ts capCoverageProbe): a covering
     // slab extends past the cap, while a free cap's own far edge no longer reaches the probed texel.
     float sinA = max(dot(-rel, n) / max(d, 1e-4), 0.15);
     vec3 probe = qc + atHoriz(-rel) * min(0.5, k * d / sinA);
-    if (atCapCovered(uLightAtlas, l2.xyz, probe, n)) return 0.0;
-    return atPcf(uLightAtlas, l2.xyz, qc, -AT_CAP_EPS, wide);
+    if (atCapCovered(atlas, l2.xyz, probe, n)) return 0.0;
+    return atPcf(atlas, l2.xyz, qc, -AT_CAP_EPS, wide);
   }
-  return atPcf(uLightAtlas, l2.xyz, rel + n * (k * d), AT_DIST_EPS, wide);
+#if AT_TIER >= 3
+  if ((flags & 4) != 0) return atPcss(atlas, l2.xyz, rel + n * (k * d), AT_DIST_EPS, l3.w);
+#endif
+  return atPcf(atlas, l2.xyz, rel + n * (k * d), AT_DIST_EPS, wide);
+}
+
+float atPointShadow(vec4 l2, vec4 l3, vec3 p, vec3 n, bool cap) {
+#if AT_TIER >= 3
+  if ((int(l2.w + 0.5) & 2) != 0) return atShadowIn(uLightAtlasHi, l2, l3, p, n, cap);
+#endif
+  return atShadowIn(uLightAtlas, l2, l3, p, n, cap);
 }
 
 // Sum of point-light radiance at p (culled by dim radius and N·L before any shadow tap). "lit" returns
 // how surely some light grants at least dim light at p by the rules (static dim radius, not shadowed;
 // softened over the last 0.5 ft and by the shadow filter), for the perception refinement.
-vec3 atPointLights(vec3 p, vec3 n, bool shadows, bool cap, out float lit) {
+// n = geometric normal (culling, shadow offsets); nb = shading normal (bump-mapped detail, or n).
+// gloss > 0 adds a Blinn-Phong highlight toward the view direction v into spec (water, metal, marble).
+vec3 atPointLights(vec3 p, vec3 n, vec3 nb, bool shadows, bool cap, out float lit, vec3 v, float gloss, inout vec3 spec) {
   vec3 sum = vec3(0.0);
   lit = 0.0;
+  float specPow = 12.0 + 180.0 * gloss * gloss;
   for (int i = 0; i < AT_MAX_LIGHTS; i++) {
     if (i >= uLightCount) break;
     vec4 l0 = uLights[i * 4];
@@ -234,19 +320,30 @@ vec3 atPointLights(vec3 p, vec3 n, bool shadows, bool cap, out float lit) {
     if (d >= l0.w) continue;
     float inRange = 1.0 - atSmoothstepSafe(l0.w - 0.5, l0.w, d);
     vec4 l2 = uLights[i * 4 + 2];
-    float lam = atSoftLambert(dot(n, toL / max(d, 1e-4)));
+    vec3 L = toL / max(d, 1e-4);
+    float lam = atSoftLambert(dot(n, L));
     if (lam <= 0.0) {
       // No light term. By the rules an unshadowed light still counts (it shines through everything); a
       // shadowed one would have to come through the surface's own solid.
       if (l2.z < 0.5) lit = max(lit, inRange);
       continue;
     }
+#if AT_TIER >= 2
+    lam = atSoftLambert(dot(nb, L)) * min(1.0, lam * 8.0);
+#endif
     vec4 l1 = uLights[i * 4 + 1];
-    float a = atLightFalloff(d, l1.w, l0.w) * lam;
+    float fall = atLightFalloff(d, l1.w, l0.w);
+    float a = fall * lam;
     float sh = 1.0;
-    if (shadows && l2.z > 0.5) sh = atPointShadow(l2, uLights[i * 4 + 3].xyz, p, n, cap);
+    if (shadows && l2.z > 0.5) sh = atPointShadow(l2, uLights[i * 4 + 3], p, n, cap);
     lit = max(lit, inRange * sh);
     sum += l1.rgb * (a * sh);
+#if AT_TIER >= 2
+    if (gloss > 0.0 && sh > 0.0) {
+      float nh = max(dot(nb, normalize(L + v)), 0.0);
+      spec += l1.rgb * (fall * sh * gloss * pow(nh, specPow) * (specPow + 8.0) * 0.04);
+    }
+#endif
   }
   return sum;
 }
@@ -270,6 +367,23 @@ float atDirShadow(sampler2DShadow map, mat4 m, vec3 p, vec3 n, float texel, floa
   return s * 0.25;
 }
 
+#if AT_TIER >= 3
+// Wide, rotated Poisson PCF on a directional depth map (soft shadows of the sun / moon on ultra).
+float atDirShadowSoft(sampler2DShadow map, mat4 m, vec3 p, vec3 n, float texel, float bias, float normalOffset, float reversed) {
+  vec4 sc = m * vec4(p + n * normalOffset, 1.0);
+  vec3 c = sc.xyz / sc.w;
+  if (c.x <= 0.0 || c.y <= 0.0 || c.x >= 1.0 || c.y >= 1.0 || c.z >= 1.0) return 1.0;
+  float ref = c.z - bias;
+  ref = reversed > 0.5 ? 1.0 - ref : ref;
+  float a = atIgn(gl_FragCoord.xy) * 6.2831853;
+  vec2 rx = vec2(cos(a), sin(a)) * (texel * 2.2);
+  vec2 ry = vec2(-rx.y, rx.x);
+  float s = 0.0;
+  for (int i = 0; i < 12; i++) s += texture(map, vec3(c.xy + rx * AT_POISSON[i].x + ry * AT_POISSON[i].y, ref));
+  return s / 12.0;
+}
+#endif
+
 // Ambient fill: mix of covered and sky-exposed fill by the sky exposure map (disabled in fog mode,
 // where unexplored roofs are missing from the player's scene).
 vec3 atFill(vec3 p, vec3 n, bool cap) {
@@ -281,16 +395,38 @@ vec3 atFill(vec3 p, vec3 n, bool cap) {
   return mix(uAmbient, uSkyAmbient, exposure);
 }
 
-vec3 atSunTerm(vec3 p, vec3 n, bool cap) {
+vec3 atSunTerm(vec3 p, vec3 n, vec3 nb, bool cap, vec3 v, float gloss, inout vec3 spec) {
   if (uSunColor.r + uSunColor.g + uSunColor.b <= 0.0) return vec3(0.0);
   float lam = atSoftLambert(dot(n, uSunDir));
   if (lam <= 0.0) return vec3(0.0);
+#if AT_TIER >= 2
+  lam = atSoftLambert(dot(nb, uSunDir)) * min(1.0, lam * 8.0);
+#endif
   // Caps: hardware PCF compares one depth against 2x2 texels, so a cap on an occluder's back-face plane
   // needs an inset that grows with the slope (1.5 texels × cot(elevation), uSunParams.w = 1.5 texels).
   float slope = min(length(uSunDir.xz) / max(uSunDir.y, 0.1), 10.0);
   float offset = cap ? -(AT_CAP_INSET + uSunParams.w * slope) : uSunParams.w;
   float bias = cap ? -uSunParams.y * (AT_CAP_EPS / AT_DIR_BIAS_FT) : uSunParams.y;
-  return uSunColor * (lam * atDirShadow(uSunShadow, uSunMatrix, p, n, uSunParams.x, bias, offset, uSunParams.z, true));
+#if AT_TIER >= 3
+  // Ultra: soft moon / sun shadows (12 rotated Poisson taps of hardware PCF, ~3 texels wide); caps keep
+  // the narrow filter their inset rule is tuned for.
+  float sh = cap ? atDirShadow(uSunShadow, uSunMatrix, p, n, uSunParams.x, bias, offset, uSunParams.z, true) : atDirShadowSoft(uSunShadow, uSunMatrix, p, n, uSunParams.x, bias, offset, uSunParams.z);
+#else
+  float sh = atDirShadow(uSunShadow, uSunMatrix, p, n, uSunParams.x, bias, offset, uSunParams.z, true);
+#endif
+#if AT_TIER >= 2
+  if (gloss > 0.0 && sh > 0.0) {
+    float pw = 16.0 + 240.0 * gloss * gloss;
+    spec += uSunColor * (sh * gloss * pow(max(dot(nb, normalize(uSunDir + v)), 0.0), pw) * (pw + 8.0) * 0.04);
+  }
+#endif
+  return uSunColor * (lam * sh);
+}
+
+// Unit vector from p toward the viewer (orthographic cameras: the camera's back axis).
+vec3 atViewDir(vec3 p) {
+  if (isOrthographic) return normalize(vec3(viewMatrix[0][2], viewMatrix[1][2], viewMatrix[2][2]));
+  return normalize(cameraPosition - p);
 }
 
 // ---- Masks & viewers --------------------------------------------------------------------------
@@ -453,23 +589,30 @@ float atSenseShade(vec3 n) {
 // 1 blindsight (desaturated + tint).
 vec3 atGradeColour(float grade, vec3 albedo, vec3 light, bool darkvision, vec3 n) {
   vec3 lit = albedo * light;
+  float tone = atSenseTone(albedo) * atSenseShade(n);
   if (grade > 2.5) {
     // Lift by the light the surface actually reflects (a blue moon barely lights brown dirt), so the
     // floor is the same for every hue.
     float received = atLuma(lit) / max(atLuma(albedo), 1e-3);
     float lift = max((darkvision ? AT_BRIGHT_FLOOR : AT_DIM_FLOOR) - received, 0.0);
-    return lit + albedo * lift;
+    vec3 c = lit + albedo * lift;
+    // Darkvision: a lit surface never reads darker than the same surface in darkness (its grey). With
+    // dark albedo (night-painted battlemaps) AT_BRIGHT_FLOOR × albedo falls below the tone-compressed grey,
+    // and the edge of a light would show dark colour next to brighter grey. The difference is added as
+    // grey (scaling the colour up would oversaturate dark paint).
+    if (darkvision) c += vec3(max(AT_DARKVISION_LEVEL * tone - atLuma(c), 0.0));
+    return c;
   }
-  float tone = atSenseTone(albedo) * atSenseShade(n);
   if (grade > 1.5) return vec3(max(atLuma(lit), AT_DARKVISION_LEVEL * tone));
   return vec3(AT_BLINDSIGHT_LEVEL * tone) + AT_BLINDSIGHT_TINT;
 }
 
-// DM colour (vision off): the lit colour, with unlit areas lifted to a faint floor (AT_DM_FLOOR).
-vec3 atDmColour(vec3 albedo, vec3 light) {
+// DM colour (vision off): the lit colour, lifted to AT_DM_LIT_FLOOR where at least dim-lit (litHere = 1)
+// and to AT_DM_FLOOR elsewhere.
+vec3 atDmColour(vec3 albedo, vec3 light, float litHere) {
   vec3 lit = albedo * light;
   float received = atLuma(lit) / max(atLuma(albedo), 1e-3);
-  return lit + albedo * max(AT_DM_FLOOR - received, 0.0);
+  return lit + albedo * max(mix(AT_DM_FLOOR, AT_DM_LIT_FLOOR, clamp(litHere, 0.0, 1.0)) - received, 0.0);
 }
 
 // Explored memory: desaturated albedo x constant, no light terms.

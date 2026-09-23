@@ -1,16 +1,22 @@
 /**
  * Grid overlay on the active level: a mesh over the grid extent (flat plane, or a lattice draped on
- * the level's terrain) with a shader that draws anti-aliased cell lines from world XZ, fades them out
- * with distance from the view centre and when cells get too small on screen.
+ * the level's terrain) with a shader that draws thin anti-aliased cell lines from world XZ, fades them
+ * with distance from the view centre and out entirely when cells get small on screen (no moiré).
+ *
+ * Perception-aware: in player fog mode (vision "fog") lines are drawn only over EXPLORED cells of the
+ * level (host mask layer), so the grid never reveals the extent or shape of unexplored ground.
+ * When the main pass renders into the HDR post target, blending happens in linear space, which makes
+ * light lines on dark ground read much brighter: the opacity is lowered there (setHdr).
  */
 import * as THREE from "three"
 
 import type { GridSettings } from "@/core/scene/types"
 
 import type { GroundSampler } from "../builders/ground"
+import { placeholderMaskTexture } from "../materials/placeholders"
 
 const VERTEX = /* glsl */ `
-varying vec3 vWorld;
+out vec3 vWorld;
 void main() {
   vec4 w = modelMatrix * vec4(position, 1.0);
   vWorld = w.xyz;
@@ -19,32 +25,54 @@ void main() {
 `
 
 const FRAGMENT = /* glsl */ `
+layout(location = 0) out highp vec4 gridColor;
+in vec3 vWorld;
 uniform float uCell;
 uniform vec3 uColor;
 uniform float uOpacity;
 uniform vec2 uFadeCenter;
 uniform float uFadeRadius;
 uniform vec4 uExtent;
-varying vec3 vWorld;
+// Fog of war (shared with the world material): explored cells of the active level only.
+uniform sampler2DArray uMasks;
+uniform vec4 uMaskGrid;
+uniform int uVisionMode;
+uniform int uLayer;
 void main() {
   vec2 coord = vWorld.xz / uCell;
   vec2 fw = max(fwidth(coord), vec2(1e-5));
+  // Distance to the nearest line in pixels; lines ~1 px wide with a soft edge.
   vec2 g = abs(fract(coord - 0.5) - 0.5) / fw;
-  float line = 1.0 - min(min(g.x, g.y), 1.0);
-  // Too dense on screen (cells under ~6 px): fade out instead of moiré.
-  float density = 1.0 - smoothstep(0.12, 0.3, max(fw.x, fw.y));
+  float line = 1.0 - clamp(min(g.x, g.y) - 0.2, 0.0, 1.0);
+  // Small cells on screen (under ~10 px): fade out instead of moiré.
+  float density = 1.0 - smoothstep(0.08, 0.2, max(fw.x, fw.y));
   float d = length(vWorld.xz - uFadeCenter);
   float fade = 1.0 - smoothstep(uFadeRadius * 0.55, uFadeRadius, d);
   // The outer border of the grid extent is drawn a bit stronger.
   vec2 lo = (vWorld.xz - uExtent.xy) / (uCell * fw);
   vec2 hi = (uExtent.zw - vWorld.xz) / (uCell * fw);
   float border = 1.0 - min(min(min(abs(lo.x), abs(lo.y)), min(abs(hi.x), abs(hi.y))) * 0.5, 1.0);
-  float a = max(line * density * fade, border * 0.9) * uOpacity;
+  float a = max(line * density * fade, border * 0.8) * uOpacity;
+  if (uVisionMode == 1) {
+    vec2 uv = vWorld.xz * uMaskGrid.xy;
+    float explored = 0.0;
+    if (uLayer >= 0 && uv.x >= 0.0 && uv.y >= 0.0 && uv.x < 1.0 && uv.y < 1.0) {
+      explored = smoothstep(0.5, 1.0, texture(uMasks, vec3(uv, float(uLayer))).g);
+    }
+    a *= explored;
+  }
   if (a < 0.004) discard;
-  gl_FragColor = vec4(uColor, a);
-  #include <colorspace_fragment>
+  gridColor = linearToOutputTexel(vec4(uColor, a));
 }
 `
+
+/**
+ * Grid opacity for direct (sRGB-space blending) and HDR (linear-space blending) rendering. The line
+ * colour is a mid grey, which reads on dark (night) and bright (day) ground alike: it lifts the darks
+ * and pulls the brights down.
+ */
+export const GRID_OPACITY = { direct: 0.22, hdr: 0.13 }
+export const GRID_COLOR = 0.32
 
 export class GridOverlay {
   readonly mesh: THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>
@@ -52,15 +80,21 @@ export class GridOverlay {
 
   constructor() {
     const material = new THREE.ShaderMaterial({
+      name: "atlas-grid",
+      glslVersion: THREE.GLSL3,
       vertexShader: VERTEX,
       fragmentShader: FRAGMENT,
       uniforms: {
         uCell: { value: 5 },
-        uColor: { value: new THREE.Color(0.85, 0.87, 0.9) },
-        uOpacity: { value: 0.2 },
+        uColor: { value: new THREE.Color(GRID_COLOR, GRID_COLOR * 1.02, GRID_COLOR * 1.06) },
+        uOpacity: { value: GRID_OPACITY.direct },
         uFadeCenter: { value: new THREE.Vector2() },
         uFadeRadius: { value: 100 },
         uExtent: { value: new THREE.Vector4(0, 0, 100, 100) },
+        uMasks: { value: placeholderMaskTexture() as THREE.Texture },
+        uMaskGrid: { value: new THREE.Vector4(0, 0, 1, 1) },
+        uVisionMode: { value: 0 },
+        uLayer: { value: -1 },
       },
       transparent: true,
       depthWrite: false,
@@ -119,6 +153,23 @@ export class GridOverlay {
     pos.needsUpdate = true
     this.mesh.geometry.computeBoundingSphere()
     return true
+  }
+
+  /**
+   * Share the fog uniforms of the world material (host masks, mask grid, vision mode) and pick the
+   * active level's mask layer.
+   */
+  bindVision(uniforms: { uMasks: THREE.IUniform; uMaskGrid: THREE.IUniform; uVisionMode: THREE.IUniform }, layer: number): void {
+    const u = this.mesh.material.uniforms
+    u.uMasks = uniforms.uMasks
+    u.uMaskGrid = uniforms.uMaskGrid
+    u.uVisionMode = uniforms.uVisionMode
+    u.uLayer.value = layer
+  }
+
+  /** Main pass renders into the HDR post target (linear blending). */
+  setHdr(hdr: boolean): void {
+    this.mesh.material.uniforms.uOpacity.value = hdr ? GRID_OPACITY.hdr : GRID_OPACITY.direct
   }
 
   setFade(centerX: number, centerZ: number, radius: number): void {

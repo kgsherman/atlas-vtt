@@ -7,6 +7,11 @@
  * World, token, glass and flame materials come only from the LightingSystem (render/lighting), so all of
  * them honour fog; editor overlays use unlit three.js materials. Nothing here adds THREE.Light,
  * scene.fog, shadow maps or clipping planes.
+ *
+ * Frame (ARCHITECTURE §10): low / medium render straight to the canvas (tone mapping in the materials,
+ * context MSAA). High / ultra render the world into the post pipeline's HDR MSAA target, run AO (ultra),
+ * bloom and the composite onto the canvas, then draw the OVERLAY layer (outlines, previews, rulers, token
+ * rings) on top, depth-tested against the composited scene depth and untouched by tone mapping.
  */
 import * as THREE from "three"
 
@@ -26,9 +31,10 @@ import { OrbitCameraController } from "../cameras/orbit"
 import { TopDownCameraController } from "../cameras/topdown"
 import type { CameraController } from "../cameras/types"
 import type { Engine, EngineOptions, FrameStats, OverlayState, PickOptions, PickResult, Quality, SceneChange, ViewState } from "../contracts"
-import type { LightingSystem } from "../internal"
+import { LAYER, type LightingSystem } from "../internal"
 import { createLightingSystem } from "../lighting/system"
 import { precompileScene } from "../materials/util"
+import { DIRECT_EMISSIVE, POST_SETTINGS, PostPipeline, type PostSettings } from "../post/pipeline"
 import type { ObjectMeshRef } from "../overlays/highlight"
 import { OverlayManager } from "../overlays/manager"
 import { Picker } from "../picking/picker"
@@ -37,8 +43,14 @@ import { classifyStructure, diffScenes, gridRect, heightmapDiffRect, invalidatio
 import { GpuTimer } from "./gpuTimer"
 import { computeLevelPlan, effectiveActiveLevelId, type LevelPlanEntry } from "./levelPlan"
 import { LevelView, type LevelMaterials, type SharedMaterials } from "./levels"
-import { AdaptiveQuality, computePixelRatio, FrameTimeWindow, intervalFrameCost, PIXEL_BUDGET } from "./quality"
+import { pickInitialQuality } from "./autoQuality"
+import { BackdropManager, type BackdropOptions } from "./backdrops"
+import { AdaptiveQuality, computePixelRatio, FrameTimeWindow, intervalFrameCost, MAX_PIXEL_RATIO, PIXEL_BUDGET } from "./quality"
 import { TokenLayer } from "./tokens"
+
+const LAYERS_ALL = (1 << LAYER.VISUAL) | (1 << LAYER.OVERLAY)
+const LAYERS_WORLD = 1 << LAYER.VISUAL
+const LAYERS_OVERLAY = 1 << LAYER.OVERLAY
 
 export class AtlasEngine implements Engine {
   private readonly canvas: HTMLCanvasElement
@@ -57,6 +69,9 @@ export class AtlasEngine implements Engine {
   private readonly topdown: TopDownCameraController
   private controller: CameraController
   private gpuTimer: GpuTimer
+  /** High / ultra post-processing (null = direct rendering). */
+  private post: PostPipeline | null = null
+  private readonly backdrops: BackdropManager
 
   private view: ViewState = { ...DEFAULT_VIEW }
   private plan = new Map<Id, LevelPlanEntry>()
@@ -77,6 +92,7 @@ export class AtlasEngine implements Engine {
   private follow: { id: Id; key: string } | null = null
 
   private quality: Quality
+  private qualityFrozen = false
   private readonly adaptive: AdaptiveQuality
   private readonly frameWindow = new FrameTimeWindow(2000)
   private readonly frameListeners = new Set<(s: FrameStats) => void>()
@@ -86,6 +102,7 @@ export class AtlasEngine implements Engine {
   private sizeDirty = true
   private lastDpr = 0
   private running = false
+  private debugPaused = false
   private contextLost = false
   private disposed = false
   private errorLogged = false
@@ -116,7 +133,12 @@ export class AtlasEngine implements Engine {
       token: this.lighting.createTokenMaterial({ instanced: false }),
       glass: this.lighting.createOverlayMaterial({ kind: "glass" }),
       flame: this.lighting.createOverlayMaterial({ kind: "flame" }),
+      glow: this.lighting.createOverlayMaterial({ kind: "glow" }),
     }
+    this.backdrops = new BackdropManager(this.renderer, this.quality, (levelId, texture, rect, opacity, tintWalls) =>
+      this.lighting.setLevelBackdrop(levelId, texture, rect, opacity, tintWalls)
+    )
+    this.configurePost(this.quality)
 
     this.worldRoot.name = "world"
     this.tokens = new TokenLayer(this.tokenInstancedMaterial)
@@ -198,6 +220,7 @@ export class AtlasEngine implements Engine {
     this.rebuildAllLevels(scene)
     this.tokens.syncScene(scene, performance.now(), false)
     this.lighting.setScene(scene, this.world)
+    this.backdrops.syncScene(scene)
     this.afterStructure(scene)
   }
 
@@ -218,10 +241,12 @@ export class AtlasEngine implements Engine {
         this.rebuildAllLevels(scene)
         this.tokens.syncScene(scene, performance.now(), true)
         this.lighting.setScene(scene, this.world)
+        this.backdrops.syncScene(scene)
         this.afterStructure(scene)
         return
       }
       this.applyBackground(scene)
+      this.backdrops.syncScene(scene)
     }
     const dirty: DirtyRegion[] = []
     if (ch.objects && ch.objects.length > 0) dirty.push(...this.world.update(scene, occlusionClosure(prev, scene, ch.objects)))
@@ -302,8 +327,11 @@ export class AtlasEngine implements Engine {
     this.overlays.sceneChanged()
     if (!this.framed) {
       this.framed = true
-      this.orbit.frame(this.bounds, true)
-      this.topdown.frame(this.bounds, true)
+      // Frame the active level's footprint (not the whole storey stack, which pushes the camera back
+      // until the map is a small island in the middle of the screen).
+      const fb = this.frameBounds()
+      this.orbit.frame(fb, true)
+      this.topdown.frame(fb, true)
       // Both cameras look at the active level's plane.
       const y = this.activeElevation()
       for (const c of [this.orbit, this.topdown]) {
@@ -324,13 +352,16 @@ export class AtlasEngine implements Engine {
     this.root.background = new THREE.Color(this.view.vision === "fog" ? "#000000" : scene.environment.backgroundColor)
   }
 
-  /** Battlemap images: implemented by the map-image work (ARCHITECTURE §9). */
-  setLevelImage(_levelId: Id, _image: TexImageSource | null, _rect: { x: number; z: number; w: number; d: number } | null): void {
-    // Not yet supported: images are ignored until the backdrop pipeline lands.
+  /**
+   * Battlemap image of a level (ARCHITECTURE §9; engine/backdrops.ts). Opacity / tintWalls come from
+   * `opts`, else from the level document's `backdrop`, else opaque without wall tint.
+   */
+  setLevelImage(levelId: Id, image: TexImageSource | null, rect: { x: number; z: number; w: number; d: number } | null, opts?: BackdropOptions): void {
+    this.backdrops.set(levelId, image, rect, opts)
   }
 
-  updateLevelImage(_levelId: Id, _dirty?: { x: number; z: number; w: number; d: number }): void {
-    // See setLevelImage.
+  updateLevelImage(levelId: Id, dirty?: { x: number; z: number; w: number; d: number }): void {
+    this.backdrops.update(levelId, dirty)
   }
 
   previewTerrain(levelId: Id, heights: Float32Array | null, dirty: { x: number; z: number; w: number; d: number } | null): void {
@@ -450,13 +481,47 @@ export class AtlasEngine implements Engine {
 
   setQuality(q: Quality): void {
     this.adaptive.setCeiling(q)
+    // Image resolution follows the ceiling only (adaptive steps never re-upload map images).
+    this.backdrops.setQuality(q)
     this.applyQuality(q)
   }
 
+  async benchmarkQuality(): Promise<Quality> {
+    const q = await pickInitialQuality({ cssWidth: this.canvas.clientWidth || undefined, cssHeight: this.canvas.clientHeight || undefined })
+    if (!this.disposed) this.setQuality(q)
+    return q
+  }
+
   private applyQuality(q: Quality): void {
+    if (q === this.quality) return
     this.quality = q
     this.lighting.setQuality(q)
+    this.configurePost(q)
     this.sizeDirty = true
+    // Tier defines / post targets change the programs: compile them again up front.
+    this.precompiled = false
+    this.precompile()
+  }
+
+  /** Post pipeline and emissive parameters of a tier. */
+  private configurePost(q: Quality): void {
+    const settings = POST_SETTINGS[q]
+    if (settings) {
+      if (!this.post) this.post = new PostPipeline(this.renderer, settings)
+      else this.post.configure(settings)
+      const size = this.drawingBufferSize()
+      if (size) this.post.setSize(size.x, size.y)
+      this.lighting.setRenderParams({ hdr: true, emissive: settings.emissive, glow: settings.glow })
+    } else {
+      this.post?.dispose()
+      this.post = null
+      this.lighting.setRenderParams({ hdr: false, emissive: DIRECT_EMISSIVE.emissive, glow: DIRECT_EMISSIVE.glow })
+    }
+  }
+
+  private drawingBufferSize(): THREE.Vector2 | null {
+    const r = this.renderer as Partial<THREE.WebGLRenderer>
+    return typeof r.getDrawingBufferSize === "function" ? r.getDrawingBufferSize.call(this.renderer, new THREE.Vector2()) : null
   }
 
   resize(): void {
@@ -470,12 +535,16 @@ export class AtlasEngine implements Engine {
     if (w <= 0 || h <= 0) return
     const dpr = window.devicePixelRatio || 1
     this.lastDpr = dpr
-    const pr = computePixelRatio(w, h, dpr, PIXEL_BUDGET[this.quality])
+    const pr = computePixelRatio(w, h, dpr, PIXEL_BUDGET[this.quality], MAX_PIXEL_RATIO[this.quality])
     if (pr !== this.pixelRatio || w !== this.cssSize.w || h !== this.cssSize.h) {
       this.pixelRatio = pr
       this.cssSize = { w, h }
       this.renderer.setPixelRatio(pr)
       this.renderer.setSize(w, h, false)
+    }
+    if (this.post) {
+      const size = this.drawingBufferSize()
+      if (size) this.post.setSize(size.x, size.y)
     }
     this.orbit.setViewport(w, h)
     this.topdown.setViewport(w, h)
@@ -483,7 +552,7 @@ export class AtlasEngine implements Engine {
 
   /** Start/stop the loop with page visibility and context state. */
   private syncLoop(): void {
-    const shouldRun = !this.disposed && !this.contextLost && document.visibilityState !== "hidden"
+    const shouldRun = !this.disposed && !this.contextLost && !this.debugPaused && document.visibilityState !== "hidden"
     if (shouldRun === this.running) return
     this.running = shouldRun
     this.renderer.setAnimationLoop(shouldRun ? this.frame : null)
@@ -517,15 +586,20 @@ export class AtlasEngine implements Engine {
     this.animateDoors(dt)
     this.tokens.update({ scene: this.scene, plan: this.plan, view: this.view, overlays: this.overlays.current }, now)
     const timeSec = now / 1000
+    this.tokens.tick(timeSec)
     for (const lv of this.levels.values()) lv.animateFlames(timeSec, flameFlicker)
     this.overlays.update()
 
     const camera = this.controller.camera
     const ls = this.lighting.beforeRender(this.renderer, camera, timeSec)
+    // Fog-aware grid (explored cells only in player fog mode) and its blending for the target.
+    const active = this.activeLevelId()
+    this.overlays.grid.bindVision(this.lighting.maskUniforms(), active ? this.lighting.maskLayerOf(active) : -1)
+    this.overlays.grid.setHdr(this.post !== null)
     const info = this.renderer.info
     const calls0 = info.render.calls
     const tris0 = info.render.triangles
-    this.renderer.render(this.root, camera)
+    this.renderMain(camera, timeSec)
     const drawCalls = info.render.calls - calls0
     const triangles = info.render.triangles - tris0
     info.reset()
@@ -537,7 +611,7 @@ export class AtlasEngine implements Engine {
       this.frameWindow.push(now, dtMs)
       const gpu = this.gpuTimer.latestMs
       const cost = gpu !== null ? Math.max(cpuMs, gpu) : intervalFrameCost(dtMs, this.frameWindow.percentile(0.5), this.frameWindow.p95())
-      const step = this.adaptive.push(now, cost)
+      const step = this.qualityFrozen ? null : this.adaptive.push(now, cost)
       if (step) this.applyQuality(step)
     }
     if (this.frameListeners.size > 0) {
@@ -555,6 +629,36 @@ export class AtlasEngine implements Engine {
         quality: this.quality,
       }
       for (const cb of this.frameListeners) cb(stats)
+    }
+  }
+
+  /** World (+ overlays): straight to the canvas, or through the post pipeline with an overlay pass after. */
+  private renderMain(camera: THREE.Camera, timeSec: number): void {
+    const r = this.renderer
+    const post = this.post
+    const target = post?.target ?? null
+    if (!post || !target) {
+      camera.layers.mask = LAYERS_ALL
+      r.render(this.root, camera)
+      return
+    }
+    const background = this.root.background
+    const auto = r.autoClear
+    try {
+      camera.layers.mask = LAYERS_WORLD
+      r.setRenderTarget(target)
+      r.render(this.root, camera)
+      post.finish(camera, this.view.vision === "fog", timeSec)
+      // Overlays on the composited image: no clear (the background colour would force one).
+      camera.layers.mask = LAYERS_OVERLAY
+      this.root.background = null
+      r.autoClear = false
+      r.render(this.root, camera)
+    } finally {
+      this.root.background = background
+      r.autoClear = auto
+      camera.layers.mask = LAYERS_ALL
+      r.setRenderTarget(null)
     }
   }
 
@@ -610,6 +714,7 @@ export class AtlasEngine implements Engine {
     // deleting objects that no longer exist.
     this.configureRenderer()
     this.gpuTimer = new GpuTimer(this.renderer.getContext() as WebGL2RenderingContext)
+    this.backdrops.invalidate()
     this.precompiled = false
     this.precompile()
     this.sizeDirty = true
@@ -646,7 +751,15 @@ export class AtlasEngine implements Engine {
     add(this.tokenInstancedMaterial, true)
     add(this.shared.flame, true)
     add(this.shared.glass, false)
-    void precompileScene(this.renderer, holder, this.controller.camera, this.root).then(() => {
+    if (this.shared.glow) add(this.shared.glow, true)
+    // Programs depend on the target (tone mapping / output transform): compile for the one the main pass uses.
+    const r = this.renderer as Partial<THREE.WebGLRenderer>
+    const prev = r.getRenderTarget?.call(this.renderer) ?? null
+    const target = this.post?.target ?? null
+    if (target) r.setRenderTarget?.call(this.renderer, target)
+    const done = precompileScene(this.renderer, holder, this.controller.camera, this.root)
+    if (target) r.setRenderTarget?.call(this.renderer, prev)
+    void done.then(() => {
       for (const c of holder.children) if ((c as THREE.InstancedMesh).isInstancedMesh) (c as THREE.InstancedMesh).dispose()
     })
   }
@@ -667,8 +780,16 @@ export class AtlasEngine implements Engine {
     this.controller.focus(point, opts)
   }
 
+  /** Bounds for framing: the grid extent around the active level's ground (a storey tall). */
+  private frameBounds(): Bounds3 {
+    const y = this.activeElevation()
+    const id = this.activeLevelId()
+    const h = id && this.scene ? Math.min(this.scene.levels[id].height, 12) : 10
+    return { min: { x: this.bounds.min.x, y: y - 1, z: this.bounds.min.z }, max: { x: this.bounds.max.x, y: y + h * 0.6, z: this.bounds.max.z } }
+  }
+
   frameScene(): void {
-    this.controller.frame(this.bounds)
+    this.controller.frame(this.frameBounds())
     // Keep looking at the active level's plane.
     const t = this.controller.getTarget()
     this.controller.setTarget({ x: t.x, y: this.activeElevation(), z: t.z }, false)
@@ -703,6 +824,40 @@ export class AtlasEngine implements Engine {
     const sorted = times.slice().sort((a, b) => a - b)
     const at = (q: number) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] ?? 0
     return { frames, meanMs: times.reduce((a, b) => a + b, 0) / Math.max(1, times.length), medianMs: at(0.5), p95Ms: at(0.95) }
+  }
+
+  /**
+   * Dev/automation helper (not part of the Engine contract): force the shaders' AT_TIER define (0..3)
+   * independently of the quality tier, to measure feature costs; null restores the tier's own.
+   */
+  debugShaderTier(tier: number | null): void {
+    const tiers = (this.lighting as { tiers?: { set(t: number): boolean } }).tiers
+    tiers?.set(tier ?? { low: 0, medium: 1, high: 2, ultra: 3 }[this.quality])
+  }
+
+  /** Dev/automation helper: tweak the current tier's post-processing (tuning; lost on a tier change). */
+  debugPostSettings(patch: Partial<PostSettings> & { view?: number }): void {
+    if (!this.post) return
+    if (patch.view !== undefined) this.post.debugView = patch.view
+    const next = { ...this.post.current, ...patch }
+    this.post.configure(next)
+    const size = this.drawingBufferSize()
+    if (size) this.post.setSize(size.x, size.y)
+    this.lighting.setRenderParams({ hdr: true, emissive: next.emissive, glow: next.glow })
+  }
+
+  /**
+   * Dev/automation helper: stop / resume rendering (the page stays live). Headless browsers never hide
+   * background tabs, so measurements pause the other tabs' engines to keep the GPU to one renderer.
+   */
+  debugPause(paused: boolean): void {
+    this.debugPaused = paused
+    this.syncLoop()
+  }
+
+  /** Dev/automation helper: freeze adaptive quality (benchmarks measure one tier). */
+  debugFreezeQuality(frozen: boolean): void {
+    this.qualityFrozen = frozen
   }
 
   /** Dev/automation helper (not part of the Engine contract): orbit camera direction, radians. */
@@ -778,7 +933,11 @@ export class AtlasEngine implements Engine {
     this.shared.token.dispose()
     this.shared.glass.dispose()
     this.shared.flame.dispose()
+    this.shared.glow?.dispose()
     this.tokenInstancedMaterial.dispose()
+    this.backdrops.dispose()
+    this.post?.dispose()
+    this.post = null
     this.lighting.dispose()
     this.gpuTimer.dispose()
     this.frameListeners.clear()

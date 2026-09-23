@@ -225,11 +225,11 @@ begin
   perform pg_temp.eq('catalog: authenticated can execute exactly the RPCs',
     (select string_agg(p.proname, ',' order by p.proname) from pg_proc p
       where p.pronamespace = 'public'::regnamespace and has_function_privilege('authenticated', p.oid, 'execute')),
-    'claim_host,create_scene,create_session,end_session,get_shared_scene,join_session,list_session_members,save_scene_version,save_session_state,session_info,set_display_name,set_member_status,set_scene_visibility,upsert_player_view');
+    'claim_host,create_scene,create_session,end_session,get_shared_scene,grant_tiles,join_session,list_session_members,revoke_tiles,save_scene_version,save_session_state,session_info,set_display_name,set_member_status,set_scene_visibility,upsert_player_view');
   perform pg_temp.eq('catalog: authenticated can execute only the policy helpers in private',
     (select string_agg(p.proname, ',' order by p.proname) from pg_proc p
       where p.pronamespace = 'private'::regnamespace and has_function_privilege('authenticated', p.oid, 'execute')),
-    'is_active_member,is_session_dm,normalize_display_name,topic_kind,topic_sid,topic_uid');
+    'can_delete_session_tile,can_read_session_tile,can_write_session_tile,is_active_member,is_session_dm,normalize_display_name,topic_kind,topic_sid,topic_uid');
   perform pg_temp.eq('catalog: every public/private function pins an empty search_path',
     (select coalesce(string_agg(p.proname, ','), '') from pg_proc p
       where p.pronamespace in ('public'::regnamespace, 'private'::regnamespace)

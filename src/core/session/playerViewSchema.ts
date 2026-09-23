@@ -131,6 +131,41 @@ const light = z.strictObject({
 
 export const playerObjectSchema = z.discriminatedUnion("type", [floor, wall, door, window_, connector, pillar, prop, light])
 
+/** Max mask cells (matches the scene schema: 800×800). */
+const MAX_MASK_CELLS = 800 * 800
+
+/** A floor mask as kept in HOST memory (never on the wire): exact bitset length, bounded size. */
+const floorMask = z
+  .strictObject({
+    spacing: z.number().gt(0).max(100),
+    cols: z.int().min(1).max(4096),
+    rows: z.int().min(1).max(4096),
+    b64: base64.max(Math.ceil(MAX_MASK_CELLS / 8 / 3) * 4 + 4),
+  })
+  .refine((m) => m.cols * m.rows <= MAX_MASK_CELLS, "floor mask too large")
+  .refine((m) => {
+    const bytes = Math.ceil((m.cols * m.rows) / 8)
+    return m.b64.length === 4 * Math.ceil(bytes / 3)
+  }, "floor mask length does not match cols × rows")
+
+/** A remembered floor: the wire fields plus its coverage mask (sanitize.ts MemoryFloor). */
+const memoryFloor = z.strictObject({
+  id: objectId,
+  type: z.literal("floor"),
+  levelId: id,
+  rect,
+  material,
+  thickness: nonNeg.optional(),
+  mask: floorMask.optional(),
+})
+
+/**
+ * Remembered objects in GameState.memory (HOST side only, e.g. a persisted session_state): the wire
+ * allowlist, except that floors may keep their `mask` (the filter clips it and never sends it). Use
+ * this — not playerObjectSchema — to validate stored memory.
+ */
+export const memoryObjectSchema = z.discriminatedUnion("type", [memoryFloor, wall, door, window_, connector, pillar, prop, light])
+
 const vision = z.strictObject({ darkvision: nonNeg, blindsight: nonNeg, blind: z.boolean() })
 
 export const playerTokenSchema = z.strictObject({
@@ -183,6 +218,14 @@ const environment = z.strictObject({
   backgroundColor: color,
 })
 
+/** Backdrop placement only: an asset id, name, mask or pixels never fit (strict). */
+const backdrop = z.strictObject({
+  rect,
+  opacity: z.number().min(0).max(1),
+  tintWalls: z.boolean(),
+  tilePx: z.int().min(1).max(1024),
+})
+
 const encodedMask = z.strictObject({ width: z.int().min(1), depth: z.int().min(1), b64: base64, partial: base64.optional() })
 
 /** Record whose keys must equal each value's `id`. */
@@ -204,6 +247,7 @@ export const playerViewSchema = z.strictObject({
   tokens: keyedRecord(id, playerTokenSchema),
   terrain: z.record(id, z.record(z.string().regex(/^(0|[1-9]\d*),(0|[1-9]\d*)$/), base64)),
   masks: z.record(id, z.strictObject({ perception: encodedMask, explored: encodedMask, sunlit: encodedMask })),
+  backdrops: z.record(id, backdrop).optional(),
   controlledTokenIds: z.array(id),
   visionTokenIds: z.array(id),
   flags: z.strictObject({ movementLocked: z.boolean(), sharedVision: z.boolean(), enforceSpeed: z.boolean() }),
