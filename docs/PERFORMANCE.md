@@ -19,7 +19,11 @@ All world geometry uses one custom GLSL3 `ShaderMaterial` that does lighting, sh
 Lights are **uniform arrays** (`vec4 uLights[128]`), not three.js `Light` objects, so turning lights on/off,
 adding/removing them or changing their count never recompiles the shader (the loop bound is a uniform).
 No `scene.fog`, clipping planes or `renderer.shadowMap`; tone mapping and colour space are fixed; every variant
-is pre-compiled with `renderer.compileAsync` at load.
+is pre-compiled with `renderer.compileAsync` at load, and the engine draws nothing until those parallel compiles
+have landed (ARCHITECTURE §4.1 start-up hold): the first frame used to force every link synchronously (~2 s of
+blocked main thread on the Vineyard, ultra, RTX 5070 Ti through WSL; 1.1 s were still left when only the
+material variants were waited for, 0.4 s with the live scene compiled too, none once the capture programs
+and the first-use reflection were covered).
 
 ### 2. Light culling
 Every frame the CPU culls lights: off/hidden, dim sphere outside the camera frustum, or on a level hidden by the

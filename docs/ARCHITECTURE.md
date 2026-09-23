@@ -239,6 +239,18 @@ render exactly as without it, so the DM can build a dark level and still see whi
 always have `instanceColor`; ghost/token variants created up front; `renderer.compileAsync` at load.
 The world shader never uses `discard`/`gl_FragDepth` (keeps early-Z).
 
+Start-up hold (`Engine.getLoadState` / `onLoadState`, `EngineLoadState`): after a scene is set, a user quality
+change or a context restore, the engine compiles every program with `KHR_parallel_shader_compile` (material
+variants, the lighting system's capture programs against a render target, then stand-ins for whatever the
+live scene draws, per target) and draws nothing until they have landed ("compiling"); the frame's updates
+still run, so overlays and defines are current when the live scene is compiled. It then pays each program's
+first-use work (three.js reads the info logs and reflects uniforms) a few programs per frame under an 8 ms
+budget. Drawing earlier made three.js wait for every link on the main thread: ~2 s frozen and dark on the
+Vineyard's first load (RTX 5070 Ti, ultra), now a responsive page with a progress card and a 16.7 ms first
+frame. After the hold, "lighting" lasts until the first shadow / vision captures are done (≤ 1.5 s). The hold
+gives up after 20 s; without the extension compiles are synchronous and the state stays "ready".
+`EngineCanvas` shows the probe and both stages in a non-blocking card (`components/canvas/EngineLoading`).
+
 ### 4.2 Distance atlases
 
 A point light's shadow and a token's line of sight are the same query ("nearest occluder from P in

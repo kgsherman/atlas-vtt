@@ -18,6 +18,10 @@
  *
  * Adaptive tier steps compile the next tier's programs and fill its shadow atlases in the background, and
  * switch once both are ready (requestQuality); the user's setQuality applies at once.
+ *
+ * Start-up (and a user tier change, or a context restore) compiles every program with
+ * KHR_parallel_shader_compile; the loop holds its frames until those compiles land (getLoadState), since
+ * drawing earlier makes three.js wait for each link on the main thread (~2 s frozen on first load).
  */
 import * as THREE from "three"
 
@@ -36,7 +40,7 @@ import { sceneBounds, type Bounds3 } from "../cameras/fit"
 import { OrbitCameraController } from "../cameras/orbit"
 import { TopDownCameraController } from "../cameras/topdown"
 import type { CameraController } from "../cameras/types"
-import type { Engine, EngineOptions, FrameStats, OverlayState, PickOptions, PickResult, Quality, SceneChange, ViewState } from "../contracts"
+import type { Engine, EngineLoadState, EngineOptions, FrameStats, OverlayState, PickOptions, PickResult, Quality, SceneChange, ViewState } from "../contracts"
 import { LAYER, type LightingSystem } from "../internal"
 import { createLightingSystem } from "../lighting/system"
 import { precompileScene, TIER_DEFINE } from "../materials/util"
@@ -59,6 +63,27 @@ import { TokenLayer } from "./tokens"
 
 /** Longest wait for a background tier compile before switching anyway (compiling synchronously then). */
 export const TIER_COMPILE_DEADLINE_MS = 1500
+
+/** Main-thread time per held frame for programs' first-use work (at least one program per frame). */
+const WARM_BUDGET_MS = 8
+
+/** three.js WebGLProgram (not in its public types): the GL program and its lazy first-use reflection. */
+interface WarmableProgram {
+  program: WebGLProgram
+  getUniforms(): unknown
+  getAttributes(): unknown
+}
+
+/** Share of the load progress for compiling; the rest is the first shadow captures (settle). */
+const COMPILE_SHARE = 0.9
+
+/** Longest the loading state waits for the first shadow captures after a hold. */
+const SETTLE_MAX_MS = 1500
+
+const LOADED: EngineLoadState = { loading: false, stage: "ready", progress: 1 }
+
+/** Longest the loop holds its frames for start-up compiles before drawing anyway (compiling synchronously then). */
+export const HOLD_DEADLINE_MS = 20000
 
 interface PendingQuality {
   q: Quality
@@ -110,6 +135,18 @@ export class AtlasEngine implements Engine {
   /** Elevation the cameras' look-at point was last put on (see lookAtActiveLevel). */
   private lookElevation = 0
   private precompiled = false
+  /** Start-up / recompile programs still compiling in parallel (the loop holds its frames meanwhile). */
+  private compiling = 0
+  /** When the current hold began (performance.now), null when not holding. */
+  private holdSince: number | null = null
+  /** A (re)compile started: check the live scene's programs before the next frame draws. */
+  private liveCompileDue = false
+  /** Programs whose first-use work is done (warmPrograms). */
+  private readonly warmed = new WeakSet<object>()
+  private loadState: EngineLoadState = LOADED
+  /** When the frames after a hold began, while the first captures fill (settle). */
+  private settleSince: number | null = null
+  private readonly loadListeners = new Set<(s: EngineLoadState) => void>()
 
   /** Heightmap-brush previews: dense lattices per level. */
   private readonly previews = new Map<Id, Float32Array>()
@@ -669,7 +706,6 @@ export class AtlasEngine implements Engine {
     if (this.sizeDirty || window.devicePixelRatio !== this.lastDpr) this.applySize()
     this.gpuTimer.poll()
     const cpu0 = performance.now()
-    this.gpuTimer.begin()
 
     this.controller.update(dt)
     this.animateDoors(dt)
@@ -688,14 +724,18 @@ export class AtlasEngine implements Engine {
     this.tokens.tick(timeSec)
     for (const lv of this.levels.values()) lv.animateFlames(timeSec, flameFlicker)
     this.overlays.update()
-
-    this.commitPendingQuality(now)
-    const camera = this.controller.camera
-    const ls = this.lighting.beforeRender(this.renderer, camera, timeSec)
     // Fog-aware grid (explored cells only in player fog mode) and its blending for the target.
     const active = this.activeLevelId()
     this.overlays.grid.bindVision(this.lighting.maskUniforms(), active ? this.lighting.maskLayerOf(active) : -1)
     this.overlays.grid.setHdr(this.post !== null)
+    // Held frames still update (the live-scene compile needs this frame's overlays and defines), then draw nothing.
+    if (this.holdFrame(now)) return
+    this.gpuTimer.begin()
+
+    this.commitPendingQuality(now)
+    const camera = this.controller.camera
+    const ls = this.lighting.beforeRender(this.renderer, camera, timeSec)
+    this.settle(now, ls.tilesUpdated)
     const info = this.renderer.info
     const calls0 = info.render.calls
     const tris0 = info.render.triangles
@@ -839,10 +879,181 @@ export class AtlasEngine implements Engine {
     this.precompiled = true
     const holders = this.compileHolders((m) => m, this.quality)
     if (!holders) return
+    // Without parallel compilation the programs are built synchronously right here: nothing to wait for.
+    const parallel = this.parallelCompile()
+    this.liveCompileDue = parallel
     for (const h of holders) {
-      void this.compileHolderFor(h.holder, h.canvas ? null : (this.post?.target ?? null)).then(() => {
+      const done = this.compileHolderFor(h.holder, h.canvas ? null : (this.post?.target ?? null)).then(() => {
         for (const c of h.holder.children) if ((c as THREE.InstancedMesh).isInstancedMesh) (c as THREE.InstancedMesh).dispose()
       })
+      if (parallel) this.holdFor(done)
+    }
+    if (parallel) this.holdFor(this.lighting.precompile())
+  }
+
+  private parallelCompile(): boolean {
+    return this.renderer.extensions?.has?.("KHR_parallel_shader_compile") === true
+  }
+
+  /**
+   * Compile the programs of every object the main pass draws (world layer into the post target, overlay
+   * layer onto the canvas) through stand-ins sharing their geometry and material, one per material and
+   * object kind. Holds the frames when that created programs.
+   */
+  private compileLiveScene(): void {
+    const world = new THREE.Object3D()
+    const overlay = new THREE.Object3D()
+    const seen = new Set<string>()
+    const worldLayer = new THREE.Layers()
+    worldLayer.mask = LAYERS_WORLD
+    const direct = !this.post?.target
+    this.root.traverse((o) => {
+      const r = o as THREE.Mesh
+      if (!r.material || !(r.isMesh || (o as THREE.Line).isLine || (o as THREE.Points).isPoints || (o as THREE.Sprite).isSprite)) return
+      const inst = (o as THREE.InstancedMesh).isInstancedMesh ? (o as THREE.InstancedMesh) : null
+      const toWorld = direct || o.layers.test(worldLayer)
+      const mats = Array.isArray(r.material) ? r.material : [r.material]
+      const key = `${o.type}|${mats.map((m) => m.uuid).join(",")}|${inst?.instanceColor ? 1 : 0}|${toWorld ? 1 : 0}`
+      if (seen.has(key)) return
+      seen.add(key)
+      let stand: THREE.Object3D
+      if (inst) {
+        const im = new THREE.InstancedMesh(inst.geometry, inst.material, 1)
+        if (inst.instanceColor) im.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(3), 3)
+        stand = im
+      } else {
+        // The object kind (line, points, sprite) is not part of a program's key: a plain mesh stands in.
+        stand = new THREE.Mesh(r.geometry, r.material)
+      }
+      ;(toWorld ? world : overlay).add(stand)
+    })
+    const before = this.renderer.info.programs?.length ?? 0
+    const pending: Promise<void>[] = []
+    for (const [holder, target] of [
+      [world, direct ? null : (this.post?.target ?? null)],
+      [overlay, null],
+    ] as const) {
+      if (holder.children.length === 0) continue
+      pending.push(
+        this.compileHolderFor(holder, target).then(() => {
+          for (const c of holder.children) if ((c as THREE.InstancedMesh).isInstancedMesh) (c as THREE.InstancedMesh).dispose()
+        })
+      )
+    }
+    if ((this.renderer.info.programs?.length ?? 0) > before) for (const p of pending) this.holdFor(p)
+  }
+
+  /** Hold the frames until `compile` settles (see holdFrame). */
+  private holdFor(compile: Promise<void>): void {
+    this.compiling++
+    void compile.finally(() => {
+      this.compiling--
+    })
+  }
+
+  /**
+   * Whether to skip this frame because start-up programs are still compiling: drawing now would make
+   * three.js wait for each program's link on the main thread (onFirstUse → getProgramInfoLog), freezing
+   * the page. The canvas keeps its last frame (or its clear colour) meanwhile. Progress is the share of
+   * the renderer's programs whose parallel compile completed. HOLD_DEADLINE_MS caps the wait.
+   */
+  private holdFrame(now: number): boolean {
+    // Precompiled variants done: also compile whatever the live scene draws that they did not cover
+    // (overlays, tokens, grid, …). Nothing new to compile means the hold is over.
+    if (this.compiling === 0 && (this.holdSince !== null || this.liveCompileDue)) {
+      this.liveCompileDue = false
+      if (this.parallelCompile()) this.compileLiveScene()
+    }
+    if (this.compiling > 0 || (this.holdSince !== null && this.warmPrograms())) {
+      this.holdSince ??= now
+      if (now - this.holdSince < HOLD_DEADLINE_MS) {
+        const progress = COMPILE_SHARE * this.compileProgress()
+        const prev = this.loadState.stage === "compiling" ? this.loadState.progress : 0
+        this.setLoadState({ loading: true, stage: "compiling", progress: Math.max(prev, progress) })
+        return true
+      }
+    }
+    if (this.holdSince !== null) {
+      this.holdSince = null
+      // The held frames must not count towards frame pacing.
+      this.frameWindow.clear()
+      this.adaptive.reset()
+      this.settleSince = now
+      this.setLoadState({ loading: true, stage: "lighting", progress: (1 + COMPILE_SHARE) / 2 })
+    }
+    return false
+  }
+
+  /**
+   * After a hold: still loading until the first shadow / vision captures are done (a few frames under the
+   * lighting system's per-frame budget; also where the GPU's own first-draw work lands), so lights do
+   * not pop in after the loading overlay is gone. SETTLE_MAX_MS caps it (moving lights keep capturing).
+   */
+  private settle(now: number, tilesUpdated: number): void {
+    if (this.settleSince === null || (tilesUpdated > 0 && now - this.settleSince < SETTLE_MAX_MS)) return
+    this.settleSince = null
+    this.setLoadState(LOADED)
+  }
+
+  /**
+   * First use of a program still costs main-thread time after its parallel compile (three.js reads the
+   * info logs and reflects uniforms and attributes: ~300 ms for a first load through ANGLE). Pay it
+   * while holding, a few programs per frame within WARM_BUDGET_MS, so no single task freezes the page.
+   * Returns whether programs are left.
+   */
+  private warmPrograms(): boolean {
+    const programs = (this.renderer.info.programs ?? []) as unknown as WarmableProgram[]
+    const gl = this.renderer.getContext()
+    const ext = gl.getExtension("KHR_parallel_shader_compile") as { COMPLETION_STATUS_KHR: number } | null
+    const t0 = performance.now()
+    let left = false
+    for (const p of programs) {
+      // Still compiling (e.g. an adaptive step's programs): not this hold's, and warming would block.
+      if (this.warmed.has(p) || (ext && gl.getProgramParameter(p.program, ext.COMPLETION_STATUS_KHR) !== true)) continue
+      if (performance.now() - t0 > WARM_BUDGET_MS) {
+        left = true
+        break
+      }
+      p.getUniforms()
+      p.getAttributes()
+      this.warmed.add(p)
+    }
+    return left
+  }
+
+  /**
+   * Share (0..1) of the renderer's programs ready to draw: half for the parallel compile having finished,
+   * half for the first-use work (warmPrograms). 0 without the parallel-compile extension.
+   */
+  private compileProgress(): number {
+    const programs = (this.renderer.info.programs ?? []) as unknown as WarmableProgram[]
+    if (programs.length === 0) return 0
+    const gl = this.renderer.getContext()
+    const ext = gl.getExtension("KHR_parallel_shader_compile") as { COMPLETION_STATUS_KHR: number } | null
+    if (!ext) return 0
+    let done = 0
+    for (const p of programs) {
+      if (this.warmed.has(p)) done += 2
+      else if (gl.getProgramParameter(p.program, ext.COMPLETION_STATUS_KHR) === true) done++
+    }
+    return done / (2 * programs.length)
+  }
+
+  private setLoadState(next: EngineLoadState): void {
+    const prev = this.loadState
+    if (prev.loading === next.loading && prev.stage === next.stage && Math.abs(prev.progress - next.progress) < 0.005) return
+    this.loadState = next
+    for (const cb of this.loadListeners) cb(next)
+  }
+
+  getLoadState(): EngineLoadState {
+    return this.loadState
+  }
+
+  onLoadState(cb: (s: EngineLoadState) => void): () => void {
+    this.loadListeners.add(cb)
+    return () => {
+      this.loadListeners.delete(cb)
     }
   }
 
@@ -1160,6 +1371,7 @@ export class AtlasEngine implements Engine {
     this.lighting.dispose()
     this.gpuTimer.dispose()
     this.frameListeners.clear()
+    this.loadListeners.clear()
     this.cancelPendingQuality()
     for (const release of this.releaseAfterFrame.splice(0)) release()
     for (const g of sharedGpuGeometries()) disposeCachedEdges(g)

@@ -78,6 +78,11 @@ export interface LightingSystem {
   /** `q` is current, or prepared with a capture for every ranked shadowed light and viewer. */
   qualityReady(q: Quality): boolean
   /**
+   * Compile the shadow / vision capture programs ahead of the first capture (parallel where supported);
+   * resolves when they are ready.
+   */
+  precompile(): Promise<void>
+  /**
    * Battlemap image of a level (ARCHITECTURE §9): the level's world materials sample `texture` over `rect`
    * (null = none). A uniform update, never a recompile.
    */

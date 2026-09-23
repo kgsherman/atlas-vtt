@@ -153,6 +153,18 @@ export interface FrameStats {
   quality: Quality
 }
 
+/**
+ * Start-up progress (Engine.getLoadState), after a scene is set, a user quality change or a context
+ * restore: "compiling" while the shader programs compile (the engine draws nothing meanwhile), then
+ * "lighting" while the first shadow / vision captures fill (the scene draws, lights may still pop in).
+ */
+export interface EngineLoadState {
+  loading: boolean
+  stage: "compiling" | "lighting" | "ready"
+  /** 0..1 over both stages (1 when ready). */
+  progress: number
+}
+
 export interface SceneChange {
   /** Object ids added, changed or removed since the last call. */
   objects?: Id[]
@@ -221,6 +233,14 @@ export interface Engine {
   setCameraControlsEnabled(enabled: boolean): void
 
   onFrame(cb: (stats: FrameStats) => void): () => void
+  /**
+   * Load progress (EngineLoadState). Programs compile in parallel off the main thread where the browser
+   * supports it (KHR_parallel_shader_compile); until they are ready the engine draws nothing, so the page
+   * stays responsive. Without that extension compiles are synchronous and the state stays "ready".
+   * Listeners are called on changes only.
+   */
+  getLoadState(): EngineLoadState
+  onLoadState(cb: (s: EngineLoadState) => void): () => void
   resize(): void
   dispose(): void
 }

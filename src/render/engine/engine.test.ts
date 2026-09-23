@@ -21,6 +21,11 @@ const calls = vi.hoisted(() => ({
   /** Tiers the mock lighting system reports as prepared (qualityReady). */
   readyTiers: [] as string[],
   beforeRender: 0,
+  /** Shadow tiles the mock lighting system reports as updated per frame. */
+  tilesUpdated: 1,
+  /** The fake renderer supports KHR_parallel_shader_compile; compileAsync resolves with `compileGate`. */
+  parallel: false,
+  compileGate: null as Promise<void> | null,
   backdrops: [] as { levelId: string; texture: unknown; opacity: number; tintWalls: boolean }[],
   renderParams: [] as { hdr: boolean; emissive: number; glow: number }[],
   renders: [] as { target: unknown; layers: number; background: unknown }[],
@@ -87,8 +92,10 @@ vi.mock("three", async (importOriginal) => {
       this.info.render.calls += 3
       this.info.render.triangles += 100
     }
+    extensions = { has: (name: string) => calls.parallel && name === "KHR_parallel_shader_compile" }
+    compile() {}
     compileAsync() {
-      return Promise.resolve()
+      return calls.compileGate ?? Promise.resolve()
     }
     dispose() {}
   }
@@ -120,7 +127,7 @@ vi.mock("../lighting/system", async () => {
       qualityReady: (q: string) => calls.readyTiers.includes(q),
       beforeRender: () => {
         calls.beforeRender++
-        return { activeLights: 2, tilesUpdated: 1, tilesTotal: 3, updateMs: 0.5 }
+        return { activeLights: 2, tilesUpdated: calls.tilesUpdated, tilesTotal: 3, updateMs: 0.5 }
       },
       setLevelBackdrop: (levelId: string, texture: unknown, _rect: unknown, opacity: number, tintWalls: boolean) => {
         calls.backdrops.push({ levelId, texture, opacity, tintWalls })
@@ -130,6 +137,7 @@ vi.mock("../lighting/system", async () => {
       },
       maskUniforms: () => ({ uMasks: { value: null }, uMaskGrid: { value: new T.Vector4() }, uVisionMode: { value: 0 } }),
       maskLayerOf: () => -1,
+      precompile: () => calls.compileGate ?? Promise.resolve(),
       dispose: () => {},
     }),
   }
@@ -181,6 +189,9 @@ describe("engine", () => {
     calls.prepareQuality = []
     calls.readyTiers = ["low", "medium", "high", "ultra"]
     calls.beforeRender = 0
+    calls.tilesUpdated = 1
+    calls.parallel = false
+    calls.compileGate = null
     calls.backdrops = []
     calls.renderParams = []
     calls.renders = []
@@ -209,6 +220,59 @@ describe("engine", () => {
     expect(calls.renderer!.pixelRatio).toBe(1)
     engine.dispose()
     expect(calls.renderer!.loop).toBeNull()
+  })
+
+  it("holds frames while start-up programs compile in parallel, then waits for the first captures", async () => {
+    calls.parallel = true
+    let release!: () => void
+    calls.compileGate = new Promise<void>((r) => (release = r))
+    const engine = createEngine(canvasEl(), { quality: "medium" })
+    const stages: string[] = []
+    engine.onLoadState((s) => stages.push(s.stage))
+    expect(engine.getLoadState()).toEqual({ loading: false, stage: "ready", progress: 1 })
+    engine.setScene(sampleScene().scene)
+    frame(0)
+    frame(16)
+    // Drawing now would make three.js wait for every program's link on the main thread.
+    expect(calls.renders).toHaveLength(0)
+    expect(calls.beforeRender).toBe(0)
+    expect(engine.getLoadState()).toMatchObject({ loading: true, stage: "compiling" })
+    release()
+    await new Promise((r) => setTimeout(r, 0))
+    frame(32)
+    expect(calls.renders.length).toBeGreaterThan(0)
+    expect(engine.getLoadState()).toMatchObject({ loading: true, stage: "lighting" })
+    // Still capturing shadow tiles: loading until they are done…
+    frame(48)
+    expect(engine.getLoadState().loading).toBe(true)
+    calls.tilesUpdated = 0
+    frame(64)
+    expect(engine.getLoadState()).toEqual({ loading: false, stage: "ready", progress: 1 })
+    expect(stages).toEqual(["compiling", "lighting", "ready"])
+    engine.dispose()
+  })
+
+  it("caps the wait for the first captures, and never holds without parallel compilation", async () => {
+    calls.parallel = true
+    const engine = createEngine(canvasEl(), { quality: "medium" })
+    engine.setScene(sampleScene().scene)
+    frame(0)
+    await new Promise((r) => setTimeout(r, 0))
+    frame(16)
+    expect(engine.getLoadState().stage).toBe("lighting")
+    // Lights that keep moving keep capturing: the loading state ends anyway.
+    frame(2000)
+    expect(engine.getLoadState().loading).toBe(false)
+    engine.dispose()
+
+    calls.parallel = false
+    calls.renders = []
+    const sync = createEngine(canvasEl(), { quality: "medium" })
+    sync.setScene(sampleScene().scene)
+    frame(0)
+    expect(calls.renders.length).toBeGreaterThan(0)
+    expect(sync.getLoadState().loading).toBe(false)
+    sync.dispose()
   })
 
   it("updates incrementally and animates doors", () => {

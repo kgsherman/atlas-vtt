@@ -370,7 +370,7 @@ export class AtlasLightingSystem implements LightingSystem {
     this.skyDirty = true
     this.updateEnvironment()
     this.syncMasks()
-    this.precompile()
+    void this.precompile()
   }
 
   applyChange(scene: SceneLike, world: OcclusionWorld, change: SceneChange, dirty: DirtyRegion[]): void {
@@ -953,9 +953,34 @@ export class AtlasLightingSystem implements LightingSystem {
     this.skyDirty = false
   }
 
-  /** Compile the proxy / re-encode programs ahead of the first capture (best effort, async). */
-  private precompile(): void {
-    void precompileScene(this.renderer, this.proxies.scene, new THREE.PerspectiveCamera(90, 1, 0.05, 100))
+  /**
+   * Compile the capture programs ahead of the first capture (parallel where supported): the proxies'
+   * distance material, the depth material the directional maps override them with (plain and
+   * instanced) and the octahedral re-encode. Compiled against a render target, as the captures draw.
+   */
+  precompile(): Promise<void> {
+    const r = this.renderer
+    const camera = new THREE.PerspectiveCamera(90, 1, 0.05, 100)
+    // Position only, like the proxies and the fullscreen triangle: attributes are part of a program's key.
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(9), 3))
+    const depth = new THREE.Object3D()
+    depth.add(new THREE.Mesh(geometry, this.depthMaterial), new THREE.InstancedMesh(geometry, this.depthMaterial, 1))
+    const reencode = new THREE.Mesh(geometry, this.reencodeMaterial)
+    const prev = r.getRenderTarget()
+    r.setRenderTarget(this.sun.target)
+    try {
+      return Promise.all([
+        precompileScene(r, this.proxies.scene, camera),
+        precompileScene(r, depth, camera, this.proxies.scene),
+        precompileScene(r, reencode, camera, this.proxies.scene),
+      ]).then(() => {
+        for (const c of depth.children) if ((c as THREE.InstancedMesh).isInstancedMesh) (c as THREE.InstancedMesh).dispose()
+        geometry.dispose()
+      })
+    } finally {
+      r.setRenderTarget(prev)
+    }
   }
 
   private resetGpuState(): void {

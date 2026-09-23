@@ -7,6 +7,9 @@
  * heuristics + a short benchmark, cached per GPU for 30 days) picks the starting tier, which is also the adaptive
  * ceiling, the backdrop texel cap and whether the WebGL context gets MSAA. Those are fixed when the
  * engine is created, so the probe runs first; to switch back to Auto, remount (e.g. via `key`).
+ *
+ * A loading card (EngineLoading) shows the probe, then the engine's shader compilation and first
+ * shadow captures (Engine.getLoadState) with their progress.
  */
 import * as React from "react"
 
@@ -22,6 +25,7 @@ import {
 import { cn } from "@/lib/utils"
 
 import { EngineContext, type EngineContextValue } from "./engineContext"
+import { EngineLoading } from "./EngineLoading"
 
 export interface EngineCanvasProps {
   /** Explicit tier; undefined (at mount) = Auto, chosen by the device probe. */
@@ -46,10 +50,7 @@ let inflightProbe: Promise<Quality> | null = null
  * One device probe at a time: StrictMode double-mounts and several canvases mounting together share
  * it. It only runs without a fresh cache entry (see cachedQuality).
  */
-function probeInitialQuality(
-  cssWidth?: number,
-  cssHeight?: number
-): Promise<Quality> {
+function probeInitialQuality(cssWidth?: number, cssHeight?: number): Promise<Quality> {
   inflightProbe ??= pickInitialQuality({ cssWidth, cssHeight })
     .catch(() => FALLBACK_QUALITY)
     .finally(() => {
@@ -58,13 +59,7 @@ function probeInitialQuality(
   return inflightProbe
 }
 
-export function EngineCanvas({
-  quality,
-  className,
-  onEngine,
-  onQualityCeiling,
-  children,
-}: EngineCanvasProps) {
+export function EngineCanvas({ quality, className, onEngine, onQualityCeiling, children }: EngineCanvasProps) {
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
   const [value, setValue] = React.useState<EngineContextValue>({
     engine: null,
@@ -72,9 +67,7 @@ export function EngineCanvas({
   })
   const [error, setError] = React.useState<string | null>(null)
   // Auto with a cached probe result starts at once, without the "Choosing quality…" pass.
-  const [probing, setProbing] = React.useState(
-    () => quality === undefined && cachedQuality() === null
-  )
+  const [probing, setProbing] = React.useState(() => quality === undefined && cachedQuality() === null)
   const onEngineRef = React.useRef(onEngine)
   const onCeilingRef = React.useRef(onQualityCeiling)
   const initialQuality = React.useRef(quality)
@@ -106,9 +99,7 @@ export function EngineCanvas({
           tokenModels: tokenModels.current,
         })
       } catch (err) {
-        queueMicrotask(() =>
-          setError(err instanceof Error ? err.message : String(err))
-        )
+        queueMicrotask(() => setError(err instanceof Error ? err.message : String(err)))
         return
       }
       created = engine
@@ -133,10 +124,7 @@ export function EngineCanvas({
       queueMicrotask(() => setProbing(false))
       start(cached.tier)
     } else {
-      void probeInitialQuality(
-        canvas.clientWidth || undefined,
-        canvas.clientHeight || undefined
-      ).then((q) => {
+      void probeInitialQuality(canvas.clientWidth || undefined, canvas.clientHeight || undefined).then((q) => {
         if (cancelled) return
         setProbing(false)
         start(q)
@@ -160,27 +148,15 @@ export function EngineCanvas({
 
   return (
     <EngineContext.Provider value={value}>
-      <div
-        className={cn("relative size-full overflow-hidden bg-black", className)}
-      >
-        <canvas
-          ref={canvasRef}
-          data-slot="engine-canvas"
-          className="block size-full touch-none outline-none"
-          tabIndex={0}
-        />
+      <div className={cn("relative size-full overflow-hidden bg-black", className)}>
+        <canvas ref={canvasRef} data-slot="engine-canvas" className="block size-full touch-none outline-none" tabIndex={0} />
         {error ? (
           <div className="absolute inset-0 grid place-items-center p-6 text-center text-sm text-muted-foreground">
             WebGL2 is required to render maps. {error}
           </div>
-        ) : probing ? (
-          <div
-            role="status"
-            className="pointer-events-none absolute inset-0 grid place-items-center text-xs text-muted-foreground"
-          >
-            Choosing quality…
-          </div>
-        ) : null}
+        ) : (
+          <EngineLoading engine={value.engine} probing={probing} />
+        )}
         {children}
       </div>
     </EngineContext.Provider>
