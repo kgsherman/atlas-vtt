@@ -98,6 +98,8 @@ export class AtlasEngine implements Engine {
   private world: OcclusionWorld | null = null
   private bounds: Bounds3 = { min: { x: 0, y: 0, z: 0 }, max: { x: 100, y: 10, z: 100 } }
   private framed = false
+  /** Elevation the cameras' look-at point was last put on (see lookAtActiveLevel). */
+  private lookElevation = 0
   private precompiled = false
 
   /** Heightmap-brush previews: dense lattices per level. */
@@ -363,12 +365,10 @@ export class AtlasEngine implements Engine {
       const fb = this.frameBounds()
       this.orbit.frame(fb, true)
       this.topdown.frame(fb, true)
-      // Both cameras look at the active level's plane.
-      const y = this.activeElevation()
-      for (const c of [this.orbit, this.topdown]) {
-        const t = c.getTarget()
-        c.setTarget({ x: t.x, y, z: t.z }, true)
-      }
+      this.lookAtActiveLevel(true)
+    } else if (this.activeElevation() !== this.lookElevation) {
+      // The active level was raised / lowered (or replaced by one at another height): follow it.
+      this.lookAtActiveLevel(false)
     }
     this.precompile()
     this.checkFollow()
@@ -437,14 +437,7 @@ export class AtlasEngine implements Engine {
     this.topdown.tilt = next.tilt
     this.topdown.keyboardPan = next.mode !== "editor"
     this.replan()
-    if (next.activeLevelId !== prev.activeLevelId && this.scene) {
-      // Keep the look-at point on the active level.
-      const y = this.activeElevation()
-      for (const c of [this.orbit, this.topdown]) {
-        const t = c.getTarget()
-        c.setTarget({ x: t.x, y, z: t.z }, c !== this.controller)
-      }
-    }
+    if (next.activeLevelId !== prev.activeLevelId && this.scene) this.lookAtActiveLevel(false)
     if (next.vision !== prev.vision && this.scene) this.applyBackground(this.scene)
     this.tokens.invalidate()
     this.overlays.viewChanged()
@@ -482,6 +475,19 @@ export class AtlasEngine implements Engine {
   private activeElevation(): number {
     const id = this.activeLevelId()
     return id && this.scene ? this.scene.levels[id].elevation : 0
+  }
+
+  /**
+   * Put both cameras' look-at point on the active level's plane, keeping its XZ. Unless `immediate`, the
+   * current camera glides there; the inactive one jumps.
+   */
+  private lookAtActiveLevel(immediate: boolean): void {
+    const y = this.activeElevation()
+    this.lookElevation = y
+    for (const c of [this.orbit, this.topdown]) {
+      const t = c.getTarget()
+      c.setTarget({ x: t.x, y, z: t.z }, immediate || c !== this.controller)
+    }
   }
 
   setOverlays(overlays: Partial<OverlayState>): void {

@@ -264,6 +264,25 @@ describe("engine", () => {
     engine.dispose()
   })
 
+  it("refocuses on the active level when its elevation changes", () => {
+    const { scene, upper } = sampleScene()
+    const engine = createEngine(canvasEl())
+    const internals = engine as unknown as Internals
+    engine.setScene(scene)
+    engine.setView({ mode: "editor", camera: "orbit", activeLevelId: upper })
+    for (let t = 0; t <= 2000; t += 16) frame(t)
+    expect(internals.controller.getTarget().y).toBeCloseTo(10)
+    const { x, z } = internals.controller.getTarget()
+    const raised: Scene = { ...scene, levels: { ...scene.levels, [upper]: { ...scene.levels[upper], elevation: 25 } } }
+    engine.updateScene(raised)
+    for (let t = 2016; t <= 4000; t += 16) frame(t)
+    expect(internals.controller.getTarget()).toEqual({ x: expect.closeTo(x), y: expect.closeTo(25), z: expect.closeTo(z) })
+    // The other camera follows too.
+    engine.setView({ camera: "topdown" })
+    expect(internals.controller.getTarget().y).toBeCloseTo(25)
+    engine.dispose()
+  })
+
   it("releases module-level GPU singletons and loses a detached canvas' context on dispose", () => {
     const { scene } = sampleScene()
     const canvas = canvasEl()
