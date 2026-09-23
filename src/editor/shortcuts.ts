@@ -1,16 +1,21 @@
 /**
- * Editor keymap. resolveShortcut() maps a key event to an action (pure, testable); the editor
- * controller runs it with runShortcut(). The canvas should only forward keys while focus is not in a
- * text field, and should report Cmd as `ctrl` on macOS.
+ * Editor keymap: every editor command with its default keys, as TanStack Hotkeys strings (`Mod` = Cmd
+ * on macOS, Ctrl elsewhere). Users can rebind commands (the keymap store saves per-command overrides by
+ * id); the React layer registers the effective keys with the hotkey manager and hands the matched
+ * action to the editor controller, which offers the key to the active tool first (Escape, Enter, R),
+ * then runs the action with runShortcut().
  *
- * Arrow nudges move one cell (Shift: one foot) along world axes: ArrowUp = −Z, ArrowDown = +Z,
+ * Arrow nudges move one cell (or one foot) along world axes: ArrowUp = −Z, ArrowDown = +Z,
  * ArrowLeft = −X, ArrowRight = +X (screen directions in the default top-down orientation).
  */
+import type { Hotkey } from "@tanstack/hotkeys"
+
 import type { SnapMode } from "@/core/grid/grid"
 import type { Id, Vec2 } from "@/core/scene/types"
+import { bindingsOf, type Command, type KeyOverrides } from "@/lib/keymap"
 
 import type { EditorStore } from "./store"
-import type { ToolId, ToolKeyEvent } from "./tools/types"
+import type { ToolId } from "./tools/types"
 
 export type ShortcutAction =
   | { type: "tool"; tool: ToolId }
@@ -31,125 +36,100 @@ export type ShortcutAction =
   | { type: "brush-size"; factor: number }
   | { type: "level"; delta: 1 | -1 }
   | { type: "escape" }
+  /** Only tools use it (finish a wall chain or ruler). */
+  | { type: "confirm" }
+  /** Handled by the page, not the controller. */
+  | { type: "save" }
+  | { type: "help" }
 
-export interface ShortcutDef {
-  /** Human-readable binding ("Ctrl+Z"). */
-  keys: string
-  description: string
+export interface EditorCommand extends Command {
+  group: "Tools" | "Editing" | "View"
   action: ShortcutAction
 }
 
-const TOOL_KEYS: Record<string, ToolId> = {
-  v: "select",
-  f: "floor",
-  w: "wall",
-  d: "door",
-  n: "window",
-  s: "connector",
-  p: "pillar",
-  o: "prop",
-  l: "light",
-  t: "terrain",
-  k: "token",
-  m: "measure",
+export interface EditorBinding {
+  hotkey: Hotkey
+  action: ShortcutAction
 }
 
-const TOOL_NAMES: Record<ToolId, string> = {
-  select: "Select",
-  floor: "Floor",
-  wall: "Wall",
-  door: "Door",
-  window: "Window",
-  connector: "Stairs / ladder / ramp",
-  pillar: "Pillar",
-  prop: "Prop",
-  light: "Light",
-  terrain: "Terrain brush",
-  token: "Token",
-  measure: "Measure",
-}
-
-/** Brush radius multiplier per [ / ] press. */
-export const BRUSH_STEP = 1.25
-
-/** Every binding, for help panels / tooltips. */
-export const SHORTCUTS: ShortcutDef[] = [
-  ...Object.entries(TOOL_KEYS).map(([key, tool]) => ({ keys: key.toUpperCase(), description: TOOL_NAMES[tool], action: { type: "tool", tool } as const })),
-  { keys: "Ctrl+Z", description: "Undo", action: { type: "undo" } },
-  { keys: "Ctrl+Shift+Z / Ctrl+Y", description: "Redo", action: { type: "redo" } },
-  { keys: "Ctrl+C", description: "Copy", action: { type: "copy" } },
-  { keys: "Ctrl+X", description: "Cut", action: { type: "cut" } },
-  { keys: "Ctrl+V", description: "Paste at the pointer (snapped)", action: { type: "paste" } },
-  { keys: "Ctrl+Alt+V", description: "Paste at the pointer without snapping", action: { type: "paste", free: true } },
-  { keys: "Ctrl+D", description: "Duplicate", action: { type: "duplicate" } },
-  { keys: "Ctrl+A", description: "Select all on the level", action: { type: "select-all" } },
-  { keys: "Delete / Backspace", description: "Delete selection", action: { type: "delete" } },
-  { keys: "Arrows", description: "Nudge one cell (Shift: one foot)", action: { type: "nudge", x: 0, z: 0, fine: false } },
-  { keys: "R / Shift+R", description: "Rotate selection 90°", action: { type: "rotate", turns: 1 } },
-  { keys: "G", description: "Toggle grid", action: { type: "toggle-grid" } },
-  { keys: "H", description: "Toggle helpers", action: { type: "toggle-helpers" } },
-  { keys: "[ / ]", description: "Brush smaller / larger", action: { type: "brush-size", factor: BRUSH_STEP } },
-  { keys: "PageUp / PageDown", description: "Level above / below", action: { type: "level", delta: 1 } },
-  { keys: "Escape", description: "Cancel / clear selection", action: { type: "escape" } },
+const TOOLS: [ToolId, string, Hotkey][] = [
+  ["select", "Select", "V"],
+  ["floor", "Floor", "F"],
+  ["wall", "Wall", "W"],
+  ["door", "Door", "D"],
+  ["window", "Window", "N"],
+  ["connector", "Stairs / ladder / ramp", "S"],
+  ["pillar", "Pillar", "P"],
+  ["prop", "Prop", "O"],
+  ["light", "Light", "L"],
+  ["terrain", "Terrain brush", "T"],
+  ["token", "Token", "K"],
+  ["measure", "Measure", "M"],
 ]
 
-/** Map a key event to an editor action, or null. */
-export function resolveShortcut(e: ToolKeyEvent): ShortcutAction | null {
-  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key
-  if (e.ctrl && e.alt && !e.shift && key === "v") return { type: "paste", free: true }
-  if (e.ctrl && !e.alt) {
-    switch (key) {
-      case "z":
-        return e.shift ? { type: "redo" } : { type: "undo" }
-      case "y":
-        return e.shift ? null : { type: "redo" }
-      case "c":
-        return e.shift ? null : { type: "copy" }
-      case "x":
-        return e.shift ? null : { type: "cut" }
-      case "v":
-        return e.shift ? null : { type: "paste" }
-      case "d":
-        return e.shift ? null : { type: "duplicate" }
-      case "a":
-        return e.shift ? null : { type: "select-all" }
-      default:
-        return null
-    }
-  }
-  if (e.ctrl || e.alt) return null
-  switch (key) {
-    case "Delete":
-    case "Backspace":
-      return { type: "delete" }
-    case "ArrowUp":
-      return { type: "nudge", x: 0, z: -1, fine: e.shift }
-    case "ArrowDown":
-      return { type: "nudge", x: 0, z: 1, fine: e.shift }
-    case "ArrowLeft":
-      return { type: "nudge", x: -1, z: 0, fine: e.shift }
-    case "ArrowRight":
-      return { type: "nudge", x: 1, z: 0, fine: e.shift }
-    case "PageUp":
-      return { type: "level", delta: 1 }
-    case "PageDown":
-      return { type: "level", delta: -1 }
-    case "Escape":
-      return { type: "escape" }
-    case "[":
-      return { type: "brush-size", factor: 1 / BRUSH_STEP }
-    case "]":
-      return { type: "brush-size", factor: BRUSH_STEP }
-    case "r":
-      return { type: "rotate", turns: e.shift ? -1 : 1 }
-    default:
-      break
-  }
-  if (e.shift) return null
-  if (key === "g") return { type: "toggle-grid" }
-  if (key === "h") return { type: "toggle-helpers" }
-  if (Object.hasOwn(TOOL_KEYS, key)) return { type: "tool", tool: TOOL_KEYS[key] }
-  return null
+/** Brush radius multiplier per brush step. */
+export const BRUSH_STEP = 1.25
+
+const NUDGES: [string, "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight", -1 | 0 | 1, -1 | 0 | 1][] = [
+  ["up", "ArrowUp", 0, -1],
+  ["down", "ArrowDown", 0, 1],
+  ["left", "ArrowLeft", -1, 0],
+  ["right", "ArrowRight", 1, 0],
+]
+
+/** Every editor command, in help / settings order. */
+export const EDITOR_COMMANDS: EditorCommand[] = [
+  ...TOOLS.map(([tool, label, key]): EditorCommand => ({ id: `tool.${tool}`, label, group: "Tools", keys: [key], action: { type: "tool", tool } })),
+  { id: "undo", label: "Undo", group: "Editing", keys: ["Mod+Z"], action: { type: "undo" } },
+  { id: "redo", label: "Redo", group: "Editing", keys: ["Mod+Shift+Z", "Mod+Y"], action: { type: "redo" } },
+  { id: "copy", label: "Copy", group: "Editing", keys: ["Mod+C"], action: { type: "copy" } },
+  { id: "cut", label: "Cut", group: "Editing", keys: ["Mod+X"], action: { type: "cut" } },
+  { id: "paste", label: "Paste at the pointer (snapped)", group: "Editing", keys: ["Mod+V"], action: { type: "paste" } },
+  { id: "paste-free", label: "Paste at the pointer without snapping", group: "Editing", keys: ["Mod+Alt+V"], action: { type: "paste", free: true } },
+  { id: "duplicate", label: "Duplicate", group: "Editing", keys: ["Mod+D"], action: { type: "duplicate" } },
+  { id: "select-all", label: "Select all on the level", group: "Editing", keys: ["Mod+A"], action: { type: "select-all" } },
+  { id: "delete", label: "Delete selection", group: "Editing", keys: ["Delete", "Backspace"], action: { type: "delete" } },
+  ...NUDGES.map(([dir, key, x, z]): EditorCommand => ({
+    id: `nudge.${dir}`,
+    label: `Nudge ${dir} one cell`,
+    group: "Editing",
+    keys: [key],
+    action: { type: "nudge", x, z, fine: false },
+  })),
+  ...NUDGES.map(([dir, key, x, z]): EditorCommand => ({
+    id: `nudge.${dir}-fine`,
+    label: `Nudge ${dir} one foot`,
+    group: "Editing",
+    keys: [`Shift+${key}`],
+    action: { type: "nudge", x, z, fine: true },
+  })),
+  { id: "rotate.cw", label: "Rotate selection 90° clockwise", group: "Editing", keys: ["R"], action: { type: "rotate", turns: 1 } },
+  { id: "rotate.ccw", label: "Rotate selection 90° counter-clockwise", group: "Editing", keys: ["Shift+R"], action: { type: "rotate", turns: -1 } },
+  { id: "brush.smaller", label: "Brush smaller", group: "Editing", keys: ["["], action: { type: "brush-size", factor: 1 / BRUSH_STEP } },
+  { id: "brush.larger", label: "Brush larger", group: "Editing", keys: ["]"], action: { type: "brush-size", factor: BRUSH_STEP } },
+  { id: "escape", label: "Cancel / clear selection", group: "Editing", keys: ["Escape"], action: { type: "escape" } },
+  { id: "confirm", label: "Finish a wall chain or ruler", group: "Editing", keys: ["Enter"], action: { type: "confirm" } },
+  { id: "toggle-grid", label: "Toggle grid", group: "View", keys: ["G"], action: { type: "toggle-grid" } },
+  { id: "toggle-helpers", label: "Toggle helpers", group: "View", keys: ["H"], action: { type: "toggle-helpers" } },
+  { id: "level.up", label: "Level above", group: "View", keys: ["PageUp"], action: { type: "level", delta: 1 } },
+  { id: "level.down", label: "Level below", group: "View", keys: ["PageDown"], action: { type: "level", delta: -1 } },
+  { id: "save", label: "Save", group: "View", keys: ["Mod+S"], action: { type: "save" } },
+  { id: "help", label: "Keyboard shortcuts", group: "View", keys: ["?"], action: { type: "help" } },
+]
+
+/** Mouse and held-modifier input for help lists (not remappable). */
+export const EDITOR_POINTER_HELP: { keys: string; label: string }[] = [
+  { keys: "Alt (hold)", label: "Free placement (no snapping)" },
+  { keys: "Shift (wall tool)", label: "Constrain to 45°" },
+  { keys: "Right-drag", label: "Orbit the camera" },
+  { keys: "Middle-drag", label: "Pan" },
+  { keys: "Wheel", label: "Zoom toward the cursor" },
+  { keys: "Right-click / Double-click", label: "Finish walls / rulers" },
+]
+
+/** The bindings to register: every key of every command, after the user's overrides. */
+export function editorBindings(overrides: KeyOverrides = {}): EditorBinding[] {
+  return bindingsOf(EDITOR_COMMANDS, overrides).map(({ hotkey, command }) => ({ hotkey, action: command.action }))
 }
 
 export interface PasteTarget {
@@ -228,9 +208,17 @@ export function runShortcut(action: ShortcutAction, ctx: ShortcutContext): boole
       ctx.cancelGesture?.()
       ctx.store.getState().stepActiveLevel(action.delta)
       return true
-    case "escape":
+    case "escape": {
+      // Not consumed when there was nothing to deselect, so the page may use Escape (the host's
+      // live editor leaves edit mode).
+      const hadSelection = s.selection.length > 0
       ctx.cancelGesture?.()
       ctx.store.getState().clearSelection()
-      return true
+      return hadSelection
+    }
+    case "confirm":
+    case "save":
+    case "help":
+      return false
   }
 }

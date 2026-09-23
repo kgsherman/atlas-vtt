@@ -31,7 +31,7 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty"
-import { Kbd } from "@/components/ui/kbd"
+import { CommandKbd } from "@/components/keybindings/CommandKbd"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Spinner } from "@/components/ui/spinner"
 import {
@@ -333,7 +333,7 @@ function PartyPanel({
         <span className="flex items-center gap-1 text-[0.6875rem] text-muted-foreground">
           {tokens.length > 1 ? (
             <>
-              <Kbd>Tab</Kbd> to switch
+              <CommandKbd scope="play" command="token.next" /> to switch
             </>
           ) : null}
         </span>

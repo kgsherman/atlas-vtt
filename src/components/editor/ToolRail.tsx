@@ -1,5 +1,6 @@
 import * as React from "react"
 
+import { useCommandLabel } from "@/components/keybindings/keymapStore"
 import { Kbd } from "@/components/ui/kbd"
 import { Separator } from "@/components/ui/separator"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
@@ -49,7 +50,7 @@ export function ToolRail({ disabled }: { disabled?: boolean }) {
                 <TooltipContent side="right" sideOffset={8} className="max-w-64 flex-col items-start gap-1 py-2">
                   <span className="flex w-full items-center justify-between gap-3 font-medium">
                     {t.label}
-                    {t.key ? <Kbd>{t.key}</Kbd> : null}
+                    <ToolKey tool={t.id} />
                   </span>
                   <span className="text-[0.6875rem] leading-snug opacity-80">{t.hint}</span>
                 </TooltipContent>
@@ -61,4 +62,10 @@ export function ToolRail({ disabled }: { disabled?: boolean }) {
       </ToggleGroup>
     </nav>
   )
+}
+
+/** The tool's current shortcut (follows the user's key remaps). */
+function ToolKey({ tool }: { tool: ToolId }) {
+  const label = useCommandLabel("editor", `tool.${tool}`)
+  return label ? <Kbd>{label}</Kbd> : null
 }

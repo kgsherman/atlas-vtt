@@ -2,9 +2,10 @@ import * as React from "react"
 import { CircleDot, Cloud, Eye, HardDrive, Pencil, Play, Redo2, Share2, Undo2 } from "lucide-react"
 
 import { AppLogoMark } from "@/components/app/AppLogo"
+import { CommandKbd } from "@/components/keybindings/CommandKbd"
+import { useCommandLabel } from "@/components/keybindings/keymapStore"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Kbd } from "@/components/ui/kbd"
 import {
   Menubar,
   MenubarCheckboxItem,
@@ -63,6 +64,7 @@ function SceneName({ disabled }: { disabled: boolean }) {
 
 function SaveState({ doc }: { doc: SceneDocument }) {
   const { dirty, readOnly } = useEditorShallow((s) => ({ dirty: s.dirty, readOnly: s.readOnly }))
+  const saveKey = useCommandLabel("editor", "save") || "File › Save"
   const [, force] = React.useReducer((n: number) => n + 1, 0)
   React.useEffect(() => {
     const t = setInterval(force, 30_000)
@@ -90,11 +92,11 @@ function SaveState({ doc }: { doc: SceneDocument }) {
   let tone = "text-muted-foreground"
   if (!doc.libraryId) {
     label = "Not saved yet"
-    tip = doc.draftSavedAt ? `Draft kept on this device at ${clockTime(doc.draftSavedAt)}. Press Ctrl+S to add it to your library.` : "Press Ctrl+S to add this scene to your library."
+    tip = doc.draftSavedAt ? `Draft kept on this device at ${clockTime(doc.draftSavedAt)}. Press ${saveKey} to add it to your library.` : `Press ${saveKey} to add this scene to your library.`
     tone = "text-foreground/80"
   } else if (dirty) {
     label = "Unsaved changes"
-    tip = doc.draftSavedAt ? `Draft kept on this device at ${clockTime(doc.draftSavedAt)}. Ctrl+S saves a new version.` : "Ctrl+S saves a new version."
+    tip = doc.draftSavedAt ? `Draft kept on this device at ${clockTime(doc.draftSavedAt)}. ${saveKey} saves a new version.` : `${saveKey} saves a new version.`
     tone = "text-foreground/80"
   } else {
     label = doc.baseVersion ? `Saved · v${doc.baseVersion}` : "Saved"
@@ -134,7 +136,7 @@ function UndoRedo({ disabled }: { disabled: boolean }) {
           <Undo2 />
         </TooltipTrigger>
         <TooltipContent>
-          {h.undoLabel ? `Undo ${h.undoLabel}` : "Undo"} <Kbd>Ctrl+Z</Kbd>
+          {h.undoLabel ? `Undo ${h.undoLabel}` : "Undo"} <CommandKbd scope="editor" command="undo" />
         </TooltipContent>
       </Tooltip>
       <Tooltip>
@@ -155,7 +157,7 @@ function UndoRedo({ disabled }: { disabled: boolean }) {
           <Redo2 />
         </TooltipTrigger>
         <TooltipContent>
-          {h.redoLabel ? `Redo ${h.redoLabel}` : "Redo"} <Kbd>Ctrl+Shift+Z</Kbd>
+          {h.redoLabel ? `Redo ${h.redoLabel}` : "Redo"} <CommandKbd scope="editor" command="redo" />
         </TooltipContent>
       </Tooltip>
     </div>
@@ -202,7 +204,7 @@ function EditorMenus({ doc, previewing }: { doc: SceneDocument; previewing: bool
           <MenubarGroup>
             <MenubarItem disabled={!editable} onClick={actions.save}>
               Save
-              <MenubarShortcut>Ctrl+S</MenubarShortcut>
+              <CommandShortcut id="save" />
             </MenubarItem>
             <MenubarItem disabled={!doc.libraryId} onClick={actions.openVersions}>
               Version history…
@@ -236,20 +238,20 @@ function EditorMenus({ doc, previewing }: { doc: SceneDocument; previewing: bool
         <MenubarContent className="min-w-56">
           <MenubarItem disabled={!editable || !s.canUndo} onClick={run(() => store.getState().undo())}>
             {s.undoLabel ? `Undo ${s.undoLabel}` : "Undo"}
-            <MenubarShortcut>Ctrl+Z</MenubarShortcut>
+            <CommandShortcut id="undo" />
           </MenubarItem>
           <MenubarItem disabled={!editable || !s.canRedo} onClick={run(() => store.getState().redo())}>
             {s.redoLabel ? `Redo ${s.redoLabel}` : "Redo"}
-            <MenubarShortcut>Ctrl+Shift+Z</MenubarShortcut>
+            <CommandShortcut id="redo" />
           </MenubarItem>
           <MenubarSeparator />
           <MenubarItem disabled={!editable || s.selection === 0} onClick={run(() => store.getState().cutSelection())}>
             Cut
-            <MenubarShortcut>Ctrl+X</MenubarShortcut>
+            <CommandShortcut id="cut" />
           </MenubarItem>
           <MenubarItem disabled={s.selection === 0} onClick={() => store.getState().copySelection()}>
             Copy
-            <MenubarShortcut>Ctrl+C</MenubarShortcut>
+            <CommandShortcut id="copy" />
           </MenubarItem>
           <MenubarItem
             disabled={!editable}
@@ -258,28 +260,28 @@ function EditorMenus({ doc, previewing }: { doc: SceneDocument; previewing: bool
             })}
           >
             Paste
-            <MenubarShortcut>Ctrl+V</MenubarShortcut>
+            <CommandShortcut id="paste" />
           </MenubarItem>
           <MenubarItem disabled={!editable || s.selection === 0} onClick={run(() => store.getState().duplicateSelection())}>
             Duplicate
-            <MenubarShortcut>Ctrl+D</MenubarShortcut>
+            <CommandShortcut id="duplicate" />
           </MenubarItem>
           <MenubarItem variant="destructive" disabled={!editable || s.selection === 0} onClick={actions.deleteSelection}>
             Delete
-            <MenubarShortcut>Del</MenubarShortcut>
+            <CommandShortcut id="delete" />
           </MenubarItem>
           <MenubarSeparator />
           <MenubarItem disabled={previewing} onClick={() => store.getState().selectAll()}>
             Select all on level
-            <MenubarShortcut>Ctrl+A</MenubarShortcut>
+            <CommandShortcut id="select-all" />
           </MenubarItem>
           <MenubarItem disabled={s.selection === 0} onClick={() => store.getState().clearSelection()}>
             Deselect
-            <MenubarShortcut>Esc</MenubarShortcut>
+            <CommandShortcut id="escape" />
           </MenubarItem>
           <MenubarItem disabled={!editable || s.selection === 0} onClick={run(() => store.getState().rotateSelection(1))}>
             Rotate 90°
-            <MenubarShortcut>R</MenubarShortcut>
+            <CommandShortcut id="rotate.cw" />
           </MenubarItem>
         </MenubarContent>
       </MenubarMenu>
@@ -289,11 +291,11 @@ function EditorMenus({ doc, previewing }: { doc: SceneDocument; previewing: bool
         <MenubarContent className="min-w-56">
           <MenubarCheckboxItem checked={s.showGrid} onCheckedChange={() => store.getState().toggleGrid()}>
             Grid
-            <MenubarShortcut>G</MenubarShortcut>
+            <CommandShortcut id="toggle-grid" />
           </MenubarCheckboxItem>
           <MenubarCheckboxItem checked={s.showHelpers} onCheckedChange={() => store.getState().toggleHelpers()}>
             Helpers (light radii, arrows)
-            <MenubarShortcut>H</MenubarShortcut>
+            <CommandShortcut id="toggle-helpers" />
           </MenubarCheckboxItem>
           <MenubarCheckboxItem checked={s.ghost} onCheckedChange={() => store.getState().toggleGhostAdjacent()}>
             Ghost adjacent levels
@@ -341,11 +343,11 @@ function EditorMenus({ doc, previewing }: { doc: SceneDocument; previewing: bool
           <MenubarSeparator />
           <MenubarItem onClick={run(() => store.getState().stepActiveLevel(1))}>
             Level above
-            <MenubarShortcut>PgUp</MenubarShortcut>
+            <CommandShortcut id="level.up" />
           </MenubarItem>
           <MenubarItem onClick={run(() => store.getState().stepActiveLevel(-1))}>
             Level below
-            <MenubarShortcut>PgDn</MenubarShortcut>
+            <CommandShortcut id="level.down" />
           </MenubarItem>
           <MenubarSeparator />
           <MenubarItem disabled={!editable || levels.length >= SCENE_LIMITS.maxLevels} onClick={actions.addLevel}>
@@ -365,7 +367,7 @@ function EditorMenus({ doc, previewing }: { doc: SceneDocument; previewing: bool
         <MenubarContent className="min-w-56">
           <MenubarItem onClick={actions.openShortcuts}>
             Keyboard shortcuts
-            <MenubarShortcut>?</MenubarShortcut>
+            <CommandShortcut id="help" />
           </MenubarItem>
           <MenubarSeparator />
           {/* A plain hint, not a MenubarLabel: Base UI group labels must sit inside a MenubarGroup
@@ -431,4 +433,10 @@ export function TopBar({ doc, previewing, onModeChange }: { doc: SceneDocument; 
       </Button>
     </header>
   )
+}
+
+/** A menu item's shortcut, following the user's key remaps. */
+function CommandShortcut({ id }: { id: string }) {
+  const label = useCommandLabel("editor", id)
+  return label ? <MenubarShortcut>{label}</MenubarShortcut> : null
 }

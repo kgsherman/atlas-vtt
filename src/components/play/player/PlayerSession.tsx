@@ -17,6 +17,7 @@ import { useServices } from "@/app/services"
 import { EngineCanvas } from "@/components/canvas/EngineCanvas"
 import { useEngine } from "@/components/canvas/engineContext"
 import { useQualityChoice } from "@/components/canvas/qualityChoice"
+import { useSuppressThemeHotkey } from "@/components/theme-provider"
 import { footprintCells, validateMove } from "@/core/movement"
 import { buildOcclusionWorld } from "@/core/occlusion"
 import {
@@ -48,12 +49,7 @@ import {
 import { backdropTexelBudget } from "@/render"
 import type { Engine, Quality } from "@/render/contracts"
 
-import {
-  usePlayCanvasInput,
-  usePlayKeys,
-  useGuardThemeHotkey,
-  zoomCanvas,
-} from "../input"
+import { usePlayCanvasInput, usePlayKeys, zoomCanvas } from "../input"
 import {
   EndedScreen,
   ErrorScreenOverlay,
@@ -137,7 +133,7 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
   const [engine, setEngine] = React.useState<Engine | null>(null)
   const quality = useQualityChoice()
   const [ceiling, setCeiling] = React.useState<Quality | null>(null)
-  useGuardThemeHotkey()
+  useSuppressThemeHotkey()
 
   // Backdrop canvases follow the engine's quality ceiling (the engine caps textures at the same budget).
   React.useEffect(() => {
@@ -320,6 +316,7 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
         controller.cancel()
         return
       case "level":
+      case "preview-vision":
         return false
     }
   })

@@ -26,6 +26,7 @@ export function HostEditorProviders({
   onPreviewToken,
   onExit,
   onSave,
+  onShortcuts,
   children,
 }: {
   editor: HostEditor | null
@@ -34,6 +35,8 @@ export function HostEditorProviders({
   onExit(): void
   /** Save the live map to the library (Ctrl+S / File › Save). */
   onSave(): void
+  /** Open the keyboard shortcuts dialog. */
+  onShortcuts(): void
   children: React.ReactNode
 }) {
   const confirm = useConfirm()
@@ -67,11 +70,7 @@ export function HostEditorProviders({
       openShare: unavailable("Sharing"),
       startSession: () => toast.info("This session is already running"),
       goHome: onExit,
-      openShortcuts: () =>
-        toast.info("Editor shortcuts work as in the editor", {
-          description:
-            "W walls, D doors, L lights, K tokens, V select · Ctrl+Z undo.",
-        }),
+      openShortcuts: onShortcuts,
       enterPreview: (tokenId?: Id) => {
         const id =
           tokenId ??
@@ -117,7 +116,16 @@ export function HostEditorProviders({
         store.getState().deleteSelection()
       },
     }
-  }, [store, controller, engine, confirm, onExit, onPreviewToken, onSave])
+  }, [
+    store,
+    controller,
+    engine,
+    confirm,
+    onExit,
+    onPreviewToken,
+    onSave,
+    onShortcuts,
+  ])
   const engineHandle = React.useMemo(() => ({ engine }), [engine])
   return (
     <EditorActionsContext.Provider value={actions}>

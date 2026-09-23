@@ -1,0 +1,113 @@
+// @vitest-environment jsdom
+import { act } from "react"
+import { createRoot, type Root } from "react-dom/client"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+
+import { setKeyOverrides } from "@/components/keybindings/keymapStore"
+import { createEditorController, type EditorController } from "@/editor/controller"
+import { fixtureScene, makeStore } from "@/editor/test-utils"
+
+import { useEditorHotkeys, type EditorHotkeysOptions } from "./useEditorHotkeys"
+
+declare global {
+  var IS_REACT_ACT_ENVIRONMENT: boolean
+}
+globalThis.IS_REACT_ACT_ENVIRONMENT = true
+
+function Harness({ controller, ...opts }: EditorHotkeysOptions & { controller: EditorController }) {
+  useEditorHotkeys(controller, opts)
+  return null
+}
+
+let root: Root
+let controller: EditorController
+const save = vi.fn()
+const escape = vi.fn()
+
+function render(opts: Partial<EditorHotkeysOptions> = {}) {
+  act(() => root.render(<Harness controller={controller} enabled save={save} escape={escape} {...opts} />))
+}
+
+function press(key: string, init: KeyboardEventInit = {}, target: EventTarget = document.body, type = "keydown"): KeyboardEvent {
+  const e = new KeyboardEvent(type, { key, bubbles: true, cancelable: true, ...init })
+  act(() => void target.dispatchEvent(e))
+  return e
+}
+
+beforeEach(() => {
+  controller = createEditorController(makeStore(fixtureScene().scene), { now: () => 0 })
+  root = createRoot(document.createElement("div"))
+  save.mockReset()
+  escape.mockReset()
+})
+
+afterEach(() => {
+  act(() => root.unmount())
+  controller.dispose()
+  setKeyOverrides("editor", {})
+  document.body.innerHTML = ""
+})
+
+describe("useEditorHotkeys", () => {
+  it("runs bound keys and prevents their default", () => {
+    render()
+    expect(press("w").defaultPrevented).toBe(true)
+    expect(controller.store.getState().tool).toBe("wall")
+  })
+
+  it("leaves unused keys to the browser", () => {
+    render()
+    const e = press("Delete")
+    expect(e.defaultPrevented).toBe(false)
+  })
+
+  it("ignores keys typed into text fields and under dialogs, but saves from anywhere", () => {
+    render()
+    const input = document.body.appendChild(document.createElement("input"))
+    press("w", {}, input)
+    expect(controller.store.getState().tool).toBe("select")
+    expect(press("s", { ctrlKey: true }, input).defaultPrevented).toBe(true)
+    expect(save).toHaveBeenCalledTimes(1)
+    document.body.insertAdjacentHTML("beforeend", '<div data-slot="dialog-content"></div>')
+    press("w")
+    expect(controller.store.getState().tool).toBe("select")
+  })
+
+  it("keeps navigation keys for a focused widget", () => {
+    render()
+    const button = document.body.appendChild(document.createElement("button"))
+    expect(press("PageUp", {}, button).defaultPrevented).toBe(false)
+    expect(press("w", {}, button).defaultPrevented).toBe(true)
+  })
+
+  it("passes an unused Escape to the page", () => {
+    render()
+    press("Escape")
+    expect(escape).toHaveBeenCalledTimes(1)
+  })
+
+  it("is off while disabled, except save", () => {
+    render({ enabled: false })
+    press("w")
+    expect(controller.store.getState().tool).toBe("select")
+    press("s", { ctrlKey: true })
+    expect(save).toHaveBeenCalledTimes(1)
+  })
+
+  it("tracks Alt for free placement", () => {
+    render()
+    press("Alt", { altKey: true })
+    expect(controller.store.getState().altHeld).toBe(true)
+    press("Alt", {}, document.body, "keyup")
+    expect(controller.store.getState().altHeld).toBe(false)
+  })
+
+  it("follows remaps live", () => {
+    render()
+    act(() => setKeyOverrides("editor", { "tool.wall": ["Shift+W"] }))
+    press("w")
+    expect(controller.store.getState().tool).toBe("select")
+    press("W", { shiftKey: true })
+    expect(controller.store.getState().tool).toBe("wall")
+  })
+})

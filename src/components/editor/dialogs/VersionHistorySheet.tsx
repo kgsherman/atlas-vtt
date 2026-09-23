@@ -1,6 +1,7 @@
 import * as React from "react"
 import { Eye, History, RotateCcw } from "lucide-react"
 
+import { useCommandLabel } from "@/components/keybindings/keymapStore"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
@@ -17,6 +18,7 @@ import { errorText, type SceneDocument } from "../useSceneDocument"
 type LoadState = { status: "loading" } | { status: "ready"; versions: SceneVersionInfo[] } | { status: "error"; message: string }
 
 export function VersionHistorySheet({ open, onOpenChange, doc }: { open: boolean; onOpenChange(open: boolean): void; doc: SceneDocument }) {
+  const saveKey = useCommandLabel("editor", "save")
   const [state, setState] = React.useState<LoadState>({ status: "loading" })
   const { listVersions, libraryId, baseVersion } = doc
 
@@ -65,7 +67,7 @@ export function VersionHistorySheet({ open, onOpenChange, doc }: { open: boolean
                     <History />
                   </EmptyMedia>
                   <EmptyTitle>No versions yet</EmptyTitle>
-                  <EmptyDescription>Save the scene (Ctrl+S) to create the first version.</EmptyDescription>
+                  <EmptyDescription>Save the scene{saveKey ? ` (${saveKey})` : ""} to create the first version.</EmptyDescription>
                 </EmptyHeader>
               </Empty>
             ) : null}

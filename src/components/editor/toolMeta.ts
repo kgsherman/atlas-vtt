@@ -32,15 +32,12 @@ import {
 } from "lucide-react"
 
 import type { PropKind } from "@/core/scene/types"
-import { SHORTCUTS } from "@/editor/shortcuts"
 import type { ToolId } from "@/editor/tools/types"
 
 export interface ToolMeta {
   id: ToolId
   label: string
   icon: LucideIcon
-  /** Shortcut key ("W"). */
-  key: string
   hint: string
 }
 
@@ -50,9 +47,7 @@ const Stairs = createLucideIcon("stairs", [
   ["path", { d: "M3 20V14", key: "rail" }],
 ])
 
-const keyOf = (tool: ToolId): string => SHORTCUTS.find((s) => s.action.type === "tool" && s.action.tool === tool)?.keys ?? ""
-
-const meta = (id: ToolId, label: string, icon: LucideIcon, hint: string): ToolMeta => ({ id, label, icon, key: keyOf(id), hint })
+const meta = (id: ToolId, label: string, icon: LucideIcon, hint: string): ToolMeta => ({ id, label, icon, hint })
 
 /** Tools in rail order, grouped by separators after "select", "window", "light" and "token". */
 export const TOOLS: ToolMeta[] = [

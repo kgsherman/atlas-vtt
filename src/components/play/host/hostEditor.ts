@@ -11,7 +11,6 @@ import { toast } from "sonner"
 
 import type { EditorContextValue } from "@/components/editor/context"
 import { describeIssues } from "@/components/editor/lib/format"
-import { isTextEntryTarget } from "@/components/editor/lib/pointer"
 import { createToolExtrasStore } from "@/components/editor/lib/toolExtras"
 import type { Id, Scene } from "@/core/scene/types"
 import { createEditorController } from "@/editor/controller"
@@ -19,8 +18,6 @@ import type { EditorViewOptions } from "@/editor/settings"
 import { createEditorStore } from "@/editor/store"
 import type { HostRunnerImpl } from "@/net/host"
 import type { CameraKind } from "@/render/contracts"
-
-import { overlayOpen } from "../input"
 
 export interface HostEditor {
   ctx: EditorContextValue
@@ -104,66 +101,4 @@ export function useAdoptHostScene(
     const st = editor.ctx.store.getState()
     if (st.scene !== scene) st.syncScene(scene)
   }, [editor, scene])
-}
-
-/**
- * Editor keyboard shortcuts while editing (capture phase, like the editor page). Ctrl+S saves the live
- * map to the library (`onSave`).
- */
-export function useHostEditKeys(
-  editor: HostEditor | null,
-  onExit: () => void,
-  onSave: () => void
-): void {
-  const exitRef = React.useRef(onExit)
-  const saveRef = React.useRef(onSave)
-  React.useEffect(() => {
-    exitRef.current = onExit
-    saveRef.current = onSave
-  })
-  React.useEffect(() => {
-    if (!editor) return
-    const { store, controller } = editor.ctx
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.defaultPrevented) return
-      const ctrl = e.ctrlKey || e.metaKey
-      const key = e.key.length === 1 ? e.key.toLowerCase() : e.key
-      if (ctrl && !e.altKey && key === "s") {
-        e.preventDefault()
-        saveRef.current()
-        return
-      }
-      if (isTextEntryTarget(e.target) || overlayOpen()) return
-      if (e.key === "Alt") e.preventDefault()
-      const consumed = controller.keyDown({
-        key: e.key,
-        shift: e.shiftKey,
-        alt: e.altKey,
-        ctrl,
-      })
-      if (consumed) e.preventDefault()
-      else if (e.key === "Escape" && store.getState().selection.length === 0) {
-        e.preventDefault()
-        exitRef.current()
-      }
-      if (!ctrl && !e.altKey && e.key.length === 1 && (consumed || key === "d"))
-        e.stopPropagation()
-    }
-    const onKeyUp = (e: KeyboardEvent) =>
-      controller.keyUp({
-        key: e.key,
-        shift: e.shiftKey,
-        alt: e.altKey,
-        ctrl: e.ctrlKey || e.metaKey,
-      })
-    const onBlur = () => store.getState().setAltHeld(false)
-    window.addEventListener("keydown", onKeyDown, true)
-    window.addEventListener("keyup", onKeyUp)
-    window.addEventListener("blur", onBlur)
-    return () => {
-      window.removeEventListener("keydown", onKeyDown, true)
-      window.removeEventListener("keyup", onKeyUp)
-      window.removeEventListener("blur", onBlur)
-    }
-  }, [editor])
 }

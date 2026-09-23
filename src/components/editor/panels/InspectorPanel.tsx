@@ -1,6 +1,8 @@
 import * as React from "react"
 import { Copy, EyeOff, Lock, LockOpen, MousePointerClick, RotateCw, Scan, Trash2 } from "lucide-react"
 
+import { CommandKbd } from "@/components/keybindings/CommandKbd"
+import { useCommandLabel } from "@/components/keybindings/keymapStore"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
@@ -80,7 +82,9 @@ function Header({ title, subtitle, id }: { title: React.ReactNode; subtitle: Rea
           <TooltipTrigger render={<Button variant="ghost" size="icon-sm" aria-label="Duplicate" disabled={readOnly} onClick={() => store.getState().duplicateSelection()} />}>
             <Copy />
           </TooltipTrigger>
-          <TooltipContent>Duplicate (Ctrl+D)</TooltipContent>
+          <TooltipContent>
+            Duplicate <CommandKbd scope="editor" command="duplicate" />
+          </TooltipContent>
         </Tooltip>
         <Tooltip>
           <TooltipTrigger
@@ -750,6 +754,7 @@ function MultiInspector({ ids }: { ids: Id[] }) {
 export function InspectorPanel() {
   const selection = useEditorState((s) => s.selection)
   const tool = useEditorState((s) => s.tool)
+  const selectKey = useCommandLabel("editor", "tool.select")
   if (selection.length === 0) {
     return (
       <Empty className="mt-6 gap-3 p-6">
@@ -759,7 +764,7 @@ export function InspectorPanel() {
           </EmptyMedia>
           <EmptyTitle>Nothing selected</EmptyTitle>
           <EmptyDescription>
-            {tool === "select" ? "Click an object or token to edit it. Drag on empty ground to box-select; Shift-click adds to the selection." : "Switch to the Select tool (V) and click something to edit its properties."}
+            {tool === "select" ? "Click an object or token to edit it. Drag on empty ground to box-select; Shift-click adds to the selection." : `Switch to the Select tool${selectKey ? ` (${selectKey})` : ""} and click something to edit its properties.`}
           </EmptyDescription>
         </EmptyHeader>
       </Empty>

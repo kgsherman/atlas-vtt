@@ -13,7 +13,9 @@ import type { EditorController } from "@/editor/controller"
 import type { EditorStore } from "@/editor/store"
 import type { Engine } from "@/render/contracts"
 import { useQualityChoice } from "@/components/canvas/qualityChoice"
-import { overlayOpen } from "@/components/play/input"
+import { KeybindingsDialog } from "@/components/keybindings/KeybindingsDialog"
+import { useSuppressThemeHotkey } from "@/components/theme-provider"
+import { overlayOpen, useAppHotkeys } from "@/lib/hotkeys"
 
 import {
   EditorActionsContext,
@@ -26,11 +28,10 @@ import {
 import { EditorViewport, type PreviewState } from "./EditorViewport"
 import { MapImportDialog, type MapImportRequest } from "./dialogs/MapImportDialog"
 import { ShareDialog } from "./dialogs/ShareDialog"
-import { ShortcutsDialog } from "./dialogs/ShortcutsDialog"
 import { VersionHistorySheet } from "./dialogs/VersionHistorySheet"
 import { describeIssues } from "./lib/format"
 import { duplicateLevel } from "./lib/levelOps"
-import { editorMayHandleKey, isTextEntryTarget } from "./lib/pointer"
+import { isTextEntryTarget } from "./lib/pointer"
 import { defaultPreviewToken, type PreviewResult } from "./lib/preview"
 import { createViewportInfoStore } from "./lib/viewportInfo"
 import { readEditorView, writeEditorView } from "./lib/viewPrefs"
@@ -39,6 +40,7 @@ import { StatusBar } from "./StatusBar"
 import { ToolOptionsBar } from "./ToolOptionsBar"
 import { ToolRail } from "./ToolRail"
 import { TopBar } from "./TopBar"
+import { acceptsEditorKey, useEditorHotkeys } from "./useEditorHotkeys"
 import type { SceneDocument } from "./useSceneDocument"
 import { CameraControls, DocumentBanners, GettingStarted, LevelSwitcher, PreviewBar } from "./ViewportOverlays"
 
@@ -162,64 +164,27 @@ export function EditorShell({ doc, goHome, importRequest, setImportRequest }: Ed
   )
 
   // ---- keyboard --------------------------------------------------------------------------------
-  const keyState = React.useRef({ previewing: false, actions })
+  const previewing = activePreview !== null
+  useSuppressThemeHotkey()
+  useEditorHotkeys(controller, { enabled: !previewing, save: () => actions.save(), help: () => actions.openShortcuts() })
+  useAppHotkeys([{ hotkey: "Escape", run: () => actions.exitPreview() }], { enabled: previewing, accepts: acceptsEditorKey })
+
+  // ---- clipboard (system paste of copied Atlas objects) -----------------------------------------------
+  const previewingRef = React.useRef(previewing)
   React.useEffect(() => {
-    keyState.current = { previewing: activePreview !== null, actions }
+    previewingRef.current = previewing
   })
   React.useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.defaultPrevented) return
-      const ctrl = e.ctrlKey || e.metaKey
-      const key = e.key.length === 1 ? e.key.toLowerCase() : e.key
-      if (ctrl && !e.altKey && key === "s") {
-        e.preventDefault()
-        keyState.current.actions.save()
-        return
-      }
-      if (!editorMayHandleKey(e.key, e.target) || overlayOpen()) return
-      if (keyState.current.previewing) {
-        if (e.key === "Escape") {
-          e.preventDefault()
-          keyState.current.actions.exitPreview()
-        }
-        if (key === "d" && !ctrl && !e.altKey) e.stopPropagation()
-        return
-      }
-      if (e.key === "?" || (e.key === "/" && e.shiftKey)) {
-        e.preventDefault()
-        keyState.current.actions.openShortcuts()
-        return
-      }
-      if (e.key === "Alt") e.preventDefault()
-      const consumed = controller.keyDown({ key: e.key, shift: e.shiftKey, alt: e.altKey, ctrl })
-      if (consumed) e.preventDefault()
-      // Editor letter shortcuts own the key: stop app-wide single-key handlers (e.g. the theme
-      // provider's "d" toggle, which would fire on every Door tool shortcut).
-      if (!ctrl && !e.altKey && e.key.length === 1 && (consumed || key === "d")) e.stopPropagation()
-    }
-    const onKeyUp = (e: KeyboardEvent) => {
-      controller.keyUp({ key: e.key, shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey || e.metaKey })
-    }
-    const onBlur = () => store.getState().setAltHeld(false)
     const onPaste = (e: ClipboardEvent) => {
-      if (isTextEntryTarget(e.target) || overlayOpen() || keyState.current.previewing) return
+      if (isTextEntryTarget(e.target) || overlayOpen() || previewingRef.current) return
       const text = e.clipboardData?.getData("text/plain")
       if (!text || !text.includes("atlas-clipboard")) return
       e.preventDefault()
       const r = store.getState().pasteText(text, controller.pasteTarget())
       if (!r.ok) toast.error("Could not paste", { description: describeIssues(r.issues) })
     }
-    // Capture phase: the editor sees keys before app-wide window listeners.
-    window.addEventListener("keydown", onKeyDown, true)
-    window.addEventListener("keyup", onKeyUp)
-    window.addEventListener("blur", onBlur)
     window.addEventListener("paste", onPaste)
-    return () => {
-      window.removeEventListener("keydown", onKeyDown, true)
-      window.removeEventListener("keyup", onKeyUp)
-      window.removeEventListener("blur", onBlur)
-      window.removeEventListener("paste", onPaste)
-    }
+    return () => window.removeEventListener("paste", onPaste)
   }, [store, controller])
 
   // Dev builds: expose the editor to browser automation (window.__atlasEditor).
@@ -232,7 +197,6 @@ export function EditorShell({ doc, goHome, importRequest, setImportRequest }: Ed
   }, [store, controller, engine])
 
   const engineHandle = React.useMemo(() => ({ engine }), [engine])
-  const previewing = activePreview !== null
 
   return (
     <EditorActionsContext.Provider value={actions}>
@@ -318,7 +282,7 @@ export function EditorShell({ doc, goHome, importRequest, setImportRequest }: Ed
           }}
         />
         <MapImportDialog request={importRequest} onClose={() => setImportRequest(null)} doc={doc} />
-        <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
+        <KeybindingsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} scopes={["editor", "play"]} host />
         <VersionHistorySheet open={versionsOpen} onOpenChange={setVersionsOpen} doc={doc} />
         <ShareDialog open={shareOpen} onOpenChange={setShareOpen} doc={doc} />
       </EditorEngineContext.Provider>

@@ -7,7 +7,7 @@
 import type { Id, Rect, Vec2 } from "@/core/scene/types"
 import type { OverlayState, PickResult } from "@/render/contracts"
 
-import { resolveShortcut, runShortcut, type PasteTarget } from "./shortcuts"
+import { runShortcut, type PasteTarget, type ShortcutAction } from "./shortcuts"
 import { currentSnapMode, type EditorStore } from "./store"
 import { createTools, type ToolSet } from "./tools"
 import type { Tool, ToolKeyEvent, ToolPointerEvent } from "./tools/types"
@@ -21,9 +21,11 @@ export interface EditorController {
   pointerDown(e: ToolPointerEvent): void
   pointerMove(e: ToolPointerEvent): void
   pointerUp(e: ToolPointerEvent): void
-  /** Returns true when the key was consumed (the canvas should preventDefault). */
-  keyDown(e: ToolKeyEvent): boolean
-  keyUp(e: ToolKeyEvent): void
+  /**
+   * A bound key was pressed (see EDITOR_BINDINGS): the active tool may consume it, otherwise its
+   * action runs. Returns true when the key was consumed (the page should preventDefault).
+   */
+  keyDown(e: ToolKeyEvent, action: ShortcutAction): boolean
   /** Overlay state for the engine; the same object is returned until something in it changes. */
   overlays(): EditorOverlays
   /** Listen for overlay / preview changes (the canvas pushes overlays() to the engine). */
@@ -117,19 +119,9 @@ export function createEditorController(store: EditorStore, opts: { now?: () => n
       current.onPointerUp?.(e)
     },
 
-    keyDown(e) {
-      if (e.key === "Alt") {
-        store.getState().setAltHeld(true)
-        return false
-      }
+    keyDown(e, action) {
       if (current.onKeyDown?.(e)) return true
-      const action = resolveShortcut(e)
-      if (!action) return false
       return runShortcut(action, { store, cancelGesture: () => current.cancel?.(), pasteTarget })
-    },
-
-    keyUp(e) {
-      if (e.key === "Alt" || !e.alt) store.getState().setAltHeld(false)
     },
 
     overlays() {

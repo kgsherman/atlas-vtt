@@ -2,9 +2,14 @@
  * Test helpers for the editor: a small two-level fixture scene, a store without a system clipboard
  * and a builder for synthetic ToolPointerEvents.
  */
+import { matchesKeyboardEvent } from "@tanstack/hotkeys"
+
 import { createConnector, createDoor, createFloor, createLevel, createScene, createWall, createWindow } from "@/core/scene/factory"
 import type { Id, Scene, SceneObject, Vec2, Vec3 } from "@/core/scene/types"
+import type { KeyOverrides } from "@/lib/keymap"
 
+import type { EditorController } from "./controller"
+import { editorBindings } from "./shortcuts"
 import { createEditorStore, type CreateEditorStoreOptions } from "./store"
 import type { ToolPointerEvent } from "./tools/types"
 
@@ -87,3 +92,20 @@ export const key = (k: string, mods: { shift?: boolean; alt?: boolean; ctrl?: bo
   alt: mods.alt ?? false,
   ctrl: mods.ctrl ?? false,
 })
+
+/**
+ * A key press as the app delivers it: TanStack Hotkeys matches the event against the editor bindings
+ * (Linux platform: Mod = Ctrl) and the controller gets the bound action. Returns whether the key was
+ * consumed; false also when nothing is bound to it. Needs a DOM (KeyboardEvent): jsdom tests only.
+ */
+export function pressKey(
+  controller: EditorController,
+  k: string,
+  mods: { shift?: boolean; alt?: boolean; ctrl?: boolean } = {},
+  overrides?: KeyOverrides
+): boolean {
+  const e = key(k, mods)
+  const event = new KeyboardEvent("keydown", { key: k, shiftKey: e.shift, altKey: e.alt, ctrlKey: e.ctrl })
+  const binding = editorBindings(overrides).find((b) => matchesKeyboardEvent(event, b.hotkey, "linux"))
+  return binding ? controller.keyDown(e, binding.action) : false
+}

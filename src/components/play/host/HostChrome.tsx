@@ -29,7 +29,7 @@ import { ModeBadge } from "@/components/app/ModeBadge"
 import { useConfirm } from "@/components/editor/context"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Kbd } from "@/components/ui/kbd"
+import { CommandKbd } from "@/components/keybindings/CommandKbd"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
@@ -199,7 +199,8 @@ export function HostTopBar({
           <ScanEye data-icon="inline-start" /> Preview vision
         </TooltipTrigger>
         <TooltipContent side="bottom">
-          See what the selected token (or the first PC) perceives <Kbd>V</Kbd>
+          See what the selected token (or the first PC) perceives{" "}
+          <CommandKbd scope="play" command="preview-vision" />
         </TooltipContent>
       </Tooltip>
       <Separator orientation="vertical" className="mx-1 h-5 self-center" />

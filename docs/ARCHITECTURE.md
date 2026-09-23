@@ -40,6 +40,7 @@ src/
     host/               DM-side host runner, vision worker client, flush pipeline, persistence, backdrop tiler
     player/             Player client (sync rules, requests), backdrop compositor
   app/                  Service wiring (Supabase or local mode), router + lazy routes, library, scene digests
+  lib/                  keymap (pure: remappable command tables, overrides), hotkeys (TanStack Hotkeys wrapper, key labels), utils
   components/           React + shadcn UI (app shell, editor panels, play HUD, host console, lobby)
   routes/               Page-level components (home, editor, host, play, join, shared scene)
   dev/                  Dev-only render harness (`dev/render.html`) and the Vineyard build helpers
@@ -48,7 +49,7 @@ supabase/migrations/    SQL: schema, RLS, RPCs, realtime policies
 ```
 
 Dependency rule: `core` imports nothing outside `core` (immer types allowed). `render` imports `core`.
-`editor`/`play`/`net` import `core` and `render/contracts.ts`. `components`/`routes` import everything.
+`editor`/`play`/`net` import `core` and `render/contracts.ts` (`editor`/`play` also the pure `lib/keymap`). `components`/`routes` import everything.
 Bundling: `/editor`, `/host` and `/play` are lazy routes (`app/routes.ts`), so three.js and the renderer load
 only there; the home, join and shared-scene routes never download them.
 
@@ -735,6 +736,20 @@ script checks that it is off.
   so pasted tokens land on cell centres. Free mode, Alt held, or Ctrl+Alt+V keeps the raw pointer point.
 - "Preview player view": pick a token → render mode player with masks computed locally by core/vision
   (explored = currently perceived, no memory).
+- Keyboard (TanStack Hotkeys): keymaps are command tables, `EDITOR_COMMANDS` (`editor/shortcuts.ts`) and
+  `PLAY_COMMANDS` (`play/keys.ts`), each command with a stable id, a label, default keys (`Hotkey` strings,
+  `Mod` = Cmd on macOS / Ctrl elsewhere) and an action. Users remap keys in the Keyboard shortcuts dialog
+  (`components/keybindings`, recording via the library's `HotkeyRecorder`). Remaps are per-command overrides
+  saved in localStorage (`atlas-vtt:keymap`, versioned), and a key belongs to at most one command per
+  keymap (`lib/keymap.ts`). Pages register the effective bindings through `useAppHotkeys` (`lib/hotkeys.ts`),
+  which adds the app's rules to the manager's matching. Shortcuts don't fire in text fields or under
+  dialogs or menus. Navigation keys stay with a focused widget (`editorMayHandleKey`). The default is
+  prevented only when the handler used the key. Propagation is never stopped. `useEditorHotkeys` (editor
+  page and the host's live editor) hands the matched action to `controller.keyDown(e, action)`: the
+  active tool sees the key first (Escape, Enter, R), then `runShortcut`. Alt for free placement comes from
+  the library's key-state tracker. Map views turn off the theme provider's "D" hotkey
+  (`useSuppressThemeHotkey`), because D is a tool and a pan key there. Menus, tooltips and hints show the
+  current keys (`useCommandLabel`, `CommandKbd`).
 
 ---
 
@@ -759,6 +774,9 @@ script checks that it is off.
 - The play-mode Measure tool (players and DM) and the editor's Measure tool share one rule, `rulerDistance`
   (`core/grid`): the king-move cells through the waypoints' cells (`legCells`, diagonals first), priced with
   the grid's diagonal rule over the whole route (`pathDistance`), or the euclidean length in free mode.
+- Play keys: `usePlayKeys` registers `PLAY_COMMANDS` (host-only commands, level switching and vision preview,
+  only for the DM). WASD / arrow panning is the top-down camera's own held-key input and is not remappable, so
+  the dialog refuses those keys for play commands.
 - DM play controls: lock/unlock movement (global and per player), shared vision toggle, enforce speed, door and
   light toggles, sun/moon on/off (scene patch), move any token, hide/reveal tokens, reveal secret doors, assign
   tokens to players, preview any token's vision, kick players.

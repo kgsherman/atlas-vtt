@@ -18,6 +18,7 @@ import {
 import { formatElevation } from "@/components/editor/lib/format"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { CommandKbd } from "@/components/keybindings/CommandKbd"
 import { Kbd } from "@/components/ui/kbd"
 import {
   Select,
@@ -68,8 +69,8 @@ export function LevelRail({
           <Layers className="size-3" /> Levels
         </span>
         <span className="flex gap-0.5">
-          <Kbd>PgUp</Kbd>
-          <Kbd>PgDn</Kbd>
+          <CommandKbd scope="play" command="level.up" />
+          <CommandKbd scope="play" command="level.down" />
         </span>
       </div>
       <ToggleGroup

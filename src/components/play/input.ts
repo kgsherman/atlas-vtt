@@ -1,52 +1,14 @@
 /**
  * DOM plumbing for the play views: canvas pointer events → PlayController (engine.pick on the active
- * level, rAF-throttled moves), the play keymap (window, capture phase), camera zoom via synthetic wheel
- * events, and a guard that keeps the app-wide "d" theme hotkey from firing while WASD pans the map.
+ * level, rAF-throttled moves), the play keymap and camera zoom via synthetic wheel events.
  */
 import * as React from "react"
 
 import type { Id } from "@/core/scene/types"
-import { resolvePlayKey, type PlayController, type PlayKeyAction } from "@/play"
+import { useKeyOverrides } from "@/components/keybindings/keymapStore"
+import { useAppHotkeys } from "@/lib/hotkeys"
+import { playBindings, type PlayController, type PlayKeyAction } from "@/play"
 import type { Engine } from "@/render/contracts"
-
-/** Keyboard focus is in something that takes text: shortcuts must not fire. */
-export function isTextEntry(target: EventTarget | null): boolean {
-  if (!target || typeof (target as Element).closest !== "function") return false
-  const el = target as HTMLElement
-  if (el.isContentEditable) return true
-  const tag = el.tagName
-  if (tag === "TEXTAREA" || tag === "SELECT") return true
-  if (tag === "INPUT") {
-    const type = (el as HTMLInputElement).type
-    return ![
-      "checkbox",
-      "radio",
-      "button",
-      "submit",
-      "reset",
-      "range",
-      "color",
-      "file",
-    ].includes(type)
-  }
-  return false
-}
-
-const OVERLAY_SELECTOR =
-  '[data-slot="dialog-content"], [data-slot="alert-dialog-content"], [data-slot="sheet-content"], [role="menu"], [role="listbox"]'
-
-/**
- * A modal dialog, sheet or menu is open: map shortcuts must not fire underneath it. Only live overlays
- * count: Base UI keeps a closed Select/Menu popup mounted inside a `[hidden]` (unmounted-but-kept) or
- * `[inert]` (closing) wrapper, and those must not swallow shortcuts for the rest of the page's life.
- * `closest()` rather than `checkVisibility()` so the check also works under jsdom.
- */
-export function overlayOpen(root: ParentNode = document): boolean {
-  for (const el of root.querySelectorAll(OVERLAY_SELECTOR)) {
-    if (!el.closest("[hidden], [inert]")) return true
-  }
-  return false
-}
 
 /** Zoom the engine camera about the canvas centre (the camera zooms on wheel events). */
 export function zoomCanvas(
@@ -68,54 +30,26 @@ export function zoomCanvas(
 }
 
 /**
- * The theme provider toggles dark/light on a bare "d" key press (window listener). On the map, "d"
- * pans right (the camera reads `code`), so hide the key from that listener while this hook is mounted.
+ * Play keymap with the user's remaps. The handler returns false when the key did nothing. Host-only
+ * commands (level switching, vision preview) are bound only when `host`.
  */
-export function useGuardThemeHotkey(enabled = true): void {
-  React.useEffect(() => {
-    if (!enabled) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey || e.altKey || isTextEntry(e.target)) return
-      if (e.key === "d" || e.key === "D") {
-        try {
-          Object.defineProperty(e, "key", { value: "", configurable: true })
-        } catch {
-          // Non-configurable in some engine: the theme toggles, nothing else breaks.
-        }
-      }
-    }
-    window.addEventListener("keydown", onKey, true)
-    return () => window.removeEventListener("keydown", onKey, true)
-  }, [enabled])
-}
-
-/** Play keymap on window (capture phase so it wins over app-wide handlers). */
 export function usePlayKeys(
   handler: (action: PlayKeyAction, e: KeyboardEvent) => boolean | void,
-  enabled = true
+  { enabled = true, host = false }: { enabled?: boolean; host?: boolean } = {}
 ): void {
-  const ref = React.useRef(handler)
-  React.useEffect(() => {
-    ref.current = handler
-  })
-  React.useEffect(() => {
-    if (!enabled) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || isTextEntry(e.target) || overlayOpen()) return
-      const action = resolvePlayKey({
-        key: e.key,
-        code: e.code,
-        shift: e.shiftKey,
-        ctrl: e.ctrlKey || e.metaKey,
-        alt: e.altKey,
-      })
-      if (!action || (e.repeat && action.type !== "zoom")) return
-      const consumed = ref.current(action, e)
-      if (consumed !== false) e.preventDefault()
-    }
-    window.addEventListener("keydown", onKey, true)
-    return () => window.removeEventListener("keydown", onKey, true)
-  }, [enabled])
+  const overrides = useKeyOverrides("play")
+  const bindings = React.useMemo(
+    () => playBindings(overrides).filter((b) => host || !b.hostOnly),
+    [overrides, host]
+  )
+  useAppHotkeys(
+    bindings.map((b) => ({
+      hotkey: b.hotkey,
+      repeat: b.repeat ?? false,
+      run: (e) => handler(b.action, e),
+    })),
+    { enabled }
+  )
 }
 
 export interface CanvasInputOptions {

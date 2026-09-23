@@ -48,7 +48,6 @@ import {
   setDirectionalPatches,
   setTokensHiddenPatches,
 } from "./host"
-import { resolvePlayKey } from "./keys"
 import { MeasureTool } from "./measure"
 import {
   blindLandingOk,
@@ -620,22 +619,6 @@ describe("tokens & keys", () => {
     expect(cycleToken("b", ["a", "b"], 1)).toBe("a")
     expect(cycleToken("a", ["a", "b"], -1)).toBe("b")
     expect(cycleToken(null, ["a", "b"], -1)).toBe("b")
-  })
-
-  it("maps play keys", () => {
-    const k = (
-      key: string,
-      extra: Partial<{ shift: boolean; ctrl: boolean; alt: boolean }> = {}
-    ) =>
-      resolvePlayKey({ key, shift: false, ctrl: false, alt: false, ...extra })
-    expect(k("q")).toEqual({ type: "rotate", quarterTurns: -1 })
-    expect(k("E")).toEqual({ type: "rotate", quarterTurns: 1 })
-    expect(k("=")).toEqual({ type: "zoom", direction: 1 })
-    expect(k("-")).toEqual({ type: "zoom", direction: -1 })
-    expect(k("Tab", { shift: true })).toEqual({ type: "cycle-token", dir: -1 })
-    expect(k("m")).toEqual({ type: "toggle-measure" })
-    expect(k("w")).toBeNull()
-    expect(k("q", { ctrl: true })).toBeNull()
   })
 })
 

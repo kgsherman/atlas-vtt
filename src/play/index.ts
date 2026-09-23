@@ -51,11 +51,12 @@ export {
   type SenseLine,
 } from "./tokens"
 export {
-  PLAY_SHORTCUTS,
-  resolvePlayKey,
+  PLAY_COMMANDS,
+  PLAY_POINTER_HELP,
+  playBindings,
+  type PlayBinding,
+  type PlayCommand,
   type PlayKeyAction,
-  type PlayKeyEvent,
-  type PlayShortcut,
 } from "./keys"
 export {
   isEmptyChange,

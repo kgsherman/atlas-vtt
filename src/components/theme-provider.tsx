@@ -1,6 +1,8 @@
 /* eslint-disable react-refresh/only-export-components */
 import * as React from "react"
 
+import { useAppHotkeys } from "@/lib/hotkeys"
+
 type Theme = "dark" | "light" | "system"
 type ResolvedTheme = "dark" | "light"
 
@@ -14,6 +16,8 @@ type ThemeProviderProps = {
 type ThemeProviderState = {
   theme: Theme
   setTheme: (theme: Theme) => void
+  /** Turn the "D" theme hotkey off until the returned release is called. */
+  suppressHotkey: () => () => void
 }
 
 const COLOR_SCHEME_QUERY = "(prefers-color-scheme: dark)"
@@ -56,25 +60,6 @@ function disableTransitionsTemporarily() {
       })
     })
   }
-}
-
-function isEditableTarget(target: EventTarget | null) {
-  if (!(target instanceof HTMLElement)) {
-    return false
-  }
-
-  if (target.isContentEditable) {
-    return true
-  }
-
-  const editableParent = target.closest(
-    "input, textarea, select, [contenteditable='true']"
-  )
-  if (editableParent) {
-    return true
-  }
-
-  return false
 }
 
 export function ThemeProvider({
@@ -139,45 +124,35 @@ export function ThemeProvider({
     }
   }, [theme, applyTheme])
 
-  React.useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.repeat) {
-        return
-      }
-
-      if (event.metaKey || event.ctrlKey || event.altKey) {
-        return
-      }
-
-      if (isEditableTarget(event.target)) {
-        return
-      }
-
-      if (event.key.toLowerCase() !== "d") {
-        return
-      }
-
-      setThemeState((currentTheme) => {
-        const nextTheme =
-          currentTheme === "dark"
-            ? "light"
-            : currentTheme === "light"
-              ? "dark"
-              : getSystemTheme() === "dark"
+  // "D" toggles dark / light, except where the map owns bare letter keys (see useSuppressThemeHotkey).
+  const [hotkeyHolds, setHotkeyHolds] = React.useState(0)
+  const suppressHotkey = React.useCallback(() => {
+    setHotkeyHolds((n) => n + 1)
+    return () => setHotkeyHolds((n) => n - 1)
+  }, [])
+  useAppHotkeys(
+    [
+      {
+        hotkey: "D",
+        repeat: false,
+        run: () =>
+          setThemeState((currentTheme) => {
+            const nextTheme =
+              currentTheme === "dark"
                 ? "light"
-                : "dark"
+                : currentTheme === "light"
+                  ? "dark"
+                  : getSystemTheme() === "dark"
+                    ? "light"
+                    : "dark"
 
-        localStorage.setItem(storageKey, nextTheme)
-        return nextTheme
-      })
-    }
-
-    window.addEventListener("keydown", handleKeyDown)
-
-    return () => {
-      window.removeEventListener("keydown", handleKeyDown)
-    }
-  }, [storageKey])
+            localStorage.setItem(storageKey, nextTheme)
+            return nextTheme
+          }),
+      },
+    ],
+    { enabled: hotkeyHolds === 0 }
+  )
 
   React.useEffect(() => {
     const handleStorageChange = (event: StorageEvent) => {
@@ -208,8 +183,9 @@ export function ThemeProvider({
     () => ({
       theme,
       setTheme,
+      suppressHotkey,
     }),
-    [theme, setTheme]
+    [theme, setTheme, suppressHotkey]
   )
 
   return (
@@ -227,4 +203,13 @@ export const useTheme = () => {
   }
 
   return context
+}
+
+/**
+ * Map views own bare letter keys (D is the door tool in the editor and pans right in play), so they
+ * turn the theme hotkey off while mounted.
+ */
+export function useSuppressThemeHotkey(active = true): void {
+  const { suppressHotkey } = useTheme()
+  React.useEffect(() => (active ? suppressHotkey() : undefined), [active, suppressHotkey])
 }

@@ -5,6 +5,7 @@
 import * as React from "react"
 import { Box, ChevronDown, ChevronUp, Eye, History, ImagePlus, Keyboard, LifeBuoy, Map as MapIcon, Maximize, RotateCcw, Undo2, X } from "lucide-react"
 
+import { CommandKbd } from "@/components/keybindings/CommandKbd"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ButtonGroup } from "@/components/ui/button-group"
@@ -52,7 +53,7 @@ export function LevelSwitcher() {
             <ChevronUp />
           </TooltipTrigger>
           <TooltipContent side="right">
-            {above ? `Up to ${above.name}` : "No level above"} <Kbd>PgUp</Kbd>
+            {above ? `Up to ${above.name}` : "No level above"} <CommandKbd scope="editor" command="level.up" />
           </TooltipContent>
         </Tooltip>
         <Tooltip>
@@ -60,7 +61,7 @@ export function LevelSwitcher() {
             <ChevronDown />
           </TooltipTrigger>
           <TooltipContent side="right">
-            {below ? `Down to ${below.name}` : "No level below"} <Kbd>PgDn</Kbd>
+            {below ? `Down to ${below.name}` : "No level below"} <CommandKbd scope="editor" command="level.down" />
           </TooltipContent>
         </Tooltip>
       </ButtonGroup>
@@ -163,7 +164,9 @@ export function GettingStarted() {
         </Button>
       </div>
       <p className="text-[0.6875rem] leading-relaxed text-muted-foreground">
-        Draw walls with <Kbd>W</Kbd>, add doors <Kbd>D</Kbd> and windows <Kbd>N</Kbd>, light the place <Kbd>L</Kbd> and drop tokens <Kbd>K</Kbd>. Or start from a battlemap image.
+        Draw walls <CommandKbd scope="editor" command="tool.wall" />, add doors <CommandKbd scope="editor" command="tool.door" /> and windows{" "}
+        <CommandKbd scope="editor" command="tool.window" />, light the place <CommandKbd scope="editor" command="tool.light" /> and drop tokens{" "}
+        <CommandKbd scope="editor" command="tool.token" />. Or start from a battlemap image.
       </p>
       <div className="flex gap-1.5">
         <Button size="xs" onClick={() => actions.openMapImport()}>

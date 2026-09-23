@@ -15,11 +15,15 @@ import {
   RotateCcw,
   RotateCw,
   Ruler,
+  Settings2,
   SunMedium,
 } from "lucide-react"
 
 import { QualitySelect } from "@/components/canvas/QualitySelect"
 import type { QualityChoice } from "@/components/canvas/qualityChoice"
+import { CommandKbd } from "@/components/keybindings/CommandKbd"
+import { KeybindingsDialog } from "@/components/keybindings/KeybindingsDialog"
+import { useKeyOverrides } from "@/components/keybindings/keymapStore"
 import { Button } from "@/components/ui/button"
 import { Kbd } from "@/components/ui/kbd"
 import {
@@ -38,8 +42,10 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
+import { hotkeyLabel } from "@/lib/hotkeys"
 import { cn } from "@/lib/utils"
-import { PLAY_SHORTCUTS, type PlayTool } from "@/play"
+import { keysOf } from "@/lib/keymap"
+import { PLAY_COMMANDS, PLAY_POINTER_HELP, type PlayTool } from "@/play"
 import type { Quality } from "@/render/contracts"
 
 /** Frosted panel look for everything floating over the map. */
@@ -329,57 +335,88 @@ export function ToolSwitch({
           <Ruler className="size-3.5" /> Measure
         </TooltipTrigger>
         <TooltipContent side={side}>
-          Drag to measure; Shift-drag adds a leg <Kbd>M</Kbd>
+          Drag to measure; Shift-drag adds a leg{" "}
+          <CommandKbd scope="play" command="measure" />
         </TooltipContent>
       </Tooltip>
     </ToggleGroup>
   )
 }
 
-/** Keyboard/mouse help. */
+/** Keyboard/mouse help (current keys, after remaps), with a way into the key-bindings dialog. */
 export function ShortcutsButton({
   side = "top",
-  extra = [],
+  host = false,
 }: {
   side?: "top" | "bottom"
-  extra?: { keys: string; label: string }[]
+  /** Include the DM-only keys, and the editor keymap in the dialog. */
+  host?: boolean
 }) {
+  const [open, setOpen] = React.useState(false)
+  const [customizing, setCustomizing] = React.useState(false)
+  const overrides = useKeyOverrides("play")
+  const rows = [
+    ...PLAY_POINTER_HELP.filter((h) => host || !h.hostOnly),
+    ...PLAY_COMMANDS.filter((c) => host || !c.hostOnly).map((c) => ({
+      keys: keysOf(c, overrides).map(hotkeyLabel).join(" / ") || "—",
+      label: c.label,
+    })),
+  ]
   return (
-    <Popover>
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <PopoverTrigger
-              render={
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="Keyboard shortcuts"
-                />
-              }
-            />
-          }
-        >
-          <Keyboard />
-        </TooltipTrigger>
-        <TooltipContent side={side}>Keyboard shortcuts</TooltipContent>
-      </Tooltip>
-      <PopoverContent side={side} align="end" className="w-72 gap-2">
-        <PopoverHeader>
-          <PopoverTitle>Controls</PopoverTitle>
-        </PopoverHeader>
-        <dl className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1.5">
-          {[...PLAY_SHORTCUTS, ...extra].map((s) => (
-            <React.Fragment key={s.keys + s.label}>
-              <dt>
-                <Kbd>{s.keys}</Kbd>
-              </dt>
-              <dd className="text-muted-foreground">{s.label}</dd>
-            </React.Fragment>
-          ))}
-        </dl>
-      </PopoverContent>
-    </Popover>
+    <>
+      <Popover open={open} onOpenChange={setOpen}>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <PopoverTrigger
+                render={
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label="Keyboard shortcuts"
+                  />
+                }
+              />
+            }
+          >
+            <Keyboard />
+          </TooltipTrigger>
+          <TooltipContent side={side}>Keyboard shortcuts</TooltipContent>
+        </Tooltip>
+        <PopoverContent side={side} align="end" className="w-72 gap-2">
+          <PopoverHeader>
+            <PopoverTitle>Controls</PopoverTitle>
+          </PopoverHeader>
+          <dl className="grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-1.5">
+            {rows.map((s) => (
+              <React.Fragment key={s.label}>
+                <dt>
+                  <Kbd>{s.keys}</Kbd>
+                </dt>
+                <dd className="text-muted-foreground">{s.label}</dd>
+              </React.Fragment>
+            ))}
+          </dl>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setOpen(false)
+              setCustomizing(true)
+            }}
+          >
+            <Settings2 data-icon="inline-start" />
+            Customize keys…
+          </Button>
+        </PopoverContent>
+      </Popover>
+      <KeybindingsDialog
+        open={customizing}
+        onOpenChange={setCustomizing}
+        scopes={host ? ["play", "editor"] : ["play"]}
+        host={host}
+      />
+    </>
   )
 }
 

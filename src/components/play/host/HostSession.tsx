@@ -14,6 +14,8 @@ import { paths } from "@/app/routes"
 import { useServices } from "@/app/services"
 import { useQualityChoice } from "@/components/canvas/qualityChoice"
 import { EditorContext } from "@/components/editor/context"
+import { useEditorHotkeys } from "@/components/editor/useEditorHotkeys"
+import { KeybindingsDialog } from "@/components/keybindings/KeybindingsDialog"
 import { Sidebar as EditorSidebar } from "@/components/editor/Sidebar"
 import { ToolOptionsBar } from "@/components/editor/ToolOptionsBar"
 import { ToolRail } from "@/components/editor/ToolRail"
@@ -21,6 +23,7 @@ import {
   CameraControls,
   LevelSwitcher,
 } from "@/components/editor/ViewportOverlays"
+import { useSuppressThemeHotkey } from "@/components/theme-provider"
 import { Button } from "@/components/ui/button"
 import { sortedLevels } from "@/core/scene/queries"
 import type { Id } from "@/core/scene/types"
@@ -30,13 +33,7 @@ import { cycleToken, PlayController, type PlayTool } from "@/play"
 import type { CameraKind, Engine, FrameStats } from "@/render/contracts"
 
 import { CameraDock, HudPanel, ShortcutsButton, ToolSwitch } from "../hud"
-import {
-  useGuardThemeHotkey,
-  usePlayKeys,
-  zoomCanvas,
-  isTextEntry,
-  overlayOpen,
-} from "../input"
+import { usePlayKeys, zoomCanvas } from "../input"
 import {
   BlockingScreen,
   EndedScreen,
@@ -56,7 +53,6 @@ import { HostStatusBar, HostTopBar, type HostMode } from "./HostChrome"
 import {
   createHostEditor,
   useAdoptHostScene,
-  useHostEditKeys,
   type HostEditor,
   type HostEditorView,
 } from "./hostEditor"
@@ -208,6 +204,7 @@ function HostConsole({
   const [levelChoice, setLevelChoice] = React.useState<Id | null>(null)
   const [selected, setSelected] = React.useState<Id | null>(null)
   const [preview, setPreview] = React.useState<Id[] | null>(null)
+  const [keysOpen, setKeysOpen] = React.useState(false)
   const [previewInfo, setPreviewInfo] = React.useState<PreviewInfo | null>(null)
   const [camera, setCamera] = usePreference<CameraKind>(
     "atlas-host:camera",
@@ -230,7 +227,7 @@ function HostConsole({
   )
   const hosting = snap.status === "hosting"
   const quality = useQualityChoice()
-  useGuardThemeHotkey(mode === "play")
+  useSuppressThemeHotkey()
 
   const activeLevelId =
     levelChoice && Object.hasOwn(scene.levels, levelChoice)
@@ -411,81 +408,72 @@ function HostConsole({
   )
   useAdoptHostScene(editor, scene)
   const saveToLibrary = React.useCallback(() => void saveMap.save(), [saveMap])
-  useHostEditKeys(editor, exitEdit, saveToLibrary)
+  useEditorHotkeys(editor?.ctx.controller ?? null, {
+    enabled: true,
+    save: saveToLibrary,
+    help: () => setKeysOpen(true),
+    escape: exitEdit,
+  })
 
   // ---- keyboard (play mode) --------------------------------------------------------------------------
-  usePlayKeys((action) => {
-    const e = live.get().engine
-    switch (action.type) {
-      case "rotate":
-        e?.rotateCamera(action.quarterTurns)
-        return
-      case "zoom":
-        zoomCanvas(canvas, action.direction)
-        return
-      case "toggle-grid":
-        setGrid(!grid)
-        return
-      case "toggle-measure":
-        controller.setTool(
-          controller.getTool() === "measure" ? "move" : "measure"
-        )
-        return
-      case "tool":
-        controller.setTool(action.tool)
-        return
-      case "focus-selected":
-        if (selectedId) focusToken(selectedId)
-        return
-      case "cycle-token": {
-        const pcs = Object.values(scene.tokens)
-          .filter((t) => t.kind === "pc")
-          .map((t) => t.id)
-          .sort()
-        const next = cycleToken(selectedId, pcs, action.dir)
-        if (next) {
-          setSelected(next)
-          focusToken(next)
+  usePlayKeys(
+    (action) => {
+      const e = live.get().engine
+      switch (action.type) {
+        case "rotate":
+          e?.rotateCamera(action.quarterTurns)
+          return
+        case "zoom":
+          zoomCanvas(canvas, action.direction)
+          return
+        case "toggle-grid":
+          setGrid(!grid)
+          return
+        case "toggle-measure":
+          controller.setTool(
+            controller.getTool() === "measure" ? "move" : "measure"
+          )
+          return
+        case "tool":
+          controller.setTool(action.tool)
+          return
+        case "focus-selected":
+          if (selectedId) focusToken(selectedId)
+          return
+        case "cycle-token": {
+          const pcs = Object.values(scene.tokens)
+            .filter((t) => t.kind === "pc")
+            .map((t) => t.id)
+            .sort()
+          const next = cycleToken(selectedId, pcs, action.dir)
+          if (next) {
+            setSelected(next)
+            focusToken(next)
+          }
+          return
         }
-        return
+        case "level": {
+          const levels = sortedLevels(scene)
+          const k = levels.findIndex((l) => l.id === activeLevelId)
+          const next =
+            levels[Math.min(levels.length - 1, Math.max(0, k + action.delta))]
+          if (next) setLevelChoice(next.id)
+          return
+        }
+        case "cancel":
+          if (controller.dragging || controller.getTool() === "measure")
+            controller.cancel()
+          else if (preview) setPreview(null)
+          else if (selectedId) setSelected(null)
+          else return false
+          return
+        case "preview-vision":
+          togglePreview()
+          return
       }
-      case "level": {
-        const levels = sortedLevels(scene)
-        const k = levels.findIndex((l) => l.id === activeLevelId)
-        const next =
-          levels[Math.min(levels.length - 1, Math.max(0, k + action.delta))]
-        if (next) setLevelChoice(next.id)
-        return
-      }
-      case "cancel":
-        if (controller.dragging || controller.getTool() === "measure")
-          controller.cancel()
-        else if (preview) setPreview(null)
-        else if (selectedId) setSelected(null)
-        else return false
-        return
-    }
-  }, mode === "play")
-  React.useEffect(() => {
-    if (mode !== "play") return
-    const onKey = (e: KeyboardEvent) => {
-      if (
-        e.defaultPrevented ||
-        e.ctrlKey ||
-        e.metaKey ||
-        e.altKey ||
-        isTextEntry(e.target) ||
-        overlayOpen()
-      )
-        return
-      if (e.key === "v" || e.key === "V") {
-        e.preventDefault()
-        togglePreview()
-      }
-    }
-    window.addEventListener("keydown", onKey, true)
-    return () => window.removeEventListener("keydown", onKey, true)
-  }, [mode, togglePreview])
+    },
+    { enabled: mode === "play", host: true }
+  )
 
   // ---- session actions -------------------------------------------------------------------------------
   /** End for everyone (after saving the map to the library when `save`); false = stay on the dialog. */
@@ -626,16 +614,7 @@ function HostConsole({
                       onGrid={setGrid}
                     />
                     <HudPanel className="p-1">
-                      <ShortcutsButton
-                        extra={[
-                          { keys: "V", label: "Preview vision" },
-                          { keys: "PgUp / PgDn", label: "Level up / down" },
-                          {
-                            keys: "Right-click",
-                            label: "Token, door and light actions",
-                          },
-                        ]}
-                      />
+                      <ShortcutsButton host />
                     </HudPanel>
                   </div>
                 </div>
@@ -675,6 +654,12 @@ function HostConsole({
           )
         ) : null}
       </div>
+      <KeybindingsDialog
+        open={keysOpen}
+        onOpenChange={setKeysOpen}
+        scopes={["editor", "play"]}
+        host
+      />
       <EndSessionDialog
         open={ending}
         onOpenChange={setEnding}
@@ -708,6 +693,7 @@ function HostConsole({
         }}
         onExit={exitEdit}
         onSave={saveToLibrary}
+        onShortcuts={() => setKeysOpen(true)}
       >
         {main}
       </HostEditorProviders>

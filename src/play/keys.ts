@@ -1,8 +1,11 @@
 /**
- * Play-mode keyboard map (players and the DM's play view). WASD / arrow panning is handled by the
- * engine's top-down camera itself; everything else resolves to a PlayKeyAction here so the pages share
- * one keymap and one shortcut list for tooltips and help.
+ * Play-mode keymap (players and the DM's play view): every play command with its default keys, as
+ * TanStack Hotkeys strings. Users can rebind commands (saved overrides refer to the ids). WASD / arrow
+ * panning is handled by the engine's top-down camera itself and is not remappable.
  */
+import type { Hotkey } from "@tanstack/hotkeys"
+
+import { bindingsOf, type Command, type KeyOverrides } from "@/lib/keymap"
 
 export type PlayKeyAction =
   | { type: "rotate"; quarterTurns: 1 | -1 }
@@ -14,64 +17,132 @@ export type PlayKeyAction =
   | { type: "toggle-grid" }
   | { type: "level"; delta: 1 | -1 }
   | { type: "cancel" }
+  | { type: "preview-vision" }
 
-export interface PlayKeyEvent {
-  key: string
-  code?: string
-  shift: boolean
-  ctrl: boolean
-  alt: boolean
+export interface PlayCommand extends Command {
+  action: PlayKeyAction
+  /** Fire on auto-repeat while held (default: once per press). */
+  repeat?: boolean
+  /** Only the DM's view uses it (hidden from players' help and settings). */
+  hostOnly?: boolean
 }
 
-export interface PlayShortcut {
-  keys: string
-  label: string
+export interface PlayBinding {
+  hotkey: Hotkey
+  action: PlayKeyAction
+  repeat?: boolean
+  hostOnly?: boolean
 }
 
-/** Shortcut list for help popovers (display strings). */
-export const PLAY_SHORTCUTS: PlayShortcut[] = [
-  { keys: "W A S D", label: "Pan the camera" },
-  { keys: "Q / E", label: "Rotate 90°" },
-  { keys: "+ / −", label: "Zoom in / out" },
-  { keys: "Wheel", label: "Zoom at the cursor" },
-  { keys: "Right-drag", label: "Pan" },
-  { keys: "Tab", label: "Next character" },
-  { keys: "Space", label: "Centre on the selected token" },
-  { keys: "M", label: "Measure tool" },
-  { keys: "G", label: "Toggle the grid" },
-  { keys: "Esc", label: "Cancel / clear the ruler" },
+/** Every play command, in help / settings order. `+` / `_` are Shift+= / Shift+- on US layouts. */
+export const PLAY_COMMANDS: PlayCommand[] = [
+  {
+    id: "rotate.left",
+    label: "Rotate 90° left",
+    keys: ["Q"],
+    action: { type: "rotate", quarterTurns: -1 },
+  },
+  {
+    id: "rotate.right",
+    label: "Rotate 90° right",
+    keys: ["E"],
+    action: { type: "rotate", quarterTurns: 1 },
+  },
+  {
+    id: "zoom.in",
+    label: "Zoom in",
+    keys: ["+", "="],
+    action: { type: "zoom", direction: 1 },
+    repeat: true,
+  },
+  {
+    id: "zoom.out",
+    label: "Zoom out",
+    keys: ["-", "_"],
+    action: { type: "zoom", direction: -1 },
+    repeat: true,
+  },
+  {
+    id: "token.next",
+    label: "Next character",
+    keys: ["Tab"],
+    action: { type: "cycle-token", dir: 1 },
+  },
+  {
+    id: "token.previous",
+    label: "Previous character",
+    keys: ["Shift+Tab"],
+    action: { type: "cycle-token", dir: -1 },
+  },
+  {
+    id: "focus-selected",
+    label: "Centre on the selected token",
+    keys: ["Space"],
+    action: { type: "focus-selected" },
+  },
+  {
+    id: "measure",
+    label: "Measure tool",
+    keys: ["M"],
+    action: { type: "toggle-measure" },
+  },
+  {
+    id: "toggle-grid",
+    label: "Toggle the grid",
+    keys: ["G"],
+    action: { type: "toggle-grid" },
+  },
+  {
+    id: "cancel",
+    label: "Cancel / clear the ruler",
+    keys: ["Escape"],
+    action: { type: "cancel" },
+  },
+  {
+    id: "level.up",
+    label: "Level above",
+    keys: ["PageUp"],
+    action: { type: "level", delta: 1 },
+    hostOnly: true,
+  },
+  {
+    id: "level.down",
+    label: "Level below",
+    keys: ["PageDown"],
+    action: { type: "level", delta: -1 },
+    hostOnly: true,
+  },
+  {
+    id: "preview-vision",
+    label: "Preview vision",
+    keys: ["V"],
+    action: { type: "preview-vision" },
+    hostOnly: true,
+  },
 ]
 
-/** Resolve a key press (null = not a play shortcut). Modifier combos are never play shortcuts. */
-export function resolvePlayKey(e: PlayKeyEvent): PlayKeyAction | null {
-  if (e.ctrl || e.alt) return null
-  const k = e.key.length === 1 ? e.key.toLowerCase() : e.key
-  switch (k) {
-    case "q":
-      return { type: "rotate", quarterTurns: -1 }
-    case "e":
-      return { type: "rotate", quarterTurns: 1 }
-    case "+":
-    case "=":
-      return { type: "zoom", direction: 1 }
-    case "-":
-    case "_":
-      return { type: "zoom", direction: -1 }
-    case "Tab":
-      return { type: "cycle-token", dir: e.shift ? -1 : 1 }
-    case "m":
-      return { type: "toggle-measure" }
-    case " ":
-      return { type: "focus-selected" }
-    case "g":
-      return { type: "toggle-grid" }
-    case "PageUp":
-      return { type: "level", delta: 1 }
-    case "PageDown":
-      return { type: "level", delta: -1 }
-    case "Escape":
-      return { type: "cancel" }
-    default:
-      return null
-  }
+/** The bindings to register: every key of every command, after the user's overrides. */
+export function playBindings(overrides: KeyOverrides = {}): PlayBinding[] {
+  return bindingsOf(PLAY_COMMANDS, overrides).map(({ hotkey, command }) => ({
+    hotkey,
+    action: command.action,
+    repeat: command.repeat,
+    hostOnly: command.hostOnly,
+  }))
 }
+
+/** Mouse and camera input for help lists (not remappable). */
+export const PLAY_POINTER_HELP: {
+  keys: string
+  label: string
+  hostOnly?: boolean
+}[] = [
+  { keys: "W A S D / Arrows", label: "Pan the camera" },
+  { keys: "Wheel", label: "Zoom at the cursor" },
+  { keys: "Right-drag", label: "Pan" },
+  {
+    keys: "Right-click",
+    label: "Token, door and light actions",
+    hostOnly: true,
+  },
+]

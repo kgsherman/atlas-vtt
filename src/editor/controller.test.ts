@@ -1,55 +1,11 @@
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest"
 
 import { createPillar, createProp, createToken, createWall } from "@/core/scene/factory"
 import type { DoorObject, PillarObject, PropObject, WallObject } from "@/core/scene/types"
 
 import { createEditorController } from "./controller"
-import { resolveShortcut, SHORTCUTS } from "./shortcuts"
-import { at, fixtureScene, key, makeStore } from "./test-utils"
-
-describe("resolveShortcut", () => {
-  it("maps tool letters", () => {
-    const tools = { v: "select", f: "floor", w: "wall", d: "door", n: "window", s: "connector", p: "pillar", o: "prop", l: "light", t: "terrain", k: "token", m: "measure" }
-    for (const [k, tool] of Object.entries(tools)) {
-      expect(resolveShortcut(key(k))).toEqual({ type: "tool", tool })
-      expect(resolveShortcut(key(k.toUpperCase()))).toEqual({ type: "tool", tool })
-    }
-    expect(resolveShortcut(key("w", { alt: true }))).toBeNull()
-    expect(resolveShortcut(key("W", { shift: true }))).toBeNull()
-  })
-
-  it("maps editing, view and navigation keys", () => {
-    expect(resolveShortcut(key("z", { ctrl: true }))).toEqual({ type: "undo" })
-    expect(resolveShortcut(key("Z", { ctrl: true, shift: true }))).toEqual({ type: "redo" })
-    expect(resolveShortcut(key("y", { ctrl: true }))).toEqual({ type: "redo" })
-    expect(resolveShortcut(key("c", { ctrl: true }))).toEqual({ type: "copy" })
-    expect(resolveShortcut(key("x", { ctrl: true }))).toEqual({ type: "cut" })
-    expect(resolveShortcut(key("v", { ctrl: true }))).toEqual({ type: "paste" })
-    expect(resolveShortcut(key("v", { ctrl: true, alt: true }))).toEqual({ type: "paste", free: true })
-    expect(resolveShortcut(key("d", { ctrl: true }))).toEqual({ type: "duplicate" })
-    expect(resolveShortcut(key("a", { ctrl: true }))).toEqual({ type: "select-all" })
-    expect(resolveShortcut(key("Delete"))).toEqual({ type: "delete" })
-    expect(resolveShortcut(key("Backspace"))).toEqual({ type: "delete" })
-    expect(resolveShortcut(key("ArrowUp"))).toEqual({ type: "nudge", x: 0, z: -1, fine: false })
-    expect(resolveShortcut(key("ArrowRight", { shift: true }))).toEqual({ type: "nudge", x: 1, z: 0, fine: true })
-    expect(resolveShortcut(key("r"))).toEqual({ type: "rotate", turns: 1 })
-    expect(resolveShortcut(key("R", { shift: true }))).toEqual({ type: "rotate", turns: -1 })
-    expect(resolveShortcut(key("g"))).toEqual({ type: "toggle-grid" })
-    expect(resolveShortcut(key("h"))).toEqual({ type: "toggle-helpers" })
-    expect(resolveShortcut(key("["))).toMatchObject({ type: "brush-size" })
-    expect(resolveShortcut(key("]"))).toMatchObject({ type: "brush-size" })
-    expect(resolveShortcut(key("PageUp"))).toEqual({ type: "level", delta: 1 })
-    expect(resolveShortcut(key("PageDown"))).toEqual({ type: "level", delta: -1 })
-    expect(resolveShortcut(key("Escape"))).toEqual({ type: "escape" })
-    expect(resolveShortcut(key("q"))).toBeNull()
-    expect(resolveShortcut(key("q", { ctrl: true }))).toBeNull()
-  })
-
-  it("documents every binding", () => {
-    expect(SHORTCUTS.length).toBeGreaterThanOrEqual(27)
-    expect(SHORTCUTS.every((s) => s.keys.length > 0 && s.description.length > 0)).toBe(true)
-  })
-})
+import { at, fixtureScene, makeStore, pressKey } from "./test-utils"
 
 function setup() {
   const f = fixtureScene()
@@ -66,7 +22,7 @@ describe("editor controller", () => {
   it("routes pointer events to the active tool and switches tools by key", () => {
     const { store, controller } = setup()
     expect(controller.activeTool().id).toBe("select")
-    expect(controller.keyDown(key("w"))).toBe(true)
+    expect(pressKey(controller, "w")).toBe(true)
     expect(store.getState().tool).toBe("wall")
     expect(controller.activeTool().id).toBe("wall")
     controller.pointerDown(at(50, 50, { clientX: 0 }))
@@ -86,13 +42,13 @@ describe("editor controller", () => {
     store.getState().addObject(table)
     store.getState().select([table.id])
     store.getState().setTool("prop")
-    expect(controller.keyDown(key("r"))).toBe(true)
+    expect(pressKey(controller, "r")).toBe(true)
     // The prop tool rotated its preview; the selected table did not turn.
     expect(store.getState().toolSettings.prop.rotationY).toBeCloseTo(Math.PI / 2)
     expect((store.getState().scene.objects[table.id] as PropObject).rotationY).toBe(0)
     // With the select tool, R rotates the selection.
     store.getState().setTool("select")
-    expect(controller.keyDown(key("r"))).toBe(true)
+    expect(pressKey(controller, "r")).toBe(true)
     expect((store.getState().scene.objects[table.id] as PropObject).rotationY).toBeCloseTo(Math.PI / 2)
   })
 
@@ -102,14 +58,14 @@ describe("editor controller", () => {
     controller.pointerDown(at(62.5, 12.5, { objectId: pillar.id }))
     controller.pointerMove(at(80, 12.5))
     expect((store.getState().scene.objects[pillar.id] as PillarObject).position.x).toBe(82.5)
-    controller.keyDown(key("z", { ctrl: true }))
+    pressKey(controller, "z", { ctrl: true })
     const p = store.getState().scene.objects[pillar.id] as PillarObject
     expect(p.position).toEqual({ x: 62.5, z: 12.5 })
     expect(p.size).toBe(3)
     expect(store.getState().history.undoLabel).toBe("Edit pillar")
-    controller.keyDown(key("z", { ctrl: true }))
+    pressKey(controller, "z", { ctrl: true })
     expect((store.getState().scene.objects[pillar.id] as PillarObject).size).toBe(2)
-    controller.keyDown(key("y", { ctrl: true }))
+    pressKey(controller, "y", { ctrl: true })
     expect((store.getState().scene.objects[pillar.id] as PillarObject).size).toBe(3)
   })
 
@@ -118,9 +74,9 @@ describe("editor controller", () => {
     const other = createWall(f.groundId, { x: 10, z: 80 }, { x: 40, z: 80 })
     store.getState().addObject(other)
     store.getState().select([f.doorId])
-    expect(controller.keyDown(key("c", { ctrl: true }))).toBe(true)
+    expect(pressKey(controller, "c", { ctrl: true })).toBe(true)
     controller.pointerMove(at(22, 80, { objectId: other.id }))
-    expect(controller.keyDown(key("v", { ctrl: true }))).toBe(true)
+    expect(pressKey(controller, "v", { ctrl: true })).toBe(true)
     const pasted = store.getState().selection.map((id) => store.getState().scene.objects[id]) as DoorObject[]
     expect(pasted).toHaveLength(1)
     expect(pasted[0].wallId).toBe(other.id)
@@ -140,9 +96,9 @@ describe("editor controller", () => {
       const t = createToken(f.groundId, { x: 12.5, z: 12.5 }, { size: "medium" })
       store.getState().addToken(t)
       store.getState().select([t.id])
-      controller.keyDown(key("c", { ctrl: true }))
+      pressKey(controller, "c", { ctrl: true })
       controller.pointerMove(at(33.3, 81.1))
-      expect(controller.keyDown(key("v", { ctrl: true }))).toBe(true)
+      expect(pressKey(controller, "v", { ctrl: true })).toBe(true)
       const [p] = pasted(store)
       expect(p && "position" in p ? p.position : null).toEqual({ x: 32.5, z: 82.5 })
     })
@@ -153,9 +109,9 @@ describe("editor controller", () => {
       const crate = createProp(f.groundId, "crate", { x: 12.5, y: 0, z: 42.5 })
       store.getState().addObject(crate)
       store.getState().select([crate.id])
-      controller.keyDown(key("c", { ctrl: true }))
+      pressKey(controller, "c", { ctrl: true })
       controller.pointerMove(at(41.3, 78.7))
-      controller.keyDown(key("v", { ctrl: true }))
+      pressKey(controller, "v", { ctrl: true })
       const [p] = pasted(store) as PropObject[]
       expect(p.position.x).toBeCloseTo(42.5)
       expect(p.position.z).toBeCloseTo(77.5)
@@ -169,9 +125,9 @@ describe("editor controller", () => {
       store.getState().addObject(wall)
       store.getState().addToken(t)
       store.getState().select([wall.id, t.id])
-      controller.keyDown(key("c", { ctrl: true }))
+      pressKey(controller, "c", { ctrl: true })
       controller.pointerMove(at(31.7, 63.4))
-      controller.keyDown(key("v", { ctrl: true }))
+      pressKey(controller, "v", { ctrl: true })
       const items = pasted(store)
       const w = items.find((o) => o && "type" in o && o.type === "wall") as WallObject
       const tok = items.find((o) => o && !("type" in o)) as { position: { x: number; z: number } }
@@ -189,9 +145,9 @@ describe("editor controller", () => {
       const t = createToken(f.groundId, { x: 12.5, z: 12.5 })
       store.getState().addToken(t)
       store.getState().select([t.id])
-      controller.keyDown(key("c", { ctrl: true }))
+      pressKey(controller, "c", { ctrl: true })
       controller.pointerMove(at(33.3, 81.1))
-      controller.keyDown(key("v", { ctrl: true, alt: true }))
+      pressKey(controller, "v", { ctrl: true, alt: true })
       const [p] = pasted(store)
       const pos = p && "position" in p ? p.position : { x: NaN, z: NaN }
       expect(pos.x).toBeCloseTo(33.3)
@@ -204,29 +160,21 @@ describe("editor controller", () => {
   it("arrows nudge, Delete deletes, Ctrl+D duplicates, PageUp changes level, G/H toggle view", () => {
     const { f, store, controller, pillar } = setup()
     store.getState().select([pillar.id])
-    controller.keyDown(key("ArrowRight"))
-    controller.keyDown(key("ArrowDown", { shift: true }))
+    pressKey(controller, "ArrowRight")
+    pressKey(controller, "ArrowDown", { shift: true })
     expect((store.getState().scene.objects[pillar.id] as PillarObject).position).toEqual({ x: 67.5, z: 13.5 })
-    expect(controller.keyDown(key("d", { ctrl: true }))).toBe(true)
+    expect(pressKey(controller, "d", { ctrl: true })).toBe(true)
     expect(store.getState().selection).not.toContain(pillar.id)
-    expect(controller.keyDown(key("Delete"))).toBe(true)
+    expect(pressKey(controller, "Delete")).toBe(true)
     expect(store.getState().selection).toEqual([])
-    expect(controller.keyDown(key("Delete"))).toBe(false)
-    controller.keyDown(key("PageUp"))
+    expect(pressKey(controller, "Delete")).toBe(false)
+    pressKey(controller, "PageUp")
     expect(store.getState().activeLevelId).toBe(f.upperId)
-    controller.keyDown(key("g"))
-    controller.keyDown(key("h"))
+    pressKey(controller, "g")
+    pressKey(controller, "h")
     expect(store.getState().view).toMatchObject({ showGrid: false, showHelpers: false })
-    controller.keyDown(key("]"))
+    pressKey(controller, "]")
     expect(store.getState().toolSettings.brush.radius).toBe(12.5)
-  })
-
-  it("tracks Alt for free placement", () => {
-    const { store, controller } = setup()
-    controller.keyDown(key("Alt", { alt: true }))
-    expect(store.getState().altHeld).toBe(true)
-    controller.keyUp(key("Alt"))
-    expect(store.getState().altHeld).toBe(false)
   })
 
   it("overlays are memoised and include selection, hover, previews and the ruler", () => {
@@ -267,9 +215,9 @@ describe("editor controller", () => {
     store.getState().select([pillar.id])
     store.getState().setTool("floor")
     controller.pointerDown(at(10, 10))
-    expect(controller.keyDown(key("Escape"))).toBe(true)
+    expect(pressKey(controller, "Escape")).toBe(true)
     expect(store.getState().selection).toEqual([pillar.id])
-    expect(controller.keyDown(key("Escape"))).toBe(true)
+    expect(pressKey(controller, "Escape")).toBe(true)
     expect(store.getState().selection).toEqual([])
     // The cancelled drag creates nothing on release.
     controller.pointerUp(at(30, 30))
