@@ -3,14 +3,15 @@
  * synthetic, world-shader-like workload, mapped to the highest tier whose predicted main-pass cost
  * leaves headroom in a 60 fps frame. Adaptive quality (engine/quality.ts) corrects it at runtime.
  *
- *   const quality = await pickInitialQuality()     // cached per GPU for 30 days (localStorage)
+ *   const quality = await pickInitialQuality()     // measured once, then remembered (localStorage)
  *   const engine = createEngine(canvas, { quality })
  *
  * The probe uses its own tiny WebGL2 context (released afterwards), so it can run before the engine
  * exists and never disturbs the engine's GL state. It takes ~100–300 ms on a first run (measured:
  * RTX 5070 Ti 110 ms → ultra, Radeon iGPU 190 ms → medium). The renderer string is read first
  * (readRendererInfo): a software renderer (SwiftShader, llvmpipe) is classified low without timing,
- * which would otherwise block its first load for 1–2 s.
+ * which would otherwise block its first load for 1–2 s. The measurement is kept until storage is cleared
+ * (or `force`): cachedQuality() reads it synchronously, so later loads start the engine without waiting.
  */
 import type { Quality } from "../contracts"
 
@@ -33,7 +34,6 @@ const rank = (q: Quality) => ORDER.indexOf(q)
 const minQ = (a: Quality, b: Quality): Quality => (rank(a) <= rank(b) ? a : b)
 
 export const PROBE_CACHE_KEY = "atlas:quality-probe:v2"
-const CACHE_DAYS = 30
 
 /** Renderer-string heuristics: a tier cap and a label. Unknown GPUs are allowed everything (the benchmark decides). */
 export function classifyRenderer(renderer: string): { cap: Quality; label: string; software: boolean } {
@@ -293,7 +293,8 @@ function readCache(storage: Storage | null): CacheEntry | null {
     const raw = storage?.getItem(PROBE_CACHE_KEY)
     if (!raw) return null
     const e = JSON.parse(raw) as CacheEntry
-    if (!ORDER.includes(e.tier) || Date.now() - e.at > CACHE_DAYS * 86400e3) return null
+    if (!e || !ORDER.includes(e.tier) || !ORDER.includes(e.cap)) return null
+    if (e.msPerMP !== null && !(typeof e.msPerMP === "number" && Number.isFinite(e.msPerMP) && e.msPerMP >= 0)) return null
     return e
   } catch {
     return null
@@ -323,20 +324,35 @@ function defaultStorage(): Storage | null {
   }
 }
 
-/** Full probe result (tier + measurements); see pickInitialQuality for the tier alone. */
-export async function probeQuality(opts: ProbeOptions = {}): Promise<QualityProbe> {
+function windowSize(opts: ProbeOptions): { w: number; h: number; dpr: number } {
+  return {
+    w: opts.cssWidth ?? (typeof window !== "undefined" ? window.innerWidth : 1920),
+    h: opts.cssHeight ?? (typeof window !== "undefined" ? window.innerHeight : 1080),
+    dpr: opts.dpr ?? (typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1),
+  }
+}
+
+/**
+ * The remembered probe result, synchronously (null when this browser has never probed, or with `force`).
+ * The tier is re-derived for the current window size from the cached measurement; nothing is timed.
+ */
+export function cachedQuality(opts: Pick<ProbeOptions, "storage" | "force" | "cssWidth" | "cssHeight" | "dpr"> = {}): QualityProbe | null {
   const storage = opts.storage === undefined ? defaultStorage() : opts.storage
   const cached = opts.force ? null : readCache(storage)
+  if (!cached) return null
+  const { w, h, dpr } = windowSize(opts)
+  const tier = cached.msPerMP !== null ? tierForCost(cached.msPerMP, cached.cap, tierPixels(w, h, dpr)) : cached.tier
+  return { tier, renderer: cached.renderer, vendor: "", msPerMP: cached.msPerMP, cap: cached.cap, reason: cached.reason, cached: true }
+}
+
+/** Full probe result (tier + measurements); see pickInitialQuality for the tier alone. */
+export async function probeQuality(opts: ProbeOptions = {}): Promise<QualityProbe> {
+  const hit = cachedQuality(opts)
+  if (hit) return hit
+  const storage = opts.storage === undefined ? defaultStorage() : opts.storage
   // Yield once so a caller's first paint is not delayed by the benchmark.
   await new Promise((r) => setTimeout(r, 0))
-  const w = opts.cssWidth ?? (typeof window !== "undefined" ? window.innerWidth : 1920)
-  const h = opts.cssHeight ?? (typeof window !== "undefined" ? window.innerHeight : 1080)
-  const dpr = opts.dpr ?? (typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1)
-  if (cached) {
-    // Same GPU: re-derive the tier for this window size from the cached measurement.
-    const tier = cached.msPerMP !== null ? tierForCost(cached.msPerMP, cached.cap, tierPixels(w, h, dpr)) : cached.tier
-    return { tier, renderer: cached.renderer, vendor: "", msPerMP: cached.msPerMP, cap: cached.cap, reason: cached.reason, cached: true }
-  }
+  const { w, h, dpr } = windowSize(opts)
   const store = (e: Omit<CacheEntry, "at">) => {
     try {
       storage?.setItem(PROBE_CACHE_KEY, JSON.stringify({ ...e, at: Date.now() } satisfies CacheEntry))
@@ -362,7 +378,7 @@ export async function probeQuality(opts: ProbeOptions = {}): Promise<QualityProb
   return { tier, renderer: m.renderer, vendor: m.vendor, msPerMP: m.msPerMP, cap: cls.cap, reason, cached: false }
 }
 
-/** The quality tier to start an engine with (cached per GPU; adaptive quality refines it at runtime). */
+/** The quality tier to start an engine with (probed once, then remembered; adaptive quality refines it at runtime). */
 export async function pickInitialQuality(opts: ProbeOptions = {}): Promise<Quality> {
   return (await probeQuality(opts)).tier
 }

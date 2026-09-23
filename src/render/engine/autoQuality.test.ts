@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 
-import { classifyRenderer, PREDICTED_BUDGET_MS, PROBE_CACHE_KEY, predictTierMs, probeQuality, rendererStrings, tierForCost, tierPixels } from "./autoQuality"
+import { cachedQuality, classifyRenderer, PREDICTED_BUDGET_MS, PROBE_CACHE_KEY, predictTierMs, probeQuality, rendererStrings, tierForCost, tierPixels } from "./autoQuality"
 
 class MemoryStorage {
   private readonly m = new Map<string, string>()
@@ -81,10 +81,26 @@ describe("tier from the measured cost", () => {
     storage.setItem(PROBE_CACHE_KEY, JSON.stringify({ renderer: "GPU", tier: "high", msPerMP: 0.05, cap: "ultra", reason: "cached", at: Date.now() }))
     const p = await probeQuality({ storage: storage as unknown as Storage, cssWidth: 1920, cssHeight: 1080, dpr: 1 })
     expect(p).toMatchObject({ cached: true, tier: "ultra", msPerMP: 0.05 })
-    // A stale cache is ignored (no WebGL in Node: the probe falls back to medium).
-    storage.setItem(PROBE_CACHE_KEY, JSON.stringify({ renderer: "GPU", tier: "high", msPerMP: 0.2, cap: "ultra", reason: "old", at: 0 }))
+    // The result never expires: an old measurement is still used.
+    storage.setItem(PROBE_CACHE_KEY, JSON.stringify({ renderer: "GPU", tier: "high", msPerMP: 0.05, cap: "ultra", reason: "old", at: 0 }))
     const q = await probeQuality({ storage: storage as unknown as Storage, cssWidth: 1920, cssHeight: 1080, dpr: 1 })
-    expect(q).toMatchObject({ cached: false, tier: "medium" })
+    expect(q).toMatchObject({ cached: true, tier: "ultra" })
+    // `force` measures again (no WebGL in Node: the probe falls back to medium).
+    const f = await probeQuality({ storage: storage as unknown as Storage, force: true })
+    expect(f).toMatchObject({ cached: false, tier: "medium" })
+  })
+
+  it("reads the remembered result synchronously and rejects malformed entries", () => {
+    const storage = new MemoryStorage()
+    const s = storage as unknown as Storage
+    expect(cachedQuality({ storage: s })).toBeNull()
+    storage.setItem(PROBE_CACHE_KEY, JSON.stringify({ renderer: "GPU", tier: "high", msPerMP: 50, cap: "ultra", reason: "slow", at: 0 }))
+    expect(cachedQuality({ storage: s, cssWidth: 1920, cssHeight: 1080, dpr: 1 })).toMatchObject({ cached: true, tier: "low" })
+    expect(cachedQuality({ storage: s, force: true })).toBeNull()
+    for (const bad of ["{", "null", JSON.stringify({ tier: "epic", cap: "ultra", msPerMP: 1 }), JSON.stringify({ tier: "low", cap: "x", msPerMP: 1 }), JSON.stringify({ tier: "low", cap: "low", msPerMP: "1" })]) {
+      storage.setItem(PROBE_CACHE_KEY, bad)
+      expect(cachedQuality({ storage: s })).toBeNull()
+    }
   })
 
   it("classifies a software renderer as low without running the timed benchmark", async () => {

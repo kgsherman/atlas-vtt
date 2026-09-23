@@ -4,13 +4,14 @@
  * unmount; `quality` changes are applied live.
  *
  * `quality` undefined at mount means Auto: the device probe (render pickInitialQuality: renderer
- * heuristics + a short benchmark, cached per GPU) picks the starting tier, which is also the adaptive
+ * heuristics + a short benchmark, run once per browser and then remembered) picks the starting tier, which is also the adaptive
  * ceiling, the backdrop texel cap and whether the WebGL context gets MSAA. Those are fixed when the
  * engine is created, so the probe runs first; to switch back to Auto, remount (e.g. via `key`).
  */
 import * as React from "react"
 
 import {
+  cachedQuality,
   createEngine,
   pickInitialQuality,
   type Engine,
@@ -41,7 +42,7 @@ let inflightProbe: Promise<Quality> | null = null
 
 /**
  * One device probe at a time: StrictMode double-mounts and several canvases mounting together share
- * it. Later calls hit the per-GPU localStorage cache, so they are cheap.
+ * it. It only runs when nothing is remembered yet (see cachedQuality).
  */
 function probeInitialQuality(
   cssWidth?: number,
@@ -68,7 +69,10 @@ export function EngineCanvas({
     canvas: null,
   })
   const [error, setError] = React.useState<string | null>(null)
-  const [probing, setProbing] = React.useState(() => quality === undefined)
+  // Auto with a remembered probe result starts at once, without the "Choosing quality…" pass.
+  const [probing, setProbing] = React.useState(
+    () => quality === undefined && cachedQuality() === null
+  )
   const onEngineRef = React.useRef(onEngine)
   const onCeilingRef = React.useRef(onQualityCeiling)
   const initialQuality = React.useRef(quality)
@@ -105,8 +109,17 @@ export function EngineCanvas({
     }
 
     const explicit = initialQuality.current
+    const remembered = explicit
+      ? null
+      : cachedQuality({
+          cssWidth: canvas.clientWidth || undefined,
+          cssHeight: canvas.clientHeight || undefined,
+        })
     if (explicit) {
       start(explicit)
+    } else if (remembered) {
+      queueMicrotask(() => setProbing(false))
+      start(remembered.tier)
     } else {
       void probeInitialQuality(
         canvas.clientWidth || undefined,

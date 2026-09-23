@@ -10,9 +10,10 @@ export type * from "./contracts"
 export { DEFAULT_VIEW } from "./engine/defaults"
 /**
  * Startup quality pick (ARCHITECTURE §10): `await pickInitialQuality()` before createEngine(canvas,
- * { quality }). Renderer heuristics + a ~100 ms synthetic benchmark, cached per GPU (localStorage).
+ * { quality }). Renderer heuristics + a ~100 ms synthetic benchmark, run once and remembered (localStorage;
+ * `cachedQuality()` reads it synchronously).
  */
-export { pickInitialQuality, probeQuality, type ProbeOptions, type QualityProbe } from "./engine/autoQuality"
+export { cachedQuality, pickInitialQuality, probeQuality, type ProbeOptions, type QualityProbe } from "./engine/autoQuality"
 
 /**
  * Max texels of one level image per quality ceiling (the engine's own cap, engine/backdrops.ts). Give a
