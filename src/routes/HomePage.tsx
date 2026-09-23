@@ -513,16 +513,17 @@ function GuestAccountNotice() {
   }
 
   return (
-    <Alert>
+    <Alert className="border-primary/30 bg-primary/8 *:[svg]:text-primary">
       <UserRoundIcon />
       <AlertTitle>Keep your scenes</AlertTitle>
       <AlertDescription>You're a guest: your scenes live in this browser only. Create an account to keep them and open them anywhere.</AlertDescription>
-      <AlertAction className="flex gap-1">
+      {/* In the flow rather than an AlertAction: the provider buttons don't fit beside the title on phones. */}
+      <div className="col-start-2 mt-1.5 flex flex-wrap items-center gap-1">
+        <SignInButtons orientation="horizontal" size="xs" className="flex-wrap" />
         <Button size="xs" variant="ghost" onClick={dismiss}>
           Not now
         </Button>
-        <SignInButtons orientation="horizontal" size="xs" />
-      </AlertAction>
+      </div>
     </Alert>
   )
 }
