@@ -3,22 +3,24 @@
  * (read-only version, recoverable draft), the player-preview bar and a first-steps hint.
  */
 import * as React from "react"
-import { Box, ChevronDown, ChevronUp, Eye, History, ImagePlus, Keyboard, LifeBuoy, Map as MapIcon, Maximize, RotateCcw, Undo2, X } from "lucide-react"
+import { Box, ChevronDown, ChevronsDownUp, ChevronsUpDown, ChevronUp, Eye, EyeOff, History, ImagePlus, Keyboard, LifeBuoy, Map as MapIcon, Maximize, RotateCcw, Undo2, X } from "lucide-react"
 
 import { CommandKbd } from "@/components/keybindings/CommandKbd"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ButtonGroup } from "@/components/ui/button-group"
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
 import { Kbd } from "@/components/ui/kbd"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { adjacentLevels } from "@/core/scene/queries"
+import { adjacentLevels, sortedLevels } from "@/core/scene/queries"
 import type { Id } from "@/core/scene/types"
 import { cn } from "@/lib/utils"
 
 import { useEditorActions, useEditorContext, useEditorShallow, useEditorState } from "./context"
 import { SelectInput } from "./fields"
 import { clockTime, formatElevation, relativeTime, tokenLabel } from "./lib/format"
+import { axisTicks, levelAxisBounds, spreadLabels } from "./lib/levelAxis"
 import { previewCandidates, type PreviewResult } from "./lib/preview"
 import type { SceneDocument } from "./useSceneDocument"
 
@@ -33,8 +35,27 @@ function atMost(record: object, n: number): boolean {
   return true
 }
 
+const AXIS_OPEN_KEY = "atlas-editor:level-axis"
+
+function readAxisOpen(): boolean {
+  try {
+    return localStorage.getItem(AXIS_OPEN_KEY) !== "closed"
+  } catch {
+    return true
+  }
+}
+
+function writeAxisOpen(open: boolean): void {
+  try {
+    localStorage.setItem(AXIS_OPEN_KEY, open ? "open" : "closed")
+  } catch {
+    // Storage blocked: not remembered.
+  }
+}
+
 export function LevelSwitcher() {
   const { store } = useEditorContext()
+  const [open, setOpen] = React.useState(readAxisOpen)
   const { level, above, below } = useEditorShallow((s) => {
     const level = Object.hasOwn(s.scene.levels, s.activeLevelId) ? s.scene.levels[s.activeLevelId] : null
     const adj = level ? adjacentLevels(s.scene, level.id) : {}
@@ -42,29 +63,154 @@ export function LevelSwitcher() {
   })
   if (!level) return null
   return (
-    <div className={cn("pointer-events-auto flex items-center gap-1 rounded-lg p-1 pl-2.5", glass)}>
-      <div className="flex min-w-0 flex-col leading-tight">
-        <span className="max-w-48 truncate text-xs font-medium">{level.name}</span>
-        <span className="text-[0.625rem] text-muted-foreground">{formatElevation(level.elevation)}</span>
+    <Collapsible
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next)
+        writeAxisOpen(next)
+      }}
+      className={cn("pointer-events-auto flex flex-col rounded-lg p-1", glass)}
+    >
+      <div className="flex items-center gap-1 pl-1.5">
+        <div className="flex min-w-0 flex-1 flex-col leading-tight">
+          <span className="max-w-48 truncate text-xs font-medium">{level.name}</span>
+          <span className="text-[0.625rem] text-muted-foreground">{formatElevation(level.elevation)}</span>
+        </div>
+        <ButtonGroup orientation="vertical" className="ml-1">
+          <Tooltip>
+            <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="Level above" disabled={!above} onClick={() => store.getState().stepActiveLevel(1)} />}>
+              <ChevronUp />
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              {above ? `Up to ${above.name}` : "No level above"} <CommandKbd scope="editor" command="level.up" />
+            </TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="Level below" disabled={!below} onClick={() => store.getState().stepActiveLevel(-1)} />}>
+              <ChevronDown />
+            </TooltipTrigger>
+            <TooltipContent side="right">
+              {below ? `Down to ${below.name}` : "No level below"} <CommandKbd scope="editor" command="level.down" />
+            </TooltipContent>
+          </Tooltip>
+        </ButtonGroup>
+        <Tooltip>
+          <TooltipTrigger
+            render={<CollapsibleTrigger render={<Button variant="ghost" size="icon-xs" className="text-muted-foreground" aria-label={open ? "Hide the level axis" : "Show the level axis"} />} />}
+          >
+            {open ? <ChevronsDownUp /> : <ChevronsUpDown />}
+          </TooltipTrigger>
+          <TooltipContent side="right">{open ? "Hide the level axis" : "Show the level axis"}</TooltipContent>
+        </Tooltip>
       </div>
-      <ButtonGroup orientation="vertical" className="ml-1">
-        <Tooltip>
-          <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="Level above" disabled={!above} onClick={() => store.getState().stepActiveLevel(1)} />}>
-            <ChevronUp />
-          </TooltipTrigger>
-          <TooltipContent side="right">
-            {above ? `Up to ${above.name}` : "No level above"} <CommandKbd scope="editor" command="level.up" />
-          </TooltipContent>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="Level below" disabled={!below} onClick={() => store.getState().stepActiveLevel(-1)} />}>
-            <ChevronDown />
-          </TooltipTrigger>
-          <TooltipContent side="right">
-            {below ? `Down to ${below.name}` : "No level below"} <CommandKbd scope="editor" command="level.down" />
-          </TooltipContent>
-        </Tooltip>
-      </ButtonGroup>
+      <CollapsibleContent className="max-h-[60vh] overflow-y-auto">
+        <LevelAxis />
+      </CollapsibleContent>
+    </Collapsible>
+  )
+}
+
+/** Pixel layout of the level axis: label pitch, top/bottom padding, least height, axis and label x. */
+const AXIS = { row: 26, pad: 14, minHeight: 200, x: 30, labelX: 54, width: 208 }
+
+/**
+ * Every level as a point on a vertical elevation axis, with a label (visibility eye + name) leading off
+ * to the right. Labels keep to their level's height where they can and are pushed apart where levels
+ * crowd (see `spreadLabels`). It sits on the switcher's glass card, so it reads over any map.
+ */
+function LevelAxis() {
+  const { store } = useEditorContext()
+  const { levels, activeLevelId, visibility } = useEditorShallow((s) => ({
+    levels: s.scene.levels,
+    activeLevelId: s.activeLevelId,
+    visibility: s.view.levelVisibility,
+  }))
+  const { height, top, bottom, ticks, rows } = React.useMemo(() => {
+    const ordered = sortedLevels({ levels })
+    const { lo, hi } = levelAxisBounds(ordered.map((l) => l.elevation))
+    const height = Math.max(AXIS.minHeight, (ordered.length - 1) * AXIS.row + 2 * AXIS.pad)
+    // Height above the axis' bottom end, in px (labels are laid out bottom-up, like elevations).
+    const up = (e: number) => ((e - lo) / (hi - lo)) * (height - 2 * AXIS.pad)
+    const labels = spreadLabels(
+      ordered.map((l) => up(l.elevation)),
+      AXIS.row,
+      0,
+      height - 2 * AXIS.pad
+    )
+    const y = (u: number) => height - AXIS.pad - u
+    return {
+      height,
+      top: y(up(hi)),
+      bottom: y(0),
+      ticks: axisTicks(lo, hi).map((v) => ({ v, y: y(up(v)) })),
+      rows: ordered.map((level, i) => ({ level, y: y(up(level.elevation)), labelY: y(labels[i]) })),
+    }
+  }, [levels])
+
+  return (
+    <div className="relative mt-1 border-t" style={{ height, width: AXIS.width }}>
+      <svg className="absolute inset-0 size-full" aria-hidden>
+        <line x1={AXIS.x} x2={AXIS.x} y1={top} y2={bottom} className="stroke-muted-foreground/60" />
+        {ticks.map((t) => (
+          <g key={t.v}>
+            <line x1={AXIS.x - 3} x2={AXIS.x} y1={t.y} y2={t.y} className="stroke-muted-foreground/60" />
+            <text x={AXIS.x - 6} y={t.y} dominantBaseline="middle" textAnchor="end" className="fill-muted-foreground text-[0.5625rem] tabular-nums">
+              {t.v < 0 ? `−${-t.v}` : t.v}
+            </text>
+          </g>
+        ))}
+        {rows.map(({ level, y, labelY }) => (
+          <path
+            key={level.id}
+            d={`M${AXIS.x} ${y} H${AXIS.x + 6} L${AXIS.labelX - 6} ${labelY} H${AXIS.labelX}`}
+            fill="none"
+            className={level.id === activeLevelId ? "stroke-primary" : "stroke-muted-foreground/60"}
+          />
+        ))}
+        {rows.map(({ level, y }) => (
+          <circle key={level.id} cx={AXIS.x} cy={y} r={level.id === activeLevelId ? 3.5 : 2.5} className={level.id === activeLevelId ? "fill-primary" : "fill-foreground"} />
+        ))}
+      </svg>
+      {rows.map(({ level, labelY }) => {
+        const active = level.id === activeLevelId
+        const visible = visibility[level.id] !== false
+        return (
+          <ButtonGroup key={level.id} className="absolute -translate-y-1/2" style={{ top: labelY, left: AXIS.labelX }}>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    variant="outline"
+                    size="icon-sm"
+                    aria-label={visible ? `Hide ${level.name}` : `Show ${level.name}`}
+                    className={cn("text-muted-foreground", !visible && "text-muted-foreground/50")}
+                    onClick={() => store.getState().toggleLevelVisibility(level.id)}
+                  />
+                }
+              >
+                {visible ? <Eye /> : <EyeOff />}
+              </TooltipTrigger>
+              <TooltipContent side="right">{visible ? "Hide in the editor" : "Show in the editor"}</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    variant={active ? "default" : "outline"}
+                    size="sm"
+                    aria-pressed={active}
+                    className="max-w-32 justify-start"
+                    onClick={() => store.getState().setActiveLevel(level.id)}
+                  />
+                }
+              >
+                <span className={cn("truncate", !visible && !active && "opacity-50")}>{level.name}</span>
+              </TooltipTrigger>
+              <TooltipContent side="right">{formatElevation(level.elevation)}</TooltipContent>
+            </Tooltip>
+          </ButtonGroup>
+        )
+      })}
     </div>
   )
 }
