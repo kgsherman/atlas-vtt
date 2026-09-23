@@ -3,7 +3,7 @@
  * (read-only version, recoverable draft), the player-preview bar and a first-steps hint.
  */
 import * as React from "react"
-import { Box, ChevronDown, ChevronsDownUp, ChevronsUpDown, ChevronUp, Eye, EyeOff, History, ImagePlus, Keyboard, LifeBuoy, Map as MapIcon, Maximize, RotateCcw, Undo2, X } from "lucide-react"
+import { Box, ChevronsDownUp, ChevronsUpDown, Eye, EyeOff, History, ImagePlus, Keyboard, LifeBuoy, Map as MapIcon, Maximize, RotateCcw, Undo2, X } from "lucide-react"
 
 import { CommandKbd } from "@/components/keybindings/CommandKbd"
 import { Badge } from "@/components/ui/badge"
@@ -13,7 +13,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Kbd } from "@/components/ui/kbd"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { adjacentLevels, sortedLevels } from "@/core/scene/queries"
+import { sortedLevels } from "@/core/scene/queries"
 import type { Id } from "@/core/scene/types"
 import { cn } from "@/lib/utils"
 
@@ -54,13 +54,8 @@ function writeAxisOpen(open: boolean): void {
 }
 
 export function LevelSwitcher() {
-  const { store } = useEditorContext()
   const [open, setOpen] = React.useState(readAxisOpen)
-  const { level, above, below } = useEditorShallow((s) => {
-    const level = Object.hasOwn(s.scene.levels, s.activeLevelId) ? s.scene.levels[s.activeLevelId] : null
-    const adj = level ? adjacentLevels(s.scene, level.id) : {}
-    return { level, above: adj.above ?? null, below: adj.below ?? null }
-  })
+  const level = useEditorState((s) => (Object.hasOwn(s.scene.levels, s.activeLevelId) ? s.scene.levels[s.activeLevelId] : null))
   if (!level) return null
   return (
     <Collapsible
@@ -71,29 +66,11 @@ export function LevelSwitcher() {
       }}
       className={cn("pointer-events-auto flex flex-col rounded-lg p-1", glass)}
     >
-      <div className="flex items-center gap-1 pl-1.5">
+      <div className="flex items-center gap-2 pl-1.5">
         <div className="flex min-w-0 flex-1 flex-col leading-tight">
           <span className="max-w-48 truncate text-xs font-medium">{level.name}</span>
           <span className="text-[0.625rem] text-muted-foreground">{formatElevation(level.elevation)}</span>
         </div>
-        <ButtonGroup orientation="vertical" className="ml-1">
-          <Tooltip>
-            <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="Level above" disabled={!above} onClick={() => store.getState().stepActiveLevel(1)} />}>
-              <ChevronUp />
-            </TooltipTrigger>
-            <TooltipContent side="right">
-              {above ? `Up to ${above.name}` : "No level above"} <CommandKbd scope="editor" command="level.up" />
-            </TooltipContent>
-          </Tooltip>
-          <Tooltip>
-            <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="Level below" disabled={!below} onClick={() => store.getState().stepActiveLevel(-1)} />}>
-              <ChevronDown />
-            </TooltipTrigger>
-            <TooltipContent side="right">
-              {below ? `Down to ${below.name}` : "No level below"} <CommandKbd scope="editor" command="level.down" />
-            </TooltipContent>
-          </Tooltip>
-        </ButtonGroup>
         <Tooltip>
           <TooltipTrigger
             render={<CollapsibleTrigger render={<Button variant="ghost" size="icon-xs" className="text-muted-foreground" aria-label={open ? "Hide the level axis" : "Show the level axis"} />} />}
