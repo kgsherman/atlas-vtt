@@ -89,7 +89,10 @@ try {
   await dialog.getByRole("checkbox", { name: "Token models" }).waitFor()
   await waitFor(
     dm,
-    () => document.querySelectorAll("[role=dialog] img").length >= 4,
+    () =>
+      [...document.querySelectorAll("[role=dialog] img")].filter(
+        (img) => img.complete && img.naturalWidth > 0
+      ).length >= 4,
     null,
     {
       timeout: 20000,

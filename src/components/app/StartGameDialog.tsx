@@ -118,7 +118,6 @@ function StartForm({
                               src={a.thumbnailUrl}
                               alt=""
                               title={a.name}
-                              loading="lazy"
                               onError={(e) => (e.currentTarget.style.visibility = "hidden")}
                               className="size-10 rounded-md bg-muted/60 object-contain"
                             />
