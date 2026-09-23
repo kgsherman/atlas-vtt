@@ -4,7 +4,7 @@
  * unmount; `quality` changes are applied live.
  *
  * `quality` undefined at mount means Auto: the device probe (render pickInitialQuality: renderer
- * heuristics + a short benchmark, run once per browser and then remembered) picks the starting tier, which is also the adaptive
+ * heuristics + a short benchmark, cached per GPU for 30 days) picks the starting tier, which is also the adaptive
  * ceiling, the backdrop texel cap and whether the WebGL context gets MSAA. Those are fixed when the
  * engine is created, so the probe runs first; to switch back to Auto, remount (e.g. via `key`).
  */
@@ -42,7 +42,7 @@ let inflightProbe: Promise<Quality> | null = null
 
 /**
  * One device probe at a time: StrictMode double-mounts and several canvases mounting together share
- * it. It only runs when nothing is remembered yet (see cachedQuality).
+ * it. It only runs without a fresh cache entry (see cachedQuality).
  */
 function probeInitialQuality(
   cssWidth?: number,
@@ -69,7 +69,7 @@ export function EngineCanvas({
     canvas: null,
   })
   const [error, setError] = React.useState<string | null>(null)
-  // Auto with a remembered probe result starts at once, without the "Choosing quality…" pass.
+  // Auto with a cached probe result starts at once, without the "Choosing quality…" pass.
   const [probing, setProbing] = React.useState(
     () => quality === undefined && cachedQuality() === null
   )
@@ -109,7 +109,7 @@ export function EngineCanvas({
     }
 
     const explicit = initialQuality.current
-    const remembered = explicit
+    const cached = explicit
       ? null
       : cachedQuality({
           cssWidth: canvas.clientWidth || undefined,
@@ -117,9 +117,9 @@ export function EngineCanvas({
         })
     if (explicit) {
       start(explicit)
-    } else if (remembered) {
+    } else if (cached) {
       queueMicrotask(() => setProbing(false))
-      start(remembered.tier)
+      start(cached.tier)
     } else {
       void probeInitialQuality(
         canvas.clientWidth || undefined,

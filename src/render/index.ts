@@ -10,8 +10,8 @@ export type * from "./contracts"
 export { DEFAULT_VIEW } from "./engine/defaults"
 /**
  * Startup quality pick (ARCHITECTURE §10): `await pickInitialQuality()` before createEngine(canvas,
- * { quality }). Renderer heuristics + a ~100 ms synthetic benchmark, run once and remembered (localStorage;
- * `cachedQuality()` reads it synchronously).
+ * { quality }). Renderer heuristics + a ~100 ms synthetic benchmark, cached per GPU for 30 days
+ * (localStorage; `cachedQuality()` reads it synchronously).
  */
 export { cachedQuality, pickInitialQuality, probeQuality, type ProbeOptions, type QualityProbe } from "./engine/autoQuality"
 

@@ -315,11 +315,10 @@ Per level, the engine expands `HostLevelMasks` into R8 layers of `DataArrayTextu
 - Start-up tier: `render/engine/autoQuality.ts` classifies the GPU renderer string (software → low, mobile →
   medium, Intel UHD → medium, Iris / integrated Radeon → ≤ high, discrete / Apple silicon → ultra) and times a
   short synthetic world-shader workload in its own tiny WebGL2 context, then picks the highest tier whose
-  predicted frame cost leaves headroom. The measurement is taken once per browser and remembered under
-  `atlas:quality-probe:v2` (no expiry; the tier is re-derived from it for the current window size).
-  `EngineCanvas` on "Auto" (every route: editor, host console, player) reads it synchronously with
-  `cachedQuality()` and creates the engine at once; only when nothing is remembered does it run
-  `pickInitialQuality()` first (one probe at a time). On "Auto" the probed tier is both the starting tier and the adaptive ceiling; an explicit tier is
+  predicted frame cost leaves headroom (cached per GPU for 30 days under `atlas:quality-probe:v2`; the tier is
+  re-derived from the cached measurement for the current window size). `EngineCanvas` on "Auto" (every route:
+  editor, host console, player) reads the cache synchronously with `cachedQuality()` and creates the engine at
+  once; only without a fresh cache entry does it run `pickInitialQuality()` first (one probe at a time). On "Auto" the probed tier is both the starting tier and the adaptive ceiling; an explicit tier is
   the ceiling. The editor, the host console and the player page each have a quality selector
   (`components/canvas/QualitySelect`, choice stored per browser under `atlas:quality`).
 - Adaptive quality (`render/engine/quality.ts`) steps one **whole tier** down when p95 frame cost > 18 ms for
