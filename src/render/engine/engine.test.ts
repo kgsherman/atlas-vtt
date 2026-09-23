@@ -26,19 +26,36 @@ const calls = vi.hoisted(() => ({
   /** The fake renderer supports KHR_parallel_shader_compile; compileAsync resolves with `compileGate`. */
   parallel: false,
   compileGate: null as Promise<void> | null,
+  /** The fake renderer keeps a three.js-like program list (one per compiled mesh), as the serial compile needs. */
+  trackPrograms: false,
+  /** Programs whose first-use work ran (getUniforms), in compile order. */
+  warmed: [] as string[],
+  /** Fake main-thread clock (ms) each tracked program's compile advances by 5 ms. */
+  clock: 0,
   backdrops: [] as { levelId: string; texture: unknown; opacity: number; tintWalls: boolean }[],
   renderParams: [] as { hdr: boolean; emissive: number; glow: number }[],
   renders: [] as { target: unknown; layers: number; background: unknown }[],
-  renderer: null as null | { loop: ((t: number) => void) | null; size: number[]; pixelRatio: number; params: Record<string, unknown>; contextLost: number },
+  renderer: null as null | {
+    loop: ((t: number) => void) | null
+    size: number[]
+    pixelRatio: number
+    params: Record<string, unknown>
+    contextLost: number
+    programList: { program: object; name: string; getUniforms(): void; getAttributes(): void }[]
+  },
 }))
 
 vi.mock("three", async (importOriginal) => {
   const actual = await importOriginal<typeof import("three")>()
   class FakeRenderer {
     domElement: HTMLCanvasElement
+    programList: { program: object; name: string; getUniforms(): void; getAttributes(): void }[] = []
     info = {
       autoReset: true,
       render: { calls: 0, triangles: 0 },
+      get programs() {
+        return calls.trackPrograms ? calls.renderer!.programList : undefined
+      },
       reset() {
         this.render.calls = 0
         this.render.triangles = 0
@@ -93,7 +110,16 @@ vi.mock("three", async (importOriginal) => {
       this.info.render.triangles += 100
     }
     extensions = { has: (name: string) => calls.parallel && name === "KHR_parallel_shader_compile" }
-    compile() {}
+    compile(scene: import("three").Object3D) {
+      if (!calls.trackPrograms) return
+      scene.traverse((o) => {
+        const m = (o as import("three").Mesh).material as import("three").Material | undefined
+        if (!m) return
+        const name = `${m.name}#${this.programList.length}`
+        this.programList.push({ program: {}, name, getUniforms: () => calls.warmed.push(name), getAttributes() {} })
+        calls.clock += 5
+      })
+    }
     compileAsync() {
       return calls.compileGate ?? Promise.resolve()
     }
@@ -192,6 +218,8 @@ describe("engine", () => {
     calls.tilesUpdated = 1
     calls.parallel = false
     calls.compileGate = null
+    calls.trackPrograms = false
+    calls.warmed = []
     calls.backdrops = []
     calls.renderParams = []
     calls.renders = []
@@ -273,6 +301,34 @@ describe("engine", () => {
     expect(calls.renders.length).toBeGreaterThan(0)
     expect(sync.getLoadState().loading).toBe(false)
     sync.dispose()
+  })
+
+  it("without parallel compilation, compiles and queries one program at a time over held frames", () => {
+    calls.trackPrograms = true
+    const now = vi.spyOn(performance, "now").mockImplementation(() => calls.clock)
+    const engine = createEngine(canvasEl(), { quality: "medium" })
+    engine.setScene(sampleScene().scene)
+    frame(0)
+    frame(100)
+    // The loading card gets to paint first: nothing compiled yet.
+    expect(calls.warmed).toHaveLength(0)
+    expect(engine.getLoadState()).toMatchObject({ loading: true, stage: "compiling", progress: 0 })
+    const progress: number[] = []
+    let t = 300
+    for (; t < 3000 && engine.getLoadState().stage === "compiling"; t += 16) {
+      const before = calls.renderer!.programList.length
+      frame(t)
+      progress.push(engine.getLoadState().progress)
+      // Every program compiled in a frame was queried in that frame (the blocking wait is per program).
+      expect(calls.warmed.length).toBe(calls.renderer!.programList.length)
+      if (engine.getLoadState().stage === "compiling") expect(calls.renderer!.programList.length).toBeGreaterThan(before)
+    }
+    expect(progress.length).toBeGreaterThan(3)
+    expect(progress).toEqual([...progress].sort((a, b) => a - b))
+    expect(calls.renders.length).toBeGreaterThan(0)
+    expect(engine.getLoadState().stage).toBe("lighting")
+    engine.dispose()
+    now.mockRestore()
   })
 
   it("updates incrementally and animates doors", () => {

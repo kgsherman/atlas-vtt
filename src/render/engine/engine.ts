@@ -64,6 +64,9 @@ import { TokenLayer } from "./tokens"
 /** Longest wait for a background tier compile before switching anyway (compiling synchronously then). */
 export const TIER_COMPILE_DEADLINE_MS = 1500
 
+/** Held time before the first serial compile (serialCompile), so the loading card is on screen. */
+const SERIAL_START_DELAY_MS = 250
+
 /** Main-thread time per held frame for programs' first-use work (at least one program per frame). */
 const WARM_BUDGET_MS = 8
 
@@ -141,6 +144,10 @@ export class AtlasEngine implements Engine {
   private holdSince: number | null = null
   /** A (re)compile started: check the live scene's programs before the next frame draws. */
   private liveCompileDue = false
+  /** Units still to compile one at a time (serialCompile), and the progress over them. */
+  private serialQueue: { holder: THREE.Object3D; target: THREE.WebGLRenderTarget | null }[] = []
+  private serialDone = 0
+  private serialTotal = 0
   /** Programs whose first-use work is done (warmPrograms). */
   private readonly warmed = new WeakSet<object>()
   private loadState: EngineLoadState = LOADED
@@ -879,9 +886,18 @@ export class AtlasEngine implements Engine {
     this.precompiled = true
     const holders = this.compileHolders((m) => m, this.quality)
     if (!holders) return
-    // Without parallel compilation the programs are built synchronously right here: nothing to wait for.
     const parallel = this.parallelCompile()
-    this.liveCompileDue = parallel
+    const serial = !parallel && this.serialCompile()
+    this.liveCompileDue = parallel || serial
+    if (serial) {
+      // One program per unit, compiled and waited for one at a time over the held frames (holdFrame).
+      for (const h of holders) {
+        const target = h.canvas ? null : (this.post?.target ?? null)
+        for (const c of [...h.holder.children]) this.serialQueue.push({ holder: new THREE.Object3D().add(c), target })
+      }
+      this.serialTotal = this.serialDone + this.serialQueue.length
+      return
+    }
     for (const h of holders) {
       const done = this.compileHolderFor(h.holder, h.canvas ? null : (this.post?.target ?? null)).then(() => {
         for (const c of h.holder.children) if ((c as THREE.InstancedMesh).isInstancedMesh) (c as THREE.InstancedMesh).dispose()
@@ -889,6 +905,30 @@ export class AtlasEngine implements Engine {
       if (parallel) this.holdFor(done)
     }
     if (parallel) this.holdFor(this.lighting.precompile())
+  }
+
+  /**
+   * Without KHR_parallel_shader_compile (Firefox) a program is compiled by the time three.js first
+   * queries it, and that query blocks the main thread until the GPU process has compiled everything
+   * submitted before it (~6 s on Windows / D3D11 for the Vineyard at ultra, the page frozen and dark).
+   * Submitting one program at a time and querying it at once (warmPrograms) splits that into one
+   * short block per program, with frames (and the loading card) in between. Needs three.js' program
+   * list (absent from the unit tests' fake renderer: no hold there).
+   */
+  private serialCompile(): boolean {
+    return Array.isArray(this.renderer.info.programs)
+  }
+
+  /** Compile and query queued units (serialCompile) for WARM_BUDGET_MS, at least one. */
+  private compileSerial(): void {
+    const t0 = performance.now()
+    do {
+      const unit = this.serialQueue.shift()!
+      void this.compileHolderFor(unit.holder, unit.target)
+      for (const c of unit.holder.children) if ((c as THREE.InstancedMesh).isInstancedMesh) (c as THREE.InstancedMesh).dispose()
+      this.warmPrograms(Infinity)
+      this.serialDone++
+    } while (this.serialQueue.length > 0 && performance.now() - t0 < WARM_BUDGET_MS)
   }
 
   private parallelCompile(): boolean {
@@ -960,11 +1000,16 @@ export class AtlasEngine implements Engine {
   private holdFrame(now: number): boolean {
     // Precompiled variants done: also compile whatever the live scene draws that they did not cover
     // (overlays, tokens, grid, …). Nothing new to compile means the hold is over.
-    if (this.compiling === 0 && (this.holdSince !== null || this.liveCompileDue)) {
+    if (this.compiling === 0 && this.serialQueue.length === 0 && (this.holdSince !== null || this.liveCompileDue)) {
       this.liveCompileDue = false
-      if (this.parallelCompile()) this.compileLiveScene()
+      if (this.parallelCompile() || this.serialCompile()) this.compileLiveScene()
     }
-    if (this.compiling > 0 || (this.holdSince !== null && this.warmPrograms())) {
+    if (this.serialQueue.length > 0) {
+      this.holdSince ??= now
+      // Let the loading card paint before the first (blocking) compile.
+      if (now - this.holdSince >= SERIAL_START_DELAY_MS) this.compileSerial()
+    }
+    if (this.compiling > 0 || this.serialQueue.length > 0 || (this.holdSince !== null && this.warmPrograms(WARM_BUDGET_MS))) {
       this.holdSince ??= now
       if (now - this.holdSince < HOLD_DEADLINE_MS) {
         const progress = COMPILE_SHARE * this.compileProgress()
@@ -975,6 +1020,10 @@ export class AtlasEngine implements Engine {
     }
     if (this.holdSince !== null) {
       this.holdSince = null
+      // Past the deadline: whatever is left compiles when first drawn.
+      this.serialQueue = []
+      this.serialDone = 0
+      this.serialTotal = 0
       // The held frames must not count towards frame pacing.
       this.frameWindow.clear()
       this.adaptive.reset()
@@ -1001,7 +1050,7 @@ export class AtlasEngine implements Engine {
    * while holding, a few programs per frame within WARM_BUDGET_MS, so no single task freezes the page.
    * Returns whether programs are left.
    */
-  private warmPrograms(): boolean {
+  private warmPrograms(budgetMs: number): boolean {
     const programs = (this.renderer.info.programs ?? []) as unknown as WarmableProgram[]
     const gl = this.renderer.getContext()
     const ext = gl.getExtension("KHR_parallel_shader_compile") as { COMPLETION_STATUS_KHR: number } | null
@@ -1010,7 +1059,7 @@ export class AtlasEngine implements Engine {
     for (const p of programs) {
       // Still compiling (e.g. an adaptive step's programs): not this hold's, and warming would block.
       if (this.warmed.has(p) || (ext && gl.getProgramParameter(p.program, ext.COMPLETION_STATUS_KHR) !== true)) continue
-      if (performance.now() - t0 > WARM_BUDGET_MS) {
+      if (performance.now() - t0 > budgetMs) {
         left = true
         break
       }
@@ -1023,14 +1072,15 @@ export class AtlasEngine implements Engine {
 
   /**
    * Share (0..1) of the renderer's programs ready to draw: half for the parallel compile having finished,
-   * half for the first-use work (warmPrograms). 0 without the parallel-compile extension.
+   * half for the first-use work (warmPrograms). Without the parallel-compile extension, the share of the
+   * serial units done.
    */
   private compileProgress(): number {
-    const programs = (this.renderer.info.programs ?? []) as unknown as WarmableProgram[]
-    if (programs.length === 0) return 0
     const gl = this.renderer.getContext()
     const ext = gl.getExtension("KHR_parallel_shader_compile") as { COMPLETION_STATUS_KHR: number } | null
-    if (!ext) return 0
+    if (!ext) return this.serialTotal > 0 ? this.serialDone / this.serialTotal : 0
+    const programs = (this.renderer.info.programs ?? []) as unknown as WarmableProgram[]
+    if (programs.length === 0) return 0
     let done = 0
     for (const p of programs) {
       if (this.warmed.has(p)) done += 2

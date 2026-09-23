@@ -248,7 +248,12 @@ first-use work (three.js reads the info logs and reflects uniforms) a few progra
 budget. Drawing earlier made three.js wait for every link on the main thread: ~2 s frozen and dark on the
 Vineyard's first load (RTX 5070 Ti, ultra), now a responsive page with a progress card and a 16.7 ms first
 frame. After the hold, "lighting" lasts until the first shadow / vision captures are done (≤ 1.5 s). The hold
-gives up after 20 s; without the extension compiles are synchronous and the state stays "ready".
+gives up after 20 s. Without the extension (Firefox) the first query of any program blocks the main thread
+until the GPU process has compiled everything submitted before it (~6 s of frozen, dark page on Windows /
+D3D11, ~11 s under the profiler, all inside one `PWebGL::Msg_GetLinkResult`), so the engine compiles
+serially instead: one program per unit, submitted and queried at once, units within the same 8 ms budget
+(at least one per frame), after a 250 ms head start for the loading card. Same total time, but one short
+block per program with progress in between.
 `EngineCanvas` shows the probe and both stages in a non-blocking card (`components/canvas/EngineLoading`).
 
 ### 4.2 Distance atlases
