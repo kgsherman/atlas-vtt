@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 
-import type { AtlasClient } from "@/net/supabase"
+import { NetError, type AtlasClient } from "@/net/supabase"
 
 import { AUTH_CALLBACK_PATH, finishAuthRedirect, isAccountProvider, providerLabel, safeReturnPath, type FinishAuthRedirectEnv } from "./account"
 import type { KeyValueStorage } from "./mode"
@@ -114,5 +114,38 @@ describe("providers", () => {
     expect(providerLabel("discord")).toBe("Discord")
     expect(providerLabel("github")).toBe("Github")
     expect(providerLabel("")).toBe("your account")
+  })
+})
+
+describe("finishAuthRedirect with a guest merge ticket", () => {
+  const TICKET = "a".repeat(43)
+  const withTicket = (intent: "link" | "sign_in", mergeTicket: string = TICKET) =>
+    memoryStorage({ "atlas-vtt:auth-pending": JSON.stringify({ intent, provider: "discord", returnTo: "/", mergeTicket }) })
+
+  it("merges the guest into the account it signed in to", async () => {
+    const { client } = fakeClient()
+    const mergeGuest = vi.fn(async () => ({ scenes: 2, sessions: 1, images: 5 }))
+    const outcome = await finishAuthRedirect(client, { ...env("?code=c", withTicket("sign_in")), mergeGuest })
+    expect(mergeGuest).toHaveBeenCalledWith(TICKET)
+    expect(outcome).toEqual({ kind: "signed_in", provider: "discord", merge: { ok: true, result: { scenes: 2, sessions: 1, images: 5 } } })
+  })
+
+  it("keeps the ticket for a retry when the merge fails", async () => {
+    const { client } = fakeClient()
+    const mergeGuest = vi.fn(async () => {
+      throw new NetError("quota_exceeded", "too many scenes")
+    })
+    const outcome = await finishAuthRedirect(client, { ...env("?code=c", withTicket("sign_in")), mergeGuest })
+    expect(outcome?.kind === "signed_in" && outcome.merge).toMatchObject({ ok: false, ticket: TICKET, error: { code: "quota_exceeded" } })
+  })
+
+  it("never merges on a link, a failed sign-in or a malformed ticket", async () => {
+    const mergeGuest = vi.fn(async () => ({ scenes: 0, sessions: 0, images: 0 }))
+    await finishAuthRedirect(fakeClient().client, { ...env("?code=c", withTicket("link")), mergeGuest })
+    await finishAuthRedirect(fakeClient().client, { ...env("?error=access_denied", withTicket("sign_in")), mergeGuest })
+    await finishAuthRedirect(fakeClient({ error: { code: "bad_code_verifier", status: 400 } }).client, { ...env("?code=c", withTicket("sign_in")), mergeGuest })
+    const outcome = await finishAuthRedirect(fakeClient().client, { ...env("?code=c", withTicket("sign_in", "not a ticket")), mergeGuest })
+    expect(mergeGuest).not.toHaveBeenCalled()
+    expect(outcome).toEqual({ kind: "signed_in", provider: "discord" })
   })
 })

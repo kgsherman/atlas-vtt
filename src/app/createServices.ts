@@ -20,6 +20,7 @@ import {
   type AtlasIdentity,
 } from "@/net/auth"
 import { getLocalStore, type LocalStore } from "@/net/localStore"
+import { createMergeTicket, mergeGuest } from "@/net/guestMerge"
 import { createLocalTransport } from "@/net/localTransport"
 import { createLocalScenesRepo, createRemoteScenesRepo } from "@/net/scenesRepo"
 import { createLocalSessionsRepo, createRemoteSessionsRepo } from "@/net/sessionsRepo"
@@ -95,7 +96,13 @@ export async function createServices(opts: CreateServicesOptions = {}): Promise<
     },
     async signIn(provider, opts = {}) {
       if (!client) throw new NetError("unsupported_offline", "accounts need Cloud mode")
-      await beginAccountRedirect(client, opts.intent ?? (identity.isAnonymous ? "link" : "sign_in"), provider, { silent: opts.silent })
+      const intent = opts.intent ?? (identity.isAnonymous ? "link" : "sign_in")
+      const mergeTicket = opts.bringGuest && intent === "sign_in" && identity.isAnonymous ? await createMergeTicket(client) : undefined
+      await beginAccountRedirect(client, intent, provider, { silent: opts.silent, mergeTicket })
+    },
+    async mergeGuest(ticket) {
+      if (!client) throw new NetError("unsupported_offline", "accounts need Cloud mode")
+      return mergeGuest(ticket, client)
     },
     async signOut() {
       if (!client) throw new NetError("unsupported_offline", "accounts need Cloud mode")

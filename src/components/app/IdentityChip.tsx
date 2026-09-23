@@ -144,7 +144,7 @@ function AccountSection() {
           <p className="text-xs font-medium">Guest in this browser</p>
           <p className="text-xs/relaxed text-muted-foreground">
             Your scenes and games live in this browser only. Create an account to keep them and use them anywhere. Already have one? Continue the same way to
-            sign in.
+            sign in and bring them along.
           </p>
         </div>
         <SignInButtons />

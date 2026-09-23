@@ -251,7 +251,12 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      begin_guest_merge: {
+        Args: { p_target: string; p_token: string }
+        Returns: Json
+      }
       claim_host: { Args: { p_session_id: string }; Returns: number }
+      create_merge_ticket: { Args: never; Returns: string }
       create_scene: {
         Args: { p_data: Json; p_name: string; p_schema_version: number }
         Returns: string
@@ -264,6 +269,10 @@ export type Database = {
         }[]
       }
       end_session: { Args: { p_session_id: string }; Returns: boolean }
+      finish_guest_merge: {
+        Args: { p_target: string; p_token: string }
+        Returns: Json
+      }
       get_shared_scene: {
         Args: { p_slug: string }
         Returns: {

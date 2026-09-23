@@ -6,6 +6,7 @@ import * as React from "react"
 
 import type { AccountProvider, AtlasIdentity } from "@/net/auth"
 import type { AssetStore, BackdropTileSource } from "@/net/assets/types"
+import type { GuestMergeResult } from "@/net/guestMerge"
 import type { ScenesRepo } from "@/net/scenesRepo"
 import type { SessionsRepo } from "@/net/sessionsRepo"
 import type { Transport } from "@/net/transport"
@@ -24,9 +25,13 @@ export interface AppServices {
   setDisplayName(name: string): Promise<string>
   /**
    * Cloud only (else unsupported_offline): leave for the provider to make this guest a permanent
-   * account (`link`, same user id) or to switch to an existing account (`sign_in`). See app/account.ts.
+   * account (`link`, same user id) or to switch to an existing account (`sign_in`). With
+   * `bringGuest`, a guest first takes a merge ticket (throws if it cannot, without leaving) so the
+   * account takes over its scenes and games after signing in. See app/account.ts.
    */
-  signIn(provider: AccountProvider, opts?: { intent?: "link" | "sign_in"; silent?: boolean }): Promise<void>
+  signIn(provider: AccountProvider, opts?: { intent?: "link" | "sign_in"; silent?: boolean; bringGuest?: boolean }): Promise<void>
+  /** Cloud only: redeem a merge ticket as the signed-in account (retry after a failed merge). */
+  mergeGuest(ticket: string): Promise<GuestMergeResult>
   /** Cloud only: sign out of this browser; the app restarts as a new guest. */
   signOut(): Promise<void>
 }

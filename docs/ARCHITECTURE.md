@@ -631,9 +631,19 @@ anonymous guests (`signInAnonymously`, session in localStorage). "Continue with 
 Discord to the guest (`linkIdentity`, needs "Allow manual linking"): the user id is unchanged, so every row
 keyed by it (scenes, sessions, memberships, Storage folders) stays and the guest becomes permanent. If the
 Discord account already belongs to another user, the callback carries `identity_already_exists`, and the
-app switches to that account (`signInWithOAuth`, Discord `prompt=none`): straight away when the guest owns
-no scenes and hosts no active game, otherwise after a confirmation, because the guest's data stays with the
-orphaned guest user (there is no merge; exporting and re-importing scenes is the workaround). OAuth uses
+app switches to that account (`signInWithOAuth`, Discord `prompt=none`). A guest that owns scenes or hosts
+an active game first takes a merge ticket along (`create_merge_ticket()`, 256 random bits, only the SHA-256
+stored, one hour, one per guest), and the account redeems it after signing in through the `merge-guest`
+Edge Function (secret key; `verify_jwt` off because user tokens are ES256, so it checks the caller with
+`auth.getUser`): `begin_guest_merge` validates the ticket (guest still anonymous, target permanent and not
+the guest) and the combined quotas and names the guest's `scene-assets` objects; the function moves them
+from `{guest}/…` to `{account}/…` with the Storage API; `finish_guest_merge` (one transaction, both quota
+locks) moves scenes and hosted sessions (dropping the account's own membership in them), adopts the
+guest's display name only if the account has none, and consumes the ticket; the function then deletes the
+guest user. `begin_`/`finish_guest_merge` are executable by `service_role` only, and every step before the
+last SQL one can be retried with the same ticket. The guest's memberships in other DMs' games are not
+merged (their game state names the guest's user id; the player rejoins by room code). If no ticket can be
+made, the app asks before switching, since the guest's work would stay behind. OAuth uses
 PKCE: the provider returns to `/auth/callback`, which `ServicesProvider` finishes before services start
 (code exchange, then `history.replaceState` to the path saved in sessionStorage, same-origin paths only),
 so the callback never signs in a new guest first. Signing out (`scope: "local"`) restarts the app as a new

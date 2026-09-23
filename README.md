@@ -122,8 +122,9 @@ with `?local=0`.
      client id and secret of a Discord application whose OAuth2 redirect is
      `https://<project-ref>.supabase.co/auth/v1/callback`), **Allow manual linking** (on: a guest becomes
      permanent by linking Discord to the same user), and under **Authentication → URL Configuration** add
-     every origin's `/auth/callback` to the redirect URLs (e.g. `http://localhost:5173/auth/callback` and
-     your deployment's).
+     every origin's `/auth/callback` to the redirect URLs (e.g. `http://localhost:5173/**`; the Site URL's
+     own host is always allowed). Deploy the `merge-guest` Edge Function (`supabase functions deploy
+     merge-guest --no-verify-jwt`) so a guest who signs in to an existing account takes its scenes along.
 3. Create `.env.local` next to `package.json` (see `.env.example`):
 
    ```bash

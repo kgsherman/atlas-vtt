@@ -2,8 +2,9 @@
  * Permanent accounts (Cloud mode only). Everyone starts as an anonymous guest. "Continue with Discord"
  * first tries to LINK Discord to the guest: the user id stays, so scenes, sessions and memberships are
  * kept and the guest simply becomes permanent. If that Discord account already belongs to another
- * Atlas user, the redirect comes back with `identity_exists` and the app offers to SIGN IN to that
- * account instead (the guest's scenes stay with the guest; see AccountRedirectNotice).
+ * Atlas user, the redirect comes back with `identity_exists` and the app SIGNS IN to that account
+ * instead (AccountRedirectNotice). A guest that made something first takes a merge ticket along
+ * (net/guestMerge.ts): after the sign-in, the account takes over the guest's scenes and games.
  *
  * OAuth leaves the page. What the user was doing (intent, provider, path to return to) survives the
  * round trip in sessionStorage; `finishAuthRedirect` consumes it on /auth/callback, exchanges the PKCE
@@ -11,6 +12,7 @@
  * page never signs in a fresh guest first).
  */
 import { ACCOUNT_PROVIDERS, exchangeAuthCode, linkAccount, parseAuthCallback, signInWithProvider, type AccountProvider } from "@/net/auth"
+import { MERGE_TICKET_RE, mergeGuest, type GuestMergeResult } from "@/net/guestMerge"
 import { NetError, type AtlasClient } from "@/net/supabase"
 
 import type { KeyValueStorage } from "./mode"
@@ -25,13 +27,18 @@ interface PendingAuth {
   intent: AccountIntent
   provider: AccountProvider
   returnTo: string
+  /** sign_in from a guest with scenes or games: the guest's merge ticket. */
+  mergeTicket?: string
 }
+
+/** What happened to the guest a sign-in took a merge ticket for. */
+export type GuestMergeOutcome = { ok: true; result: GuestMergeResult } | { ok: false; error: NetError; ticket: string }
 
 export type AuthRedirectOutcome =
   /** A guest became permanent (same user id). */
   | { kind: "linked"; provider: AccountProvider }
   /** Signed in to an existing account (or created one without a guest to keep). */
-  | { kind: "signed_in"; provider: AccountProvider }
+  | { kind: "signed_in"; provider: AccountProvider; merge?: GuestMergeOutcome }
   | { kind: "error"; intent: AccountIntent | null; provider: AccountProvider; error: NetError }
 
 /**
@@ -70,7 +77,9 @@ function readPending(storage: KeyValueStorage | null): PendingAuth | null {
   try {
     const v = JSON.parse(raw) as Partial<PendingAuth>
     if ((v.intent !== "link" && v.intent !== "sign_in") || !isAccountProvider(v.provider)) return null
-    return { intent: v.intent, provider: v.provider, returnTo: safeReturnPath(v.returnTo) }
+    const pending: PendingAuth = { intent: v.intent, provider: v.provider, returnTo: safeReturnPath(v.returnTo) }
+    if (v.intent === "sign_in" && typeof v.mergeTicket === "string" && MERGE_TICKET_RE.test(v.mergeTicket)) pending.mergeTicket = v.mergeTicket
+    return pending
   } catch {
     return null
   }
@@ -81,6 +90,8 @@ export interface BeginAccountOptions {
   returnTo?: string
   /** Skip the provider's consent screen (the user just authorised Atlas while trying to link). */
   silent?: boolean
+  /** sign_in only: the current guest's merge ticket, redeemed once signed in. */
+  mergeTicket?: string
   storage?: KeyValueStorage | null
 }
 
@@ -100,6 +111,7 @@ export async function beginAccountRedirect(
     intent,
     provider,
     returnTo: safeReturnPath(opts.returnTo ?? `${location.pathname}${location.search}`),
+    ...(intent === "sign_in" && opts.mergeTicket ? { mergeTicket: opts.mergeTicket } : {}),
   }
   try {
     storage?.setItem(PENDING_KEY, JSON.stringify(pending))
@@ -124,6 +136,8 @@ export interface FinishAuthRedirectEnv {
   href: string
   replaceUrl(path: string): void
   storage: KeyValueStorage | null
+  /** Default: the merge-guest Edge Function, as the account just signed in. */
+  mergeGuest?(ticket: string): Promise<GuestMergeResult>
 }
 
 function browserEnv(): FinishAuthRedirectEnv {
@@ -134,10 +148,15 @@ function browserEnv(): FinishAuthRedirectEnv {
   }
 }
 
+function asNetError(err: unknown): NetError {
+  return err instanceof NetError ? err : new NetError("unknown", String(err), { cause: err })
+}
+
 /**
- * On /auth/callback: exchange the code (or read the error), restore the path the user left from, and
- * report what happened. null on any other page. Never throws: failures come back as `error` outcomes
- * and the existing session (if any) stays.
+ * On /auth/callback: exchange the code (or read the error), merge the guest the sign-in took a ticket
+ * for, restore the path the user left from, and report what happened. null on any other page. Never
+ * throws: failures come back as `error` outcomes (the existing session, if any, stays) or as a failed
+ * `merge` (the ticket is returned so the user can retry within its hour).
  */
 export async function finishAuthRedirect(client: AtlasClient, env: FinishAuthRedirectEnv = browserEnv()): Promise<AuthRedirectOutcome | null> {
   const url = new URL(env.href)
@@ -154,9 +173,22 @@ export async function finishAuthRedirect(client: AtlasClient, env: FinishAuthRed
   } else {
     try {
       await exchangeAuthCode(callback.code, client)
-      outcome = { kind: intent === "link" ? "linked" : "signed_in", provider }
+      if (intent === "link") {
+        outcome = { kind: "linked", provider }
+      } else {
+        outcome = { kind: "signed_in", provider }
+        const ticket = pending?.mergeTicket
+        if (ticket) {
+          const merge = env.mergeGuest ?? ((t: string) => mergeGuest(t, client))
+          try {
+            outcome.merge = { ok: true, result: await merge(ticket) }
+          } catch (err) {
+            outcome.merge = { ok: false, error: asNetError(err), ticket }
+          }
+        }
+      }
     } catch (err) {
-      outcome = { kind: "error", intent, provider, error: err instanceof NetError ? err : new NetError("unknown", String(err), { cause: err }) }
+      outcome = { kind: "error", intent, provider, error: asNetError(err) }
     }
   }
   // Drop the code / error from the address bar (and history) before the router sees the page.
