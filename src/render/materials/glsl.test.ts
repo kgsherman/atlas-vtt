@@ -370,10 +370,25 @@ describe("quality tier defines", () => {
     const shared = createSharedUniforms()
     const m = createWorldMaterial({ shared, levelUniform: () => ({ value: 0 }) }, { levelId: "L", variant: "opaque", instanced: false })
     // PCSS and the hi-res atlas exist only on ultra; bump mapping from high up.
-    expect(m.fragmentShader).toMatch(/#if AT_TIER >= 3\n\/\/ Rotated Poisson disc/)
+    expect(m.fragmentShader).toMatch(/#if AT_TIER >= 3\n\/\/ Soft-shadow taps on a golden-angle/)
     expect(m.fragmentShader).toMatch(/#if AT_TIER >= 2\n {2}nb = atBumpNormal/)
     // Unset tier: defaults to low.
     expect(m.fragmentShader).toMatch(/#ifndef AT_TIER\n#define AT_TIER 0/)
+  })
+
+  it("inline each point-shadow filter once (D3D compile time)", () => {
+    const shared = createSharedUniforms()
+    const m = createWorldMaterial({ shared, levelUniform: () => ({ value: 0 }) }, { levelId: "L", variant: "opaque", instanced: false })
+    const calls = (fn: string) => (m.fragmentShader.match(new RegExp(`[^a-zA-Z]${fn}\\(`, "g")) ?? []).length - 1
+    // Every call site is a full inlined copy for D3D's HLSL compiler (ANGLE on Windows): one shadow filter
+    // per light for all atlases, one atPcf call per atShadowIn (plus the viewer line of sight).
+    expect(calls("atShadowIn")).toBe(1)
+    expect(calls("atPcss")).toBe(1)
+    expect(calls("atPcf")).toBe(2)
+    expect(m.fragmentShader).not.toMatch(/sampler2D atlas/)
+    // Const-array lookups in the unrolled tap loops cost ~0.7 s of D3D compile per world program.
+    expect(m.fragmentShader).not.toMatch(/AT_POISSON/)
+    m.dispose()
   })
 })
 

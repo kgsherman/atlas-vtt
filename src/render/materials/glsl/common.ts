@@ -198,9 +198,24 @@ float atPlaneDist(vec2 i, float s, vec3 q, vec3 n, float dist) {
   return t > 0.0 ? clamp(t, dist * 0.9, dist * 1.1) : dist;
 }
 
+// Distance atlases for the filters below. They take an atlas id rather than a sampler: one inlined copy
+// of each filter for all atlases (GLSL cannot pick a sampler at runtime, so a sampler parameter meant a
+// copy per atlas, and each copy of the point-shadow filters cost D3D's compiler ~0.5 s per world program).
+#define AT_ATLAS_LIGHT 0
+#define AT_ATLAS_HI 1
+#define AT_ATLAS_VIEWER 2
+
+float atTexel(int atlas, ivec2 c) {
+#if AT_TIER >= 3
+  if (atlas == AT_ATLAS_HI) return texelFetch(uLightAtlasHi, c, 0).r;
+#endif
+  if (atlas == AT_ATLAS_VIEWER) return texelFetch(uViewerAtlas, c, 0).r;
+  return texelFetch(uLightAtlas, c, 0).r;
+}
+
 // Distance-map PCF (octahedral.ts pcfSample). tile = (atlas x, atlas y, size incl. guard ring); q is the
 // receiver relative to the capture origin. Returns the fraction of taps with |q| <= stored + eps.
-float atPcf(sampler2D atlas, vec3 tile, vec3 q, float eps, bool wide) {
+float atPcf(int atlas, vec3 tile, vec3 q, float eps, bool wide) {
   float dist = length(q);
   if (dist < 1e-4) return 1.0;
   vec2 uv = atOctEncode(q / dist);
@@ -211,10 +226,10 @@ float atPcf(sampler2D atlas, vec3 tile, vec3 q, float eps, bool wide) {
     vec2 i0 = floor(f);
     vec2 wt = f - i0;
     ivec2 c = base + ivec2(i0);
-    float s00 = step(dist, texelFetch(atlas, c, 0).r + eps);
-    float s10 = step(dist, texelFetch(atlas, c + ivec2(1, 0), 0).r + eps);
-    float s01 = step(dist, texelFetch(atlas, c + ivec2(0, 1), 0).r + eps);
-    float s11 = step(dist, texelFetch(atlas, c + ivec2(1, 1), 0).r + eps);
+    float s00 = step(dist, atTexel(atlas, c) + eps);
+    float s10 = step(dist, atTexel(atlas, c + ivec2(1, 0)) + eps);
+    float s01 = step(dist, atTexel(atlas, c + ivec2(0, 1)) + eps);
+    float s11 = step(dist, atTexel(atlas, c + ivec2(1, 1)) + eps);
     return mix(mix(s00, s10, wt.x), mix(s01, s11, wt.x), wt.y);
   }
   // 3x3 taps, 2-texel box filter: per-axis weights (0.5 - o, 1, 0.5 + o), total weight 4.
@@ -226,7 +241,7 @@ float atPcf(sampler2D atlas, vec3 tile, vec3 q, float eps, bool wide) {
   float sum = 0.0;
   for (int j = 0; j < 3; j++) {
     for (int i = 0; i < 3; i++) {
-      float stored = texelFetch(atlas, c + ivec2(i - 1, j - 1), 0).r;
+      float stored = atTexel(atlas, c + ivec2(i - 1, j - 1));
       sum += step(dist, stored + eps) * wx[i] * wy[j];
     }
   }
@@ -236,23 +251,21 @@ float atPcf(sampler2D atlas, vec3 tile, vec3 q, float eps, bool wide) {
 // Is the cap receiver q covered? The texel under q compared on the cap's own plane (octahedral.ts
 // capCovered): robust at grazing angles, where the back-face plane of a slab resting on the cap moves
 // by more than the inset from one texel to the next.
-bool atCapCovered(sampler2D atlas, vec3 tile, vec3 q, vec3 n) {
+bool atCapCovered(int atlas, vec3 tile, vec3 q, vec3 n) {
   float dist = length(q);
   if (dist < 1e-4) return false;
   float s = tile.z - 2.0;
   vec2 f = clamp((atOctEncode(q / dist) * 0.5 + 0.5) * s - 0.5, vec2(0.0), vec2(s - 1.0));
   vec2 i = floor(f + 0.5);
-  float stored = texelFetch(atlas, ivec2(tile.xy) + ivec2(1) + ivec2(i), 0).r;
+  float stored = atTexel(atlas, ivec2(tile.xy) + ivec2(1) + ivec2(i));
   return atPlaneDist(i, s, q, n, dist) > stored - AT_CAP_EPS;
 }
 
 #if AT_TIER >= 3
-// Rotated Poisson disc for the soft-shadow taps (unit disc).
-const vec2 AT_POISSON[12] = vec2[12](
-  vec2(-0.326, -0.406), vec2(-0.840, -0.074), vec2(-0.696, 0.457), vec2(-0.203, 0.621),
-  vec2(0.962, -0.195), vec2(0.473, -0.480), vec2(0.519, 0.767), vec2(0.185, -0.893),
-  vec2(0.507, 0.064), vec2(0.896, 0.412), vec2(-0.322, -0.933), vec2(-0.792, -0.598)
-);
+// Soft-shadow taps on a golden-angle (Vogel) disc: tap i of n at radius sqrt((i + 0.5) / n), each one
+// AT_GOLDEN further round from the per-pixel start direction. Computed, not read from a const array:
+// ANGLE's HLSL for the array lookups in these unrolled loops cost ~0.7 s of D3D compile per world program.
+const mat2 AT_GOLDEN = mat2(-0.7373688, 0.6754903, -0.6754903, -0.7373688);
 
 // Interleaved gradient noise (per-pixel tap rotation; the grain hides the pattern).
 float atIgn(vec2 px) {
@@ -262,8 +275,10 @@ float atIgn(vec2 px) {
 // PCSS-style soft shadow in a distance tile: a blocker search over the directions through which the
 // light's disc (radius srcRadius ft) can be hidden from q, then a PCF disc sized by the penumbra
 // estimate srcRadius·(d − dBlocker)/dBlocker (contact-hardening). Taps are clamped to the tile
-// interior; with no blocker in the search disc it falls back to the 2x2 bilinear filter.
-float atPcss(sampler2D atlas, vec3 tile, vec3 q, float eps, float srcRadius) {
+// interior. Returns the lit fraction, or a fallback for the caller's atPcf: -1 = no blocker in the search
+// disc (2x2 bilinear), -2 = penumbra under 1.25 texels (3x3). Calling atPcf from here instead inlined the
+// filter twice more per atlas; D3D's compiler (ANGLE on Windows) took seconds per world program.
+float atPcss(int atlas, vec3 tile, vec3 q, float eps, float srcRadius) {
   float dist = length(q);
   if (dist < 1e-4) return 1.0;
   vec2 uv = atOctEncode(q / dist);
@@ -273,27 +288,30 @@ float atPcss(sampler2D atlas, vec3 tile, vec3 q, float eps, float srcRadius) {
   // Radians per texel of the octahedral map (average; the map is close to equal-area).
   float texAng = AT_SQRT_4PI / s;
   float a = atIgn(gl_FragCoord.xy) * 6.2831853;
-  vec2 rx = vec2(cos(a), sin(a));
-  vec2 ry = vec2(-rx.y, rx.x);
+  vec2 start = vec2(cos(a), sin(a));
   float searchTex = clamp(2.0 * srcRadius / (dist * texAng), 1.0, 16.0);
   float sum = 0.0;
   float n = 0.0;
+  vec2 dir = start;
   for (int i = 0; i < 8; i++) {
-    vec2 o = (rx * AT_POISSON[i].x + ry * AT_POISSON[i].y) * searchTex;
-    float d = texelFetch(atlas, base + ivec2(clamp(floor(f + o + 0.5), vec2(0.0), vec2(s - 1.0))), 0).r;
+    vec2 o = dir * (sqrt((float(i) + 0.5) / 8.0) * searchTex);
+    dir = AT_GOLDEN * dir;
+    float d = atTexel(atlas, base + ivec2(clamp(floor(f + o + 0.5), vec2(0.0), vec2(s - 1.0))));
     if (d + eps < dist) {
       sum += d;
       n += 1.0;
     }
   }
-  if (n < 0.5) return atPcf(atlas, tile, q, eps, false);
+  if (n < 0.5) return -1.0;
   float dB = sum / n;
   float r = clamp(srcRadius * (dist - dB) / max(dB, 0.05) / (dist * texAng), 0.0, 14.0);
-  if (r < 1.25) return atPcf(atlas, tile, q, eps, true);
+  if (r < 1.25) return -2.0;
   float lit = 0.0;
+  dir = start;
   for (int i = 0; i < 12; i++) {
-    vec2 o = (rx * AT_POISSON[i].x + ry * AT_POISSON[i].y) * r;
-    float d = texelFetch(atlas, base + ivec2(clamp(floor(f + o + 0.5), vec2(0.0), vec2(s - 1.0))), 0).r;
+    vec2 o = dir * (sqrt((float(i) + 0.5) / 12.0) * r);
+    dir = AT_GOLDEN * dir;
+    float d = atTexel(atlas, base + ivec2(clamp(floor(f + o + 0.5), vec2(0.0), vec2(s - 1.0))));
     lit += step(dist, d + eps);
   }
   return lit / 12.0;
@@ -306,12 +324,15 @@ float atPcss(sampler2D atlas, vec3 tile, vec3 q, float eps, float srcRadius) {
 // there pass). Caps use the inset rule (AT_CAP_INSET): covered (probed on the cap's plane, see atCapCovered)
 // → dark, else the same filter. l2 = (tile x, tile y, tile size, flags), l3.w = source radius. In cutaway
 // views atPointLights skips this for caps above the cutaway plane lit from above it (see AT_CAP_INSET).
-float atShadowIn(sampler2D atlas, vec4 l2, vec4 l3, vec3 p, vec3 n, bool cap) {
+float atShadowIn(int atlas, vec4 l2, vec4 l3, vec3 p, vec3 n, bool cap) {
   vec3 rel = p - l3.xyz;
   float d = length(rel);
   float k = 1.5 * AT_SQRT_4PI / (l2.z - 2.0);
   int flags = int(l2.w + 0.5);
   bool wide = (flags & 1) != 0;
+  // One atPcf call site: every inlined copy costs compile time on D3D (see atPcss).
+  vec3 q;
+  float eps;
   if (cap) {
     vec3 qc = rel - n * AT_CAP_INSET;
     // Probe coverage one filter footprint toward the light (octahedral.ts capCoverageProbe): a covering
@@ -319,19 +340,28 @@ float atShadowIn(sampler2D atlas, vec4 l2, vec4 l3, vec3 p, vec3 n, bool cap) {
     float sinA = max(dot(-rel, n) / max(d, 1e-4), 0.15);
     vec3 probe = qc + atHoriz(-rel) * min(0.5, k * d / sinA);
     if (atCapCovered(atlas, l2.xyz, probe, n)) return 0.0;
-    return atPcf(atlas, l2.xyz, qc, -AT_CAP_EPS, wide);
-  }
+    q = qc;
+    eps = -AT_CAP_EPS;
+  } else {
+    q = rel + n * (k * d);
+    eps = AT_DIST_EPS;
 #if AT_TIER >= 3
-  if ((flags & 4) != 0) return atPcss(atlas, l2.xyz, rel + n * (k * d), AT_DIST_EPS, l3.w);
+    if ((flags & 4) != 0) {
+      float soft = atPcss(atlas, l2.xyz, q, eps, l3.w);
+      if (soft >= 0.0) return soft;
+      wide = soft < -1.5;
+    }
 #endif
-  return atPcf(atlas, l2.xyz, rel + n * (k * d), AT_DIST_EPS, wide);
+  }
+  return atPcf(atlas, l2.xyz, q, eps, wide);
 }
 
 float atPointShadow(vec4 l2, vec4 l3, vec3 p, vec3 n, bool cap) {
+  int atlas = AT_ATLAS_LIGHT;
 #if AT_TIER >= 3
-  if ((int(l2.w + 0.5) & 2) != 0) return atShadowIn(uLightAtlasHi, l2, l3, p, n, cap);
+  if ((int(l2.w + 0.5) & 2) != 0) atlas = AT_ATLAS_HI;
 #endif
-  return atShadowIn(uLightAtlas, l2, l3, p, n, cap);
+  return atShadowIn(atlas, l2, l3, p, n, cap);
 }
 
 // Slot bits of the point lights whose dim disc reaches p's cell (XZ, conservative: the loop still tests
@@ -417,7 +447,7 @@ float atDirShadow(sampler2DShadow map, mat4 m, vec3 p, vec3 n, float texel, floa
 }
 
 #if AT_TIER >= 3
-// Wide, rotated Poisson PCF on a directional depth map (soft shadows of the sun / moon on ultra).
+// Wide, rotated Vogel-disc PCF on a directional depth map (soft shadows of the sun / moon on ultra).
 float atDirShadowSoft(sampler2DShadow map, mat4 m, vec3 p, vec3 n, float texel, float bias, float normalOffset, float reversed) {
   vec4 sc = m * vec4(p + n * normalOffset, 1.0);
   vec3 c = sc.xyz / sc.w;
@@ -425,10 +455,12 @@ float atDirShadowSoft(sampler2DShadow map, mat4 m, vec3 p, vec3 n, float texel, 
   float ref = c.z - bias;
   ref = reversed > 0.5 ? 1.0 - ref : ref;
   float a = atIgn(gl_FragCoord.xy) * 6.2831853;
-  vec2 rx = vec2(cos(a), sin(a)) * (texel * 2.2);
-  vec2 ry = vec2(-rx.y, rx.x);
+  vec2 dir = vec2(cos(a), sin(a));
   float s = 0.0;
-  for (int i = 0; i < 12; i++) s += texture(map, vec3(c.xy + rx * AT_POISSON[i].x + ry * AT_POISSON[i].y, ref));
+  for (int i = 0; i < 12; i++) {
+    s += texture(map, vec3(c.xy + dir * (sqrt((float(i) + 0.5) / 12.0) * texel * 2.2), ref));
+    dir = AT_GOLDEN * dir;
+  }
   return s / 12.0;
 }
 #endif
@@ -457,7 +489,7 @@ vec3 atSunTerm(vec3 p, vec3 n, vec3 nb, bool cap, vec3 v, float gloss, inout vec
   float offset = cap ? -(AT_CAP_INSET + uSunParams.w * slope) : uSunParams.w;
   float bias = cap ? -uSunParams.y * (AT_CAP_EPS / AT_DIR_BIAS_FT) : uSunParams.y;
 #if AT_TIER >= 3
-  // Ultra: soft moon / sun shadows (12 rotated Poisson taps of hardware PCF, ~3 texels wide); caps keep
+  // Ultra: soft moon / sun shadows (12 rotated Vogel-disc taps of hardware PCF, ~3 texels wide); caps keep
   // the narrow filter their inset rule is tuned for.
   float sh = cap ? atDirShadow(uSunShadow, uSunMatrix, p, n, uSunParams.x, bias, offset, uSunParams.z, true) : atDirShadowSoft(uSunShadow, uSunMatrix, p, n, uSunParams.x, bias, offset, uSunParams.z);
 #else
@@ -631,7 +663,7 @@ float atViewerLos(vec3 p, vec3 n, float surf) {
     // Caps keep their test point inside the solid (no outward normal offset): pushed up past the top
     // it would sit in free space the eye can only reach through the wall, and flicker.
     vec3 q = surf > 1.5 ? rel : rel + n * (k * d);
-    float vis = atPcf(uViewerAtlas, v1.xyz, q, AT_DIST_EPS, false);
+    float vis = atPcf(AT_ATLAS_VIEWER, v1.xyz, q, AT_DIST_EPS, false);
     best = max(best, vis);
     if (best >= 1.0) break;
   }

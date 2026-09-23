@@ -23,11 +23,19 @@ is pre-compiled with `renderer.compileAsync` at load, and the engine draws nothi
 have landed (ARCHITECTURE §4.1 start-up hold): the first frame used to force every link synchronously (~2 s of
 blocked main thread on the Vineyard, ultra, RTX 5070 Ti through WSL; 1.1 s were still left when only the
 material variants were waited for, 0.4 s with the live scene compiled too, none once the capture programs
-and the first-use reflection were covered). The light and viewer loops take a uniform bound
-(`min(uLightCount, AT_MAX_LIGHTS)`), not the array size plus `break`: with a constant bound D3D's HLSL
-compiler (ANGLE on Windows) is free to unroll them, 32 copies of both shadow filters, and each lit world
-program took ~2.4 s to compile on Firefox / D3D11 (the token program ~0.9 s; measured with `?debugShaders=1`).
-Runtime cost of the dynamic bound: within noise (alternating A/B, NVIDIA ultra, Crooked Lantern and Stress Test).
+and the first-use reflection were covered). 
+**Compile time on D3D (ANGLE on Windows).** D3D's HLSL compiler is slow on the world shader, and Firefox has no
+parallel compile: the ultra start-up took ~15 s there (4 lit world programs at 2.4–4.8 s each, the token
+program ~1 s; `?debugShaders=1` logs per-program times). Bisected by timing stubbed variants of the assembled
+shader in Firefox on Windows: ~80 % of it was the point-light shadow filters, inlined once per call site. Now:
+one `atShadowIn` for both light atlases (filters take an atlas id and fetch through `atTexel`, since GLSL cannot
+pick a sampler at runtime), one `atPcf` call per light (`atPcss` returns a fallback code instead of calling it),
+and soft-shadow taps on a computed Vogel disc instead of a const-array lookup in the unrolled loops (~0.7 s per
+program on its own). The light and viewer loops also take a uniform bound (`min(count, max)`, not the array
+size plus `break`), which D3D cannot unroll (~10 %). Result on the same machine (Firefox 156, RTX 5070 Ti,
+ultra, Crooked Lantern): 14.6 s → 5.6 s of start-up compile, world programs 1.0–1.4 s, token 0.3 s. GPU frame
+time within noise in an alternating A/B (NVIDIA ultra, Crooked Lantern and Stress Test); penumbrae change
+slightly with the tap pattern.
 
 ### 2. Light culling
 Every frame the CPU culls lights: off/hidden, dim sphere outside the camera frustum, or on a level hidden by the
