@@ -32,6 +32,7 @@
  *   trail     "x,z;x,z" earlier positions of the first viewer; what it perceived there is explored
  *   ghost     1 = editor ghosts of the adjacent levels
  *   grid, helpers, cutaway   0 | 1
+ *   dark      1 = DM dark vision (vision off only)
  *   stats     0 hides the stats corner (F3 toggles it)
  *   moon      0 | 1 overrides the directional light's on/off state
  *   lights    0 turns every point light off; "name,name" keeps only these lights on
@@ -376,6 +377,7 @@ async function main(): Promise<void> {
     cutaway: flag("cutaway", true),
     showGrid: flag("grid", mode === "editor"),
     showHelpers: flag("helpers", mode === "editor"),
+    darkVision: flag("dark", false),
   }
   const tilt = numParam("tilt")
   if (tilt !== null) view.tilt = (tilt * Math.PI) / 180

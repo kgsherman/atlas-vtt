@@ -38,6 +38,9 @@ export const LIGHT_LEVEL_NUMBER = { dark: 0, dim: 1, bright: 2 } as const
 export const ENV_FLAG_SKY_MAP = 1
 export const ENV_FLAG_SUN_MAP = 2
 
+/** Period of the DM dark vision stripes, CSS pixels (scaled by the pixel ratio each frame). */
+export const DARK_VISION_STRIPE_PX = 10
+
 /** Vision modes as the shader's uVisionMode int. */
 export const VISION_MODE = { off: 0, fog: 1, preview: 2 } as const
 
@@ -168,6 +171,8 @@ export interface SharedUniforms {
   uRenderParams: THREE.IUniform<THREE.Vector4>
   /** World Y of the cutaway plane (underside of the slab above the active level); 1e9 = no cutaway. */
   uCutawayY: THREE.IUniform<number>
+  /** DM dark vision: x = on (0/1), y = stripe period in drawing-buffer pixels. */
+  uDarkVision: THREE.IUniform<THREE.Vector2>
 }
 
 /** Sampler uniforms start on real placeholder textures (see materials/placeholders), never null. */
@@ -201,5 +206,6 @@ export function createSharedUniforms(): SharedUniforms {
     uTime: { value: 0 },
     uRenderParams: { value: new THREE.Vector4(1, 0.5, 0, 0) },
     uCutawayY: { value: 1e9 },
+    uDarkVision: { value: new THREE.Vector2(0, DARK_VISION_STRIPE_PX) },
   }
 }

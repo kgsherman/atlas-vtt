@@ -49,6 +49,7 @@ import { cullAndRankLights, cutawayPlaneY, linearColor, resolveLights, type Rank
 import { orderTileUpdates, runTileUpdates, SHADOW_UPDATE_MS, SHADOW_UPDATES_PER_FRAME, type TileUpdateRequest } from "./scheduler"
 import {
   createSharedUniforms,
+  DARK_VISION_STRIPE_PX,
   ENV_FLAG_SKY_MAP,
   ENV_FLAG_SUN_MAP,
   LIGHT_LEVEL_NUMBER,
@@ -147,6 +148,7 @@ export const DEFAULT_VIEW_STATE: ViewState = {
   primaryViewerId: null,
   tilt: 0,
   showHelpers: false,
+  darkVision: false,
 }
 
 export interface ResolvedViewer {
@@ -399,6 +401,7 @@ export class AtlasLightingSystem implements LightingSystem {
     }
     this.dimmed = new Set(view.dimmedTokenIds)
     this.shared.uVisionMode.value = VISION_MODE[view.vision]
+    this.shared.uDarkVision.value.x = view.darkVision && view.vision === "off" && view.mode !== "player" ? 1 : 0
     this.updateEnvironment()
     this.syncMasks()
   }
@@ -534,6 +537,7 @@ export class AtlasLightingSystem implements LightingSystem {
     const s = this.shared
     // Wrapped so float precision stays fine for animated surfaces after hours of play.
     s.uTime.value = timeSec % 3600
+    s.uDarkVision.value.y = DARK_VISION_STRIPE_PX * renderer.getPixelRatio()
     const scene = this.scene
     const world = this.world
     if (!scene || !world) {

@@ -3,7 +3,7 @@
  * (read-only version, recoverable draft), the player-preview bar and a first-steps hint.
  */
 import * as React from "react"
-import { Box, ChevronDown, ChevronsDownUp, ChevronsUpDown, ChevronUp, Eye, EyeOff, History, ImagePlus, Keyboard, LifeBuoy, Map as MapIcon, Maximize, RotateCcw, Undo2, X } from "lucide-react"
+import { Box, ChevronDown, ChevronsDownUp, ChevronsUpDown, ChevronUp, Eye, EyeOff, History, ImagePlus, Keyboard, LifeBuoy, Map as MapIcon, Maximize, MoonStar, RotateCcw, Undo2, X } from "lucide-react"
 
 import { CommandKbd } from "@/components/keybindings/CommandKbd"
 import { Badge } from "@/components/ui/badge"
@@ -224,6 +224,7 @@ export function CameraControls() {
   const { store } = useEditorContext()
   const actions = useEditorActions()
   const camera = useEditorState((s) => s.view.camera)
+  const darkVision = useEditorState((s) => s.view.darkVision)
   return (
     <div className={cn("pointer-events-auto flex items-center gap-0.5 rounded-lg p-1", glass)}>
       <Tooltip>
@@ -252,6 +253,26 @@ export function CameraControls() {
           <Maximize />
         </TooltipTrigger>
         <TooltipContent side="bottom">Frame the scene</TooltipContent>
+      </Tooltip>
+      <div className="mx-0.5 h-4 w-px bg-border" />
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              variant={darkVision ? "secondary" : "ghost"}
+              size="icon-sm"
+              aria-label="Dark vision"
+              aria-pressed={darkVision}
+              onClick={() => store.getState().toggleDarkVision()}
+            />
+          }
+        >
+          <MoonStar />
+        </TooltipTrigger>
+        <TooltipContent side="bottom">
+          Dark vision {darkVision ? "on" : "off"}: see dark areas while you build (what it lifts is tinted blue and striped){" "}
+          <CommandKbd scope="editor" command="toggle-dark-vision" />
+        </TooltipContent>
       </Tooltip>
     </div>
   )

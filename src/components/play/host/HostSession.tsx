@@ -386,6 +386,7 @@ function HostConsole({
     setEditView({
       ghostAdjacent: view.ghostAdjacent,
       levelVisibility: view.levelVisibility,
+      darkVision: view.darkVision,
     })
     const cam = view.camera
     setCamera(cam)

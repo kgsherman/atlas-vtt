@@ -57,6 +57,7 @@ describe("editor keymap", () => {
     expect(resolve("R", { shift: true })).toEqual({ type: "rotate", turns: -1 })
     expect(resolve("g")).toEqual({ type: "toggle-grid" })
     expect(resolve("h")).toEqual({ type: "toggle-helpers" })
+    expect(resolve("b")).toEqual({ type: "toggle-dark-vision" })
     expect(resolve("[")).toMatchObject({ type: "brush-size" })
     expect(resolve("]")).toMatchObject({ type: "brush-size" })
     expect(resolve("PageUp")).toEqual({ type: "level", delta: 1 })

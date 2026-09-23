@@ -162,6 +162,16 @@ describe("cutaway cap rule", () => {
   })
 })
 
+describe("DM dark vision", () => {
+  it("declares uDarkVision (default off) and only DM colour reads it", () => {
+    expect(SHARED_UNIFORMS_GLSL).toMatch(/uniform vec2 uDarkVision;/)
+    expect(createSharedUniforms().uDarkVision.value.x).toBe(0)
+    const fns = COMMON_FUNCTIONS_GLSL.split(/\n(?=\S)/)
+    const readers = fns.filter((f) => /\buDarkVision\b/.test(f.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n")))
+    expect(readers.map((f) => f.match(/^\w+\s+(\w+)\(/)?.[1])).toEqual(["atDarkVisionLook", "atDmColour"])
+  })
+})
+
 describe("perception edges and darkvision (per pixel)", () => {
   const world = createWorldMaterial(
     { shared: createSharedUniforms(), levelUniform: () => ({ value: -1 }) },

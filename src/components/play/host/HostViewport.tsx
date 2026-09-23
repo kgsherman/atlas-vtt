@@ -256,6 +256,7 @@ function HostBridge({
       cutaway: true,
       showGrid: grid,
       showHelpers: false,
+      darkVision: false,
       vision: previewing ? "preview" : "off",
       viewerTokenIds: previewing ? preview : [],
       hostMasks: previewing ? masks.masks : {},

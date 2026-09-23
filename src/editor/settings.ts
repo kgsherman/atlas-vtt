@@ -128,11 +128,13 @@ export interface EditorViewOptions {
   showGrid: boolean
   /** Light radius gizmos, connector arrows, hidden objects outlined. */
   showHelpers: boolean
+  /** DM dark vision: dark areas lifted (and marked) so a dark level stays workable. */
+  darkVision: boolean
   camera: CameraKind
 }
 
 export function defaultViewOptions(): EditorViewOptions {
-  return { levelVisibility: {}, ghostAdjacent: true, showGrid: true, showHelpers: true, camera: "orbit" }
+  return { levelVisibility: {}, ghostAdjacent: true, showGrid: true, showHelpers: true, darkVision: false, camera: "orbit" }
 }
 
 export const DEFAULT_SNAP_MODE: SnapMode = "center"

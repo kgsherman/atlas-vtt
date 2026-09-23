@@ -1,13 +1,14 @@
 /**
- * The editor's view choices per scene (camera kind, grid, helpers, ghosted levels), remembered on this
- * device so reopening a scene restores them. Storage is untrusted input: every field is checked.
+ * The editor's view choices per scene (camera kind, grid, helpers, ghosted levels, dark vision),
+ * remembered on this device so reopening a scene restores them. Storage is untrusted input: every
+ * field is checked.
  */
 import type { EditorViewOptions } from "@/editor/settings"
 
 export type SavedEditorView = Partial<
   Pick<
     EditorViewOptions,
-    "camera" | "showGrid" | "showHelpers" | "ghostAdjacent"
+    "camera" | "showGrid" | "showHelpers" | "ghostAdjacent" | "darkVision"
   >
 >
 
@@ -33,7 +34,7 @@ export function readEditorView(
     const v = JSON.parse(raw) as Record<string, unknown>
     const out: SavedEditorView = {}
     if (v.camera === "orbit" || v.camera === "topdown") out.camera = v.camera
-    for (const k of ["showGrid", "showHelpers", "ghostAdjacent"] as const)
+    for (const k of ["showGrid", "showHelpers", "ghostAdjacent", "darkVision"] as const)
       if (typeof v[k] === "boolean") out[k] = v[k]
     return Object.keys(out).length > 0 ? out : null
   } catch {
@@ -45,7 +46,7 @@ export function writeEditorView(
   sceneId: string,
   view: Pick<
     EditorViewOptions,
-    "camera" | "showGrid" | "showHelpers" | "ghostAdjacent"
+    "camera" | "showGrid" | "showHelpers" | "ghostAdjacent" | "darkVision"
   >,
   storage: StorageLike | null = defaultStorage()
 ): void {
@@ -55,6 +56,7 @@ export function writeEditorView(
       showGrid: view.showGrid,
       showHelpers: view.showHelpers,
       ghostAdjacent: view.ghostAdjacent,
+      darkVision: view.darkVision,
     }
     storage?.setItem(key(sceneId), JSON.stringify(saved))
   } catch {

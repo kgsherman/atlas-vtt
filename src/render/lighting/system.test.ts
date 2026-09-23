@@ -11,7 +11,7 @@ import { createLevel, createLight, createScene, createToken } from "@/core/scene
 import type { LightObject, Scene, Vec3 } from "@/core/scene/types"
 import { LAYER } from "../internal"
 import { AtlasLightingSystem, DEFAULT_VIEW_STATE, QUALITY_CONFIG, viewerTouch } from "./system"
-import { LIGHT_VEC4S, VIEWER_VEC4S } from "./uniforms"
+import { DARK_VISION_STRIPE_PX, LIGHT_VEC4S, VIEWER_VEC4S } from "./uniforms"
 
 interface RenderCall {
   target: string | null
@@ -51,6 +51,7 @@ function mockRenderer() {
       return target.copy(r.clearColor)
     },
     getClearAlpha: () => r.clearAlpha,
+    getPixelRatio: () => 1,
     setClearColor(c: THREE.Color, a: number) {
       r.clearColor.copy(c)
       r.clearAlpha = a
@@ -268,6 +269,22 @@ describe("AtlasLightingSystem", () => {
     sys.beforeRender(renderer, camera, 4)
     expect(sys.shared.uLightCount.value).toBe(8)
     expect(sys.shared.uVisionMode.value).toBe(2)
+  })
+
+  it("enables DM dark vision only with vision off outside player mode, stripes scaled by pixel ratio", () => {
+    const { sys, renderer, camera, raw } = setup()
+    const dv = () => sys.shared.uDarkVision.value
+    sys.setView({ ...DEFAULT_VIEW_STATE, darkVision: true })
+    expect(dv().x).toBe(1)
+    sys.setView({ ...DEFAULT_VIEW_STATE, darkVision: true, mode: "dm-play", vision: "preview" })
+    expect(dv().x).toBe(0)
+    sys.setView({ ...DEFAULT_VIEW_STATE, darkVision: true, mode: "player" })
+    expect(dv().x).toBe(0)
+    sys.setView({ ...DEFAULT_VIEW_STATE })
+    expect(dv().x).toBe(0)
+    raw.getPixelRatio = () => 2
+    sys.beforeRender(renderer, camera, 0)
+    expect(dv().y).toBe(DARK_VISION_STRIPE_PX * 2)
   })
 
   it("captures viewer LOS tiles on the SIGHT layer, forcing the primary viewer over budget", () => {

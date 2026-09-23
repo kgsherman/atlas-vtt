@@ -74,6 +74,11 @@ export interface ViewState {
   tilt: number
   /** Editor-only helpers (light radius gizmos, connector arrows, hidden objects outlined). */
   showHelpers: boolean
+  /**
+   * DM dark vision (DM modes with vision "off"): dark and dim surfaces are lifted so a dark level stays
+   * workable, and drawn desaturated, blue-tinted and striped in proportion to the lift. Ignored otherwise.
+   */
+  darkVision: boolean
 }
 
 // ---------------------------------------------------------------------------

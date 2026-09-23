@@ -21,6 +21,7 @@ describe("editor view prefs", () => {
         showGrid: false,
         showHelpers: true,
         ghostAdjacent: false,
+        darkVision: true,
       },
       st
     )
@@ -29,6 +30,7 @@ describe("editor view prefs", () => {
       showGrid: false,
       showHelpers: true,
       ghostAdjacent: false,
+      darkVision: true,
     })
     expect(readEditorView("s2", st)).toBeNull()
   })
@@ -41,6 +43,7 @@ describe("editor view prefs", () => {
         camera: "fisheye",
         showGrid: "yes",
         ghostAdjacent: true,
+        darkVision: 1,
       })
     )
     expect(readEditorView("s1", st)).toEqual({ ghostAdjacent: true })

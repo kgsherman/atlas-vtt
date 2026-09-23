@@ -70,6 +70,8 @@ uniform float uTime;
 uniform vec4 uRenderParams;
 // World Y of the cutaway plane (underside of the slab above the active level); 1e9 = no cutaway.
 uniform float uCutawayY;
+// DM dark vision (vision off only): x = on (0/1), y = stripe period in drawing-buffer pixels.
+uniform vec2 uDarkVision;
 `
 
 export const COMMON_FUNCTIONS_GLSL = /* glsl */ `
@@ -100,6 +102,13 @@ export const COMMON_FUNCTIONS_GLSL = /* glsl */ `
 // moonlit battlemap at least as well as their players, and still sees where the light ends.
 #define AT_DM_FLOOR 0.08
 #define AT_DM_LIT_FLOOR 0.4
+// DM dark vision (editor toggle, uDarkVision): what is dark by the rules (litHere < 1) is lifted to
+// AT_DM_DV_FLOOR instead of AT_DM_FLOOR, so a level built dark stays workable, and marked as such
+// (desaturated, tinted blue, striped in screen space) by how dark it is. Lit areas look as without it.
+#define AT_DM_DV_FLOOR 0.5
+#define AT_DM_DV_DESAT 0.55
+#define AT_DM_DV_TINT vec3(0.8, 0.92, 1.18)
+#define AT_DM_DV_STRIPE 0.22
 // Caps (surface class 2: tops of walls, doors, pillars, props) are tested for light / sky / sun from
 // AT_CAP_INSET ft inside their solid, with a strict comparison (AT_CAP_EPS), instead of the outward
 // normal offset: a cap touching the underside of a slab lies ON the slab's back face (the stored
@@ -675,12 +684,27 @@ vec3 atGradeColour(float grade, vec3 albedo, vec3 light, float dv, vec3 n) {
   return vec3(AT_BLINDSIGHT_LEVEL * tone) + AT_BLINDSIGHT_TINT;
 }
 
+// DM dark vision look of a lifted colour c, weighted by w (0 = untouched): desaturated, blue, striped.
+vec3 atDarkVisionLook(vec3 c, float w) {
+  vec3 dv = mix(c, vec3(atLuma(c)), AT_DM_DV_DESAT) * AT_DM_DV_TINT;
+  // Diagonal hatch lines a third of the period wide: triangle wave across them, edges smoothed over
+  // about a pixel.
+  float period = max(uDarkVision.y, 3.0);
+  float t = abs(fract((gl_FragCoord.x + gl_FragCoord.y) / period) - 0.5) * 2.0;
+  float e = 2.0 / period;
+  dv *= 1.0 - AT_DM_DV_STRIPE * smoothstep(0.67 - e, 0.67 + e, t);
+  return mix(c, dv, w);
+}
+
 // DM colour (vision off): the lit colour, lifted to AT_DM_LIT_FLOOR where at least dim-lit (litHere = 1)
-// and to AT_DM_FLOOR elsewhere.
+// and to AT_DM_FLOOR elsewhere (AT_DM_DV_FLOOR, marked, with dark vision on).
 vec3 atDmColour(vec3 albedo, vec3 light, float litHere) {
   vec3 lit = albedo * light;
   float received = atLuma(lit) / max(atLuma(albedo), 1e-3);
-  return lit + albedo * max(mix(AT_DM_FLOOR, AT_DM_LIT_FLOOR, clamp(litHere, 0.0, 1.0)) - received, 0.0);
+  float l = clamp(litHere, 0.0, 1.0);
+  bool dv = uDarkVision.x > 0.5;
+  vec3 c = lit + albedo * max(mix(dv ? AT_DM_DV_FLOOR : AT_DM_FLOOR, AT_DM_LIT_FLOOR, l) - received, 0.0);
+  return dv ? atDarkVisionLook(c, 1.0 - l) : c;
 }
 
 // Explored memory: desaturated albedo x constant, no light terms.

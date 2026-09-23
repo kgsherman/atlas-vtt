@@ -223,7 +223,11 @@ Per fragment, in one forward pass:
    else black. Player mode: directional term = local sun shadow × `sunlit` mask.
 
 The DM sees everything (`vision:"off"`); "preview" darkens unperceived areas using masks computed locally by
-core/vision for the previewed token. Rules to avoid recompiles/hitches: no `THREE.Light`, `scene.fog`,
+core/vision for the previewed token. **DM dark vision** (`ViewState.darkVision`, the editor's moon toggle / B;
+shared uniform `uDarkVision`, honoured only with vision "off" outside player mode) lifts what is dark by the
+rules (`litHere < 1` in `atDmColour`) to `AT_DM_DV_FLOOR` instead of `AT_DM_FLOOR`, and marks it by how dark it
+is: desaturated, blue-tinted, with screen-space diagonal hatching (`DARK_VISION_STRIPE_PX` CSS px). Lit areas
+render exactly as without it, so the DM can build a dark level and still see which parts of it are dark. Rules to avoid recompiles/hitches: no `THREE.Light`, `scene.fog`,
 `renderer.shadowMap` or clipping planes in rendered scenes; fixed tone mapping/colour space; InstancedMeshes
 always have `instanceColor`; ghost/token variants created up front; `renderer.compileAsync` at load.
 The world shader never uses `discard`/`gl_FragDepth` (keeps early-Z).
@@ -746,6 +750,9 @@ script checks that it is off.
   so pasted tokens land on cell centres. Free mode, Alt held, or Ctrl+Alt+V keeps the raw pointer point.
 - "Preview player view": pick a token → render mode player with masks computed locally by core/vision
   (explored = currently perceived, no memory).
+- View options (camera, grid, helpers, ghosts, dark vision) are remembered per scene on the device
+  (`components/editor/lib/viewPrefs.ts`); the host's live editor carries ghosts, level visibility and dark
+  vision over between "Edit map" sessions. Dark vision (§4.1) is off whenever the host console is in play mode.
 - Keyboard (TanStack Hotkeys): keymaps are command tables, `EDITOR_COMMANDS` (`editor/shortcuts.ts`) and
   `PLAY_COMMANDS` (`play/keys.ts`), each command with a stable id, a label, default keys (`Hotkey` strings,
   `Mod` = Cmd on macOS / Ctrl elsewhere) and an action. Users remap keys in the Keyboard shortcuts dialog

@@ -520,6 +520,7 @@ function PlayerBridge({
       dimmedTokenIds: [],
       tilt: tilt * DEG,
       showHelpers: false,
+      darkVision: false,
     })
   }, [engine, visionTokenIds, masks, activeLevelId, selectedId, grid, tilt])
 

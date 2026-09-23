@@ -177,6 +177,7 @@ function EditorMenus({ doc, previewing }: { doc: SceneDocument; previewing: bool
     hasClipboard: st.clipboard !== null,
     showGrid: st.view.showGrid,
     showHelpers: st.view.showHelpers,
+    darkVision: st.view.darkVision,
     ghost: st.view.ghostAdjacent,
     camera: st.view.camera,
     activeLevelId: st.activeLevelId,
@@ -296,6 +297,10 @@ function EditorMenus({ doc, previewing }: { doc: SceneDocument; previewing: bool
           <MenubarCheckboxItem checked={s.showHelpers} onCheckedChange={() => store.getState().toggleHelpers()}>
             Helpers (light radii, arrows)
             <CommandShortcut id="toggle-helpers" />
+          </MenubarCheckboxItem>
+          <MenubarCheckboxItem checked={s.darkVision} onCheckedChange={() => store.getState().toggleDarkVision()}>
+            Dark vision
+            <CommandShortcut id="toggle-dark-vision" />
           </MenubarCheckboxItem>
           <MenubarCheckboxItem checked={s.ghost} onCheckedChange={() => store.getState().toggleGhostAdjacent()}>
             Ghost adjacent levels

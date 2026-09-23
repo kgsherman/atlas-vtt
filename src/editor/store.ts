@@ -238,6 +238,7 @@ export interface EditorState {
   setView(partial: Partial<EditorViewOptions>): void
   toggleGrid(): void
   toggleHelpers(): void
+  toggleDarkVision(): void
   toggleGhostAdjacent(): void
   setLevelVisibility(id: Id, visible: boolean): void
   toggleLevelVisibility(id: Id): void
@@ -1095,6 +1096,10 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
         get().setView({ showHelpers: !get().view.showHelpers })
       },
 
+      toggleDarkVision() {
+        get().setView({ darkVision: !get().view.darkVision })
+      },
+
       toggleGhostAdjacent() {
         get().setView({ ghostAdjacent: !get().view.ghostAdjacent })
       },
@@ -1122,6 +1127,7 @@ export function editorViewState(state: Pick<EditorState, "view" | "activeLevelId
     ghostAdjacent: state.view.ghostAdjacent,
     showGrid: state.view.showGrid,
     showHelpers: state.view.showHelpers,
+    darkVision: state.view.darkVision,
     cutaway: false,
     vision: "off",
   }

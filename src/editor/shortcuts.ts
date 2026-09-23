@@ -33,6 +33,7 @@ export type ShortcutAction =
   | { type: "rotate"; turns: 1 | -1 }
   | { type: "toggle-grid" }
   | { type: "toggle-helpers" }
+  | { type: "toggle-dark-vision" }
   | { type: "brush-size"; factor: number }
   | { type: "level"; delta: 1 | -1 }
   | { type: "escape" }
@@ -111,6 +112,7 @@ export const EDITOR_COMMANDS: EditorCommand[] = [
   { id: "confirm", label: "Finish a wall chain or ruler", group: "Editing", keys: ["Enter"], action: { type: "confirm" } },
   { id: "toggle-grid", label: "Toggle grid", group: "View", keys: ["G"], action: { type: "toggle-grid" } },
   { id: "toggle-helpers", label: "Toggle helpers", group: "View", keys: ["H"], action: { type: "toggle-helpers" } },
+  { id: "toggle-dark-vision", label: "Toggle dark vision", group: "View", keys: ["B"], action: { type: "toggle-dark-vision" } },
   { id: "level.up", label: "Level above", group: "View", keys: ["PageUp"], action: { type: "level", delta: 1 } },
   { id: "level.down", label: "Level below", group: "View", keys: ["PageDown"], action: { type: "level", delta: -1 } },
   { id: "save", label: "Save", group: "View", keys: ["Mod+S"], action: { type: "save" } },
@@ -200,6 +202,9 @@ export function runShortcut(action: ShortcutAction, ctx: ShortcutContext): boole
       return true
     case "toggle-helpers":
       s.toggleHelpers()
+      return true
+    case "toggle-dark-vision":
+      s.toggleDarkVision()
       return true
     case "brush-size":
       s.scaleBrushRadius(action.factor)

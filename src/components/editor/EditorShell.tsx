@@ -73,7 +73,7 @@ export function EditorShell({ doc, goHome, importRequest, setImportRequest }: Ed
   const [dropHint, setDropHint] = React.useState(false)
   const activeLevelName = useEditorState((s) => s.scene.levels[s.activeLevelId]?.name ?? "the active level")
 
-  // View choices (camera kind, grid, helpers, ghosts) are remembered per scene on this device.
+  // View choices (camera kind, grid, helpers, ghosts, dark vision) are remembered per scene on this device.
   const sceneId = useEditorState((s) => s.scene.id)
   React.useEffect(() => {
     const saved = readEditorView(sceneId)
@@ -82,7 +82,7 @@ export function EditorShell({ doc, goHome, importRequest, setImportRequest }: Ed
       const v = s.view
       const p = prev.view
       if (s.scene.id !== sceneId) return
-      if (v.camera !== p.camera || v.showGrid !== p.showGrid || v.showHelpers !== p.showHelpers || v.ghostAdjacent !== p.ghostAdjacent) writeEditorView(sceneId, v)
+      if (v.camera !== p.camera || v.showGrid !== p.showGrid || v.showHelpers !== p.showHelpers || v.ghostAdjacent !== p.ghostAdjacent || v.darkVision !== p.darkVision) writeEditorView(sceneId, v)
     })
   }, [store, sceneId])
 

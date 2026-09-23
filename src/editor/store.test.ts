@@ -655,6 +655,14 @@ describe("editor store: view", () => {
     expect(store.getState().view.levelVisibility[f.upperId]).toBe(true)
   })
 
+  it("toggles dark vision (off by default) into the engine ViewState", () => {
+    const store = makeStore()
+    expect(editorViewState(store.getState()).darkVision).toBe(false)
+    store.getState().toggleDarkVision()
+    expect(store.getState().view.darkVision).toBe(true)
+    expect(editorViewState(store.getState())).toMatchObject({ darkVision: true, vision: "off" })
+  })
+
   it("scales the brush radius within bounds", () => {
     const store = makeStore()
     store.getState().scaleBrushRadius(100)

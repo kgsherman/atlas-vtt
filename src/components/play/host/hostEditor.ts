@@ -26,7 +26,7 @@ export interface HostEditor {
 
 /** View options the DM's choices carry over between "Edit map" sessions. */
 export type HostEditorView = Partial<
-  Pick<EditorViewOptions, "ghostAdjacent" | "levelVisibility">
+  Pick<EditorViewOptions, "ghostAdjacent" | "levelVisibility" | "darkVision">
 >
 
 /**
