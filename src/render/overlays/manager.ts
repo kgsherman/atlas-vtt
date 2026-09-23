@@ -4,10 +4,12 @@
  * overlays (selection rings, drag ghosts, markers) live in the engine's token layer.
  *
  * Every part is rebuilt lazily in update() when its inputs changed; per-frame work is limited to
- * label scaling and the grid fade.
+ * label scaling, the grid fade and the terrain overlay's gizmo (screen-space arrows that follow
+ * core/geometry/gizmo gizmoHandles) and label.
  */
 import * as THREE from "three"
 
+import type { Projector } from "@/core/geometry/gizmo"
 import type { PathStep } from "@/core/movement/types"
 import { connectorForward, connectorGround, lightLevelId, lightWorldPosition } from "@/core/scene/queries"
 import type { Id, SceneLike, Vec3 } from "@/core/scene/types"
@@ -20,6 +22,7 @@ import { GridOverlay } from "./grid"
 import { buildOutlines, disposeOutlines, type ObjectMeshRef, type OutlineMesh } from "./highlight"
 import { TextLabel } from "./label"
 import { buildToolPreview, disposePreview } from "./previews"
+import { TerrainOverlayResources } from "./terrainOverlay"
 import { aaLineGeometry, createAALineMaterial, polylinePairs } from "../materials/aaLineMaterial"
 import { createEdgeAAMaterial, edgeGeometry } from "../materials/edgeAAMaterial"
 import { circlePoints, dashPolyline, discEdgeGeometry, mergeEdgeGeometry, pathStepPoints, ribbonEdgeGeometry, ringEdgeGeometry } from "./ribbon"
@@ -46,6 +49,11 @@ export interface OverlayHost {
   worldPerPixelAt(p: THREE.Vector3): number
   /** Centre and radius for the grid fade. */
   fade(): { x: number; z: number; radius: number }
+  /**
+   * World point → canvas-relative CSS px (Engine.project), for the terrain overlay's gizmo, which must
+   * match the tool's screen-space hit test. Absent: no gizmo is drawn.
+   */
+  project?(p: Vec3): { x: number; y: number; visible: boolean }
 }
 
 type Outline = { line: OutlineMesh; attachTo: THREE.Object3D | null }
@@ -104,6 +112,10 @@ export class OverlayManager {
   private rulerDirty = false
   private pending: THREE.Object3D | null = null
   private pendingDirty = false
+  /** The terrain overlay's caches, gizmo and label (created with the first terrain preview). */
+  private terrain: TerrainOverlayResources | null = null
+  private readonly project: Projector = (p) => this.host.project?.(p) ?? null
+  private readonly worldPerPixelAt = (p: THREE.Vector3) => this.host.worldPerPixelAt(p)
   private gridVersion = 0
   /** Something was (re)built: move it to the OVERLAY layer before the next draw. */
   private layersDirty = true
@@ -146,9 +158,14 @@ export class OverlayManager {
     this.outlinesDirty = true
   }
 
-  /** Terrain geometry changed (edit or brush preview): the draped grid must follow. */
-  terrainChanged(levelId: Id): void {
-    if (levelId === this.host.activeLevelId()) this.gridVersion++
+  /**
+   * Terrain geometry changed (edit or brush preview): the draped grid must follow. With `dirty` (the
+   * engine moved the terrain mesh in place over it: a commit, a cleared preview; null = everywhere) the
+   * grid's heights are refreshed in place over it when it is a lattice of the ground's spacing, else the
+   * grid is rebuilt.
+   */
+  terrainChanged(levelId: Id, dirty?: { x: number; z: number; w: number; d: number } | null): void {
+    if (levelId === this.host.activeLevelId() && (dirty === undefined || !this.grid.refreshHeights(this.host.ground(levelId), dirty))) this.gridVersion++
     // Previews draped on the terrain are rebuilt against the new heights.
     if (this.previewSource) this.updatePreview(this.previewSource, true)
   }
@@ -182,6 +199,8 @@ export class OverlayManager {
     if (this.layersDirty) this.markLayers()
     // Keep the ruler label at a constant pixel size.
     if (this.rulerLabel?.sprite.visible) this.rulerLabel.updateScale(this.host.worldPerPixelAt(this.rulerLabel.sprite.position))
+    // Terrain overlay: gizmo arrows along the current projected axes, constant-size label.
+    this.terrain?.frame(this.host.project ? this.project : null, this.worldPerPixelAt)
   }
 
   /**
@@ -227,10 +246,26 @@ export class OverlayManager {
     }
     if (this.preview) disposePreview(this.preview)
     this.preview = null
-    if (!p || !this.host.scene()) return
-    this.preview = buildToolPreview(p, { ground: (id) => this.host.ground(id), scene: this.host.scene(), worldPerPixel: this.host.worldPerPixel() })
+    const scene = this.host.scene()
+    // Leaving the terrain overlay frees its cached geometry and hides its gizmo and label.
+    if (p?.kind !== "terrain" || !scene) this.terrain?.release()
+    if (!p || !scene) return
+    this.preview = buildToolPreview(p, {
+      ground: (id) => this.host.ground(id),
+      scene,
+      worldPerPixel: this.host.worldPerPixel(),
+      terrain: p.kind === "terrain" ? this.terrainResources() : undefined,
+    })
     this.root.add(this.preview)
     this.layersDirty = true
+  }
+
+  private terrainResources(): TerrainOverlayResources {
+    if (!this.terrain) {
+      this.terrain = new TerrainOverlayResources()
+      this.root.add(this.terrain.decor)
+    }
+    return this.terrain
   }
 
   private rebuildRuler(): void {
@@ -413,6 +448,8 @@ export class OverlayManager {
     if (this.preview) disposePreview(this.preview)
     if (this.ruler) disposeTree(this.ruler)
     if (this.pending) disposeTree(this.pending)
+    this.terrain?.dispose()
+    this.terrain = null
     if (this.rulerLabel) {
       this.rulerLabel.sprite.removeFromParent()
       this.rulerLabel.dispose()

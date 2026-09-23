@@ -3,24 +3,29 @@
  * lights, tokens, level stubs, terrain zeroing and masks. Cells are 5 ft: cell (i, j) spans
  * x ∈ [5i, 5i+5), z ∈ [5j, 5j+5).
  */
+import { produce } from "immer"
 import { describe, expect, it } from "vitest"
 
 import { createConnector, createDoor, createFloor, createLight, createPillar, createProp, createWall, createWindow } from "../scene/factory"
 import { createHeightmap, decodeChunk, sampleCounts, writeHeights } from "../scene/heightmap"
+import { levelGround, wallLength } from "../scene/queries"
 import { sampleById } from "../scene/samples"
-import type { Id, Scene } from "../scene/types"
+import { blockShape, cylinderShape, writeTerrain } from "../scene/terrainShapes"
+import type { DoorObject, Id, Scene, SceneLike, WallObject, WindowObject } from "../scene/types"
+import { openingFrame, wallBaseKnots, wallProfile, type WallProfile } from "../scene/wallProfile"
 import { createGradeMask, decodeGrades, decodeMask } from "../vision/mask"
 import type { GradeMask, VisibilityResult } from "../vision/types"
-import { buildOcclusionWorld, primitiveBounds } from "../occlusion"
+import { buildOcclusionWorld, primitiveBounds, primitiveTopAt, TerrainSampler } from "../occlusion"
 import type { OccluderPrimitive } from "../occlusion/types"
+import { diffViews } from "./diff"
 import { filterForPlayer } from "./filter"
 import { updateKnowledge } from "./memory"
 import { playerViewSchema } from "./playerViewSchema"
 import { reduceDm } from "./reduceDm"
 import { viewToScene } from "./viewToScene"
 import { createGameState } from "./state"
-import { add, addLevel, addToken, flatScene, TestHost } from "./test-utils"
-import type { GameState, PlayerDoor, PlayerLight, PlayerWall, PlayerWindow } from "./types"
+import { add, addLevel, addToken, flatScene, prng, TestHost } from "./test-utils"
+import type { GameState, PlayerDoor, PlayerLight, PlayerView, PlayerWall, PlayerWindow } from "./types"
 
 /** A synthetic visibility result: grade 3 on the listed cells ([i, j] or [i, j, subMask]). */
 function synthVis(scene: Scene, cells: Record<Id, [number, number, number?][]>, observed: Id[] = [], extra: Partial<VisibilityResult> = {}): VisibilityResult {
@@ -243,7 +248,19 @@ describe("clipping to explored cells", () => {
     const wall = add(scene, createWall(ground, { x: 0, z: 25 }, { x: 100, z: 25 }))
     const { view } = know(withPlayer(scene), synthVis(scene, { [ground]: [[4, 5]] }, [wall.id]))
     const pieces = Object.values(view.objects).filter((o) => o.type === "wall")
-    expect(pieces).toEqual([{ id: `${wall.id}@20,25`, type: "wall", levelId: ground, a: { x: 20, z: 25 }, b: { x: 25, z: 25 }, height: 10, thickness: 0.5, material: "stone" }])
+    expect(pieces).toEqual([
+      {
+        id: `${wall.id}@20,25`,
+        type: "wall",
+        levelId: ground,
+        a: { x: 20, z: 25 },
+        b: { x: 25, z: 25 },
+        height: 10,
+        thickness: 0.5,
+        material: "stone",
+        followTerrain: true,
+      },
+    ])
   })
 
   it("a wall merely touching an explored cell edge is not sent (no dilation)", () => {
@@ -402,92 +419,234 @@ describe("clipping to explored cells", () => {
 // ---------------------------------------------------------------------------
 
 describe("wall pieces on terrain", () => {
-  /** 8 × 4 cells on a slope h = 0.3·x; wall W across it with a closed door and a window; W2 runs past the east edge. */
+  /** Bumpy slope (world Y at elevation 0): sampled at resolution 2, so follow-terrain walls get strips. */
+  const bumps = (x: number, z: number) => 0.3 * x + 0.15 * z + 1.5 * Math.sin(x / 3) * Math.cos(z / 4)
+
+  function withTerrain(scene: Scene, levelId: Id, h: (x: number, z: number) => number = bumps): void {
+    const hm = createHeightmap(2)
+    const { samplesX, samplesZ } = sampleCounts(scene.grid, 2)
+    const s = scene.grid.cellSize / 2
+    const dense = new Float32Array(samplesX * samplesZ)
+    for (let j = 0; j < samplesZ; j++) for (let i = 0; i < samplesX; i++) dense[j * samplesX + i] = h(i * s, j * s)
+    scene.levels[levelId] = { ...scene.levels[levelId], heightmap: writeHeights(hm, scene.grid, dense) }
+  }
+
+  /**
+   * 8 × 4 cells. W (follow) along z = 10 with a closed door and a window; D (follow) diagonal; OFF (follow off,
+   * 3 ft: buried where the slope rises above it) along z = 5; EDGE (follow) runs past the east edge.
+   */
   function slope(flat = false) {
     const { scene, ground } = flatScene(8, 4)
-    if (!flat) {
-      const hm = createHeightmap(1)
-      const { samplesX, samplesZ } = sampleCounts(scene.grid, 1)
-      const dense = new Float32Array(samplesX * samplesZ)
-      for (let j = 0; j < samplesZ; j++) for (let i = 0; i < samplesX; i++) dense[j * samplesX + i] = 0.3 * i * 5
-      scene.levels[ground] = { ...scene.levels[ground], heightmap: writeHeights(hm, scene.grid, dense) }
-    }
+    if (!flat) withTerrain(scene, ground)
     const wall = add(scene, createWall(ground, { x: 0, z: 10 }, { x: 40, z: 10 }, { height: 10 }))
     const door = add(scene, createDoor(wall, 6, { state: "closed", height: 7 }))
     const win = add(scene, createWindow(wall, 12.5, { sillHeight: 3, height: 4 }))
+    const diag = add(scene, createWall(ground, { x: 2.5, z: 2.5 }, { x: 37.5, z: 18.5 }, { height: 8 }))
+    const off = add(scene, createWall(ground, { x: 0, z: 5 }, { x: 40, z: 5 }, { height: 3, followTerrain: false }))
     const edge = add(scene, createWall(ground, { x: 30, z: 15 }, { x: 60, z: 15 }, { height: 20 }))
-    return { scene, ground, ids: [wall.id, door.id, win.id, edge.id] }
+    return { scene, ground, wall, door, win, diag, off, edge, ids: [wall.id, door.id, win.id, diag.id, off.id, edge.id] }
   }
 
-  /** Explored columns [i0, i1) on every row. */
-  const columns = (i0: number, i1: number): [number, number][] => {
-    const out: [number, number][] = []
-    for (let j = 0; j < 4; j++) for (let i = i0; i < i1; i++) out.push([i, j])
+  /** Explored columns [i0, i1) on every row; `partial`: the first column only on sub-cells 0b0110 of each sub-row. */
+  const columns = (i0: number, i1: number, partial = false): [number, number, number?][] => {
+    const out: [number, number, number?][] = []
+    for (let j = 0; j < 4; j++) for (let i = i0; i < i1; i++) out.push(partial && i === i0 ? [i, j, 0b0110_0110_0110_0110] : [i, j])
     return out
   }
 
-  const kindOf = (p: OccluderPrimitive) => (p.sourceType === "door" ? "door" : p.key.includes("#lintel:") ? "lintel" : p.key.includes("#sill:") ? "sill" : "full")
-  const top = (p: OccluderPrimitive) => primitiveBounds(p).maxY
-  const bottom = (p: OccluderPrimitive) => primitiveBounds(p).minY
+  /** A wall's base line as a client (or the host) computes it: core/scene/wallProfile on the scene's own terrain. */
+  function profileIn(sc: SceneLike, wall: WallObject): WallProfile {
+    const level = sc.levels[wall.levelId]
+    const ground = level.heightmap ? new TerrainSampler(level, sc.grid) : null
+    return wallProfile(wall, ground, level.elevation, { a: 0, b: 0 })
+  }
 
-  for (const [i0, i1] of [
-    [0, 3],
-    [0, 4],
-    [0, 5],
-    [5, 8],
-    [4, 8],
-    [3, 8],
-  ]) {
-    it(`pieces keep the host's world heights (columns ${i0}–${i1 - 1} explored)`, () => {
-      const { scene, ground, ids } = slope()
-      const { view } = know(withPlayer(scene), synthVis(scene, { [ground]: columns(i0, i1) }, ids))
-      const host = buildOcclusionWorld(scene).primitives.filter((p) => p.sourceType === "wall" || p.sourceType === "door")
-      const player = buildOcclusionWorld(viewToScene(view)).primitives.filter((p) => p.sourceType === "wall" || p.sourceType === "door")
-      expect(player.length).toBeGreaterThan(0)
-      let compared = 0
-      for (const p of player) {
-        const b = primitiveBounds(p)
-        const cx = (b.minX + b.maxX) / 2
-        const cz = (b.minZ + b.maxZ) / 2
-        const match = host.filter((h) => {
-          const hb = primitiveBounds(h)
-          return h.sourceId === p.sourceId.split("@")[0] && kindOf(h) === kindOf(p) && cx >= hb.minX && cx <= hb.maxX && cz >= hb.minZ && cz <= hb.maxZ
-        })
-        expect(match, p.key).toHaveLength(1)
-        expect(top(p), p.key).toBeCloseTo(top(match[0]), 6)
-        // Lintel bottoms are the door / window heads.
-        if (kindOf(p) === "lintel") expect(bottom(p), p.key).toBeCloseTo(bottom(match[0]), 6)
-        compared++
+  /** Player pieces of the view with their host wall, the client's scene wall and the piece's offset along the host wall. */
+  function piecesOf(scene: Scene, view: PlayerView) {
+    const client = viewToScene(view)
+    return Object.values(view.objects)
+      .filter((o): o is PlayerWall => o.type === "wall")
+      .map((piece) => {
+        const host = scene.objects[piece.id.split("@")[0]] as WallObject
+        const cw = client.objects[piece.id] as WallObject
+        return { piece, host, cw, client, t0: Math.hypot(piece.a.x - host.a.x, piece.a.z - host.a.z), len: wallLength(piece) }
+      })
+  }
+
+  const kindOf = (p: OccluderPrimitive) => (p.sourceType === "door" ? "door" : p.key.includes("#lintel:") ? "lintel" : p.key.includes("#sill:") ? "sill" : "full")
+
+  for (const [i0, i1, partial] of [
+    [0, 3, false],
+    [0, 4, false],
+    [0, 5, true],
+    [5, 8, false],
+    [4, 8, true],
+    [3, 8, false],
+    [1, 2, false],
+    [2, 6, true],
+  ] as const) {
+    it(`client tops and opening heights are the host's (columns ${i0}–${i1 - 1} explored${partial ? ", first one partly" : ""})`, () => {
+      const f = slope()
+      const { view } = know(withPlayer(f.scene), synthVis(f.scene, { [f.ground]: columns(i0, i1, partial) }, f.ids))
+      expect(playerViewSchema.parse(view)).toEqual(view)
+      const r = prng(i0 * 16 + i1)
+      const pieces = piecesOf(f.scene, view)
+      expect(pieces.length).toBeGreaterThan(0)
+      const profiles = new Map<Id, WallProfile>()
+      for (const { piece, host, cw, client, t0, len } of pieces) {
+        expect(piece.followTerrain).toBe(host.followTerrain)
+        // Follow-terrain pieces carry the host's base line; the others stand on the elevation.
+        expect(piece.terrainProfile !== undefined).toBe(host.followTerrain)
+        const hp = profileIn(f.scene, host)
+        const cp = profileIn(client, cw)
+        profiles.set(piece.id, cp)
+        expect(cp.follow).toBe(host.followTerrain)
+        for (let k = 0; k <= 24; k++) {
+          const u = k === 0 ? 0 : k === 24 ? len : r() * len
+          expect(cp.topAt(u), `${piece.id} at ${u}`).toBeCloseTo(hp.topAt(t0 + u), 9)
+        }
+        if (!host.followTerrain) for (const b of cp.base) expect(b).toBe(0)
       }
-      expect(compared).toBe(player.length)
+      // Door heads and window sills / heads (world Y) as on the host.
+      let openings = 0
+      for (const o of Object.values(view.objects)) {
+        if (o.type !== "door" && o.type !== "window") continue
+        const { piece, host, cw, client, t0 } = pieces.find((p) => p.piece.id === o.wallId)!
+        const hostOpening = f.scene.objects[o.id] as DoorObject | WindowObject
+        const hf = openingFrame(profileIn(f.scene, host), host, hostOpening)!
+        const cf = openingFrame(profiles.get(piece.id)!, cw, client.objects[o.id] as DoorObject | WindowObject)!
+        expect(cf.u0 + t0).toBeCloseTo(hf.u0, 9)
+        expect(cf.u1 + t0).toBeCloseTo(hf.u1, 9)
+        expect(cf.base, o.id).toBeCloseTo(hf.base, 9)
+        expect(cf.head, o.id).toBeCloseTo(hf.head, 9)
+        expect(cf.sillTop, o.id).toBeCloseTo(hf.sillTop, 9)
+        expect(cf.hasSill).toBe(hf.hasSill)
+        openings++
+      }
+      if (i0 <= 1) expect(openings).toBeGreaterThan(0)
+
+      // End to end through the occluders both sides build: the tops of the player's wall pieces, lintels
+      // and closed doors at points along them are the host's.
+      const client = viewToScene(view)
+      const hostPrims = buildOcclusionWorld(f.scene).primitives
+      const playerPrims = buildOcclusionWorld(client).primitives.filter((p) => p.sourceType === "wall" || p.sourceType === "door")
+      expect(playerPrims.length).toBeGreaterThan(0)
+      for (const p of playerPrims) {
+        const kind = kindOf(p)
+        if (kind === "sill") continue
+        if (p.shape !== "box" && p.shape !== "strip") throw new Error(`unexpected ${p.shape}`)
+        const hostId = p.sourceId.split("@")[0]
+        const cw = client.objects[p.sourceType === "door" ? (view.objects[p.sourceId] as PlayerDoor).wallId : p.sourceId] as WallObject
+        const len = wallLength(cw)
+        const dir = { x: (cw.b.x - cw.a.x) / len, z: (cw.b.z - cw.a.z) / len }
+        const hx = p.halfExtents.x
+        for (const s of [-0.9, -0.45, 0, 0.3, 0.85]) {
+          const x = p.center.x + dir.x * hx * s
+          const z = p.center.z + dir.z * hx * s
+          const top = primitiveTopAt(p, x, z)
+          expect(top, p.key).not.toBeNull()
+          const hostTops = hostPrims
+            .filter((h) => h.sourceId === hostId && kindOf(h) === kind)
+            .map((h) => primitiveTopAt(h, x, z))
+            .filter((t) => t !== null)
+          expect(
+            hostTops.some((t) => Math.abs(t - top!) < 1e-6),
+            `${p.key} at (${x}, ${z}): ${top} vs ${hostTops}`
+          ).toBe(true)
+        }
+      }
     })
   }
 
-  it("the wall past the grid edge keeps its host top; a piece buried in the client's ground is not sent", () => {
-    const { scene, ground, ids } = slope()
-    const edgePieces = (sc: Scene) => {
-      const { view } = know(withPlayer(sc), synthVis(sc, { [ground]: columns(5, 8) }, ids))
-      return Object.values(view.objects).filter((o): o is PlayerWall => o.type === "wall" && o.id.startsWith(`${ids[3]}@`))
-    }
-    const pieces = edgePieces(scene)
+  it("a follow-off wall buried by the terrain is still sent, and stays buried on the client", () => {
+    const f = slope()
+    // Columns 4–7 (x 20–40): the ground along OFF (z = 5) is 6–13 ft, above its 3 ft top.
+    const { view } = know(withPlayer(f.scene), synthVis(f.scene, { [f.ground]: columns(4, 8) }, f.ids))
+    const pieces = piecesOf(f.scene, view).filter((p) => p.host.id === f.off.id)
     expect(pieces).toHaveLength(1)
-    // Host base: ground at the midpoint x = 45 (beyond the lattice: 0); client: ground at x = 35.
-    expect(pieces[0].height).toBeCloseTo(20 - 0.3 * 35, 6)
-    // 8 ft tall from the host base 0: its top is below the client's ground (10.5) at the piece.
-    const edge = scene.objects[ids[3]]
-    if (edge.type !== "wall") throw new Error("edge wall")
-    expect(edgePieces({ ...scene, objects: { ...scene.objects, [edge.id]: { ...edge, height: 8 } } })).toEqual([])
+    const { piece, cw, client, len } = pieces[0]
+    expect(piece).toMatchObject({ a: { x: 20, z: 5 }, b: { x: 40, z: 5 }, height: 3, followTerrain: false })
+    expect(piece.terrainProfile).toBeUndefined()
+    const cp = profileIn(client, cw)
+    for (let u = 0; u <= len; u += 2.5) {
+      expect(cp.topAt(u)).toBe(3)
+      expect(levelGround(client, f.ground, 20 + u, 5)).toBeGreaterThan(3)
+    }
+    // Its occluder is the host's (a box from just below the elevation to 3 ft).
+    const [box, ...more] = buildOcclusionWorld(client).primitives.filter((p) => p.sourceId === piece.id)
+    expect(more).toEqual([])
+    expect(box.shape).toBe("box")
+    expect(primitiveBounds(box).minY).toBeCloseTo(-0.05, 9)
+    expect(primitiveBounds(box).maxY).toBeCloseTo(3, 9)
   })
 
-  it("flat levels: pieces and openings keep the remembered heights", () => {
-    const { scene, ground, ids } = slope(true)
-    const { view } = know(withPlayer(scene), synthVis(scene, { [ground]: columns(0, 3) }, ids))
+  it("a follow wall crossing unexplored cells keeps the host's tops; the terrain there stays clipped", () => {
+    const { scene, ground } = flatScene(8, 4)
+    withTerrain(scene, ground)
+    // The centreline z = 9.5 lies in row 1 (unexplored); the 2 ft thick strip reaches row 2 (explored), so
+    // the ground under the piece depends on samples z = 7.5 the client never receives.
+    const wall = add(scene, createWall(ground, { x: 0, z: 9.5 }, { x: 40, z: 9.5 }, { height: 8, thickness: 2 }))
+    const cells: [number, number][] = [2, 3, 4, 5].map((i) => [i, 2])
+    const { view } = know(withPlayer(scene), synthVis(scene, { [ground]: cells }, [wall.id]))
+    const [p] = piecesOf(scene, view)
+    expect(piecesOf(scene, view)).toHaveLength(1)
+    expect(p.piece).toMatchObject({ a: { x: 10, z: 9.5 }, b: { x: 30, z: 9.5 }, followTerrain: true })
+
+    // The terrain sent is exactly what the explored cells allow: no sample of row z = 7.5 (sz = 3).
+    const without: Scene = { ...scene, objects: Object.fromEntries(Object.entries(scene.objects).filter(([id]) => id !== wall.id)) }
+    expect(know(withPlayer(without), synthVis(without, { [ground]: cells })).view.terrain).toEqual(view.terrain)
+    const chunk = decodeChunk(view.terrain[ground]["0,0"], 2)
+    for (let sx = 0; sx < 16; sx++) expect(chunk[3 * 16 + sx]).toBe(0)
+    expect(bumps(15, 7.5)).not.toBe(0)
+
+    // The profile is the host's ground at the piece's own base knots (its centreline), nothing else.
+    const knots = wallBaseKnots(p.piece, 2.5)
+    expect(p.piece.terrainProfile).toHaveLength(knots.length)
+    knots.forEach((u, k) => expect(p.piece.terrainProfile![k]).toBeCloseTo(levelGround(scene, ground, 10 + u, 9.5), 9))
+
+    // With it the client's tops are the host's; its own clipped ground would put them elsewhere.
+    const hp = profileIn(scene, p.host)
+    const cp = profileIn(p.client, p.cw)
+    const bare = profileIn(p.client, { ...p.cw, terrainProfile: undefined })
+    let worst = 0
+    for (let u = 0; u <= p.len; u += 0.25) {
+      expect(cp.topAt(u)).toBeCloseTo(hp.topAt(p.t0 + u), 9)
+      worst = Math.max(worst, Math.abs(bare.topAt(u) - hp.topAt(p.t0 + u)))
+    }
+    expect(worst).toBeGreaterThan(0.5)
+  })
+
+  it("flat levels: pieces follow the level elevation, without a profile, and openings keep their heights", () => {
+    const f = slope(true)
+    const { view } = know(withPlayer(f.scene), synthVis(f.scene, { [f.ground]: columns(0, 3) }, f.ids))
     const walls = Object.values(view.objects).filter((o): o is PlayerWall => o.type === "wall")
     expect(walls.length).toBeGreaterThan(0)
-    for (const w of walls) expect(w.height).toBe(w.id.startsWith(ids[3]) ? 20 : 10)
-    expect((view.objects[ids[1]] as PlayerDoor).height).toBe(7)
-    const win = view.objects[ids[2]] as PlayerWindow
+    for (const w of walls) {
+      const host = f.scene.objects[w.id.split("@")[0]] as WallObject
+      expect(w.height).toBe(host.height)
+      expect(w.followTerrain).toBe(host.followTerrain)
+      expect(w).not.toHaveProperty("terrainProfile")
+    }
+    expect((view.objects[f.door.id] as PlayerDoor).height).toBe(7)
+    const win = view.objects[f.win.id] as PlayerWindow
     expect([win.sillHeight, win.height]).toEqual([3, 4])
+  })
+
+  it("terrain edits change the profiles; unchanged terrain gives the same arrays (no patch)", () => {
+    const f = slope()
+    const vis = synthVis(f.scene, { [f.ground]: columns(0, 8) }, f.ids)
+    const first = know(withPlayer(f.scene), vis)
+    const again = filterForPlayer(first.state, "p1", vis)
+    expect(diffViews(first.view, again)).toEqual([])
+    const piece = Object.values(first.view.objects).find((o): o is PlayerWall => o.type === "wall" && o.id.startsWith(`${f.wall.id}@`))!
+    expect((again.objects[piece.id] as PlayerWall).terrainProfile).toBe(piece.terrainProfile)
+    // Raise the terrain by 2 ft: the pieces are re-sent 2 ft higher.
+    const raised: Scene = { ...f.scene, levels: { ...f.scene.levels } }
+    withTerrain(raised, f.ground, (x, z) => bumps(x, z) + 2)
+    const moved = filterForPlayer({ ...first.state, scene: raised }, "p1", vis)
+    const next = moved.objects[piece.id] as PlayerWall
+    next.terrainProfile!.forEach((v, k) => expect(v).toBeCloseTo(piece.terrainProfile![k] + 2, 5))
+    expect(diffViews(first.view, moved).some((op) => op.path.join("/") === `objects/${piece.id}`)).toBe(true)
   })
 })
 
@@ -563,6 +722,29 @@ describe("terrain", () => {
     for (let sz = 0; sz < 16; sz++) {
       for (let sx = 0; sx < 16; sx++) expect(right[sz * 16 + sx]).toBe(sx === 0 && sz >= 6 && sz <= 8 ? 3 : 0)
     }
+  })
+
+  it("never sends terrain shapes or the painted base (terrainEdits), only the baked terrain", () => {
+    const { scene, ground } = flatScene(8, 8)
+    const hill = { ...blockShape("SENTINELhill", { x: 10, z: 10, w: 10, d: 10 }, 0, 4, 0), name: "SENTINEL_SHAPE_NAME" }
+    const pit = cylinderShape("SENTINELpit", { x: 30, z: 30 }, 4, 12, 0, -2, 1)
+    scene.levels[ground] = produce(scene.levels[ground], (d) => {
+      expect(writeTerrain(d, scene.grid, { upsert: [hill, pit] })).toBe(true)
+    })
+    expect(Object.keys(scene.levels[ground].terrainEdits!.baseChunks).length).toBeGreaterThan(0)
+    const wall = add(scene, createWall(ground, { x: 5, z: 15 }, { x: 35, z: 15 }))
+    const cells: [number, number][] = []
+    for (let j = 0; j < 8; j++) for (let i = 0; i < 8; i++) cells.push([i, j])
+    const { view } = know(withPlayer(scene), synthVis(scene, { [ground]: cells }, [wall.id]))
+    const json = JSON.stringify(view)
+    for (const s of ["terrainEdits", "baseChunks", "shapes", "SENTINEL"]) expect(json).not.toContain(s)
+    expect(playerViewSchema.parse(view)).toEqual(view)
+    // The baked terrain arrives (the block's top, the pit's floor), and the wall stands on it.
+    const client = viewToScene(view)
+    expect(levelGround(client, ground, 15, 12.5)).toBeCloseTo(4, 6)
+    expect(levelGround(client, ground, 30, 30)).toBeCloseTo(-2, 6)
+    const piece = Object.values(view.objects).find((o): o is PlayerWall => o.type === "wall")!
+    expect(piece.terrainProfile).toContain(4)
   })
 
   it("sends no terrain for unexplored levels", () => {

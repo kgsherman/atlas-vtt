@@ -59,6 +59,22 @@ describe("serializeGameState / parseGameState", () => {
     expect(parseGameState(bad)).toBeNull()
   })
 
+  it("loads remembered walls saved before followTerrain existed (they follow the terrain); never a remembered terrainProfile", () => {
+    const state = playedState()
+    const wallIds = Object.keys(state.memory.p1).filter((id) => state.memory.p1[id].type === "wall")
+    expect(wallIds.length).toBeGreaterThan(0)
+    const old = clone(state) as unknown as { memory: Record<string, Record<string, Record<string, unknown>>> }
+    for (const id of wallIds) delete old.memory.p1[id].followTerrain
+    const parsed = parseGameState(old)
+    expect(parsed).not.toBeNull()
+    // Normalised to what sanitising the (migrated) scene walls gives, so re-observing them changes nothing.
+    expect(parsed!.memory).toEqual(clone(state.memory))
+    for (const id of wallIds) expect(parsed!.memory.p1[id]).toMatchObject({ type: "wall", followTerrain: true })
+    const withProfile = clone(state) as unknown as { memory: Record<string, Record<string, Record<string, unknown>>> }
+    withProfile.memory.p1[wallIds[0]].terrainProfile = [0, 0]
+    expect(parseGameState(withProfile)).toBeNull()
+  })
+
   it("rejects malformed shapes", () => {
     const base = clone(playedState()) as unknown as Record<string, unknown>
     const variants: Array<[string, (s: Record<string, unknown>) => unknown]> = [

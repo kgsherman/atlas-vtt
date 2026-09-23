@@ -6,7 +6,6 @@ import * as React from "react"
 import { ImagePlus } from "lucide-react"
 import { toast } from "sonner"
 
-import { selectionBounds } from "@/core/scene/integrity"
 import { groundHeightAt } from "@/core/scene/queries"
 import type { Id } from "@/core/scene/types"
 import type { EditorController } from "@/editor/controller"
@@ -34,6 +33,7 @@ import { describeIssues } from "./lib/format"
 import { duplicateLevel } from "./lib/levelOps"
 import { isTextEntryTarget } from "./lib/pointer"
 import { defaultPreviewToken, type PreviewResult } from "./lib/preview"
+import { inTerrainMode, runEditorCommand, selectionFocusBounds } from "./lib/terrainMode"
 import { createViewportInfoStore } from "./lib/viewportInfo"
 import { readEditorView, writeEditorView } from "./lib/viewPrefs"
 import { Sidebar } from "./Sidebar"
@@ -95,9 +95,10 @@ export function EditorShell({ doc, goHome, importRequest, setImportRequest }: Ed
 
   // ---- actions ----------------------------------------------------------------------------------
   const actions = React.useMemo<EditorActions>(() => {
+    // In the terrain mode "the selection" is the terrain tool's shapes (lib/terrainMode).
     const focusSelection = () => {
       const s = store.getState()
-      const b = selectionBounds(s.scene, s.selection)
+      const b = selectionFocusBounds(s)
       if (!engine || !b) return
       const c = { x: b.x + b.w / 2, z: b.z + b.d / 2 }
       engine.focus({ x: c.x, y: groundHeightAt(s.scene, s.activeLevelId, c), z: c.z }, { distance: Math.max(30, Math.hypot(b.w, b.d) * 1.6) })
@@ -153,7 +154,8 @@ export function EditorShell({ doc, goHome, importRequest, setImportRequest }: Ed
       },
       deleteSelection: () => {
         controller.cancelGesture()
-        store.getState().deleteSelection()
+        if (inTerrainMode(store.getState())) runEditorCommand(controller, { type: "delete" })
+        else store.getState().deleteSelection()
       },
     }
   }, [store, controller, doc, engine, goHome, confirm, setImportRequest])
@@ -182,7 +184,8 @@ export function EditorShell({ doc, goHome, importRequest, setImportRequest }: Ed
   })
   React.useEffect(() => {
     const onPaste = (e: ClipboardEvent) => {
-      if (isTextEntryTarget(e.target) || overlayOpen() || previewingRef.current) return
+      // Terrain mode: shapes are not on the clipboard, and the object selection is hidden (not a paste target).
+      if (isTextEntryTarget(e.target) || overlayOpen() || previewingRef.current || inTerrainMode(store.getState())) return
       const text = e.clipboardData?.getData("text/plain")
       if (!text || !text.includes("atlas-clipboard")) return
       e.preventDefault()

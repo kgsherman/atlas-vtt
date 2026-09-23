@@ -32,8 +32,13 @@ export interface MergedBuild {
   name: string
   slot: MaterialSlot
   geometry: THREE.BufferGeometry
-  /** Terrain floors only: per-vertex Y offset from the ground, for in-place brush previews. */
+  /** Terrain floors only: per-vertex Y offset from the ground, for in-place terrain previews. */
   terrainOffsets?: Float32Array
+  /**
+   * Terrain floors only: (sz, first triangle, end triangle) triples, one per floor and lattice cell row sz;
+   * inside a row the triangles are in ascending x of their first vertex (floors.ts updateTerrainGeometry).
+   */
+  terrainRows?: Int32Array
 }
 
 /** Per-instance flicker of a fixture flame (visual only; radii never flicker). */

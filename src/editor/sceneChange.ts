@@ -28,9 +28,12 @@ export function sceneChangeFromPatches(patches: readonly Patch[]): SceneChange {
         else tokens.add(String(id))
         break
       case "levels":
-        // Terrain edits touch only levels/<id>/heightmap/...; anything else about a level is structural.
-        if (id !== undefined && field === "heightmap") terrain.add(String(id))
-        else structure = true
+        // Terrain edits touch only levels/<id>/heightmap/...; levels/<id>/terrainEdits/... is DM-only
+        // editing data with no visual effect (its baked result arrives as heightmap patches); anything
+        // else about a level is structural.
+        if (id === undefined) structure = true
+        else if (field === "heightmap") terrain.add(String(id))
+        else if (field !== "terrainEdits") structure = true
         break
       case "grid":
       case "environment":

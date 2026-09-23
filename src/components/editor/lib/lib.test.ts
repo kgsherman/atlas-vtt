@@ -1,27 +1,37 @@
 import { describe, expect, it } from "vitest"
 
 import { createFloor, createLevel, createLight, createScene, createToken, createWall } from "@/core/scene/factory"
-import { createHeightmap, sampleHeight, writeHeights, sampleCounts } from "@/core/scene/heightmap"
 import { parseScene, serializeScene } from "@/core/scene/schema"
+import { blockShape, rampShape } from "@/core/scene/terrainShapes"
 import type { Scene } from "@/core/scene/types"
 import { decodeGrades, decodeMask, getCell } from "@/core/vision"
+import { createEditorController } from "@/editor/controller"
 import { createEditorStore } from "@/editor/store"
 
 import { describeIssues, formatBytes, formatElevation, formatFeet, itemLabel, relativeTime, selectionSummary, trimNumber } from "./format"
-import {
-  duplicateLevel,
-  guessStoreyFromName,
-  levelNameFromFile,
-  levelsTopDown,
-  nextLevelElevation,
-  resampleHeightmap,
-  setTerrainResolution,
-  suggestLevelForImage,
-} from "./levelOps"
+import { duplicateLevel, guessStoreyFromName, levelNameFromFile, levelsTopDown, nextLevelElevation, suggestLevelForImage } from "./levelOps"
 import { presetForFileNames, withPreset } from "./environmentPresets"
 import { defaultCalibration, floorPlanForLevel, importRect, pxPerCell, requiredGrid, sceneNameFromFiles } from "./importPlan"
-import { cursorReadout, editorMayHandleKey, isTextEntryTarget, stripBackgroundFloor, toToolPointerEvent } from "./pointer"
+import { cursorReadout, editorCursor, editorMayHandleKey, isTextEntryTarget, stripBackgroundFloor, toToolPointerEvent } from "./pointer"
 import { createPreviewVision, defaultPreviewToken, playerPreviewScene, previewCandidates } from "./preview"
+import {
+  alsoAppliedShapes,
+  applyInspectorTerrainEdit,
+  offsetShapeTop,
+  reorderShapes,
+  shapeSampleCount,
+  shapeTopStats,
+  wallTerrainWarning,
+} from "./terrainInspect"
+import {
+  activeLevelShapes,
+  activeTerrainSelection,
+  editedTerrainElements,
+  runEditorCommand,
+  selectedShapes,
+  selectionCount,
+  selectionFocusBounds,
+} from "./terrainMode"
 import { applyExtras, defaultToolExtras, extrasApply, lightOverridesFromPreset, newItemIds } from "./toolExtras"
 
 const store = (scene: Scene) => createEditorStore({ scene, systemClipboard: null })
@@ -102,22 +112,18 @@ describe("levelOps", () => {
     expect(Object.keys(s.getState().scene.levels)).toHaveLength(1)
   })
 
-  it("resamples terrain between resolutions", () => {
-    const grid = { width: 4, depth: 4, cellSize: 5, diagonalRule: "5-5-5" as const }
-    const { samplesX, samplesZ } = sampleCounts(grid, 1)
-    const dense = new Float32Array(samplesX * samplesZ)
-    for (let k = 0; k < dense.length; k++) dense[k] = (k % samplesX) * 2 // linear ramp along x
-    const hm = writeHeights(createHeightmap(1), grid, dense)
-    const hi = resampleHeightmap(hm, grid, 4)
-    expect(hi.resolution).toBe(4)
-    for (const x of [0, 2.5, 7.5, 13.75]) expect(sampleHeight(hi, 5, x, 6)).toBeCloseTo(sampleHeight(hm, 5, x, 6), 4)
-
-    const scene = createScene({ width: 4, depth: 4 })
+  it("duplicates a level with its terrain shapes", () => {
+    const scene = createScene({ width: 10, depth: 10 })
     const g = groundOf(scene)
-    scene.levels[g].heightmap = hm
     const s = store(scene)
-    expect(setTerrainResolution(s, g, 2)).toBe(true)
-    expect(s.getState().scene.levels[g].heightmap?.resolution).toBe(2)
+    expect(s.getState().applyTerrainEdit(g, { upsert: [blockShape("hill", { x: 10, z: 10, w: 10, d: 10 }, 0, 4, 0)] }, "Add block")).toBe(true)
+    const src = s.getState().scene.levels[g]
+    const id = duplicateLevel(s, g)
+    expect(id).not.toBeNull()
+    const copy = s.getState().scene.levels[id!]
+    expect(copy.heightmap).toEqual(src.heightmap)
+    expect(copy.terrainEdits).toEqual(src.terrainEdits)
+    expect(parseScene(JSON.parse(serializeScene(s.getState().scene))).ok).toBe(true)
   })
 
   it("guesses storeys and names from map file names", () => {
@@ -153,6 +159,107 @@ describe("pointer", () => {
     expect(cursorReadout(grid, { x: 12, z: 49 })).toEqual({ i: 2, j: 9, x: 12, z: 49, inside: true })
     expect(cursorReadout(grid, { x: -1, z: 3 })?.inside).toBe(false)
     expect(isTextEntryTarget(null)).toBe(false)
+  })
+
+  it("fills canvas-relative coordinates and the pressed buttons", () => {
+    const grid = { cellSize: 5, width: 10, depth: 10, diagonalRule: "5-5-5" as const }
+    const pick = { ground: null, objectId: null, tokenId: null, hitPoint: null }
+    const base = { clientX: 110, clientY: 220, button: 0, buttons: 2, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false }
+    const e = toToolPointerEvent(base, pick, { grid, snapMode: "center", altHeld: false }, { origin: { left: 100, top: 200 } })
+    expect(e).toMatchObject({ canvasX: 10, canvasY: 20, buttons: 2, clientX: 110, clientY: 220 })
+    const bare = toToolPointerEvent(base, pick, { grid, snapMode: "center", altHeld: false })
+    expect(bare.canvasX).toBeUndefined()
+    expect(bare.canvasY).toBeUndefined()
+  })
+
+  it("uses the tool's cursor, else the tool's default", () => {
+    const s = store(createScene())
+    const controller = createEditorController(s)
+    expect(editorCursor(controller, false)).toBe("default")
+    s.getState().setTool("wall")
+    expect(editorCursor(controller, false)).toBe("crosshair")
+    s.getState().setTool("terrain")
+    s.getState().setToolSettings("terrain", { sub: "select" })
+    expect(editorCursor(controller, false)).toBe("default")
+    s.getState().setToolSettings("terrain", { sub: "block" })
+    expect(editorCursor(controller, false)).toBe(controller.toolCursor() ?? "crosshair")
+    controller.dispose()
+  })
+})
+
+describe("terrainMode", () => {
+  const setup = () => {
+    const scene = createScene({ width: 12, depth: 12 })
+    const g = groundOf(scene)
+    const wall = createWall(g, { x: 5, z: 5 }, { x: 25, z: 5 })
+    scene.objects[wall.id] = wall
+    const s = store(scene)
+    s.getState().applyTerrainEdit(
+      g,
+      { upsert: [blockShape("a", { x: 10, z: 10, w: 10, d: 5 }, 0, 3, 0), blockShape("b", { x: 30, z: 30, w: 5, d: 5 }, 0, 2, 1)] },
+      "Add blocks"
+    )
+    const controller = createEditorController(s)
+    return { s, g, wall, controller }
+  }
+
+  it("counts, lists and bounds the shape selection in the terrain mode only", () => {
+    const { s, g, wall, controller } = setup()
+    s.getState().select([wall.id])
+    s.getState().setTool("terrain")
+    expect(selectionCount(s.getState())).toBe(0)
+    expect(Object.keys(activeLevelShapes(s.getState()))).toEqual(["a", "b"])
+    s.getState().setTerrainSelection({ levelId: g, shapeIds: ["b", "a"], elements: [] })
+    expect(activeTerrainSelection(s.getState())?.shapeIds).toEqual(["b", "a"])
+    expect(selectedShapes(s.getState()).map((sh) => sh.id)).toEqual(["b", "a"])
+    expect(selectionCount(s.getState())).toBe(2)
+    expect(selectionFocusBounds(s.getState())).toEqual({ x: 10, z: 10, w: 25, d: 25 })
+    s.getState().setTool("select")
+    expect(selectionCount(s.getState())).toBe(1)
+    expect(selectionFocusBounds(s.getState())).not.toBeNull()
+    expect(selectedShapes(s.getState())).toEqual([])
+    controller.dispose()
+  })
+
+  it("routes menu commands to the terrain tool, never to the hidden object selection", () => {
+    const { s, g, wall, controller } = setup()
+    s.getState().select([wall.id])
+    s.getState().setTool("terrain")
+    s.getState().setToolSettings("terrain", { sub: "select" })
+    // Nothing selected in the mode: consumed, the wall stays (and is not duplicated).
+    const objects = s.getState().scene.objects
+    expect(runEditorCommand(controller, { type: "delete" })).toBe(true)
+    expect(runEditorCommand(controller, { type: "duplicate" })).toBe(true)
+    expect(s.getState().scene.objects).toBe(objects)
+    // Select all → the level's shapes; delete removes them, not the wall.
+    runEditorCommand(controller, { type: "select-all" })
+    expect(s.getState().terrainSelection?.shapeIds.slice().sort()).toEqual(["a", "b"])
+    runEditorCommand(controller, { type: "delete" })
+    expect(s.getState().scene.levels[g].terrainEdits).toBeUndefined()
+    expect(Object.hasOwn(s.getState().scene.objects, wall.id)).toBe(true)
+    // Outside the mode the same command acts on objects again.
+    s.getState().setTool("select")
+    s.getState().select([wall.id])
+    runEditorCommand(controller, { type: "delete" })
+    expect(Object.hasOwn(s.getState().scene.objects, wall.id)).toBe(false)
+    controller.dispose()
+  })
+
+  it("counts the selected elements only where the tool edits them (Select sub-tool, advanced mode)", () => {
+    const { s, g, controller } = setup()
+    s.getState().setTool("terrain")
+    s.getState().setToolSettings("terrain", { sub: "select", advanced: true, element: "vertex" })
+    s.getState().setTerrainSelection({ levelId: g, shapeIds: ["a"], elements: [{ shapeId: "a", kind: "vertex", index: 0 }] })
+    expect(editedTerrainElements(s.getState())).toBe(1)
+    s.getState().setToolSettings("terrain", { advanced: false })
+    expect(editedTerrainElements(s.getState())).toBe(0)
+    s.getState().setToolSettings("terrain", { advanced: true, sub: "brush" })
+    // The vertex stays selected (hidden) in Brush, but Delete there removes the whole shape.
+    expect(s.getState().terrainSelection?.elements).toHaveLength(1)
+    expect(editedTerrainElements(s.getState())).toBe(0)
+    runEditorCommand(controller, { type: "delete" })
+    expect(Object.keys(activeLevelShapes(s.getState()))).toEqual(["b"])
+    controller.dispose()
   })
 })
 
@@ -311,6 +418,151 @@ describe("floorPlanForLevel", () => {
   })
 })
 
+describe("terrainInspect", () => {
+  it("reads and offsets a shape's top", () => {
+    const ramp = rampShape("r", { x: 0, z: 0, w: 10, d: 10 }, 1, 2, 6, 0)
+    expect(shapeTopStats(ramp)).toEqual({ mean: 5, min: 2, max: 8 })
+    const up = offsetShapeTop(ramp, 1.5)
+    expect(shapeTopStats(up)).toEqual({ mean: 6.5, min: 3.5, max: 9.5 })
+    expect(up.base).toBe(ramp.base)
+    expect(ramp.points[0].y).not.toBe(up.points[0].y)
+  })
+
+  it("moves shapes one step in the bake order", () => {
+    const at = (id: string, order: number) => blockShape(id, { x: 0, z: 0, w: 5, d: 5 }, 0, 1, order)
+    const orders = (up: ReturnType<typeof reorderShapes>) => Object.fromEntries((up ?? []).map((s) => [s.id, s.order]))
+    const three = [at("a", 0), at("b", 3), at("c", 7)]
+    expect(orders(reorderShapes(three, "a", 1))).toEqual({ a: 3, b: 0 })
+    expect(orders(reorderShapes(three, "c", -1))).toEqual({ c: 3, b: 7 })
+    expect(reorderShapes(three, "c", 1)).toBeNull()
+    expect(reorderShapes(three, "a", -1)).toBeNull()
+    expect(reorderShapes(three, "zz", 1)).toBeNull()
+    // Shared orders: renumbered so the moved shape really passes its neighbour.
+    const tied = [at("a", 2), at("b", 2), at("c", 2)]
+    const up = reorderShapes(tied, "a", 1)!
+    const next = tied.map((s) => up.find((u) => u.id === s.id) ?? s).sort((p, q) => p.order - q.order || (p.id < q.id ? -1 : 1))
+    expect(next.map((s) => s.id)).toEqual(["b", "a", "c"])
+  })
+
+  it("flags shapes too small for the terrain resolution", () => {
+    const tiny = blockShape("t", { x: 1, z: 1, w: 1, d: 1 }, 0, 2, 0)
+    const room = blockShape("r", { x: 0, z: 0, w: 10, d: 10 }, 0, 2, 0)
+    expect(shapeSampleCount(tiny, { heightmap: { resolution: 2, chunks: {} } }, { cellSize: 5 })).toBeLessThan(4)
+    expect(shapeSampleCount(room, { heightmap: { resolution: 2, chunks: {} } }, { cellSize: 5 })).toBe(4)
+    expect(shapeSampleCount(room, { heightmap: null }, { cellSize: 5 })).toBeNull()
+  })
+
+  it("warns about buried walls and walls poking through the level above", () => {
+    const scene = createScene({ width: 12, depth: 12 })
+    const g = groundOf(scene)
+    const off = createWall(g, { x: 5, z: 20 }, { x: 45, z: 20 }, { followTerrain: false, height: 8 })
+    const on = createWall(g, { x: 5, z: 20 }, { x: 45, z: 20 }, { followTerrain: true, height: 8 })
+    // Flat level: nothing to warn about.
+    expect(wallTerrainWarning(scene, off)).toBeNull()
+    const s = store(scene)
+    s.getState().applyTerrainEdit(g, { upsert: [blockShape("hill", { x: 20, z: 10, w: 10, d: 20 }, 0, 4, 0)] }, "Add block")
+    const terrain = s.getState().scene
+    const buried = wallTerrainWarning(terrain, off)
+    expect(buried?.kind).toBe("buried")
+    expect(buried && buried.kind === "buried" ? buried.depth : 0).toBeCloseTo(4, 5)
+    expect(buried && buried.kind === "buried" ? buried.whole : true).toBe(false)
+    // Following the terrain it rides up to 12 ft: no level above → fine; a floor at 10 ft (1 ft thick) → its
+    // top pokes 2 ft above that floor.
+    expect(wallTerrainWarning(terrain, on)).toBeNull()
+    const upper = createLevel({ name: "Upper", elevation: 10, floorThickness: 1 })
+    const stacked = { ...terrain, levels: { ...terrain.levels, [upper.id]: upper } }
+    const pokes = wallTerrainWarning(stacked, on)
+    expect(pokes).toMatchObject({ kind: "pokes", above: "Upper" })
+    expect(pokes && pokes.kind === "pokes" ? pokes.by : 0).toBeCloseTo(2, 5)
+    expect(wallTerrainWarning(stacked, { ...on, height: 4 })).toBeNull()
+  })
+
+  it("reports an Inspector terrain edit as refused only when a shape is invalid, not when it changes nothing", () => {
+    const s = store(createScene({ width: 12, depth: 12 }))
+    const g = s.getState().activeLevelId
+    const hill = { ...blockShape("b", { x: 10, z: 10, w: 10, d: 10 }, 0, 3, 0), name: "Hill" }
+    expect(applyInspectorTerrainEdit(s, g, { upsert: [hill] }, "Add shape")).toEqual({ ok: true, refused: false })
+    const shape = s.getState().scene.levels[g].terrainEdits!.shapes.b
+    // "Hill " trims back to "Hill": nothing changes, which is no error.
+    const same = { ...shape, name: "Hill ".trim() || undefined }
+    expect(applyInspectorTerrainEdit(s, g, { upsert: [same] }, "Rename shape")).toEqual({ ok: false, refused: false })
+    expect(applyInspectorTerrainEdit(s, g, { upsert: [{ ...shape, name: "Mound" }] }, "Rename shape")).toEqual({ ok: true, refused: false })
+    // A top beyond ±500 ft: the terrain writer refuses the shape.
+    expect(applyInspectorTerrainEdit(s, g, { upsert: [offsetShapeTop(shape, 600)] }, "Move shape top")).toEqual({ ok: false, refused: true })
+    expect(s.getState().scene.levels[g].terrainEdits!.shapes.b.name).toBe("Mound")
+    // Read-only documents: nothing happens, nothing to report.
+    s.getState().loadScene(s.getState().scene, { readOnly: true })
+    expect(applyInspectorTerrainEdit(s, g, { upsert: [offsetShapeTop(shape, 600)] }, "Move shape top")).toEqual({ ok: false, refused: false })
+  })
+
+  it("lists the older shapes Apply to terrain applies with the selection", () => {
+    const s = store(createScene({ width: 20, depth: 20 }))
+    const g = s.getState().activeLevelId
+    s.getState().applyTerrainEdit(
+      g,
+      {
+        upsert: [
+          blockShape("pit", { x: 10, z: 10, w: 30, d: 30 }, 0, -6, 0),
+          blockShape("pillar", { x: 20, z: 20, w: 10, d: 10 }, -6, 10, 1),
+          blockShape("apart", { x: 60, z: 60, w: 10, d: 10 }, 0, 2, 0),
+        ],
+      },
+      "Add shapes"
+    )
+    const level = s.getState().scene.levels[g]
+    expect(alsoAppliedShapes(level, ["pillar"]).map((sh) => sh.id)).toEqual(["pit"])
+    expect(alsoAppliedShapes(level, ["pit", "pillar"])).toEqual([])
+    expect(alsoAppliedShapes(level, ["pit"])).toEqual([])
+    expect(alsoAppliedShapes(level, ["apart"])).toEqual([])
+    expect(alsoAppliedShapes(undefined, ["pillar"])).toEqual([])
+  })
+
+  it("does not warn about a default wall reaching the level above on flat terrain, only about the terrain lifting it", () => {
+    const s = store(createScene({ width: 12, depth: 12 }))
+    const g = s.getState().activeLevelId
+    expect(s.getState().enableTerrain(g)).toBe(true)
+    s.getState().addLevel() // defaults: elevation 10, 1 ft floor → the ceiling is at 9 ft
+    const scene = s.getState().scene
+    const upper = Object.values(scene.levels).find((l) => l.id !== g)!
+    expect(upper.elevation - upper.floorThickness).toBe(9)
+    // A wall with the tool's defaults (storey height, follow terrain) on flat terrain: its top is where it
+    // would be without terrain, so nothing to warn about.
+    const { height, followTerrain } = s.getState().toolSettings.wall
+    const w = createWall(g, { x: 5, z: 20 }, { x: 45, z: 20 }, { height, followTerrain })
+    expect(w).toMatchObject({ height: 10, followTerrain: true })
+    expect(wallTerrainWarning(scene, w)).toBeNull()
+    // A 2 ft block under it lifts its top 2 ft past that.
+    s.getState().applyTerrainEdit(g, { upsert: [blockShape("b", { x: 20, z: 15, w: 10, d: 10 }, 0, 2, 0)] }, "Add block")
+    const lifted = wallTerrainWarning(s.getState().scene, w)
+    expect(lifted).toMatchObject({ kind: "pokes", above: upper.name })
+    expect(lifted && lifted.kind === "pokes" ? lifted.by : 0).toBeCloseTo(2, 5)
+  })
+
+  it("measures a wall poking through from the top of the floor above, whatever the wall's height", () => {
+    const s = store(createScene({ width: 12, depth: 12 }))
+    const g = s.getState().activeLevelId
+    s.getState().enableTerrain(g)
+    s.getState().addLevel() // elevation 10, 1 ft floor: its underside at 9 ft, its top at 10 ft
+    s.getState().applyTerrainEdit(g, { upsert: [blockShape("b", { x: 20, z: 15, w: 10, d: 10 }, 0, 2, 0)] }, "Add block")
+    const scene = s.getState().scene
+    const wall = (height: number) => createWall(g, { x: 5, z: 20 }, { x: 45, z: 20 }, { height, followTerrain: true })
+    const by = (height: number) => {
+      const warning = wallTerrainWarning(scene, wall(height))
+      return warning?.kind === "pokes" ? warning.by : null
+    }
+    // On the 2 ft block the top is at height + 2.
+    expect(by(10)).toBeCloseTo(2, 5)
+    expect(by(9)).toBeCloseTo(1, 5)
+    expect(by(8.5)).toBeCloseTo(0.5, 5)
+    // Lowered by the 2 ft it reported, the 10 ft wall's top is flush with the floor above, like a default
+    // wall's on flat ground: no warning (tops inside the slab do not show on the level above either).
+    expect(by(10 - 2)).toBeNull()
+    expect(by(7.5)).toBeNull()
+    // A wall taller than the storey already passes through on flat ground: only the terrain's lift counts.
+    expect(by(12)).toBeCloseTo(2, 5)
+  })
+})
+
 describe("editorMayHandleKey", () => {
   it("leaves navigation keys to focused widgets", () => {
     const el = (tagName: string, extra: Record<string, unknown> = {}) => ({ tagName, closest: () => null, isContentEditable: false, ...extra }) as unknown as EventTarget
@@ -321,5 +573,8 @@ describe("editorMayHandleKey", () => {
     expect(editorMayHandleKey("w", el("INPUT", { type: "text" }))).toBe(false)
     expect(editorMayHandleKey("Delete", el("TEXTAREA"))).toBe(false)
     expect(editorMayHandleKey("ArrowLeft", el("INPUT", { type: "range" }))).toBe(false)
+    // Tab moves focus between widgets; it reaches the canvas (terrain advanced mode) only from there.
+    expect(editorMayHandleKey("Tab", el("BUTTON"))).toBe(false)
+    expect(editorMayHandleKey("Tab", el("CANVAS"))).toBe(true)
   })
 })

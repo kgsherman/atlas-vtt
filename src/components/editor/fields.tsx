@@ -398,7 +398,9 @@ export interface Option<V extends string> {
   value: V
   label: React.ReactNode
   icon?: React.ReactNode
-  tooltip?: string
+  tooltip?: React.ReactNode
+  /** Accessible name when the label is not plain text (icon-only options); default: the label or a text tooltip. */
+  ariaLabel?: string
   disabled?: boolean
 }
 
@@ -438,7 +440,13 @@ export function Segmented<V extends string>({
     >
       {options.map((o) => {
         const item = (
-          <ToggleGroupItem key={o.value} value={o.value} disabled={o.disabled} aria-label={typeof o.label === "string" ? o.label : o.tooltip} className="grow gap-1 px-2 text-[0.6875rem]">
+          <ToggleGroupItem
+            key={o.value}
+            value={o.value}
+            disabled={o.disabled}
+            aria-label={o.ariaLabel ?? (typeof o.label === "string" ? o.label : typeof o.tooltip === "string" ? o.tooltip : undefined)}
+            className="grow gap-1 px-2 text-[0.6875rem]"
+          >
             {o.icon}
             {o.label}
           </ToggleGroupItem>

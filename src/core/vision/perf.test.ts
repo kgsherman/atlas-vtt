@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest"
 
 import { rng } from "../occlusion/test-utils"
 import { createConnector, createDoor, createFloor, createLevel, createLight, createPillar, createProp, createScene, createToken, createWall } from "../scene/factory"
+import { createHeightmap, sampleCounts, writeHeights } from "../scene/heightmap"
 import type { Id, LightObject, PropKind, Scene, SceneObject, Token } from "../scene/types"
 import { VisionEngineImpl } from "./engine"
 import { perceivedCount } from "./test-scenes"
@@ -174,53 +175,64 @@ describe("vision performance", () => {
     expect(stepMs).toBeLessThan(1000)
   })
 
-  it("200×200 single level, ~10k objects, 20 lights", () => {
-    const r = rng(5)
-    const scene = createScene({ width: 200, depth: 200 })
-    scene.environment.skyLevel = "dark"
-    scene.environment.ambientLevel = "dark"
-    const levelId = Object.keys(scene.levels)[0]
-    const add = <T extends SceneObject>(o: T): T => {
-      scene.objects[o.id] = o
-      return o
-    }
-    // 30 ft rooms with a door in every wall segment.
-    const room = 30
-    const n = Math.floor(1000 / room)
-    for (let k = 0; k <= n; k++) {
-      for (let m = 0; m < n; m++) {
-        const v = add(createWall(levelId, { x: k * room, z: m * room }, { x: k * room, z: (m + 1) * room }))
-        const h = add(createWall(levelId, { x: m * room, z: k * room }, { x: (m + 1) * room, z: k * room }))
-        if (k > 0 && k < n) {
-          add(createDoor(v, room / 2, { state: r() < 0.5 ? "open" : "closed" }))
-          add(createDoor(h, room / 2, { state: r() < 0.5 ? "open" : "closed" }))
+  // Flat, then on rolling terrain with follow-terrain walls (strips): ≤ 1.5× the flat budgets.
+  for (const terrain of [false, true]) {
+    const budget = terrain ? 1.5 : 1
+    it(`200×200 single level, ~10k objects, 20 lights${terrain ? ", terrain + follow-terrain walls" : ""}`, () => {
+      const r = rng(5)
+      const scene = createScene({ width: 200, depth: 200 })
+      scene.environment.skyLevel = "dark"
+      scene.environment.ambientLevel = "dark"
+      const levelId = Object.keys(scene.levels)[0]
+      if (terrain) {
+        const hm = createHeightmap(2)
+        const { samplesX, samplesZ } = sampleCounts(scene.grid, 2)
+        const dense = new Float32Array(samplesX * samplesZ)
+        for (let j = 0; j < samplesZ; j++) for (let i = 0; i < samplesX; i++) dense[j * samplesX + i] = 3 * Math.sin(i / 23) * Math.cos(j / 31) + 0.004 * i
+        scene.levels[levelId] = { ...scene.levels[levelId], heightmap: writeHeights(hm, scene.grid, dense) }
+      }
+      const add = <T extends SceneObject>(o: T): T => {
+        scene.objects[o.id] = o
+        return o
+      }
+      // 30 ft rooms with a door in every wall segment.
+      const room = 30
+      const n = Math.floor(1000 / room)
+      for (let k = 0; k <= n; k++) {
+        for (let m = 0; m < n; m++) {
+          const v = add(createWall(levelId, { x: k * room, z: m * room }, { x: k * room, z: (m + 1) * room }, { followTerrain: terrain }))
+          const h = add(createWall(levelId, { x: m * room, z: k * room }, { x: (m + 1) * room, z: k * room }, { followTerrain: terrain }))
+          if (k > 0 && k < n) {
+            add(createDoor(v, room / 2, { state: r() < 0.5 ? "open" : "closed" }))
+            add(createDoor(h, room / 2, { state: r() < 0.5 ? "open" : "closed" }))
+          }
         }
       }
-    }
-    for (let k = 0; k < 3000; k++) add(createProp(levelId, PROPS[k % PROPS.length], { x: 5 + r() * 990, y: 0, z: 5 + r() * 990 }, { rotationY: r() * 6 }))
-    const lights: LightObject[] = []
-    for (let k = 0; k < 20; k++) lights.push(add(createLight(levelId, "torch", { x: (Math.floor(r() * n) + 0.5) * room, z: (Math.floor(r() * n) + 0.5) * room })))
-    const tokens: Token[] = []
-    for (let k = 0; k < 15; k++) {
-      const t = createToken(levelId, { x: (Math.floor(r() * n) + 0.5) * room + 2.5, z: (Math.floor(r() * n) + 0.5) * room + 2.5 })
-      scene.tokens[t.id] = t
-      tokens.push(t)
-    }
-    const objects = Object.keys(scene.objects).length
-    const created = time(() => new VisionEngineImpl(scene))
-    const engine = created.value
-    const viewers = tokens.map((t) => engine.viewerFor(t))
-    const full: number[] = []
-    for (let k = 0; k < 5; k++) full.push(time(() => engine.compute([viewers[k]])).ms)
-    const idle = time(() => engine.compute([viewers[0]])).ms
-    const lamp = lights[0]
-    const moved = { ...scene, objects: { ...scene.objects, [lamp.id]: { ...lamp, position: { ...lamp.position, x: lamp.position.x + 5 } } } }
-    const lightMs = time(() => engine.update(moved, { objects: [lamp.id] })).ms
-    console.log(
-      `[vision perf] 200×200: ${objects} objects, ${engine.stats().samples} samples; engine build ${created.ms.toFixed(0)} ms; ` +
-        `full compute 1 viewer: median ${median(full).toFixed(1)} ms; unchanged recompute ${idle.toFixed(1)} ms; light move ${lightMs.toFixed(2)} ms`
-    )
-    expect(median(full)).toBeLessThan(400)
-    expect(lightMs).toBeLessThan(40)
-  })
+      for (let k = 0; k < 3000; k++) add(createProp(levelId, PROPS[k % PROPS.length], { x: 5 + r() * 990, y: 0, z: 5 + r() * 990 }, { rotationY: r() * 6 }))
+      const lights: LightObject[] = []
+      for (let k = 0; k < 20; k++) lights.push(add(createLight(levelId, "torch", { x: (Math.floor(r() * n) + 0.5) * room, z: (Math.floor(r() * n) + 0.5) * room })))
+      const tokens: Token[] = []
+      for (let k = 0; k < 15; k++) {
+        const t = createToken(levelId, { x: (Math.floor(r() * n) + 0.5) * room + 2.5, z: (Math.floor(r() * n) + 0.5) * room + 2.5 })
+        scene.tokens[t.id] = t
+        tokens.push(t)
+      }
+      const objects = Object.keys(scene.objects).length
+      const created = time(() => new VisionEngineImpl(scene))
+      const engine = created.value
+      const viewers = tokens.map((t) => engine.viewerFor(t))
+      const full: number[] = []
+      for (let k = 0; k < 5; k++) full.push(time(() => engine.compute([viewers[k]])).ms)
+      const idle = time(() => engine.compute([viewers[0]])).ms
+      const lamp = lights[0]
+      const moved = { ...scene, objects: { ...scene.objects, [lamp.id]: { ...lamp, position: { ...lamp.position, x: lamp.position.x + 5 } } } }
+      const lightMs = time(() => engine.update(moved, { objects: [lamp.id] })).ms
+      console.log(
+        `[vision perf] 200×200${terrain ? " terrain + follow walls" : ""}: ${objects} objects, ${engine.stats().samples} samples; engine build ${created.ms.toFixed(0)} ms; ` +
+          `full compute 1 viewer: median ${median(full).toFixed(1)} ms; unchanged recompute ${idle.toFixed(1)} ms; light move ${lightMs.toFixed(2)} ms`
+      )
+      expect(median(full)).toBeLessThan(400 * budget)
+      expect(lightMs).toBeLessThan(40 * budget)
+    })
+  }
 })

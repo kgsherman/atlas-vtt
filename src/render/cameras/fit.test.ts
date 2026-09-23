@@ -9,6 +9,7 @@ import {
   boundsCenter,
   damp,
   groundAxes,
+  orthoCameraDistance,
   orthoFitViewHeight,
   perspectiveFitBoxDistance,
   perspectiveFitDistance,
@@ -28,6 +29,45 @@ describe("camera math", () => {
     expect(b.min).toEqual({ x: 0, y: -1, z: 0 })
     expect(b.max).toEqual({ x: 100, y: 22, z: 50 })
     expect(boundsCenter(b)).toEqual({ x: 50, y: 10.5, z: 25 })
+    // The drawn terrain (e.g. a preview) widens the storeys it stands on.
+    const ground = Object.keys(scene.levels).find((id) => id !== upper.id)!
+    const t = sceneBounds(scene, (l) => (l.id === ground ? { min: -3, max: 20 } : { min: 0, max: 0 }))
+    expect(t.min.y).toBe(-4)
+    expect(t.max.y).toBe(30)
+  })
+
+  it("backs the tilted orthographic camera off far enough to keep high terrain in front of it, anywhere on screen", () => {
+    const raycaster = new THREE.Raycaster()
+    for (const tilt of [0, (15 * Math.PI) / 180, (35 * Math.PI) / 180]) {
+      for (const viewHeight of [30, 200, 900]) {
+        for (const above of [0, 20, 60]) {
+          const aspect = 16 / 9
+          const target = new THREE.Vector3(100, 5, 80)
+          const distance = orthoCameraDistance(above, viewHeight, tilt)
+          const cam = new THREE.OrthographicCamera((-viewHeight / 2) * aspect, (viewHeight / 2) * aspect, viewHeight / 2, -viewHeight / 2, 0.1, 5000)
+          const off = playerCameraOffset(0.4, tilt, distance)
+          cam.position.set(target.x + off.x, target.y + off.y, target.z + off.z)
+          const { up } = groundAxes(0.4)
+          cam.up.set(up.x, 0, up.z)
+          cam.lookAt(target)
+          cam.updateMatrixWorld()
+          cam.updateProjectionMatrix()
+          // Everything on screen at `above` feet over the target lies ≥ ~30 ft beyond the near plane.
+          const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -(target.y + above))
+          for (const [nx, ny] of [
+            [-1, -1],
+            [1, -1],
+            [0, 0],
+            [0, 1],
+          ]) {
+            raycaster.setFromCamera(new THREE.Vector2(nx, ny), cam)
+            const hit = raycaster.ray.intersectPlane(plane, new THREE.Vector3())
+            expect(hit, `tilt ${tilt} vh ${viewHeight} above ${above} at ${nx},${ny}`).not.toBeNull()
+            expect(raycaster.ray.origin.distanceTo(hit!)).toBeGreaterThan(29)
+          }
+        }
+      }
+    }
   })
 
   it("puts -Z at the top of the screen at yaw 0 and rotates in quarter turns", () => {

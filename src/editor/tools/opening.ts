@@ -66,7 +66,8 @@ export function createOpeningTool(deps: ToolDeps, kind: "door" | "window"): Tool
     if (!wall || wall.type !== "wall") return null
     const { width, height, sill } = dims(wall)
     const seg = openingSegment(wall, { offset: hover.offset, width })
-    return { kind: "opening", levelId: wall.levelId, a: seg.a, b: seg.b, height, sill, valid: hover.valid }
+    // The opening measures from the host wall's base line (terrain or level elevation, like the wall).
+    return { kind: "opening", levelId: wall.levelId, a: seg.a, b: seg.b, height, sill, valid: hover.valid, followTerrain: wall.followTerrain }
   })
 
   const setHover = (next: Hover | null) => {

@@ -3,13 +3,16 @@
  * and an in-thread vision client: joins and snapshots, moves (legal prefix, masked reasons, per-step
  * exploration), doors, clean patch application on mirrors, hello catch-up, snapshot_ready, host
  * restart, kicks, stale-epoch stand-down, the same-browser lock, rate limiting, backdrop tile grants
- * before the patches that reveal them, and the leak test on The Crooked Lantern.
+ * before the patches that reveal them, the leak test on The Crooked Lantern, and DM-only terrain editing
+ * data (terrainEdits) that must neither reach nor disturb players.
  */
+import { produce, produceWithPatches } from "immer"
 import { afterEach, describe, expect, it } from "vitest"
 
 import type { PathStep } from "@/core/movement/types"
 import { createDoor, createWall } from "@/core/scene/factory"
 import { sampleById } from "@/core/scene/samples"
+import { blockShape, writeTerrain } from "@/core/scene/terrainShapes"
 import type { Id, Scene } from "@/core/scene/types"
 import { playerViewSchema } from "@/core/session"
 import { add, addToken, flatScene } from "@/core/session/test-utils"
@@ -19,7 +22,7 @@ import { cellTouched, decodeMask } from "@/core/vision/mask"
 
 import { createLocalScenesRepo } from "../scenesRepo"
 import { NetError } from "../supabase"
-import type { HostRunnerImpl } from "./hostRunner"
+import { sameVisionLevels, type HostRunnerImpl } from "./hostRunner"
 import { createSessionFixture, DM, FakeWorker, Mirror, P1, P2, P3, recordingAssets, sleep, startHost, TEST_TIMING, waitFor, type SessionFixture } from "./test-utils"
 import type { TileCodec } from "./tiles"
 import { createInThreadVisionClient, createWorkerVisionClient, type WorkerLike } from "./visionClient"
@@ -1169,6 +1172,120 @@ describe("host runner — live changes", () => {
     await waitFor(() => m.result(r) !== undefined, "move on the new map")
     expect(m.result(r)).toMatchObject({ ok: true, applied: 1 })
     expect(m.applyErrors).toEqual([])
+  })
+})
+
+describe("host runner — terrain editing data", () => {
+  /** The keep with a block (terrain shape) in the west room, where Ada stands. */
+  function keepWithShape() {
+    const k = keep()
+    k.scene.levels[k.ground] = produce(k.scene.levels[k.ground], (d) => {
+      writeTerrain(d, k.scene.grid, { upsert: [blockShape("hill", { x: 15, z: 5, w: 10, d: 10 }, 0, 3, 0)] })
+    })
+    return k
+  }
+
+  it("an edit touching only terrainEdits marks no player dirty and keeps knowledge current; a baked change reaches players", async () => {
+    const k = keepWithShape()
+    const { fx, h } = await hosted(k.scene, [P1])
+    h.dispatch({ t: "assign-token", tokenId: k.ada.id, userId: P1, assigned: true })
+    const m = mirror(fx, P1)
+    await settle(h, [[P1, m]])
+    const knowledgeRev = () => (h as unknown as { knowledgeRev: number }).knowledgeRev
+    const seq = m.seq
+    const rev = knowledgeRev()
+
+    // Renaming the shape: DM-only editing data (the heightmap is unchanged).
+    const scene = h.getSnapshot().state!.scene
+    const [renamed, patches] = produceWithPatches(scene, (d: Scene) => {
+      d.levels[k.ground].terrainEdits!.shapes.hill.name = "SENTINEL_HILL"
+    })
+    expect(patches.length).toBeGreaterThan(0)
+    expect(patches.every((p) => p.path[0] === "levels" && p.path[2] === "terrainEdits")).toBe(true)
+    const r = h.dispatch({ t: "apply-scene-patches", patches })
+    expect(r?.dirtyPlayers).toEqual([])
+    expect(knowledgeRev()).toBe(rev)
+    expect(h.debugIdle()).toBe(true)
+    expect(h.getSnapshot().state!.scene.levels[k.ground].terrainEdits!.shapes.hill.name).toBe("SENTINEL_HILL")
+    await sleep(TEST_TIMING.flushIntervalMs * 3)
+    await settle(h, [[P1, m]])
+    expect(m.seq).toBe(seq)
+
+    // Raising the block changes the baked heightmap too: players are updated, in-flight knowledge is stale.
+    const [, raise] = produceWithPatches(renamed, (d: Scene) => {
+      const hill = d.levels[k.ground].terrainEdits!.shapes.hill
+      writeTerrain(d.levels[k.ground], d.grid, { upsert: [{ ...hill, points: blockShape("hill", { x: 15, z: 5, w: 10, d: 10 }, 0, 5, 0).points }] })
+    })
+    expect(raise.some((p) => p.path[2] === "heightmap")).toBe(true)
+    expect(h.dispatch({ t: "apply-scene-patches", patches: raise })?.dirtyPlayers).toBe("all")
+    expect(knowledgeRev()).toBeGreaterThan(rev)
+    await settle(h, [[P1, m]])
+    expect(m.seq).toBeGreaterThan(seq)
+    const json = JSON.stringify(m.view)
+    for (const s of ["terrainEdits", "baseChunks", "SENTINEL"]) expect(json).not.toContain(s)
+  })
+
+  it("sameVisionLevels: only terrainEdits may differ (same heightmap object)", () => {
+    const k = keepWithShape()
+    const levels = k.scene.levels
+    const level = levels[k.ground]
+    const renamed = produce(levels, (d) => {
+      d[k.ground].terrainEdits!.shapes.hill.name = "Hill"
+    })
+    expect(renamed).not.toBe(levels)
+    expect(renamed[k.ground].heightmap).toBe(level.heightmap)
+    expect(sameVisionLevels(levels, levels)).toBe(true)
+    expect(sameVisionLevels(levels, renamed)).toBe(true)
+    expect(sameVisionLevels(renamed, levels)).toBe(true)
+    // Removing the editing data altogether (the heightmap kept) is still the same world.
+    expect(sameVisionLevels(levels, { ...levels, [k.ground]: { ...level, terrainEdits: undefined } })).toBe(true)
+    const bare = { ...level }
+    delete bare.terrainEdits
+    expect(sameVisionLevels(levels, { ...levels, [k.ground]: bare })).toBe(true)
+    // Anything a player can see or that vision reads is a different world.
+    const heightmap = { ...level.heightmap!, chunks: { ...level.heightmap!.chunks } }
+    expect(sameVisionLevels(levels, { ...levels, [k.ground]: { ...level, heightmap } })).toBe(false)
+    expect(sameVisionLevels(levels, { ...levels, [k.ground]: { ...level, elevation: 1 } })).toBe(false)
+    expect(sameVisionLevels(levels, { ...levels, [k.ground]: { ...level, name: "Other" } })).toBe(false)
+    expect(sameVisionLevels(levels, { ...levels, extra: { ...level, id: "extra" } })).toBe(false)
+    expect(sameVisionLevels(levels, {})).toBe(false)
+  })
+
+  it("a terrainEdits-only edit while a move's steps are evaluated keeps their exploration (critique M7)", async () => {
+    const c = corridor()
+    // A shape far from the corridor Eve walks along (the level gets a heightmap with the block baked in).
+    c.scene.levels[c.ground] = produce(c.scene.levels[c.ground], (d) => {
+      writeTerrain(d, c.scene.grid, { upsert: [blockShape("mound", { x: 70, z: 10, w: 5, d: 5 }, 0, 1, 0)] })
+    })
+    expect(c.scene.levels[c.ground].terrainEdits).toBeDefined()
+    const worker = new SerialWorker(60)
+    const { fx, h } = await hosted(c.scene, [P1], { createVisionClient: () => createWorkerVisionClient(worker) })
+    h.dispatch({ t: "assign-token", tokenId: c.eve.id, userId: P1, assigned: true })
+    const m = mirror(fx, P1)
+    await settle(h, [[P1, m]])
+    const knowledgeRev = () => (h as unknown as { knowledgeRev: number }).knowledgeRev
+    const rev = knowledgeRev()
+    const r = m.move(c.eve.id, walk(c.ground, [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1], [6, 1], [7, 1], [8, 1]]))
+    await waitFor(() => m.result(r) !== undefined, "move result")
+    expect(m.result(r)).toMatchObject({ ok: true, applied: 7 })
+    // The DM renames the shape while the six step probes (60 ms each) are still being evaluated: the
+    // levels' identity changes, the world players see does not.
+    expect(worker.probesDone).toBeLessThan(6)
+    const before = h.getSnapshot().state!.scene
+    const [, patches] = produceWithPatches(before, (d: Scene) => {
+      d.levels[c.ground].terrainEdits!.shapes.mound.name = "Mound"
+    })
+    expect(h.dispatch({ t: "apply-scene-patches", patches })?.dirtyPlayers).toEqual([])
+    const after = h.getSnapshot().state!.scene
+    expect(after.levels).not.toBe(before.levels)
+    expect(after.levels[c.ground].heightmap).toBe(before.levels[c.ground].heightmap)
+    await settle(h, [[P1, m]])
+    expect(worker.probesDone).toBe(6)
+    expect(knowledgeRev()).toBe(rev)
+    // Cells 4 and 5 of the corridor are only seen from the intermediate steps (Eve's darkvision is 10 ft).
+    expect(m.explored(c.ground, 4, 1)).toBe(true)
+    expect(m.explored(c.ground, 5, 1)).toBe(true)
+    expect(JSON.stringify(m.view)).not.toContain("Mound")
   })
 })
 

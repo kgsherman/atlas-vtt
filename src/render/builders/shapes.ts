@@ -1,7 +1,7 @@
 /**
- * Solid primitives written into a MeshWriter: hexahedra (boxes, oriented boxes), prisms/cylinders
- * and frusta. Every face is oriented outward automatically (the winding is checked against the solid's
- * centre), so callers can list corners in any consistent cyclic order.
+ * Solid primitives written into a MeshWriter: hexahedra (boxes, oriented boxes), wall strips,
+ * prisms/cylinders and frusta. Every face is oriented outward automatically (the winding is checked
+ * against the solid's centre), so callers can list corners in any consistent cyclic order.
  */
 import { SURF } from "../internal"
 import type { RGB } from "./color"
@@ -105,6 +105,63 @@ export function writeFrameBox(
     c.push([ox + dx * u + nx * v, y, oz + dz * u + nz * v])
   }
   writeHexahedron(w, c, color, opts)
+}
+
+/**
+ * Wall strip in the same ground frame as writeFrameBox: u ∈ [knots[0], knots[last]] (knots strictly
+ * increasing), v ∈ [v0, v1], a flat bottom at y0 and a top linear between (knots[i], tops[i]) with every
+ * top ≥ y0. One closed solid with a single outer surface (no internal faces between knot intervals): a
+ * top quad per interval following the profile, the two long sides as one trapezoid per interval, the
+ * bottom per interval (no T-junctions) and the two end caps. Colour indices as writeFrameBox's
+ * hexahedron (0 −u cap, 1 +u cap, 2 bottom, 3 top, 4 −v side, 5 +v side). Side triangles and caps of
+ * zero height (the top touching the bottom at a knot) are skipped.
+ */
+export function writeFrameStrip(
+  w: MeshWriter,
+  ox: number,
+  oz: number,
+  dx: number,
+  dz: number,
+  knots: readonly number[],
+  tops: readonly number[],
+  y0: number,
+  v0: number,
+  v1: number,
+  color: FaceColor
+): void {
+  const n = knots.length
+  if (n < 2 || tops.length !== n || !(v1 - v0 > 1e-6) || !(knots[n - 1] - knots[0] > 1e-6)) return
+  const nx = -dz
+  const nz = dx
+  const P = (u: number, y: number, v: number): V3 => [ox + dx * u + nx * v, y, oz + dz * u + nz * v]
+  const up: V3 = [0, 1, 0]
+  const down: V3 = [0, -1, 0]
+  const sides: [number, V3, number][] = [
+    [v0, [-nx, 0, -nz], 4],
+    [v1, [nx, 0, nz], 5],
+  ]
+  const EPS = 1e-9
+  for (let i = 0; i + 1 < n; i++) {
+    const ua = knots[i]
+    const ub = knots[i + 1]
+    const ta = tops[i]
+    const tb = tops[i + 1]
+    writeQuadOutward(w, P(ua, ta, v0), P(ub, tb, v0), P(ub, tb, v1), P(ua, ta, v1), up, colorOf(color, 3), null)
+    writeQuadOutward(w, P(ua, y0, v0), P(ub, y0, v0), P(ub, y0, v1), P(ua, y0, v1), down, colorOf(color, 2), null)
+    const ha = ta - y0 > EPS
+    const hb = tb - y0 > EPS
+    for (const [v, out, face] of sides) {
+      const c = colorOf(color, face)
+      if (ha && hb) writeQuadOutward(w, P(ua, y0, v), P(ub, y0, v), P(ub, tb, v), P(ua, ta, v), out, c, null)
+      else if (ha) writeTriOutward(w, P(ua, y0, v), P(ub, y0, v), P(ua, ta, v), out, c, null)
+      else if (hb) writeTriOutward(w, P(ua, y0, v), P(ub, y0, v), P(ub, tb, v), out, c, null)
+    }
+  }
+  const cap = (u: number, t: number, out: V3, face: number) => {
+    if (t - y0 > EPS) writeQuadOutward(w, P(u, y0, v0), P(u, y0, v1), P(u, t, v1), P(u, t, v0), out, colorOf(color, face), null)
+  }
+  cap(knots[0], tops[0], [-dx, 0, -dz], 0)
+  cap(knots[n - 1], tops[n - 1], [dx, 0, dz], 1)
 }
 
 /** Axis-aligned box. */

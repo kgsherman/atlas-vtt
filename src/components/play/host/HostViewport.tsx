@@ -286,9 +286,12 @@ function HostBridge({
       ec.setTerrainPreview((levelId, heights, dirty) =>
         engine.previewTerrain(levelId, heights, dirty)
       )
+      // Tools project world points to the canvas (terrain handles, height follow).
+      ec.setProjector((p) => engine.project(p))
       return () => {
         off()
         ec.setTerrainPreview(null)
+        ec.setProjector(null)
       }
     }
     engine.setOverlays({ ...controller.overlays(), pendingMoves: {} })

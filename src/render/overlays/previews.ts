@@ -1,16 +1,22 @@
 /**
  * Tool previews (contracts.ts ToolPreview): every kind becomes a small Object3D of unlit,
- * translucent meshes/lines that owns its geometries and materials (disposePreview frees them). Lines
- * are anti-aliased screen-space segments (materials/aaLineMaterial) and ribbons fade their own edges:
- * the canvas has no MSAA. An outline on each fill's border also covers the fill's aliased edge.
+ * translucent meshes/lines that owns its geometries and materials (disposePreview frees them), except
+ * geometries flagged `userData.shared` / `userData.cached` and materials flagged `userData.shared`
+ * (the terrain overlay's caches, see ./terrainOverlay). Lines are anti-aliased screen-space segments
+ * (materials/aaLineMaterial) and ribbons fade their own edges: the canvas has no MSAA. An outline on
+ * each fill's border also covers the fill's aliased edge.
  *
  * Coordinates: `rect`, `segment`, `opening`, `brush` are ground-plane shapes on their level and are
  * placed on that level's ground. `point.position.y` is relative to the level ground at (x, z), like
- * scene object Y values (ARCHITECTURE §2).
+ * scene object Y values (ARCHITECTURE §2). A `segment` is drawn as the wall it would build
+ * (core/scene/wallProfile: its base follows the terrain unless `followTerrain` is false, its flat
+ * bottom sits just below the lowest ground under it).
  */
 import * as THREE from "three"
 
+import type { BrushMode } from "@/core/scene/heightmapBrush"
 import type { Id, Rect, SceneLike, Vec2 } from "@/core/scene/types"
+import { pieceKnots, wallProfile } from "@/core/scene/wallProfile"
 
 import { BuildContext, buildLevel } from "../builders"
 import { doorLeafPose } from "../builders/doors"
@@ -21,10 +27,11 @@ import type { ToolPreview } from "../contracts"
 import { aaLineGeometry, createAALineMaterial, polylinePairs } from "../materials/aaLineMaterial"
 import { createEdgeAAMaterial, edgeGeometry } from "../materials/edgeAAMaterial"
 import { circlePoints, ribbonEdgeGeometry } from "./ribbon"
+import { buildTerrainOverlay, positionGeometry, TERRAIN_OVERLAY_ORDER, TerrainOverlayResources } from "./terrainOverlay"
 
 export const ACCENT = "#34d399"
 export const INVALID = "#f87171"
-const BRUSH_COLORS: Record<"raise" | "lower" | "smooth" | "flatten", string> = {
+const BRUSH_COLORS: Record<BrushMode, string> = {
   raise: "#34d399",
   lower: "#fb923c",
   smooth: "#60a5fa",
@@ -39,6 +46,11 @@ export interface PreviewContext {
   scene: SceneLike | null
   /** World units per CSS pixel near the preview (line widths). */
   worldPerPixel: number
+  /**
+   * Caches and persistent objects of the terrain overlay (the OverlayManager's, which also draws their
+   * gizmo and label). Absent: a terrain preview gets its own, freed by disposePreview.
+   */
+  terrain?: TerrainOverlayResources
 }
 
 function fillMaterial(color: string, opacity = 0.28): THREE.MeshBasicMaterial {
@@ -124,6 +136,116 @@ function wallBox(a: Vec2, b: Vec2, y0: number, y1: number, thickness: number, co
   return root
 }
 
+/**
+ * The wall a segment would build (core/scene/wallProfile, no joints): a closed prism per knot interval
+ * from the flat bottom up to the (follow-terrain: sloped) top, drawn as one translucent solid without
+ * internal faces or edges, plus its base line on the ground (visible even for zero-length drags).
+ */
+function conformingWall(p: Extract<ToolPreview, { kind: "segment" }>, ground: GroundSampler, color: string): THREE.Object3D {
+  const root = new THREE.Object3D()
+  const thickness = Math.max(0.05, p.thickness)
+  const wall = { a: p.a, b: p.b, height: p.height, thickness, followTerrain: p.followTerrain ?? true }
+  const profile = wallProfile(wall, ground.flat ? null : ground, ground.elevation, { a: 0, b: 0 })
+  const knots = pieceKnots(profile, 0, profile.len)
+  const at = (u: number) => ({ x: p.a.x + profile.dir.x * u, z: p.a.z + profile.dir.z * u })
+  if (profile.len > 1e-6) {
+    const { faces, edges } = wallPrismGeometry(p.a, profile.dir, thickness, knots, (u) => profile.topAt(u), profile.bottomY)
+    root.add(new THREE.Mesh(positionGeometry(faces), fillMaterial(color, 0.3)))
+    root.add(new THREE.Mesh(aaLineGeometry(edges), lineMaterial(color)))
+  }
+  root.add(
+    lineFrom(
+      knots.map((u) => {
+        const c = at(u)
+        return { x: c.x, y: profile.baseAt(u) + LIFT, z: c.z }
+      }),
+      lineMaterial(color)
+    )
+  )
+  return root
+}
+
+/**
+ * Triangles (non-indexed positions) and outline edges (segment pairs) of a wall piece along `dir` from
+ * `a`: at each knot u the cross-section spans ±thickness/2 around the centreline, from `bottom` to
+ * top(u). Only the outer surface: long sides and top / bottom strips per interval, end caps at the first
+ * and last knots; edges are the outline (top and bottom along both faces, the end rectangles).
+ */
+function wallPrismGeometry(
+  a: Vec2,
+  dir: Vec2,
+  thickness: number,
+  knots: readonly number[],
+  top: (u: number) => number,
+  bottom: number
+): { faces: Float32Array; edges: Float32Array } {
+  const h = thickness / 2
+  const nx = -dir.z * h
+  const nz = dir.x * h
+  // Corners at knot i: left / right (±normal), top / bottom.
+  const corner = (u: number, side: 1 | -1, y: number) => [a.x + dir.x * u + side * nx, y, a.z + dir.z * u + side * nz]
+  const faces: number[] = []
+  const quad = (p: number[], q: number[], r: number[], s: number[]) => faces.push(...p, ...q, ...r, ...p, ...r, ...s)
+  const edges: number[] = []
+  const seg = (p: number[], q: number[]) => edges.push(...p, ...q)
+  const n = knots.length
+  for (let i = 0; i + 1 < n; i++) {
+    const u0 = knots[i]
+    const u1 = knots[i + 1]
+    const t0 = top(u0)
+    const t1 = top(u1)
+    const L0t = corner(u0, 1, t0)
+    const L1t = corner(u1, 1, t1)
+    const R0t = corner(u0, -1, t0)
+    const R1t = corner(u1, -1, t1)
+    const L0b = corner(u0, 1, bottom)
+    const L1b = corner(u1, 1, bottom)
+    const R0b = corner(u0, -1, bottom)
+    const R1b = corner(u1, -1, bottom)
+    quad(L0b, L1b, L1t, L0t)
+    quad(R0b, R0t, R1t, R1b)
+    quad(L0t, L1t, R1t, R0t)
+    quad(L0b, R0b, R1b, L1b)
+    seg(L0t, L1t)
+    seg(R0t, R1t)
+  }
+  if (n >= 2) {
+    const first = knots[0]
+    const last = knots[n - 1]
+    for (const [u, flip] of [
+      [first, false],
+      [last, true],
+    ] as const) {
+      const t = top(u)
+      const Lt = corner(u, 1, t)
+      const Rt = corner(u, -1, t)
+      const Lb = corner(u, 1, bottom)
+      const Rb = corner(u, -1, bottom)
+      if (flip) quad(Lb, Lt, Rt, Rb)
+      else quad(Lb, Rb, Rt, Lt)
+      seg(Lt, Rt)
+      seg(Lb, Rb)
+      seg(Lt, Lb)
+      seg(Rt, Rb)
+    }
+    // The bottom is flat and straight: one edge per side.
+    seg(corner(first, 1, bottom), corner(last, 1, bottom))
+    seg(corner(first, -1, bottom), corner(last, -1, bottom))
+  }
+  return { faces: new Float32Array(faces), edges: new Float32Array(edges) }
+}
+
+/** The heightmap brush's ring (outer radius and a fainter half-radius ring) on the ground. */
+function brushRing(b: { center: Vec2; radius: number; mode: BrushMode }, ground: GroundSampler, worldPerPixel: number): THREE.Object3D {
+  const root = new THREE.Object3D()
+  const color = BRUSH_COLORS[b.mode] ?? ACCENT
+  const pts = circlePoints(b.center.x, b.center.z, b.radius, 72, (x, z) => ground.heightAt(x, z))
+  root.add(ribbonMesh(pts, Math.max(0.15, worldPerPixel * 2.5), worldPerPixel, color, 0.9))
+  const inner = circlePoints(b.center.x, b.center.z, b.radius * 0.5, 48, (x, z) => ground.heightAt(x, z))
+  root.add(ribbonMesh(inner, Math.max(0.08, worldPerPixel * 1.2), worldPerPixel, color, 0.45))
+  return root
+}
+
 /** Ghost of a set of objects (paste preview): builder geometry with unlit translucent materials. */
 function ghostObjects(p: Extract<ToolPreview, { kind: "ghost-objects" }>): THREE.Object3D {
   const root = new THREE.Object3D()
@@ -170,15 +292,14 @@ export function buildToolPreview(p: ToolPreview, ctx: PreviewContext): THREE.Obj
       root.add(lineFrom(rectOutline(p.rect, ground), lineMaterial(color), true))
       break
     }
-    case "segment": {
-      const ground = ctx.ground(p.levelId)
-      const base = ground.heightAt((p.a.x + p.b.x) / 2, (p.a.z + p.b.z) / 2)
-      root.add(wallBox(p.a, p.b, base, base + p.height, Math.max(0.05, p.thickness), p.valid ? ACCENT : INVALID))
+    case "segment":
+      root.add(conformingWall(p, ctx.ground(p.levelId), p.valid ? ACCENT : INVALID))
       break
-    }
     case "opening": {
+      // The opening's base (core/scene/wallProfile openingFrame): the host wall's base at the opening's
+      // centre, i.e. the ground there for follow-terrain walls, the level elevation otherwise.
       const ground = ctx.ground(p.levelId)
-      const base = ground.heightAt((p.a.x + p.b.x) / 2, (p.a.z + p.b.z) / 2)
+      const base = p.followTerrain === false ? ground.elevation : ground.heightAt((p.a.x + p.b.x) / 2, (p.a.z + p.b.z) / 2)
       root.add(wallBox(p.a, p.b, base + p.sill, base + p.sill + p.height, 1, p.valid ? ACCENT : INVALID))
       break
     }
@@ -199,36 +320,50 @@ export function buildToolPreview(p: ToolPreview, ctx: PreviewContext): THREE.Obj
       }
       break
     }
-    case "brush": {
-      const ground = ctx.ground(p.levelId)
-      const color = BRUSH_COLORS[p.mode] ?? ACCENT
-      const pts = circlePoints(p.center.x, p.center.z, p.radius, 72, (x, z) => ground.heightAt(x, z))
-      root.add(ribbonMesh(pts, Math.max(0.15, ctx.worldPerPixel * 2.5), ctx.worldPerPixel, color, 0.9))
-      const inner = circlePoints(p.center.x, p.center.z, p.radius * 0.5, 48, (x, z) => ground.heightAt(x, z))
-      root.add(ribbonMesh(inner, Math.max(0.08, ctx.worldPerPixel * 1.2), ctx.worldPerPixel, color, 0.45))
+    case "brush":
+      root.add(brushRing(p, ctx.ground(p.levelId), ctx.worldPerPixel))
       break
-    }
     case "ghost-objects":
       root.add(ghostObjects(p))
       break
+    case "terrain": {
+      const ground = ctx.ground(p.levelId)
+      let res = ctx.terrain
+      if (!res) {
+        res = new TerrainOverlayResources()
+        root.userData.ownedResources = res
+      }
+      root.add(buildTerrainOverlay(p, ground.elevation, ground.spacing, res))
+      if (p.brush) {
+        const ring = brushRing(p.brush, ground, ctx.worldPerPixel)
+        ring.traverse((o) => (o.renderOrder = TERRAIN_OVERLAY_ORDER.brush))
+        root.add(ring)
+      }
+      break
+    }
   }
+  // Parts that order themselves (the terrain overlay's passes) keep their renderOrder.
   root.traverse((o) => {
-    o.renderOrder = 12
+    if (o.renderOrder === 0) o.renderOrder = 12
     o.frustumCulled = false
     o.raycast = () => {}
   })
   return root
 }
 
-/** Free a preview's geometries and materials (shared unit geometries excluded). */
+/**
+ * Free a preview's geometries and materials, except shared unit geometries and the terrain overlay's
+ * cached geometries (`userData.shared` / `userData.cached`) and shared materials (`userData.shared`).
+ */
 export function disposePreview(root: THREE.Object3D): void {
   const materials = new Set<THREE.Material>()
   root.traverse((o) => {
     const m = o as THREE.Mesh
-    if (m.geometry && !m.geometry.userData.shared) m.geometry.dispose()
-    if (m.material) (Array.isArray(m.material) ? m.material : [m.material]).forEach((x) => materials.add(x))
+    if (m.geometry && !m.geometry.userData.shared && !m.geometry.userData.cached) m.geometry.dispose()
+    if (m.material) (Array.isArray(m.material) ? m.material : [m.material]).forEach((x) => !x.userData.shared && materials.add(x))
     if ((o as THREE.InstancedMesh).isInstancedMesh) (o as THREE.InstancedMesh).dispose()
   })
   for (const m of materials) m.dispose()
+  ;(root.userData.ownedResources as TerrainOverlayResources | undefined)?.dispose()
   root.removeFromParent()
 }

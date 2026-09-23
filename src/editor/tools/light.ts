@@ -2,14 +2,17 @@
  * Light tool: click to place a light of the preset chosen in the tool settings.
  *  - on a token: the light is attached to it (carried torch), offset (0, preset height, 0);
  *  - on a wall of the active level (or a door/window in one): wall-mounted at the hit point pushed
- *    0.3 ft off the face the pointer ray hit (the camera's side), at the preset height (ARCHITECTURE
- *    §2: light origins must sit outside solid blockers);
+ *    0.3 ft off the face the pointer ray hit (the camera's side), at the preset height above the wall's
+ *    base line there (terrain or level elevation, core/scene/wallProfile) and inside the wall's height
+ *    (ARCHITECTURE §2: light origins must sit outside solid blockers);
  *  - elsewhere: at the snapped ground point, at the preset height.
  */
+import { TerrainSampler } from "@/core/occlusion"
 import { LIGHT_PRESETS } from "@/core/scene/defaults"
 import { createLight } from "@/core/scene/factory"
-import { wallDirection, wallLength, wallNormal } from "@/core/scene/queries"
-import type { Id, Scene, Vec2, Vec3 } from "@/core/scene/types"
+import { groundHeightAt, wallDirection, wallLength, wallNormal } from "@/core/scene/queries"
+import type { Id, Scene, Vec2, Vec3, WallObject } from "@/core/scene/types"
+import { wallProfile } from "@/core/scene/wallProfile"
 import type { ToolPreview } from "@/render/contracts"
 
 import { insideExtent } from "../snapping"
@@ -45,6 +48,26 @@ export function wallMountPoint(scene: Scene, wallId: Id, hit: Vec2, ground: Vec2
   return { x: wall.a.x + dir.x * t + n.x * off * sign, z: wall.a.z + dir.z * t + n.z * off * sign }
 }
 
+/** A wall-mounted light keeps at least this far (feet) inside its wall's base (and the ground) and top. */
+const WALL_MOUNT_INSET = 0.5
+
+/**
+ * LightObject.position.y (relative to the level ground at `p`) of a light mounted on `wall` at `p`:
+ * `presetHeight` above the wall's base line at the mount point, clamped to WALL_MOUNT_INSET above that
+ * base and the ground at `p` and below the wall's top there. On flat ground: min(presetHeight, height − 0.5), ≥ 0.5.
+ */
+export function wallMountHeight(scene: Scene, wall: WallObject, p: Vec2, presetHeight: number): number {
+  const level = Object.hasOwn(scene.levels, wall.levelId) ? scene.levels[wall.levelId] : undefined
+  let above = 0 // wall base − ground at p (negative: the base is buried there)
+  if (level) {
+    const profile = wallProfile(wall, level.heightmap ? new TerrainSampler(level, scene.grid) : null, level.elevation, { a: 0, b: 0 })
+    const u = (p.x - wall.a.x) * profile.dir.x + (p.z - wall.a.z) * profile.dir.z
+    above = profile.baseAt(Math.min(Math.max(u, 0), profile.len)) - groundHeightAt(scene, wall.levelId, p)
+  }
+  // Relative to the base (exact on flat ground), then back to the ground at p.
+  return above + Math.max(Math.max(0, -above) + WALL_MOUNT_INSET, Math.min(presetHeight, wall.height - WALL_MOUNT_INSET))
+}
+
 export function createLightTool(deps: ToolDeps): Tool {
   const { store } = deps
   let hover: LightPlacement | null = null
@@ -71,7 +94,7 @@ export function createLightTool(deps: ToolDeps): Tool {
       const wall = Object.hasOwn(s.scene.objects, wallId) ? s.scene.objects[wallId] : hit
       if (wall.type === "wall" && wall.levelId === s.activeLevelId) {
         const p = wallMountPoint(s.scene, wall.id, hitPoint, e.ground)
-        const y = Math.max(0.5, Math.min(def.height, wall.height - 0.5))
+        const y = wallMountHeight(s.scene, wall, p, def.height)
         return { kind: "wall", wallId: wall.id, levelId: wall.levelId, position: { x: p.x, y, z: p.z } }
       }
     }

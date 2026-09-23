@@ -10,6 +10,12 @@ import { PLAYER_VIEW_VERSION, type PlayerView } from "./types"
 
 const MAX_ID = 64
 const MAX_STRING = 2000
+/**
+ * Max entries of PlayerWall.terrainProfile (one per base knot of the piece: ~3200 for a diagonal across the
+ * largest grid at resolution 4; only walls reaching far past the grid on tiny cells get more). The filter
+ * omits longer profiles; the client then stands the piece on its own (clipped) terrain.
+ */
+export const MAX_TERRAIN_PROFILE = 4096
 
 /** Scene ids (nanoid alphabet). */
 const id = z
@@ -43,7 +49,7 @@ const floor = z.strictObject({
   thickness: nonNeg.optional(),
 })
 
-const wall = z.strictObject({
+const wallFields = {
   id: objectId,
   type: z.literal("wall"),
   levelId: id,
@@ -52,7 +58,18 @@ const wall = z.strictObject({
   height: num,
   thickness: nonNeg,
   material,
+  // Views and saved games from before followTerrain existed: the wall follows the terrain (like a migrated v1 scene).
+  followTerrain: z.boolean().default(true),
+}
+
+const wall = z.strictObject({
+  ...wallFields,
+  // The host's base line (world Y) at the piece's base knots (core/scene/wallProfile wallBaseKnots).
+  terrainProfile: z.array(num).max(MAX_TERRAIN_PROFILE).optional(),
 })
+
+/** Remembered walls are whole scene walls: the filter derives each piece's terrainProfile, memory never holds one. */
+const memoryWall = z.strictObject(wallFields)
 
 const door = z.strictObject({
   id,
@@ -162,10 +179,10 @@ const memoryFloor = z.strictObject({
 
 /**
  * Remembered objects in GameState.memory (HOST side only, e.g. a persisted session_state): the wire
- * allowlist, except that floors may keep their `mask` (the filter clips it and never sends it). Use
- * this — not playerObjectSchema — to validate stored memory.
+ * allowlist, except that floors may keep their `mask` (the filter clips it and never sends it) and walls
+ * never carry a terrainProfile. Use this — not playerObjectSchema — to validate stored memory.
  */
-export const memoryObjectSchema = z.discriminatedUnion("type", [memoryFloor, wall, door, window_, connector, pillar, prop, light])
+export const memoryObjectSchema = z.discriminatedUnion("type", [memoryFloor, memoryWall, door, window_, connector, pillar, prop, light])
 
 const vision = z.strictObject({ darkvision: nonNeg, blindsight: nonNeg, blind: z.boolean() })
 

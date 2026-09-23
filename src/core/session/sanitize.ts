@@ -87,6 +87,9 @@ function sanitizeStatic(o: Exclude<SceneObject, LightObject>): PlayerObject {
         height: o.height,
         thickness: o.thickness,
         material: o.material,
+        // Never undefined (a remembered wall must deep-equal its re-sanitised source). The per-piece
+        // terrainProfile is not remembered: the filter derives it from the current host terrain.
+        followTerrain: o.followTerrain !== false,
       }
     case "door":
       return {

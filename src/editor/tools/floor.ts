@@ -9,7 +9,7 @@ import type { Rect, Vec2 } from "@/core/scene/types"
 import type { ToolPreview } from "@/render/contracts"
 
 import { edgeSnapMode, extentRect } from "../snapping"
-import { createPreviewCache, INVALID_COLOR, PREVIEW_COLOR, pointerSnapMode, rectFromCorners, type ToolDeps } from "./shared"
+import { createPreviewCache, INVALID_COLOR, isKeyAction, PREVIEW_COLOR, pointerSnapMode, rectFromCorners, type ToolDeps } from "./shared"
 import type { Tool, ToolPointerEvent } from "./types"
 
 /** Rects thinner than this (feet) count as a click. */
@@ -81,7 +81,7 @@ export function createFloorTool(deps: ToolDeps): Tool {
     },
 
     onKeyDown(e) {
-      if (e.key === "Escape" && drag) {
+      if (isKeyAction(e, "escape") && drag) {
         drag = null
         changed()
         return true

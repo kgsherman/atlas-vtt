@@ -6,21 +6,28 @@
  * vertical. Quarter turns add π/2 to the yaw.
  */
 import { heightRange } from "@/core/scene/heightmap"
-import type { SceneLike, Vec2, Vec3 } from "@/core/scene/types"
+import type { Level, SceneLike, Vec2, Vec3 } from "@/core/scene/types"
 
 export interface Bounds3 {
   min: Vec3
   max: Vec3
 }
 
-/** World bounds of a scene: the grid extent on XZ and every level's slab..ceiling in Y. */
-export function sceneBounds(scene: Pick<SceneLike, "grid" | "levels">): Bounds3 {
+/**
+ * World bounds of a scene: the grid extent on XZ and every level's slab..ceiling in Y over its terrain.
+ * `terrainRange` gives a level's relative terrain range (default: its heightmap's; the engine passes the
+ * drawn one, terrain previews included).
+ */
+export function sceneBounds(
+  scene: Pick<SceneLike, "grid" | "levels">,
+  terrainRange: (level: Level) => { min: number; max: number } = (l) => heightRange(l.heightmap)
+): Bounds3 {
   const w = scene.grid.width * scene.grid.cellSize
   const d = scene.grid.depth * scene.grid.cellSize
   let minY = Infinity
   let maxY = -Infinity
   for (const l of Object.values(scene.levels)) {
-    const r = heightRange(l.heightmap)
+    const r = terrainRange(l)
     minY = Math.min(minY, l.elevation + r.min - l.floorThickness)
     maxY = Math.max(maxY, l.elevation + r.max + l.height)
   }
@@ -99,6 +106,19 @@ export function playerCameraOffset(yaw: number, tilt: number, distance: number):
   const { up } = groundAxes(yaw)
   const h = Math.sin(tilt) * distance
   return { x: -up.x * h, y: Math.cos(tilt) * distance, z: -up.z * h }
+}
+
+/**
+ * Distance from its target at which the tilted orthographic player camera (tilt from vertical, `viewHeight`
+ * world units tall) keeps every point up to `above` feet above the target at least `margin` in front of
+ * it, anywhere on screen. A point h feet up at screen row s (world units from the centre, down < 0) lies
+ * at depth D + s·tan(tilt) − h / cos(tilt): the bottom row of the screen is (viewHeight/2)·tan(tilt)
+ * closer than the target, so a tilted, zoomed-out view needs the camera further back than one straight
+ * down (else high terrain near the bottom edge crosses the near plane and is clipped away).
+ */
+export function orthoCameraDistance(above: number, viewHeight: number, tilt: number, margin = 30): number {
+  const c = Math.max(0.2, Math.cos(tilt))
+  return (Math.max(0, above) + margin) / c + (Math.max(0, viewHeight) / 2) * Math.tan(Math.min(Math.abs(tilt), 1.4))
 }
 
 /**

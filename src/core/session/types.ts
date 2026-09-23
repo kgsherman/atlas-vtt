@@ -28,7 +28,7 @@ import type { FreeAssetCategory } from "./freeAssets"
 // ===========================================================================
 
 export type PlayerFloor = Pick<FloorObject, "id" | "type" | "levelId" | "rect" | "material" | "thickness">
-export type PlayerWall = Pick<WallObject, "id" | "type" | "levelId" | "a" | "b" | "height" | "thickness" | "material">
+export type PlayerWall = Pick<WallObject, "id" | "type" | "levelId" | "a" | "b" | "height" | "thickness" | "material" | "followTerrain" | "terrainProfile">
 export type PlayerDoor = Pick<DoorObject, "id" | "type" | "levelId" | "wallId" | "offset" | "width" | "height" | "leaves" | "hinge" | "swing"> & {
   /** "locked" is reported as "closed". */
   state: Exclude<DoorState, "locked">

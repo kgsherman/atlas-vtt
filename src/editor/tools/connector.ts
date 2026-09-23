@@ -9,7 +9,7 @@ import { adjacentLevels } from "@/core/scene/queries"
 import type { Cell, ConnectorObject, Id, Rect } from "@/core/scene/types"
 import type { ToolPreview } from "@/render/contracts"
 
-import { createPreviewCache, INVALID_COLOR, PREVIEW_COLOR, type ToolDeps } from "./shared"
+import { createPreviewCache, INVALID_COLOR, isKeyAction, PREVIEW_COLOR, type ToolDeps } from "./shared"
 import type { Tool } from "./types"
 
 /** Ascending direction implied by a drag from `a` to `b` (dominant axis; +Z when there was no drag). */
@@ -105,7 +105,7 @@ export function createConnectorTool(deps: ToolDeps): Tool {
     },
 
     onKeyDown(e) {
-      if (e.key === "Escape" && drag) {
+      if (isKeyAction(e, "escape") && drag) {
         drag = null
         changed()
         return true

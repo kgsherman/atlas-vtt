@@ -3,6 +3,10 @@
  * wall centrelines, then the grid (Alt = free; Shift = 45° steps from the previous point). Each
  * segment is its own undo step. Escape / Enter / right-click / double-click (or clicking the last
  * point again) ends the chain; clicking the chain's first point closes it.
+ *
+ * Points come from the pointer's ground pick, which the editor viewports cast onto the terrain (so a
+ * node lands where the cursor ray meets the heightmap); new walls follow the terrain when the tool
+ * setting says so (WallObject.followTerrain), and the segment preview conforms the same way.
  */
 import { createWall } from "@/core/scene/factory"
 import { objectsOfType } from "@/core/scene/queries"
@@ -10,7 +14,7 @@ import type { Vec2 } from "@/core/scene/types"
 import type { ToolPreview } from "@/render/contracts"
 
 import { constrainAngle, insideExtent, snapWallPoint } from "../snapping"
-import { createClickTracker, createPreviewCache, defaultNow, pointerSnapMode, samePoint, type ToolDeps } from "./shared"
+import { createClickTracker, createPreviewCache, defaultNow, isKeyAction, pointerSnapMode, samePoint, type ToolDeps } from "./shared"
 import type { Tool, ToolPointerEvent } from "./types"
 
 /** Walls shorter than this (feet) are not created. */
@@ -62,10 +66,11 @@ export function createWallTool(deps: ToolDeps): WallTool {
 
   const preview = createPreviewCache(store, (): ToolPreview | null => {
     const s = store.getState()
-    const { height, thickness } = s.toolSettings.wall
+    const { height, thickness, followTerrain } = s.toolSettings.wall
     const levelId = s.activeLevelId
     const last = chain[chain.length - 1]
-    if (last && hover) return { kind: "segment", levelId, a: last, b: hover, height, thickness, valid: segmentProblem(last, hover) === null }
+    if (last && hover) return { kind: "segment", levelId, a: last, b: hover, height, thickness, valid: segmentProblem(last, hover) === null, followTerrain }
+    // y is relative to the level's ground there: the marker sits on the terrain the pick hit.
     if (hover) return { kind: "point", levelId, position: { x: hover.x, y: 0, z: hover.z }, radius: Math.max(thickness, 0.25) }
     return null
   })
@@ -97,7 +102,15 @@ export function createWallTool(deps: ToolDeps): WallTool {
       if (segmentProblem(last, p) !== null) return
       const s = store.getState()
       const settings = s.toolSettings.wall
-      s.addObject(createWall(s.activeLevelId, last, p, { height: settings.height, thickness: settings.thickness, material: settings.material }), "Add wall")
+      s.addObject(
+        createWall(s.activeLevelId, last, p, {
+          height: settings.height,
+          thickness: settings.thickness,
+          material: settings.material,
+          followTerrain: settings.followTerrain,
+        }),
+        "Add wall"
+      )
       if (chain.length > 1 && samePoint(p, chain[0])) {
         finish()
         return
@@ -114,7 +127,7 @@ export function createWallTool(deps: ToolDeps): WallTool {
     },
 
     onKeyDown(e) {
-      if ((e.key === "Escape" || e.key === "Enter") && chain.length > 0) {
+      if ((isKeyAction(e, "escape") || isKeyAction(e, "confirm")) && chain.length > 0) {
         finish()
         return true
       }

@@ -12,7 +12,11 @@ import {
   type EditorActions,
 } from "@/components/editor/context"
 import { duplicateLevel } from "@/components/editor/lib/levelOps"
-import { selectionBounds } from "@/core/scene/integrity"
+import {
+  inTerrainMode,
+  runEditorCommand,
+  selectionFocusBounds,
+} from "@/components/editor/lib/terrainMode"
 import { groundHeightAt } from "@/core/scene/queries"
 import type { Id } from "@/core/scene/types"
 import type { Engine } from "@/render/contracts"
@@ -49,9 +53,10 @@ export function HostEditorProviders({
         description:
           "Open the scene in the editor after the session to do this.",
       })
+    // In the terrain mode "the selection" is the terrain tool's shapes.
     const focusSelection = () => {
       const s = store.getState()
-      const b = selectionBounds(s.scene, s.selection)
+      const b = selectionFocusBounds(s)
       if (!engine || !b) return
       const c = { x: b.x + b.w / 2, z: b.z + b.d / 2 }
       engine.focus(
@@ -113,7 +118,9 @@ export function HostEditorProviders({
       },
       deleteSelection: () => {
         controller.cancelGesture()
-        store.getState().deleteSelection()
+        if (inTerrainMode(store.getState()))
+          runEditorCommand(controller, { type: "delete" })
+        else store.getState().deleteSelection()
       },
     }
   }, [

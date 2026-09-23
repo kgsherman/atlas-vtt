@@ -5,7 +5,7 @@
  * object shapes with neutral defaults for the fields players never receive.
  */
 import { PROP_LIBRARY, SIZE_BODY } from "../scene/defaults"
-import type { FloorObject, Id, Level, LevelBackdrop, SceneLike, SceneObject, Token } from "../scene/types"
+import type { FloorObject, Id, Level, LevelBackdrop, SceneLike, SceneObject, Token, WallObject } from "../scene/types"
 import type { PlayerBackdrop, PlayerLevel, PlayerObject, PlayerToken, PlayerView } from "./types"
 
 /**
@@ -41,8 +41,23 @@ export function objectFromPlayer(o: PlayerObject): SceneObject {
       if (o.thickness !== undefined) out.thickness = o.thickness
       return out
     }
-    case "wall":
-      return { id: o.id, type: "wall", levelId: o.levelId, a: { ...o.a }, b: { ...o.b }, height: o.height, thickness: o.thickness, material: o.material }
+    case "wall": {
+      // Views stored before followTerrain existed: walls follow the terrain (like migrated scenes).
+      const out: WallObject = {
+        id: o.id,
+        type: "wall",
+        levelId: o.levelId,
+        a: { ...o.a },
+        b: { ...o.b },
+        height: o.height,
+        thickness: o.thickness,
+        material: o.material,
+        followTerrain: o.followTerrain !== false,
+      }
+      // The host's base line along the piece (core/scene/wallProfile uses it in place of the clipped terrain).
+      if (Array.isArray(o.terrainProfile)) out.terrainProfile = o.terrainProfile.slice()
+      return out
+    }
     case "door":
       return {
         id: o.id,

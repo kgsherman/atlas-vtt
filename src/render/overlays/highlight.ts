@@ -6,6 +6,7 @@
  */
 import * as THREE from "three"
 
+import type { Rect } from "@/core/scene/types"
 import type { TriRange } from "../builders/writer"
 import { aaLineGeometry } from "../materials/aaLineMaterial"
 
@@ -32,11 +33,17 @@ export function extractTriangles(geometry: THREE.BufferGeometry, ranges: readonl
 
 const EDGE_ANGLE = 25
 
-/** Anti-aliased line geometry of a geometry's feature edges. */
-function outlineGeometry(g: THREE.BufferGeometry): THREE.BufferGeometry {
+/** Feature edges of a geometry (THREE.EdgesGeometry at EDGE_ANGLE): segment endpoint pairs, 6 floats per edge. */
+function featureEdges(g: THREE.BufferGeometry): Float32Array {
   const edges = new THREE.EdgesGeometry(g, EDGE_ANGLE)
-  const out = aaLineGeometry(edges.getAttribute("position").array)
+  const pairs = edges.getAttribute("position").array as Float32Array
   edges.dispose()
+  return pairs
+}
+
+/** Anti-aliased line geometry of segment pairs, marked as cached (disposeOutlines leaves it alone). */
+function outlineLines(pairs: ArrayLike<number>): THREE.BufferGeometry {
+  const out = aaLineGeometry(pairs)
   out.userData.cached = true
   return out
 }
@@ -47,15 +54,32 @@ const edgeCache = new WeakMap<THREE.BufferGeometry, THREE.BufferGeometry>()
 function cachedEdges(g: THREE.BufferGeometry): THREE.BufferGeometry {
   let e = edgeCache.get(g)
   if (!e) {
-    e = outlineGeometry(g)
+    e = outlineLines(featureEdges(g))
     edgeCache.set(g, e)
   }
   return e
 }
 
+/** XZ bounds (world units, closed). */
+interface Bounds2 {
+  x0: number
+  z0: number
+  x1: number
+  z1: number
+}
+
+/** An object's outline in a merged mesh: its triangle ranges, their feature edges and the line geometry drawn. */
+interface RangeEdges {
+  ranges: TriRange[]
+  pairs: Float32Array
+  lines: THREE.BufferGeometry
+  /** Where the mesh moved since `pairs` were computed (moveCachedEdges), patched on the next use; null = current. */
+  moved: { bounds: Bounds2; reach: number } | null
+}
+
 // Per-object edges of merged meshes, cached per mesh geometry (hovering a big floor must not
 // recompute its outline on every hover change).
-const rangeEdgeCache = new WeakMap<THREE.BufferGeometry, Map<string, THREE.BufferGeometry>>()
+const rangeEdgeCache = new WeakMap<THREE.BufferGeometry, Map<string, RangeEdges>>()
 
 function cachedRangeEdges(g: THREE.BufferGeometry, ranges: readonly TriRange[]): THREE.BufferGeometry {
   let byId = rangeEdgeCache.get(g)
@@ -64,11 +88,14 @@ function cachedRangeEdges(g: THREE.BufferGeometry, ranges: readonly TriRange[]):
   let e = byId.get(key)
   if (!e) {
     const tri = extractTriangles(g, ranges)
-    e = outlineGeometry(tri)
+    const pairs = featureEdges(tri)
     tri.dispose()
+    e = { ranges: ranges.map((r) => ({ ...r })), pairs, lines: outlineLines(pairs), moved: null }
     byId.set(key, e)
+  } else if (e.moved) {
+    patchRangeEdges(g, e, e.moved.bounds, e.moved.reach)
   }
-  return e
+  return e.lines
 }
 
 /** Free the cached outline edges of a geometry that is being disposed (level rebuilds). */
@@ -80,9 +107,98 @@ export function disposeCachedEdges(g: THREE.BufferGeometry): void {
   }
   const byId = rangeEdgeCache.get(g)
   if (byId) {
-    for (const r of byId.values()) r.dispose()
+    for (const r of byId.values()) r.lines.dispose()
     rangeEdgeCache.delete(g)
   }
+}
+
+/**
+ * The vertices of `g` moved in place (vertically) within `rect` only (XZ; null: anywhere): a terrain mesh
+ * following a commit or a cleared preview (engine moveTerrain). The outline edges cached against it are
+ * patched where they may have changed, on their next use (a whole-floor recompute costs seconds on a large
+ * resolution-4 level; the moves of several commits add up until then). `reach` bounds the XZ extent of a
+ * triangle (a terrain mesh: the lattice diagonal). Outlines built from the old edges must be rebuilt
+ * (OverlayManager.sceneChanged).
+ */
+export function moveCachedEdges(g: THREE.BufferGeometry, rect: Rect | null, reach: number): void {
+  const e = edgeCache.get(g)
+  if (e) {
+    e.dispose()
+    edgeCache.delete(g)
+  }
+  const byId = rangeEdgeCache.get(g)
+  if (!byId) return
+  if (!rect || !(reach >= 0)) {
+    disposeCachedEdges(g)
+    return
+  }
+  for (const entry of byId.values()) {
+    const b = entry.moved?.bounds
+    const bounds = { x0: rect.x, z0: rect.z, x1: rect.x + rect.w, z1: rect.z + rect.d }
+    if (b) {
+      bounds.x0 = Math.min(bounds.x0, b.x0)
+      bounds.z0 = Math.min(bounds.z0, b.z0)
+      bounds.x1 = Math.max(bounds.x1, b.x1)
+      bounds.z1 = Math.max(bounds.z1, b.z1)
+    }
+    entry.moved = { bounds, reach: Math.max(reach, entry.moved?.reach ?? 0) }
+  }
+}
+
+/**
+ * Recompute an outline's edges over `moved` from the mesh as it is now, keeping the rest. An edge can only
+ * have changed if one of its two triangles has a vertex in `moved`, so its midpoint lies within `reach` of
+ * it (r1), and the triangles on such an edge have every vertex within `reach` of r1 (r2): the edges with
+ * their midpoint in r1 are recomputed from the object's triangles with a vertex in r2.
+ */
+function patchRangeEdges(g: THREE.BufferGeometry, entry: RangeEdges, moved: Bounds2, reach: number): void {
+  entry.moved = null
+  const src = g.getAttribute("position").array as Float32Array
+  const r1 = { x0: moved.x0 - reach, z0: moved.z0 - reach, x1: moved.x1 + reach, z1: moved.z1 + reach }
+  const r2 = { x0: r1.x0 - reach, z0: r1.z0 - reach, x1: r1.x1 + reach, z1: r1.z1 + reach }
+  const in2 = (k: number) => src[k] >= r2.x0 && src[k] <= r2.x1 && src[k + 2] >= r2.z0 && src[k + 2] <= r2.z1
+  const nearTriangle = (t: number) => in2(t * 9) || in2(t * 9 + 3) || in2(t * 9 + 6)
+  const midIn1 = (pairs: Float32Array, k: number) => {
+    const x = (pairs[k] + pairs[k + 3]) / 2
+    const z = (pairs[k + 2] + pairs[k + 5]) / 2
+    return x >= r1.x0 && x <= r1.x1 && z >= r1.z0 && z <= r1.z1
+  }
+  // The object's triangles near the change, and their feature edges.
+  let n = 0
+  for (const r of entry.ranges) for (let t = r.start; t < r.start + r.count; t++) if (nearTriangle(t)) n++
+  const near = new Float32Array(n * 9)
+  let o = 0
+  for (const r of entry.ranges) {
+    for (let t = r.start; t < r.start + r.count; t++) {
+      if (!nearTriangle(t)) continue
+      near.set(src.subarray(t * 9, t * 9 + 9), o)
+      o += 9
+    }
+  }
+  const tri = new THREE.BufferGeometry()
+  tri.setAttribute("position", new THREE.BufferAttribute(near, 3))
+  const fresh = featureEdges(tri)
+  tri.dispose()
+  // The old edges away from the change and the fresh ones near it (partitioned by the same test).
+  const old = entry.pairs
+  let count = 0
+  for (let k = 0; k + 5 < old.length; k += 6) if (!midIn1(old, k)) count++
+  for (let k = 0; k + 5 < fresh.length; k += 6) if (midIn1(fresh, k)) count++
+  const pairs = new Float32Array(count * 6)
+  o = 0
+  for (let k = 0; k + 5 < old.length; k += 6) {
+    if (midIn1(old, k)) continue
+    pairs.set(old.subarray(k, k + 6), o)
+    o += 6
+  }
+  for (let k = 0; k + 5 < fresh.length; k += 6) {
+    if (!midIn1(fresh, k)) continue
+    pairs.set(fresh.subarray(k, k + 6), o)
+    o += 6
+  }
+  entry.pairs = pairs
+  entry.lines.dispose()
+  entry.lines = outlineLines(pairs)
 }
 
 /** An outline object: anti-aliased edge quads (aaLineGeometry) drawn with an aaLineMaterial. */

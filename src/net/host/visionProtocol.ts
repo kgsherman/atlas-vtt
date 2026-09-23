@@ -45,9 +45,34 @@ export type VisionResponse =
 
 const own = <T>(rec: Record<Id, T>, id: Id): T | undefined => (Object.hasOwn(rec, id) ? rec[id] : undefined)
 
-/** Only the fields vision reads (keeps worker messages free of names, notes, assets…). */
+// A level without its terrain edits, per level object (the same input level always maps to the same
+// output object, so in-thread clients keep level identity across revisions).
+const strippedLevels = new WeakMap<Level, Level>()
+
+/**
+ * Levels as vision reads them: without `terrainEdits` (DM-only editing data behind the heightmap, possibly
+ * megabytes of shapes and painted base chunks the worker never reads). Returns `levels` itself when no level
+ * has terrain edits.
+ */
+export function visionLevels(levels: Record<Id, Level>): Record<Id, Level> {
+  let out: Record<Id, Level> | null = null
+  for (const [id, level] of Object.entries(levels)) {
+    if (level.terrainEdits === undefined) continue
+    out ??= { ...levels }
+    let stripped = strippedLevels.get(level)
+    if (!stripped) {
+      const { terrainEdits: _edits, ...rest } = level
+      stripped = rest
+      strippedLevels.set(level, stripped)
+    }
+    out[id] = stripped
+  }
+  return out ?? levels
+}
+
+/** Only the fields vision reads (keeps worker messages free of names, notes, assets, terrain edits…). */
 export function visionScene(scene: SceneLike): SceneLike {
-  return { grid: scene.grid, environment: scene.environment, levels: scene.levels, objects: scene.objects, tokens: scene.tokens }
+  return { grid: scene.grid, environment: scene.environment, levels: visionLevels(scene.levels), objects: scene.objects, tokens: scene.tokens }
 }
 
 /** The diff from the previous revision to `scene`, given the ids that changed. */
@@ -55,7 +80,7 @@ export function diffForChange(scene: SceneLike, change: VisionChange): SceneDiff
   const diff: SceneDiff = {}
   if (change.objects && change.objects.length > 0) diff.objects = [...new Set(change.objects)].map((id) => [id, own(scene.objects, id) ?? null])
   if (change.tokens && change.tokens.length > 0) diff.tokens = [...new Set(change.tokens)].map((id) => [id, own(scene.tokens, id) ?? null])
-  if (change.structure || (change.terrain && change.terrain.length > 0)) diff.levels = scene.levels
+  if (change.structure || (change.terrain && change.terrain.length > 0)) diff.levels = visionLevels(scene.levels)
   if (change.structure) {
     diff.grid = scene.grid
     diff.environment = scene.environment

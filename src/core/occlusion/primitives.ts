@@ -23,6 +23,7 @@ import {
   createInterval,
   ENTRY_CONTAINS_START,
   ENTRY_MISS,
+  lineAABB3,
   lineConvex,
   lineOrientedBox,
   lineVerticalCylinder,
@@ -30,7 +31,7 @@ import {
 import { clipSegmentToBox2Into, distancePointSegment2 } from "../geometry/segment"
 import { EPS } from "../geometry/vec"
 import type { Rect, Vec2, Vec3 } from "../scene/types"
-import type { Heightfield, OccluderPrimitive, OrientedBox, VerticalCylinder } from "./types"
+import type { Heightfield, OccluderPrimitive, OrientedBox, VerticalCylinder, WallStrip } from "./types"
 
 export { ENTRY_CONTAINS_START, ENTRY_MISS } from "../geometry/ray"
 
@@ -70,6 +71,10 @@ export function primitiveBounds(p: OccluderPrimitive): AABB3 {
       }
     case "heightfield":
       return heightfieldBounds(p)
+    case "strip": {
+      const b = orientedRectBounds(p.center, p.halfExtents.x, p.halfExtents.z, p.yaw)
+      return { minX: b.minX, minY: p.bottom, minZ: b.minZ, maxX: b.maxX, maxY: stripMaxY(p), maxZ: b.maxZ }
+    }
   }
 }
 
@@ -169,6 +174,67 @@ function heightfieldContains(hf: Heightfield, x: number, y: number, z: number, e
 }
 
 // ---------------------------------------------------------------------------
+// Wall strip profile
+// ---------------------------------------------------------------------------
+
+/** Index i of the knot interval [knots[i], knots[i+1]] containing local x (the end intervals outside the knots). */
+export function stripInterval(knots: ArrayLike<number>, x: number): number {
+  let lo = 0
+  let hi = knots.length - 2
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if (knots[mid] <= x) lo = mid
+    else hi = mid - 1
+  }
+  return lo
+}
+
+/** Top Y of a strip at local x (clamped to the strip). */
+export function stripTopAt(st: WallStrip, lx: number): number {
+  const k = st.knots
+  const t = st.top
+  const n = k.length
+  if (!(lx > k[0])) return t[0]
+  if (lx >= k[n - 1]) return t[n - 1]
+  const i = stripInterval(k, lx)
+  return t[i] + ((lx - k[i]) / (k[i + 1] - k[i])) * (t[i + 1] - t[i])
+}
+
+/** Highest top of a strip over local x ∈ [x0, x1] (clamped to the strip). */
+export function stripMaxTop(st: WallStrip, x0: number, x1: number): number {
+  if (x1 < x0) [x0, x1] = [x1, x0]
+  let v = Math.max(stripTopAt(st, x0), stripTopAt(st, x1))
+  const k = st.knots
+  for (let i = stripInterval(k, x0) + 1; i < k.length && k[i] < x1; i++) {
+    if (k[i] > x0 && st.top[i] > v) v = st.top[i]
+  }
+  return v
+}
+
+// Highest top per strip (primitives are immutable once built).
+const maxYCache = new WeakMap<WallStrip, number>()
+
+/** Highest top of a strip (memoised). */
+function stripMaxY(st: WallStrip): number {
+  let v = maxYCache.get(st)
+  if (v === undefined) {
+    v = -Infinity
+    for (const t of st.top) if (t > v) v = t
+    maxYCache.set(st, v)
+  }
+  return v
+}
+
+/** Local (along, across) coordinates of a world XZ point in a strip's frame. */
+function stripLocal(st: WallStrip, x: number, z: number): { lx: number; lz: number } {
+  const c = Math.cos(st.yaw)
+  const s = Math.sin(st.yaw)
+  const dx = x - st.center.x
+  const dz = z - st.center.z
+  return { lx: c * dx - s * dz, lz: s * dx + c * dz }
+}
+
+// ---------------------------------------------------------------------------
 // Containment
 // ---------------------------------------------------------------------------
 
@@ -196,6 +262,11 @@ export function primitiveContains(p: OccluderPrimitive, q: Vec3, eps = EPS): boo
     }
     case "heightfield":
       return heightfieldContains(p, q.x, q.y, q.z, eps)
+    case "strip": {
+      const { lx, lz } = stripLocal(p, q.x, q.z)
+      if (Math.abs(lx) > p.halfExtents.x + eps || Math.abs(lz) > p.halfExtents.z + eps || q.y < p.bottom - eps) return false
+      return q.y <= stripTopAt(p, lx) + eps
+    }
   }
 }
 
@@ -358,6 +429,102 @@ export function heightfieldEntry(
   return best
 }
 
+// Half-spaces of one strip interval, [nx, ny, nz, w] × 6, in the strip's local frame.
+const stripPlanes = new Float64Array(24)
+
+function setStripPlane(k: number, nx: number, ny: number, nz: number, w: number): void {
+  stripPlanes[4 * k] = nx
+  stripPlanes[4 * k + 1] = ny
+  stripPlanes[4 * k + 2] = nz
+  stripPlanes[4 * k + 3] = w
+}
+
+/**
+ * Entry classification of a segment against a wall strip given its yaw cos/sin and highest top `maxY`:
+ * the union of one convex solid per knot interval (x between the knots, |z| ≤ halfExtents.z, bottom ≤ y
+ * ≤ the interval's top plane). The segment is clipped to the strip's local box, the knot intervals over
+ * the clipped local-x range are found by binary search and visited in ray order, each culled by its Y
+ * range before the exact test; the walk stops once the best entry precedes the interval's exit.
+ * On a constant profile the result is the box's.
+ */
+export function stripEntry(
+  st: WallStrip,
+  cos: number,
+  sin: number,
+  maxY: number,
+  ox: number,
+  oy: number,
+  oz: number,
+  dx: number,
+  dy: number,
+  dz: number,
+  len: number
+): number {
+  if (!(len > 0)) return ENTRY_MISS
+  const px = ox - st.center.x
+  const pz = oz - st.center.z
+  const lox = cos * px - sin * pz
+  const loz = sin * px + cos * pz
+  const ldx = cos * dx - sin * dz
+  const ldz = sin * dx + cos * dz
+  const hx = st.halfExtents.x
+  const hz = st.halfExtents.z
+  const bottom = st.bottom
+  if (!lineAABB3(lox, oy, loz, ldx, dy, ldz, -hx, bottom, -hz, hx, maxY, hz, scratch)) return ENTRY_MISS
+  // Only solids met at t ∈ [−epsT, 1] can contain the start or be entered (see classifyEntry).
+  const epsT = EPS / len
+  const tA = Math.max(scratch.t0, -epsT)
+  const tB = Math.min(scratch.t1, 1)
+  if (tA > tB) return ENTRY_MISS
+  const knots = st.knots
+  const top = st.top
+  // Local x range covered, widened so a point on a knot tests the intervals on both sides.
+  const xa = lox + ldx * tA
+  const xb = lox + ldx * tB
+  const i0 = stripInterval(knots, Math.min(xa, xb) - EPS)
+  const i1 = stripInterval(knots, Math.max(xa, xb) + EPS)
+  const forward = ldx >= 0
+  let best = ENTRY_MISS
+  for (let m = 0; m <= i1 - i0; m++) {
+    const i = forward ? i0 + m : i1 - m
+    const k0 = knots[i]
+    const k1 = knots[i + 1]
+    // Parameter range of the segment over this interval, and its exit (in ray order).
+    let tc0 = tA
+    let tc1 = tB
+    let exit = Infinity
+    if (ldx !== 0) {
+      const ta = (k0 - lox) / ldx
+      const tb = (k1 - lox) / ldx
+      const lo = ta < tb ? ta : tb
+      exit = ta < tb ? tb : ta
+      if (lo > tc0) tc0 = lo
+      if (exit < tc1) tc1 = exit
+    }
+    const t0 = top[i]
+    const t1 = top[i + 1]
+    const ya = oy + dy * tc0
+    const yb = oy + dy * tc1
+    if (tc0 <= tc1 + epsT && Math.max(ya, yb) >= bottom - EPS && Math.min(ya, yb) <= Math.max(t0, t1) + EPS) {
+      const slope = (t1 - t0) / (k1 - k0)
+      setStripPlane(0, -1, 0, 0, -k0)
+      setStripPlane(1, 1, 0, 0, k1)
+      setStripPlane(2, 0, 0, -1, hz)
+      setStripPlane(3, 0, 0, 1, hz)
+      setStripPlane(4, 0, -1, 0, -bottom)
+      setStripPlane(5, -slope, 1, 0, t0 - slope * k0)
+      if (lineConvex(lox, oy, loz, ldx, dy, ldz, stripPlanes, 6, scratch)) {
+        const r = classifyEntry(scratch.t0, scratch.t1, len)
+        if (r === ENTRY_CONTAINS_START) return r
+        if (r < best) best = r
+      }
+    }
+    // Later intervals cannot be entered before this interval's exit.
+    if (best !== ENTRY_MISS && best <= exit) return best
+  }
+  return best
+}
+
 /**
  * Entry parameter t ∈ (0, 1) where the segment from→to enters the primitive, or null (no entry, or
  * the primitive contains `from`). Same semantics as OcclusionWorld.raycast for a single primitive.
@@ -377,6 +544,9 @@ export function segmentEntry(p: OccluderPrimitive, from: Vec3, to: Vec3): number
       break
     case "heightfield":
       r = heightfieldEntry(p, from.x, from.y, from.z, dx, dy, dz, len)
+      break
+    case "strip":
+      r = stripEntry(p, Math.cos(p.yaw), Math.sin(p.yaw), stripMaxY(p), from.x, from.y, from.z, dx, dy, dz, len)
       break
   }
   return r > 0 && r < 1 ? r : null
@@ -416,6 +586,8 @@ export function footprintOverlapsRect(p: OccluderPrimitive, r: Rect): boolean {
       return circleOverlapsAABB2({ x: p.base.x, z: p.base.z }, p.radius, box)
     case "heightfield":
       return someSolidCell(p, box, (c) => c.minX < box.maxX && box.minX < c.maxX && c.minZ < box.maxZ && box.minZ < c.maxZ)
+    case "strip":
+      return orientedRectOverlapsAABB2(p.center, p.halfExtents.x, p.halfExtents.z, p.yaw, box)
   }
 }
 
@@ -434,6 +606,8 @@ export function footprintOverlapsCircle(p: OccluderPrimitive, center: Vec2, radi
         { minX: center.x - radius, minZ: center.z - radius, maxX: center.x + radius, maxZ: center.z + radius },
         (c) => circleOverlapsAABB2(center, radius, c)
       )
+    case "strip":
+      return orientedRectOverlapsCircle(p.center, p.halfExtents.x, p.halfExtents.z, p.yaw, center, radius)
   }
 }
 
@@ -457,6 +631,8 @@ export function footprintOverlapsCapsule(p: OccluderPrimitive, a: Vec2, b: Vec2,
         },
         (c) => capsuleOverlapsAABB2(a, b, radius, c)
       )
+    case "strip":
+      return orientedRectOverlapsCapsule(p.center, p.halfExtents.x, p.halfExtents.z, p.yaw, a, b, radius)
   }
 }
 
@@ -499,10 +675,12 @@ export function footprintOverlapsPolygon(p: OccluderPrimitive, poly: readonly Ve
         )
       )
     }
+    case "strip":
+      return convexPolygonsOverlap(orientedRectCorners(p.center, p.halfExtents.x, p.halfExtents.z, p.yaw), poly)
   }
 }
 
-/** Convex XZ outline of a box or cylinder footprint (cylinders: circumscribed 16-gon); null for heightfields. */
+/** Convex XZ outline of a box, strip or cylinder footprint (cylinders: circumscribed 16-gon); null for heightfields. */
 export function footprintPolygon(p: OccluderPrimitive): Vec2[] | null {
   switch (p.shape) {
     case "box":
@@ -519,6 +697,8 @@ export function footprintPolygon(p: OccluderPrimitive): Vec2[] | null {
     }
     case "heightfield":
       return null
+    case "strip":
+      return orientedRectCorners(p.center, p.halfExtents.x, p.halfExtents.z, p.yaw)
   }
 }
 
@@ -541,12 +721,18 @@ export function primitiveTopAt(p: OccluderPrimitive, x: number, z: number): numb
       return (x - p.base.x) ** 2 + (z - p.base.z) ** 2 <= (p.radius + EPS) ** 2 ? p.base.y + p.height : null
     case "heightfield":
       return heightfieldSurfaceAt(p, x, z)
+    case "strip": {
+      const { lx, lz } = stripLocal(p, x, z)
+      if (Math.abs(lx) > p.halfExtents.x + EPS || Math.abs(lz) > p.halfExtents.z + EPS) return null
+      return stripTopAt(p, lx)
+    }
   }
 }
 
 /**
  * Move a point contained in the primitive to `margin` feet past its nearest face (the rule used for
- * eyes and light origins, docs/ARCHITECTURE.md §2). Heightfields push vertically only.
+ * eyes and light origins, docs/ARCHITECTURE.md §2). Heightfields push vertically only; strips push through
+ * their nearest side, up to their top line above the point or down below their bottom.
  * "Contained" uses the default EPS, like OcclusionWorld.containing and the segment ENTRY rule: a
  * point on (or within EPS outside) a face would make segments from it ignore the primitive, so it
  * is pushed too. Points outside the primitive are returned unchanged (copied).
@@ -594,6 +780,27 @@ export function pushOutOfPrimitive(p: OccluderPrimitive, q: Vec3, margin: number
       if (top === null) return { x: q.x, y: q.y, z: q.z }
       const bottom = top - p.thickness
       return top - q.y <= q.y - bottom ? { x: q.x, y: top + margin, z: q.z } : { x: q.x, y: bottom - margin, z: q.z }
+    }
+    case "strip": {
+      const c = Math.cos(p.yaw)
+      const s = Math.sin(p.yaw)
+      const dx = q.x - p.center.x
+      const dz = q.z - p.center.z
+      let lx = c * dx - s * dz
+      let lz = s * dx + c * dz
+      let y = q.y
+      const h = p.halfExtents
+      const top = stripTopAt(p, lx)
+      const exits = [h.x - lx, h.x + lx, top - y, y - p.bottom, h.z - lz, h.z + lz]
+      let k = 0
+      for (let m = 1; m < 6; m++) if (exits[m] < exits[k]) k = m
+      if (k === 0) lx = h.x + margin
+      else if (k === 1) lx = -h.x - margin
+      else if (k === 2) y = top + margin
+      else if (k === 3) y = p.bottom - margin
+      else if (k === 4) lz = h.z + margin
+      else lz = -h.z - margin
+      return { x: p.center.x + c * lx + s * lz, y, z: p.center.z - s * lx + c * lz }
     }
   }
 }

@@ -15,8 +15,8 @@ import {
   createWindow,
 } from "@/core/scene/factory"
 import { createHeightmap, denseHeights, sampleHeight, writeHeights } from "@/core/scene/heightmap"
-import { connectorGround, levelCeilingY, wallNormal } from "@/core/scene/queries"
-import type { Scene, SceneObject } from "@/core/scene/types"
+import { connectorGround, levelCeilingY, levelGround, wallNormal } from "@/core/scene/queries"
+import type { DoorObject, Scene, SceneObject, WallObject, WindowObject } from "@/core/scene/types"
 
 import { SURF, WORLD_ATTRIBUTES } from "../internal"
 import { BuildContext, buildLevel, BUCKETS } from "./index"
@@ -24,8 +24,8 @@ import { DOOR_MARKER_ACCENT, DOOR_MARKER_LIFT, DOOR_MARKER_OVERHANG, doorLeafPos
 import { updateTerrainGeometry } from "./floors"
 import { GroundSampler } from "./ground"
 import { pillarExtent, propPlacement } from "./props"
-import { writeBox, writePrism } from "./shapes"
-import { openingHole, splitWall, wallFrame, wallPieces } from "./walls"
+import { writeBox, writeFrameStrip, writePrism } from "./shapes"
+import { openingHole, splitWall, wallFrame, wallPieceArea, wallPieces, wallPieceTopAt, type WallPiece } from "./walls"
 import { MeshWriter, rangeIdAt } from "./writer"
 
 function add(scene: Scene, ...objs: SceneObject[]): void {
@@ -53,6 +53,33 @@ function expectWorldGeometry(g: THREE.BufferGeometry): void {
     expect(Math.hypot(nrm.getX(k), nrm.getY(k), nrm.getZ(k))).toBeCloseTo(1, 4)
     expect(col.getX(k)).toBeGreaterThanOrEqual(0)
     expect([SURF.WALKABLE, SURF.FACE, SURF.CAP]).toContain(surf.getX(k))
+  }
+}
+
+/** Signed volume of a closed triangle soup by the divergence theorem (positive for outward winding). */
+function signedVolume(pos: ArrayLike<number>): number {
+  let v = 0
+  for (let k = 0; k < pos.length; k += 9) {
+    const [ax, ay, az, bx, by, bz, cx, cy, cz] = Array.from({ length: 9 }, (_, i) => pos[k + i])
+    v += ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx)
+  }
+  return v / 6
+}
+
+/** Every directed edge is matched by the reverse edge equally often (closed, consistently wound). */
+function expectClosed(pos: ArrayLike<number>): void {
+  const key = (k: number) => `${pos[k].toFixed(4)},${pos[k + 1].toFixed(4)},${pos[k + 2].toFixed(4)}`
+  const edges = new Map<string, number>()
+  for (let k = 0; k < pos.length; k += 9) {
+    const v = [key(k), key(k + 3), key(k + 6)]
+    for (let e = 0; e < 3; e++) {
+      const id = `${v[e]}>${v[(e + 1) % 3]}`
+      edges.set(id, (edges.get(id) ?? 0) + 1)
+    }
+  }
+  for (const [id, n] of edges) {
+    const [a, b] = id.split(">")
+    expect(edges.get(`${b}>${a}`), `edge ${id}`).toBe(n)
   }
 }
 
@@ -152,23 +179,188 @@ describe("wall splitting", () => {
     const f = wallFrame(ctx, w1)!
     expect(f.extA).toBe(0)
     expect(f.extB).toBe(0.5)
-    expect(f.baseY).toBe(0)
-    expect(f.bottomY).toBeCloseTo(-0.05)
+    expect(f.profile.baseAt(10)).toBe(0)
+    expect(f.profile.topAt(10)).toBe(w1.height)
+    expect(f.profile.bottomY).toBeCloseTo(-0.05)
     const pieces = wallPieces(ctx, f)
     expect(pieces[0].u0).toBe(0)
     expect(pieces[pieces.length - 1].u1).toBe(20.5)
+    // No terrain: boxes only.
+    expect(pieces.every((p) => p.knots === undefined)).toBe(true)
     expect(openingHole(f, door)).toEqual({ u0: 8, u1: 12, y0: -Infinity, y1: 7 })
 
-    // Terrain: raise the midpoint; base follows it, bottom follows the lowest ground.
+    // Terrain: a ridge under the middle (sample (2, 0) at x = 10, 5 ft lattice). The top follows the ground
+    // along the wall; the door measures from the ground at its middle; the bottom follows the lowest ground.
     const level = scene.levels[lv]
     const hm = createHeightmap(1)
     const dense = denseHeights(hm, scene.grid).heights
-    dense[0 * 11 + 2] = 3 // sample (2, 0) at x = 10
+    dense[0 * 11 + 2] = 3
     level.heightmap = writeHeights(hm, scene.grid, dense)
-    const f2 = wallFrame(new BuildContext(scene), w1)!
-    expect(f2.baseY).toBeCloseTo(3)
-    expect(f2.topY).toBeCloseTo(3 + w1.height)
-    expect(f2.bottomY).toBeCloseTo(-0.05)
+    const ctx2 = new BuildContext(scene)
+    const f2 = wallFrame(ctx2, w1)!
+    expect(f2.profile.follow).toBe(true)
+    for (const [u, g] of [
+      [0, 0],
+      [5, 0],
+      [7.5, 1.5],
+      [10, 3],
+      [13, 1.2],
+      [20, 0],
+    ]) {
+      expect(f2.profile.topAt(u), `u = ${u}`).toBeCloseTo(g + w1.height, 9)
+    }
+    expect(f2.profile.bottomY).toBeCloseTo(-0.05)
+    // Head = base (3) + 7, under the lowest top over the span (1.8 + 10).
+    expect(openingHole(f2, door)).toEqual({ u0: 8, u1: 12, y0: -Infinity, y1: 10 })
+    const sloped = wallPieces(ctx2, f2)
+    // Full-height pieces and the lintel follow the ridge: strips.
+    expect(sloped.filter((p) => p.knots).length).toBe(3)
+    const lintel = sloped.find((p) => p.u0 === 8 && p.u1 === 12)!
+    expect(lintel.y0).toBe(10)
+    expect(lintel.knots).toEqual([8, 10, 12])
+    expect(lintel.tops![1]).toBeCloseTo(13)
+
+    // Follow off: the wall stands on the level elevation whatever the terrain.
+    const off = { ...w1, followTerrain: false }
+    scene.objects[w1.id] = off
+    const f3 = wallFrame(new BuildContext(scene), off)!
+    expect(f3.profile.follow).toBe(false)
+    expect(f3.profile.topAt(10)).toBe(w1.height)
+    expect(f3.profile.bottomY).toBeCloseTo(-0.05)
+    expect(wallPieces(new BuildContext(scene), f3).every((p) => p.knots === undefined)).toBe(true)
+  })
+})
+
+/** Scene with a sloped / bumpy res-2 heightmap level and the level id. */
+function terrainScene(height: (x: number, z: number) => number, cells = 24): { scene: Scene; lv: string } {
+  const scene = createScene({ width: cells, depth: cells })
+  const lv = groundLevelId(scene)
+  const hm = createHeightmap(2)
+  const { samplesX, samplesZ, heights } = denseHeights(hm, scene.grid)
+  const s = scene.grid.cellSize / 2
+  for (let j = 0; j < samplesZ; j++) for (let i = 0; i < samplesX; i++) heights[j * samplesX + i] = height(i * s, j * s)
+  scene.levels[lv].heightmap = writeHeights(hm, scene.grid, heights)
+  return { scene, lv }
+}
+
+/** Highest solid point of a wall's pieces at u (the wall's top there). */
+const topOfPieces = (pieces: readonly WallPiece[], u: number) => Math.max(...pieces.filter((p) => p.u0 <= u && u <= p.u1).map((p) => wallPieceTopAt(p, u)))
+
+describe("walls on terrain", () => {
+  const rng = (seed: number) => () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646
+
+  it("draws closed, outward strips whose volume matches their profile", () => {
+    const w = new MeshWriter()
+    const knots = [-0.5, 2, 3.25, 7, 9.5]
+    const tops = [5, 6.5, 4.2, 4.2, 8]
+    writeFrameStrip(w, 3, 4, Math.cos(0.4), Math.sin(0.4), knots, tops, 1, -0.25, 0.25, [1, 1, 1])
+    const g = w.build()!
+    expectWorldGeometry(g)
+    expectWindingMatchesNormals(g)
+    const pos = g.getAttribute("position").array
+    expectClosed(pos)
+    const piece: WallPiece = { u0: -0.5, u1: 9.5, y0: 1, y1: 8, knots, tops }
+    expect(signedVolume(pos)).toBeCloseTo(wallPieceArea(piece) * 0.5, 4)
+    // Tops touching the bottom (a lintel clamped to the lowest top): still closed.
+    const w2 = new MeshWriter()
+    writeFrameStrip(w2, 0, 0, 1, 0, [0, 2, 4], [3, 1, 3], 1, -0.5, 0.5, [1, 1, 1])
+    const g2 = w2.build()!
+    expectWorldGeometry(g2)
+    expectClosed(g2.getAttribute("position").array)
+    expect(signedVolume(g2.getAttribute("position").array)).toBeCloseTo(4, 6)
+  })
+
+  it("puts follow-terrain tops on the level ground + height at random u (and off: elevation + height)", () => {
+    const { scene, lv } = terrainScene((x, z) => 6 * Math.sin(x / 13) * Math.cos(z / 17) + 0.02 * x)
+    scene.levels[lv].elevation = 2
+    const r = rng(7)
+    const walls: WallObject[] = []
+    // Inside the lattice (x, z in [0, 120]): outside it the ground steps to the elevation (a known limit).
+    const inside = (v: number) => Math.min(115, Math.max(5, v))
+    for (let k = 0; k < 12; k++) {
+      const a = { x: 10 + r() * 90, z: 10 + r() * 90 }
+      const ang = k % 3 === 0 ? (Math.floor(r() * 4) * Math.PI) / 2 : r() * Math.PI * 2
+      const len = 8 + r() * 30
+      const b = { x: inside(a.x + Math.cos(ang) * len), z: inside(a.z + Math.sin(ang) * len) }
+      const wall = createWall(lv, a, b, { height: 8, followTerrain: k !== 5 })
+      walls.push(wall)
+      add(scene, wall)
+    }
+    const ctx = new BuildContext(scene)
+    let strips = 0
+    for (const wall of walls) {
+      const f = wallFrame(ctx, wall)!
+      const pieces = wallPieces(ctx, f)
+      strips += pieces.filter((p) => p.knots).length
+      for (let q = 0; q < 40; q++) {
+        const u = r() * f.len
+        const x = wall.a.x + f.dir.x * u
+        const z = wall.a.z + f.dir.z * u
+        const expected = wall.followTerrain ? levelGround(scene, lv, x, z) + 8 : 2 + 8
+        expect(topOfPieces(pieces, u), `${wall.id} at ${u}`).toBeCloseTo(expected, 5)
+      }
+      // The flat bottom reaches below the ground everywhere under the wall.
+      for (let q = 0; q <= 20; q++) {
+        const u = (f.len * q) / 20
+        expect(f.profile.bottomY).toBeLessThan(levelGround(scene, lv, wall.a.x + f.dir.x * u, wall.a.z + f.dir.z * u))
+      }
+    }
+    expect(strips).toBeGreaterThan(5)
+    // The merged mesh is valid and its highest point is the highest top.
+    const g = buildLevel(ctx, lv).walls.meshes[0].geometry
+    expectWorldGeometry(g)
+    expectWindingMatchesNormals(g)
+  })
+
+  it("seats doors and windows on the ground at their middle, under the lowest top of their span", () => {
+    // Slope of 0.25 ft per ft along x (the wall's direction); flat across it.
+    const { scene, lv } = terrainScene((x) => 0.25 * x)
+    const wall = createWall(lv, { x: 10, z: 40 }, { x: 70, z: 40 }, { height: 10, thickness: 0.5 })
+    const door = createDoor(wall, 15, { width: 4, height: 7, style: "portcullis" })
+    const win = createWindow(wall, 40, { width: 4, sillHeight: 3, height: 4 })
+    add(scene, wall, door, win)
+    const ctx = new BuildContext(scene)
+    const f = wallFrame(ctx, wall)!
+    const ground = (u: number) => levelGround(scene, lv, 10 + u, 40)
+    // Door [13, 17]: base = ground(15), head = base + 7 (below the lowest top, ground(13) + 10).
+    const doorBase = ground(15)
+    expect(openingHole(f, door as DoorObject)).toEqual({ u0: 13, u1: 17, y0: -Infinity, y1: expect.closeTo(doorBase + 7, 9) })
+    const [leaf] = doorLeaves(f, door as DoorObject)
+    expect(leaf.pivot.y).toBeCloseTo(doorBase, 9)
+    expect(leaf.top).toBeCloseTo(7, 9)
+    expect(leaf.lift).toBeCloseTo(7 * 0.9, 9)
+    // The leaf reaches the lowest ground under the opening, not the wall's bottom far downhill.
+    expect(leaf.bottom).toBeCloseTo(ground(13) - 0.05 - doorBase, 9)
+    expect(f.profile.bottomY).toBeLessThan(doorBase + leaf.bottom - 3)
+    // The top-down marker sits on the highest top over the leaf.
+    expect(leaf.wallTop).toBeCloseTo(ground(17) + 10 - doorBase, 9)
+    const marker = buildLevel(ctx, lv).doors.meshes.find((m) => m.kind === "door")
+    if (marker?.kind !== "door") throw new Error("no door leaf")
+    marker.marker!.computeBoundingBox()
+    expect(marker.marker!.boundingBox!.min.y).toBeCloseTo(leaf.wallTop + DOOR_MARKER_LIFT, 5)
+    // Window [38, 42]: sill and head from the ground at its middle.
+    const winBase = ground(40)
+    expect(openingHole(f, win as WindowObject)).toEqual({ u0: 38, u1: 42, y0: expect.closeTo(winBase + 3, 9), y1: expect.closeTo(winBase + 7, 9) })
+    // A door taller than the lowest top over its span is clamped to it.
+    const tall = createDoor(wall, 50, { width: 8, height: 10 })
+    expect(openingHole(f, tall as DoorObject)!.y1).toBeCloseTo(ground(46) + 10, 9)
+    // Follow off: everything measures from the elevation (0).
+    const off = { ...wall, followTerrain: false }
+    scene.objects[wall.id] = off
+    const f2 = wallFrame(new BuildContext(scene), off)!
+    expect(openingHole(f2, door as DoorObject)!.y1).toBeCloseTo(7, 9)
+    expect(doorLeaves(f2, door as DoorObject)[0].pivot.y).toBe(0)
+  })
+
+  it("drops door leaves buried under the ground", () => {
+    // A follow-off wall in a cutting: the ground stands 12 ft above the elevation at the door.
+    const { scene, lv } = terrainScene(() => 12)
+    const wall = createWall(lv, { x: 10, z: 40 }, { x: 40, z: 40 }, { followTerrain: false })
+    const door = createDoor(wall, 15, { height: 7 })
+    add(scene, wall, door)
+    const ctx = new BuildContext(scene)
+    expect(doorLeaves(wallFrame(ctx, wall)!, door as DoorObject)).toEqual([])
+    expect(buildLevel(ctx, lv).doors.meshes).toEqual([])
   })
 })
 
@@ -413,6 +605,115 @@ describe("level builders", () => {
     }
     expect(found).toBe(true)
     expectWindingMatchesNormals(b.geometry)
+  })
+
+  it("updates terrain previews through the row table exactly like a full scan, at a cost that follows the dirty rect", () => {
+    const scene = createScene({ width: 60, depth: 60, groundFloor: false })
+    const lv = groundLevelId(scene)
+    scene.levels[lv].heightmap = createHeightmap(4)
+    // Two floors with a gap and a notch (skirts inside rows), and a third overlapping row range.
+    add(scene, createFloor(lv, { x: 0, z: 0, w: 140, d: 300 }, "grass"), createFloor(lv, { x: 160, z: 20, w: 140, d: 250 }, "dirt"))
+    add(scene, createFloor(lv, { x: 142.5, z: 100, w: 15, d: 30 }, "stone"))
+    const build = () => {
+      const b = buildLevel(new BuildContext(scene), lv).floors.meshes[0]
+      if (b.kind !== "merged" || !b.terrainOffsets || !b.terrainRows) throw new Error("no terrain mesh")
+      return b as typeof b & { terrainOffsets: Float32Array; terrainRows: Int32Array }
+    }
+    const fast = build()
+    const slow = build()
+    const heights = denseHeights(scene.levels[lv].heightmap!, scene.grid).heights.slice()
+    const n = 241
+    const r = (() => {
+      let seed = 11
+      return () => ((seed = (seed * 16807) % 2147483647) - 1) / 2147483646
+    })()
+    const times: number[] = []
+    for (let step = 0; step < 12; step++) {
+      const dirty = step === 0 ? { x: -3, z: 250, w: 60, d: 60 } : { x: r() * 250 - 10, z: r() * 250 - 10, w: 20 + r() * 80, d: 20 + r() * 80 }
+      for (let j = 0; j < n; j++) {
+        for (let i = 0; i < n; i++) {
+          const x = i * 1.25
+          const z = j * 1.25
+          if (x >= dirty.x && x <= dirty.x + dirty.w && z >= dirty.z && z <= dirty.z + dirty.d) heights[j * n + i] = 4 * Math.sin(x / 9 + step) + (z % 7)
+        }
+      }
+      const g = GroundSampler.fromDense(scene.levels[lv], scene.grid, heights)!
+      const t0 = performance.now()
+      const a = updateTerrainGeometry(fast.geometry, fast.terrainOffsets, g, dirty, fast.terrainRows)
+      times.push(performance.now() - t0)
+      const b = updateTerrainGeometry(slow.geometry, slow.terrainOffsets, g, dirty)
+      expect(a).toBe(b)
+      expect(a).toBeGreaterThan(0)
+    }
+    for (const name of ["position", "normal"]) {
+      const other = slow.geometry.getAttribute(name).array
+      expect(
+        Array.from(fast.geometry.getAttribute(name).array).every((v, k) => v === other[k]),
+        name
+      ).toBe(true)
+    }
+    // Every moved vertex sits on the previewed ground (plus its slab offset).
+    const g = GroundSampler.fromDense(scene.levels[lv], scene.grid, heights)!
+    const pos = fast.geometry.getAttribute("position")
+    for (let k = 0; k < pos.count; k += 97) expect(pos.getY(k)).toBeCloseTo(g.heightAt(pos.getX(k), pos.getZ(k)) + fast.terrainOffsets[k], 4)
+    // Bounds grow to cover the moved vertices (never recomputed over the whole mesh).
+    const box = fast.geometry.boundingBox!
+    fast.geometry.computeBoundingBox()
+    expect(box.max.y).toBeGreaterThanOrEqual(fast.geometry.boundingBox!.max.y - 1e-6)
+    expect(fast.geometry.boundingSphere!.radius).toBeGreaterThan(0)
+    // Budget (DESIGN: ≤ 4 ms for a 100×100 ft rect on a 200×200-cell res-4 level, measured ≈ 1 ms there):
+    // generous here, the point is that it does not scan the whole mesh.
+    times.sort((x, y) => x - y)
+    expect(times[Math.floor(times.length / 2)]).toBeLessThan(8)
+    // A lattice of another spacing cannot be updated in place.
+    const coarse = GroundSampler.fromDense(scene.levels[lv], scene.grid, new Float32Array(121 * 121))!
+    expect(updateTerrainGeometry(fast.geometry, fast.terrainOffsets, coarse, null, fast.terrainRows)).toBe(-1)
+  })
+
+  it("uploads one range per attribute for a terrain update, merged with the ranges not uploaded yet", () => {
+    const scene = createScene({ width: 20, depth: 20 })
+    const lv = groundLevelId(scene)
+    scene.levels[lv].heightmap = createHeightmap(2)
+    const b = buildLevel(new BuildContext(scene), lv).floors.meshes[0]
+    if (b.kind !== "merged" || !b.terrainOffsets || !b.terrainRows) throw new Error("no terrain mesh")
+    const pos = b.geometry.getAttribute("position") as THREE.BufferAttribute
+    const nrm = b.geometry.getAttribute("normal") as THREE.BufferAttribute
+    const heights = denseHeights(scene.levels[lv].heightmap!, scene.grid).heights.slice()
+    const n = 41
+    const raise = (x0: number, z0: number, w: number, h: number) => {
+      for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) if (i * 2.5 >= x0 && i * 2.5 <= x0 + w && j * 2.5 >= z0 && j * 2.5 <= z0 + w) heights[j * n + i] = h
+      return GroundSampler.fromDense(scene.levels[lv], scene.grid, heights)!
+    }
+    /** Every float of `a` that differs from `before` lies inside one of the attribute's pending ranges. */
+    const covered = (a: THREE.BufferAttribute, before: Float32Array) => {
+      const now = a.array as Float32Array
+      for (let k = 0; k < now.length; k++) {
+        if (now[k] !== before[k] && !a.updateRanges.some((r) => k >= r.start && k < r.start + r.count)) return false
+      }
+      return true
+    }
+    pos.clearUpdateRanges()
+    nrm.clearUpdateRanges()
+    const p0 = (pos.array as Float32Array).slice()
+    const n0 = (nrm.array as Float32Array).slice()
+    // A 20 ft rect spans ~10 lattice rows, each touched only around the rect: one range, not one per row.
+    const dirtyA = { x: 30, z: 30, w: 20, d: 20 }
+    expect(updateTerrainGeometry(b.geometry, b.terrainOffsets, raise(30, 30, 20, 3), dirtyA, b.terrainRows)).toBeGreaterThan(0)
+    expect(pos.updateRanges).toHaveLength(1)
+    expect(nrm.updateRanges).toHaveLength(1)
+    expect(covered(pos, p0) && covered(nrm, n0)).toBe(true)
+    // A second update before any upload: still one range, covering both (the first one is not dropped).
+    const dirtyB = { x: 70, z: 5, w: 10, d: 10 }
+    expect(updateTerrainGeometry(b.geometry, b.terrainOffsets, raise(70, 5, 10, -2), dirtyB, b.terrainRows)).toBeGreaterThan(0)
+    expect(pos.updateRanges).toHaveLength(1)
+    expect(nrm.updateRanges).toHaveLength(1)
+    expect(covered(pos, p0) && covered(nrm, n0)).toBe(true)
+    // Unrelated pending ranges are kept inside the merged one.
+    pos.clearUpdateRanges()
+    pos.addUpdateRange(0, 9)
+    updateTerrainGeometry(b.geometry, b.terrainOffsets, raise(30, 30, 20, 1), dirtyA, b.terrainRows)
+    expect(pos.updateRanges).toHaveLength(1)
+    expect(pos.updateRanges[0].start).toBe(0)
   })
 
   it("is deterministic", () => {

@@ -114,6 +114,7 @@ export function createWall(levelId: Id, a: Vec2, b: Vec2, partial: Partial<WallO
     height: DEFAULT_LEVEL_HEIGHT,
     thickness: DEFAULT_WALL_THICKNESS,
     material: "stone",
+    followTerrain: true,
     ...partial,
   }
 }

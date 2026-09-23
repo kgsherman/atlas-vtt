@@ -16,7 +16,7 @@ import { createVisionEngine } from "@/core/vision"
 
 import { FakeWorker } from "./test-utils"
 import { createInThreadVisionClient, createWorkerVisionClient } from "./visionClient"
-import { applySceneDiff, diffForChange } from "./visionProtocol"
+import { applySceneDiff, diffForChange, visionLevels, visionScene } from "./visionProtocol"
 
 function lantern() {
   const scene = sampleById("crooked-lantern")!.build()
@@ -53,6 +53,32 @@ describe("scene diffs", () => {
     expect(rebuilt.environment.ambientLevel).toBe("bright")
     // Unchanged levels keep their identity.
     for (const id of Object.keys(scene.levels)) expect(rebuilt.levels[id]).toBe(scene.levels[id])
+  })
+
+  it("never post terrain edits (DM-only) to the worker", () => {
+    const { scene } = lantern()
+    const [id, other] = Object.keys(scene.levels)
+    const [next, patches] = produceWithPatches(scene, (d) => {
+      d.levels[id].heightmap = { resolution: 1, chunks: {} }
+      d.levels[id].terrainEdits = {
+        shapes: { s1: { id: "s1", kind: "block", op: "add", order: 0, base: 0, points: [{ x: 0, y: 1, z: 0 }, { x: 5, y: 1, z: 0 }, { x: 5, y: 1, z: 5 }] } },
+        baseChunks: { "0,0": "" },
+      }
+    })
+    const diff = diffForChange(next, deltaFromPatches(scene, next, patches))
+    expect(diff.levels).toBeDefined()
+    expect(JSON.stringify(diff)).not.toMatch(/terrainEdits|baseChunks/)
+    expect(JSON.stringify(visionScene(next))).not.toMatch(/terrainEdits|baseChunks/)
+    const { terrainEdits: _edits, ...rest } = next.levels[id]
+    expect(diff.levels![id]).toEqual(rest)
+    // Stable per level object; levels without terrain edits are passed through as they are.
+    expect(visionLevels(next.levels)[id]).toBe(diff.levels![id])
+    if (other) expect(diff.levels![other]).toBe(next.levels[other])
+    expect(visionLevels(scene.levels)).toBe(scene.levels)
+    // The worker's rebuilt revision has the heightmap but no terrain edits.
+    const rebuilt = applySceneDiff(scene, structuredClone(diff))
+    expect(rebuilt.levels[id].heightmap).toEqual({ resolution: 1, chunks: {} })
+    expect(rebuilt.levels[id].terrainEdits).toBeUndefined()
   })
 })
 

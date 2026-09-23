@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { assignKey, commandUsing, compactOverrides, conflictsOf, keysOf, removeKey, resetCommand, type Command } from "./keymap"
+import { assignKey, bindingsOf, commandUsing, compactOverrides, conflictsOf, keysOf, removeKey, resetCommand, type Command } from "./keymap"
 
 const COMMANDS: Command[] = [
   { id: "undo", label: "Undo", keys: ["Mod+Z"] },
@@ -48,6 +48,16 @@ describe("keymap overrides", () => {
     const reset = resetCommand(COMMANDS, stolen, "redo")
     expect(keys(reset, "redo")).toEqual(["Mod+Shift+Z", "Mod+Y"])
     expect(keys(reset, "grid")).toEqual([])
+  })
+
+  it("bindings carry their command (and its repeat rule) for default and remapped keys", () => {
+    const commands: Command[] = [...COMMANDS, { id: "toggle", label: "Toggle", keys: ["Tab"], repeat: false }]
+    const toggles = (o: Parameters<typeof bindingsOf>[1]) =>
+      bindingsOf(commands, o)
+        .filter((b) => b.command.repeat === false)
+        .map((b) => b.hotkey)
+    expect(toggles({})).toEqual(["Tab"])
+    expect(toggles({ toggle: ["T", "Shift+T"] })).toEqual(["T", "Shift+T"])
   })
 
   it("finds conflicts in stale overrides and cleans stored data", () => {

@@ -194,17 +194,23 @@ export async function editorToClient(page, x, z, y = null) {
   )
 }
 
-export async function clickWorld(page, x, z, opts = {}) {
-  const p = await editorToClient(page, x, z)
+/** Click a world point; `opts.y` aims at that height (e.g. a wall top) instead of the level's ground. */
+export async function clickWorld(page, x, z, { y = null, ...opts } = {}) {
+  const p = await editorToClient(page, x, z, y)
   await page.mouse.move(p.x, p.y, { steps: 2 })
   await sleep(30)
   await page.mouse.click(p.x, p.y, opts)
   await sleep(50)
 }
 
-export async function dragWorld(page, [ax, az], [bx, bz]) {
-  const p = await editorToClient(page, ax, az)
-  const q = await editorToClient(page, bx, bz)
+/** Drag between world points [x, z] or [x, z, y] (y defaults to the level's ground). */
+export async function dragWorld(
+  page,
+  [ax, az, ay = null],
+  [bx, bz, by = null]
+) {
+  const p = await editorToClient(page, ax, az, ay)
+  const q = await editorToClient(page, bx, bz, by)
   await page.mouse.move(p.x, p.y)
   await page.mouse.down()
   await page.mouse.move((p.x + q.x) / 2, (p.y + q.y) / 2, { steps: 4 })

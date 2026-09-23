@@ -1,7 +1,7 @@
 /**
  * Per-build caches shared by the level builders (one context per rebuild pass): ground samplers
- * (optionally overridden by a heightmap-brush preview), objects by level and type, openings by
- * host wall, wall joints and effective floors.
+ * (optionally overridden by a terrain preview), objects by level and type, openings by host wall,
+ * wall joints and effective floors.
  */
 import { effectiveFloorRects, type EffectiveFloor, type Opening } from "@/core/scene/queries"
 import type { Id, Level, SceneLike, SceneObject, SceneObjectType, Vec2, WallObject } from "@/core/scene/types"
@@ -25,14 +25,20 @@ export class BuildContext {
   readonly scene: BuildScene
   private readonly samplers = new Map<Id, GroundSampler>()
   private readonly previews: ReadonlyMap<Id, Float32Array>
+  private readonly previewSamplers: ReadonlyMap<Id, GroundSampler>
   private byLevel: Map<Id, SceneObject[]> | null = null
   private openings: Map<Id, Opening[]> | null = null
   private readonly joints = new Map<Id, Map<string, JointEndpoint[]>>()
   private readonly floors = new Map<Id, EffectiveFloor[]>()
 
-  constructor(scene: BuildScene, previews: ReadonlyMap<Id, Float32Array> = new Map()) {
+  /**
+   * `previews`: terrain preview lattices by level; `previewSamplers`: samplers already built over them
+   * (the engine's, with incrementally tracked ranges), used when their lattice is the preview's.
+   */
+  constructor(scene: BuildScene, previews: ReadonlyMap<Id, Float32Array> = new Map(), previewSamplers: ReadonlyMap<Id, GroundSampler> = new Map()) {
     this.scene = scene
     this.previews = previews
+    this.previewSamplers = previewSamplers
   }
 
   level(id: Id): Level | undefined {
@@ -43,12 +49,12 @@ export class BuildContext {
     return Object.hasOwn(this.scene.objects, id) ? this.scene.objects[id] : undefined
   }
 
-  /** True if the level's terrain is currently a brush preview. */
+  /** True if the level's terrain is currently a terrain preview. */
   hasPreview(levelId: Id): boolean {
     return this.previews.has(levelId)
   }
 
-  /** Ground sampler of a level (the preview lattice while the heightmap brush is active). */
+  /** Ground sampler of a level (the preview lattice while a terrain preview is active). */
   sampler(levelId: Id): GroundSampler {
     let s = this.samplers.get(levelId)
     if (!s) {
@@ -57,7 +63,9 @@ export class BuildContext {
       if (!level) s = new GroundSampler(0, grid.cellSize, grid.width + 1, grid.depth + 1, null)
       else {
         const preview = this.previews.get(levelId)
-        s = (preview && GroundSampler.fromDense(level, grid, preview)) || GroundSampler.forLevel(level, grid)
+        const built = this.previewSamplers.get(levelId)
+        if (preview && built && built.heights === preview && built.elevation === level.elevation) s = built
+        else s = (preview && GroundSampler.fromDense(level, grid, preview)) || GroundSampler.forLevel(level, grid)
       }
       this.samplers.set(levelId, s)
     }

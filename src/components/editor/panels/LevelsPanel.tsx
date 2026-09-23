@@ -17,17 +17,19 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useServices } from "@/app/services"
-import { createHeightmap, heightRange } from "@/core/scene/heightmap"
+import { heightRange } from "@/core/scene/heightmap"
 import { SCENE_LIMITS } from "@/core/scene/schema"
+import { hasPaintedBase } from "@/core/scene/terrainShapes"
 import type { Heightmap, Id, Level } from "@/core/scene/types"
 import { floorFromImage, removeBackdrop, updateBackdrop, wallsFromImage } from "@/editor/imageOps"
+import type { LevelUpdate } from "@/editor/store"
 import { cn } from "@/lib/utils"
 
 import { useConfirm, useEditorActions, useEditorContext, useEditorShallow, useEditorState } from "../context"
 import { FieldRow, Hint, NumberInput, PanelSection, Segmented, SliderInput, SwitchField, TextInput } from "../fields"
 import { formatBytes, formatElevation, trimNumber } from "../lib/format"
 import { imagePixelsForTrace, loadLevelImage } from "../lib/levelImages"
-import { levelBelowElevation, levelsTopDown, setTerrainResolution } from "../lib/levelOps"
+import { levelBelowElevation, levelsTopDown } from "../lib/levelOps"
 
 function LevelRow({ level, active, visible, count, onActivate }: { level: Level; active: boolean; visible: boolean; count: number; onActivate(): void }) {
   const { store } = useEditorContext()
@@ -174,7 +176,7 @@ function LevelProperties({ level }: { level: Level }) {
   const { store } = useEditorContext()
   const readOnly = useEditorState((s) => s.readOnly)
   // Refused edits surface as toasts through the page's lastRejected listener.
-  const update = (partial: Partial<Level>) => store.getState().updateLevel(level.id, partial)
+  const update = (partial: LevelUpdate) => store.getState().updateLevel(level.id, partial)
   return (
     <PanelSection title="Level">
       <FieldRow label="Name">
@@ -199,43 +201,99 @@ const RESOLUTION_OPTIONS = [
   { value: "4", label: "4×", tooltip: "4 samples per cell (1.25 ft)" },
 ] as const
 
-function TerrainSection({ level }: { level: Level }) {
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`
+}
+
+/**
+ * A level's terrain: on / off, resolution, height range, and the painted ground vs the editable shapes
+ * (terrain tool). Every write goes through the store's terrain actions (one undo step each).
+ */
+export function TerrainSection({ level }: { level: Level }) {
   const { store } = useEditorContext()
   const confirm = useConfirm()
   const readOnly = useEditorState((s) => s.readOnly)
   const hm = level.heightmap
   const range = React.useMemo(() => heightRange(hm ?? null), [hm])
-  const painted = hm ? Object.keys(hm.chunks).length > 0 : false
+  // The baked terrain (painted ground + shapes) is not flat vs the painted ground alone is not flat.
+  const raised = hm ? Object.keys(hm.chunks).length > 0 : false
+  const terrainEdits = level.terrainEdits
+  const painted = React.useMemo(() => hasPaintedBase({ heightmap: hm, terrainEdits }), [hm, terrainEdits])
+  const shapes = terrainEdits ? Object.keys(terrainEdits.shapes).length : 0
 
   const toggle = async (on: boolean) => {
     if (on) {
-      store.getState().updateLevel(level.id, { heightmap: createHeightmap(2) })
+      store.getState().enableTerrain(level.id)
       store.getState().setTool("terrain")
       return
     }
-    if (painted && !(await confirm({ title: "Remove the terrain?", description: `The painted heights of “${level.name}” will be flattened. You can undo this.`, confirmLabel: "Remove terrain", destructive: true }))) return
+    const what =
+      shapes > 0
+        ? `The painted heights and ${plural(shapes, "terrain shape")} of “${level.name}” will be deleted.`
+        : `The painted heights of “${level.name}” will be flattened.`
+    if (
+      (raised || shapes > 0) &&
+      !(await confirm({ title: "Remove the terrain?", description: `${what} You can undo this.`, confirmLabel: "Remove terrain", destructive: true }))
+    )
+      return
     store.getState().clearTerrain(level.id)
+  }
+
+  const deleteShapes = async () => {
+    const ok = await confirm({
+      title: `Delete ${plural(shapes, "terrain shape")}?`,
+      description: `Every block, ramp and cylinder of “${level.name}” is deleted; the painted ground stays. To keep a shape's heights, use "Apply to terrain" on it first. You can undo this.`,
+      confirmLabel: "Delete shapes",
+      destructive: true,
+    })
+    if (ok) store.getState().clearTerrainShapes(level.id)
   }
 
   return (
     <PanelSection title="Terrain">
-      <SwitchField label="Heightmap terrain" description="Paint hills and pits with the terrain brush (T)." checked={hm !== null} disabled={readOnly} onCheckedChange={(on) => void toggle(on)} />
+      <SwitchField
+        label="Heightmap terrain"
+        description="Sculpt hills, pits, blocks and ramps with the terrain tool (T)."
+        checked={hm !== null}
+        disabled={readOnly}
+        onCheckedChange={(on) => void toggle(on)}
+      />
       {hm ? (
         <>
-          <FieldRow label="Resolution" hint="Height samples per grid cell. Changing it resamples the painted terrain.">
+          <FieldRow label="Resolution" hint="Height samples per grid cell. Changing it resamples the painted terrain and re-bakes the shapes.">
             <Segmented
               value={String(hm.resolution) as "1" | "2" | "4"}
               disabled={readOnly}
-              onValueChange={(v) => void setTerrainResolution(store, level.id, Number(v) as Heightmap["resolution"])}
+              onValueChange={(v) => void store.getState().setTerrainResolution(level.id, Number(v) as Heightmap["resolution"])}
               options={RESOLUTION_OPTIONS}
             />
           </FieldRow>
           <div className="flex items-center justify-between gap-2">
-            <Hint>{painted ? `Heights ${trimNumber(range.min, 1)} to ${trimNumber(range.max, 1)} ft` : "Flat — pick the terrain brush and paint."}</Hint>
-            <Button variant="ghost" size="xs" disabled={readOnly || !painted} onClick={() => store.getState().updateLevel(level.id, { heightmap: createHeightmap(hm.resolution) })}>
-              Flatten
-            </Button>
+            <Hint>
+              {raised
+                ? `Heights ${trimNumber(range.min, 1)} to ${trimNumber(range.max, 1)} ft${painted ? "" : " (shapes only)"}`
+                : "Flat — pick the terrain tool and paint or draw shapes."}
+            </Hint>
+            <Tooltip>
+              {/* The span keeps the tooltip working while the button is disabled (it says why). */}
+              <TooltipTrigger render={<span className="inline-flex" />}>
+                <Button variant="ghost" size="xs" disabled={readOnly || !painted} onClick={() => store.getState().flattenTerrain(level.id)}>
+                  Flatten
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                {!painted ? "The painted ground is already flat" : shapes > 0 ? "Flatten the painted ground (the shapes stay)" : "Flatten the painted ground"}
+              </TooltipContent>
+            </Tooltip>
           </div>
+          {shapes > 0 ? (
+            <div className="flex items-center justify-between gap-2">
+              <Hint>{plural(shapes, "terrain shape")}</Hint>
+              <Button variant="ghost" size="xs" className="hover:text-destructive" disabled={readOnly} onClick={() => void deleteShapes()}>
+                Delete shapes
+              </Button>
+            </div>
+          ) : null}
         </>
       ) : null}
     </PanelSection>

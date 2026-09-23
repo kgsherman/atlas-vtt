@@ -27,13 +27,14 @@
  */
 import type { Patch } from "immer"
 
-import { buildOcclusionWorld } from "@/core/occlusion"
+import { buildOcclusionWorld, heightmapDiffRect } from "@/core/occlusion"
 import type { OcclusionWorld } from "@/core/occlusion/types"
 import { parseScene } from "@/core/scene/schema"
 import type { Id, Scene, Vec2 } from "@/core/scene/types"
 import {
   diffViews,
   filterForPlayer,
+  onlyTerrainEdits,
   parseClientMessage,
   perceivedCellLookup,
   reduceDm,
@@ -173,6 +174,8 @@ function jsonBytes(value: unknown): number {
 function reducesVisibility(cmd: DmCommand): boolean {
   switch (cmd.t) {
     case "apply-scene-patches":
+      // DM-only terrain editing data (shapes, painted base) changes nothing players see or know.
+      return !onlyTerrainEdits(cmd.patches)
     case "reset-fog":
     case "remove-player":
     case "load-scene":
@@ -186,6 +189,26 @@ function reducesVisibility(cmd: DmCommand): boolean {
 }
 
 const own = <T>(rec: Readonly<Record<string, T>>, key: string): T | undefined => (Object.hasOwn(rec, key) ? rec[key] : undefined)
+
+/**
+ * Two revisions' levels describe the same world for vision and knowledge: the same record, or the same
+ * levels where each one is identical or differs only in its DM-only terrain editing data (terrainEdits;
+ * the baked heightmap, which is what vision reads, is the same object). An edit of a shape's name or of
+ * the painted base under a shape changes the levels' identity without changing anything a player sees.
+ */
+export function sameVisionLevels(a: Scene["levels"], b: Scene["levels"]): boolean {
+  if (a === b) return true
+  const ids = Object.keys(a)
+  if (ids.length !== Object.keys(b).length) return false
+  for (const id of ids) {
+    if (!Object.hasOwn(b, id)) return false
+    if (a[id] === b[id]) continue
+    const la = a[id] as unknown as Readonly<Record<string, unknown>>
+    const lb = b[id] as unknown as Readonly<Record<string, unknown>>
+    for (const k of new Set([...Object.keys(la), ...Object.keys(lb)])) if (k !== "terrainEdits" && la[k] !== lb[k]) return false
+  }
+  return true
+}
 
 // ---------------------------------------------------------------------------
 // Runner
@@ -215,6 +238,8 @@ export class HostRunnerImpl implements HostRunner {
   private vision: VisionClient | null = null
   private visionOff: (() => void) | null = null
   private world: OcclusionWorld | null = null
+  /** Levels each occlusion world was last brought up to date with (terrain updates rebuild only what changed). */
+  private readonly worldLevels = new WeakMap<OcclusionWorld, Scene["levels"]>()
   /** Tag of the last revision posted to the vision client, and of the revision = state.scene. */
   private visionTag = 0
   private sceneTag = 0
@@ -703,6 +728,7 @@ export class HostRunnerImpl implements HostRunner {
     if (fullRebuild) {
       const tag = ++this.visionTag
       this.world = buildOcclusionWorld(scene)
+      this.worldLevels.set(this.world, scene.levels)
       this.sceneTag = tag
       void this.vision.setScene(scene, tag).catch((err) => this.log("vision setScene failed", err))
       this.tiler?.setScene(scene)
@@ -714,8 +740,17 @@ export class HostRunnerImpl implements HostRunner {
     if (world) {
       // world.update rebuilds everything by itself when levels/grid changed.
       if (delta.objects.length > 0 || delta.structure) world.update(scene, delta.objects)
+      // Terrain edits rebuild what the changed heightmap chunks reach (like the render engine); the whole
+      // grid when the world's previous levels are unknown.
+      const before = this.worldLevels.get(world)
       const full = { x: 0, z: 0, w: scene.grid.width * scene.grid.cellSize, d: scene.grid.depth * scene.grid.cellSize }
-      for (const levelId of delta.terrain) if (Object.hasOwn(scene.levels, levelId)) world.updateTerrain(scene, levelId, full)
+      for (const levelId of delta.terrain) {
+        if (!Object.hasOwn(scene.levels, levelId)) continue
+        const prev = before && Object.hasOwn(before, levelId) ? before[levelId].heightmap : null
+        const rect = before ? heightmapDiffRect(prev, scene.levels[levelId].heightmap, scene.grid) : full
+        if (rect) world.updateTerrain(scene, levelId, rect)
+      }
+      this.worldLevels.set(world, scene.levels)
     }
     this.sceneTag = tag
     void this.vision.update(scene, { objects: delta.objects, tokens: delta.tokens, terrain: delta.terrain, structure: delta.structure }, tag).catch((err) => this.log("vision update failed", err))
@@ -725,7 +760,8 @@ export class HostRunnerImpl implements HostRunner {
   /**
    * explored |= perceived, memory refresh (§5.4) for `vis` computed on `scene`. A result computed on an
    * intermediate revision (a move's step) is applied against THAT revision (never paired with another
-   * scene), unless levels/grid changed since.
+   * scene), unless levels/grid changed since (a change of DM-only terrain editing data alone does not
+   * count: sameVisionLevels).
    */
   private applyKnowledge(uid: string, vis: VisibilityResult, scene: Scene, markDirty: boolean): void {
     const state = this.state
@@ -734,7 +770,7 @@ export class HostRunnerImpl implements HostRunner {
     if (scene === state.scene) {
       next = updateKnowledge(state, uid, vis)
     } else {
-      if (scene.grid !== state.scene.grid || scene.levels !== state.scene.levels) return
+      if (scene.grid !== state.scene.grid || !sameVisionLevels(scene.levels, state.scene.levels)) return
       const tmp: GameState = { ...state, scene }
       const r = updateKnowledge(tmp, uid, vis)
       if (r === tmp) return

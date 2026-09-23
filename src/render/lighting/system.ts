@@ -6,6 +6,10 @@
  *  - light atlas (point-light shadows) and viewer atlas (GPU line of sight) with LRU tiles, scheduled
  *    under a per-frame budget (4 tiles / ~2 ms CPU, moved sources first);
  *  - static sun/moon shadow map and sky-exposure map, re-rendered only when occluders or the sun change;
+ *  - terrain previews (previewTerrain): the previewed level's terrain occluders follow the preview's
+ *    lattice (render/occluders previewTerrain), and its lights and viewer eyes stand on the previewed
+ *    ground, so shadows, sky exposure and line of sight match the terrain drawn; the tiles near the change
+ *    (and of the sources that moved) are recaptured and the sun / sky maps re-rendered;
  *  - light manager: resolve, cull (off/hidden, frustum ∩ dim sphere, cutaway), rank → 32 uniform slots,
  *    flicker on intensity only; shadowed lights without a captured tile are dropped (never unshadowed);
  *    a per-cell mask of the slots whose dim disc reaches each 10 ft cell lets the shaders skip the rest;
@@ -26,9 +30,10 @@
 import * as THREE from "three"
 
 import type { BlockChannel, DirtyRegion, OcclusionWorld } from "@/core/occlusion/types"
-import { levelCeilingY, nominalTokenEye, sortedLevels, tokenRect } from "@/core/scene/queries"
+import { groundIndex, levelCeilingY, nominalTokenEye, sortedLevels, tokenRect } from "@/core/scene/queries"
 import type { Id, Rect, SceneLike, Token, Vec3, VisionSettings } from "@/core/scene/types"
-import { resolveViewerEye } from "@/core/vision"
+import { eyeAtGround, resolveViewerEye } from "@/core/vision"
+import type { GroundSampler } from "../builders/ground"
 import type { Quality, SceneChange, ViewState } from "../contracts"
 import { HostMaskTextures } from "../fog/hostMaskTextures"
 import { LAYER, type CreateLightingSystem, type LightingFrameStats, type LightingSystem, type WorldMaterialOptions } from "../internal"
@@ -177,12 +182,15 @@ export function viewerTouch(scene: SceneLike, token: Token, eye: Vec3): number {
   return Math.max(eye.x - x0, x1 - eye.x, eye.z - z0, z1 - eye.z)
 }
 
-/** Eye through core/vision (so CPU and GPU agree), with a nominal-eye fallback if it fails. */
-export function viewerEye(world: OcclusionWorld, scene: SceneLike, token: Token): Vec3 {
+/**
+ * Eye through core/vision (so CPU and GPU agree), with a nominal-eye fallback if it fails. `ground`: the
+ * world Y the token stands on when it is not the document's (a terrain preview of its level).
+ */
+export function viewerEye(world: OcclusionWorld, scene: SceneLike, token: Token, ground?: number): Vec3 {
   try {
-    return resolveViewerEye(world, scene, token)
+    return ground === undefined ? resolveViewerEye(world, scene, token) : eyeAtGround(world, ground, token)
   } catch {
-    const eye = nominalTokenEye(scene, token)
+    const eye = ground === undefined ? nominalTokenEye(scene, token) : { ...token.position, y: ground + token.eyeHeight }
     return { x: eye.x, y: Math.min(eye.y, levelCeilingY(scene, token.levelId) - 0.25), z: eye.z }
   }
 }
@@ -268,6 +276,8 @@ export class AtlasLightingSystem implements LightingSystem {
   private view: ViewState = DEFAULT_VIEW_STATE
   private dimmed = new Set<Id>()
   private lights: ResolvedLight[] | null = null
+  /** Ground of the levels under terrain preview: their lights and viewer eyes stand on it. */
+  private readonly previewGround = new Map<Id, GroundSampler>()
   /** The atlases were just reallocated (tier change): the next frame recaptures with TIER_SWITCH_CAPTURE_MS. */
   private captureBurst = false
   /** Tier being prepared (adaptive step), committed by setQuality. */
@@ -362,6 +372,7 @@ export class AtlasLightingSystem implements LightingSystem {
     this.scene = scene
     this.world = world
     this.proxies.rebuild(world)
+    this.previewGround.clear()
     for (const atlas of this.allAtlases()) atlas.invalidateAll()
     this.lights = null
     this.viewers = null
@@ -376,8 +387,10 @@ export class AtlasLightingSystem implements LightingSystem {
   applyChange(scene: SceneLike, world: OcclusionWorld, change: SceneChange, dirty: DirtyRegion[]): void {
     this.scene = scene
     this.world = world
-    const proxyDirty = this.proxies.update(world)
-    const regions = dirty.concat(proxyDirty)
+    // A committed terrain change replaces the level's preview (as in Engine.updateScene): its heightfield
+    // proxies move from the previewed heights straight to the committed ones, chunk by chunk.
+    const regions = dirty.concat(this.proxies.update(world, change.terrain ?? []))
+    for (const levelId of change.terrain ?? []) this.previewGround.delete(levelId)
     const atlases = this.allAtlases()
     for (const r of regions) for (const atlas of atlases) atlas.invalidateRegion(r)
     if (regions.length > 0 || change.structure || (change.terrain?.length ?? 0) > 0) {
@@ -390,6 +403,32 @@ export class AtlasLightingSystem implements LightingSystem {
     this.viewers = null
     this.updateEnvironment()
     this.syncMasks()
+  }
+
+  /**
+   * Terrain preview of a level (Engine.previewTerrain, throttled; `dirty` = the union of the rects changed
+   * since the last call, null = everywhere): the level's terrain occluders follow `ground` in place, the
+   * light / viewer tiles whose sphere meets the change are recaptured and the sun / sky maps re-rendered.
+   * `ground` null ends the preview: the occluders show the world (the document) again, invalidated the
+   * same way. A committed terrain change of the level (applyChange) ends it too. Lights and viewer eyes of
+   * the level stand on `ground` meanwhile (re-resolved; a tile is recaptured only if its source moved).
+   */
+  previewTerrain(levelId: Id, ground: GroundSampler | null, dirty: Rect | null): void {
+    const regions = ground ? this.proxies.previewTerrain(levelId, ground, dirty) : this.proxies.endPreview(levelId)
+    if (ground || this.previewGround.has(levelId)) {
+      if (ground) this.previewGround.set(levelId, ground)
+      else this.previewGround.delete(levelId)
+      this.lights = null
+      this.viewers = null
+    }
+    if (regions.length === 0) return
+    const atlases = this.allAtlases()
+    for (const r of regions) for (const atlas of atlases) atlas.invalidateRegion(r)
+    this.sunDirty = true
+    this.skyDirty = true
+    // The directional maps cover this.bounds: grow them with the preview, shrink them back after it.
+    const pb = this.proxies.bounds()
+    if (!ground || (pb && !this.bounds.containsBox(pb))) this.recomputeBounds()
   }
 
   setView(view: ViewState): void {
@@ -821,7 +860,7 @@ export class AtlasLightingSystem implements LightingSystem {
   private resolvedLights(scene: SceneLike, world: OcclusionWorld): ResolvedLight[] {
     // The DM with vision "off" sees hidden lights; previews show what the previewed tokens' players see.
     // Origins are pushed out of light blockers (cleared with the world in setScene / applyChange).
-    if (!this.lights) this.lights = resolveLights(scene, world, { includeHidden: this.view.vision === "off" })
+    if (!this.lights) this.lights = resolveLights(scene, world, { includeHidden: this.view.vision === "off" }, this.previewGround)
     return this.lights
   }
 
@@ -833,7 +872,10 @@ export class AtlasLightingSystem implements LightingSystem {
       if (!Object.hasOwn(scene.tokens, id)) continue
       const token = scene.tokens[id]
       const range = token.vision.blind ? Math.max(token.vision.blindsight, 1) : Math.max(this.sceneDiagonal, 1)
-      const eye = viewerEye(world, scene, token)
+      // On a previewed level, off stairs / ramp runs (whose ground is the connector's), the eye stands on the preview.
+      const previewed = this.previewGround.get(token.levelId)
+      const ground = previewed && !groundIndex(scene).runAt(token.levelId, token.position) ? previewed.heightAt(token.position.x, token.position.z) : undefined
+      const eye = viewerEye(world, scene, token, ground)
       if (!Number.isFinite(eye.x + eye.y + eye.z + range)) continue
       if (out.length >= MAX_VIEWERS) {
         truncated = true

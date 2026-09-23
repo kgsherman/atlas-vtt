@@ -61,8 +61,11 @@ The sun/moon uses one static 2048² depth map with hardware PCF, re-rendered onl
 ### 4. Cheap occluder geometry
 Shadow/vision passes render a separate proxy scene built from `core/occlusion` primitives: instanced unit
 boxes and prisms (a few draw calls per level per channel) plus closed heightfield meshes — not the detailed visual
-meshes. `matrixWorldAutoUpdate` is off and sorting is disabled during tile updates. BackSide (second-depth)
-rendering removes most acne without large biases.
+meshes. Sloped wall pieces (`WallStrip`, follow-terrain walls on terrain) are not affine images of a cube, so
+each (level, channel mask, 100 ft bucket) merges its strips into one closed mesh with per-vertex primitive
+keys (one more draw call per bucket, same shader), rebuilt whole when a member changes; walls with a
+constant top stay instanced boxes. `matrixWorldAutoUpdate` is off and sorting is disabled during tile updates.
+BackSide (second-depth) rendering removes most acne without large biases.
 
 ### 5. Overdraw control
 In player view, level groups are ordered so the active level draws first and lower storeys are early-Z rejected
@@ -129,13 +132,135 @@ a 14-step move on a 120×120 daylit field took over 5 s and timed out as "DM not
 after 5 s.
 
 ### 9. Network
-Per-player patches are coalesced (≤ 10 Hz), only non-empty diffs are sent, heightmaps travel in 8×8-cell chunks,
+Per-player patches are coalesced (≤ 10 Hz), only non-empty diffs are sent, heightmaps travel in 8×8-cell chunks
+(terrain shapes and the painted base never travel; follow-terrain wall pieces carry the host's base line,
+`terrainProfile`, one number per base knot of the piece: 173–475 bytes per view, about 2%, on the Crooked Lantern),
 and big snapshots go through the database instead of the realtime socket: the transport's size guard is 200 KB
 (`MAX_BROADCAST_BYTES`, headroom under Realtime's 256 KB message limit), and each client's sends go through
 one token bucket of ≈ 25 msg/s (burst 10), well under the free tier's ~100 msg/s. Per player, requests are
 limited to 8/s (burst 16), hellos (each may cost a full snapshot plus a tile table per backdrop level) to
 1/s (burst 4, coalesced), and `rate-limited` replies to 2/s, so one client cannot turn the DM's shared send
 bucket into replies (ARCHITECTURE §6.2).
+
+### 11. Terrain editing (shapes, previews, walls on terrain)
+Terrain shapes must stay interactive at the limits (1000 shapes and 16000 points per level, 200×200 cells at
+resolution 4: 801² lattice samples) while the live host re-syncs on every player step. The measured costs
+per gesture step and per commit are below; frame times in the browser for a resolution-4 drag or nudge are
+not yet part of `e2e/perf.mjs`.
+- **Local gestures, per-chunk commits.** A drag or a creation re-bakes only the previous ∪ current footprint
+  (grown by one sample spacing) into a local lattice, and only when its snapped state changes; the document
+  gets one `writeTerrain` per gesture, which rewrites only the chunks the change reaches, so undo patches and
+  network diffs stay per chunk. The bake visits each top triangle's bounding box, never every sample against
+  every polygon. Measured once in vitest on a 200×200-cell level at resolution 4 with 400 shapes:
+
+  | Operation | Time |
+  |---|---|
+  | Move one shape (`writeTerrain`, 3 patches) | ≈ 3 ms |
+  | `bakeRegion` over 100×100 ft | ≈ 0.4 ms |
+  | `bakeRegion` over the whole level | 13 ms |
+  | Rebake "all" (resolution change, grid resize) | 35 ms |
+  | First write of all 400 shapes | 97 ms |
+
+  `triangulateFootprint` takes ≈ 51 µs for a 64-gon and ≈ 7.1 µs for a 24-gon (≈ 37 / 5.6 µs before the
+  diagonal rule of ARCHITECTURE §3), cached per shape object. "Apply to terrain"'s `applyShapesClosure`
+  takes ≈ 1–2 ms in the worst case (1000 shapes overlapping in one chain); the Inspector runs it on each
+  render of its action buttons. `hasPaintedBase` (the Levels panel's Flatten) reads chunk keys only.
+
+- **Terrain previews move the mesh in place** (`Engine.previewTerrain`, ARCHITECTURE §4.6). A per lattice-row
+  triangle table built with the terrain mesh limits an update to the rows and cells around the dirty rect,
+  heights are read straight from the lattice and the bounds grow by union (before: a scan of every terrain
+  triangle and a bounding-sphere recompute over the whole mesh per pointer move). Budget ≤ 4 ms per update for
+  a 100×100 ft dirty rect on a 200×200-cell resolution-4 level (2.57M triangles): measured ≈ 1.0–1.2 ms steady
+  and 4 ms on the first call, against 12–38 ms for the old full scan. The committed test (60×60 cells,
+  resolution 4) asserts an 8 ms median and that the result equals a full scan. The first preview rebuilds the
+  floors bucket only when the level has no terrain mesh yet. The draped grid overlay likewise updates only the
+  rows around the dirty rect and grows its bounds by union (before: the whole position buffer, 641k vertices
+  on the largest level, and a bounding-sphere recompute per call).
+- **One upload range per attribute and call.** The terrain mesh's positions and normals and the grid's
+  positions each upload one range (first to last touched vertex, merged with any range not uploaded yet,
+  since several previews can run before a render). With one range per lattice row, each a `bufferSubData`
+  into a 23 MB+ buffer the GPU may still be reading, dragging a 40×40 ft block on a 100×100-cell
+  resolution-4 level took 1.0–1.4 s per frame in headless Chromium (ANGLE → Mesa d3d12, which appears to
+  copy the whole buffer per call; p95 ≈ 1.3 s) and a brush stroke p95 510 ms; collapsing the ranges to
+  one per attribute gave p95 ≈ 21 ms for the drag and ≈ 27 ms for the brush. Native drivers may suffer
+  less, but one range costs nothing.
+- **Throttled preview work** (`PreviewThrottle`). When the dirty rect reaches a follow-terrain wall, the
+  level's WHOLE walls and doors buckets are rebuilt (the builders work per bucket, not per wall): the first
+  update at once, then only once max(100 ms, 8 × the last rebuild's cost) has passed since that rebuild ended,
+  plus a trailing rebuild, so even a slow rebuild takes at most ~1/9 of the main thread (with a fixed 100 ms
+  counted from its start, a rebuild of ~100 ms or more ran again on the next move: ~10 fps gestures on large
+  levels). The overlays are rebuilt only when outlines hang on that level's walls, doors or windows. A rebuild
+  costs ≈ 0.07 ms per wall with a door and a window (node, CPU only: 6–7 ms for 84 walls on 40×40 cells, 15 ms
+  for 220 walls on 100×100 cells and 42 ms for 544 walls on 200×200 cells at resolution 4). The lighting
+  system's occluder proxies follow the preview under a second throttle (same rule, 100 ms): rewriting the
+  touched heightfield chunks for a 100×100 ft dirty rect on a 200×200-cell resolution-4 level (2500 chunks)
+  costs ≈ 3.0 ms median and 7.6 ms worst per call, cancelling the preview (`endPreview` restores those
+  chunks) 6.7 ms, plus per call one sun and one sky map re-render (2048² + 1024² proxy depth passes) and the
+  recapture of the light / viewer tiles near the change and of the lights and viewers whose origin or eye
+  the preview moved (the level's lights and viewers are re-resolved on the preview ground each call).
+- **Terrain commits move the mesh in place.** Every drag end, creation, nudge, rotate, Inspector edit and
+  brush stroke is a commit. It used to rebuild every bucket of the level and the draped grid and re-upload
+  the whole terrain: ≈ 0.33 s of CPU per arrow-key nudge on a 100×100-cell resolution-4 level, and in
+  headless Chromium on 200×200 with 60 shapes ≈ 9 s per shape move (1.4 s in `updateScene`, then 7.5 s of
+  `bufferData` before the next frame).
+  Now the mesh and the grid move in place over the changed chunks ∪ what the preview drew, walls and doors
+  are rebuilt only when a wall stands near that rect, and the other ground-dependent buckets (cheap)
+  always. Measured in vitest (CPU, resolution 4, 150 walls with doors and props):
+
+  | Level | Floors rebuild (before) | Mesh in place | Grid | `GroundSampler.forLevel` | `world.updateTerrain` |
+  |---|---|---|---|---|---|
+  | 100×100 cells | 408 ms | 4.0 ms | 0.4 ms | 2.4 ms | 12.8 ms |
+  | 200×200 cells | 1128 ms | 4.0 ms | 0.3 ms | 3.2 ms | 15.4 ms |
+
+  When rebuilt, walls take 11–14 ms, doors 15–50 ms and props 1–10 ms there (first runs include warm-up).
+  The committed engine test (100×100 cells, resolution 4, one-shape nudge, lighting system stubbed)
+  asserts that `updateScene` costs less than half of one floors rebuild: measured 35.5 ms against
+  344.6 ms. What remains there is mostly `world.updateTerrain` (13–15 ms) and `GroundSampler.forLevel`
+  decoding the whole heightmap (2–3 ms).
+- **Terrain commits move the occluder proxies in place.** The lighting system's `applyChange` used to
+  rebuild a changed floor's heightfield proxy whole (every chunk mesh re-created, then re-uploaded at the
+  next capture) and invalidate the light tiles over the whole level. Now `OccluderProxies.update` rewrites
+  only the chunk meshes holding a changed sample and dirties only their bounds; a commit that ends a
+  preview diffs against the previewed heights, so a drag release whose commit equals its last preview
+  rewrites nothing. The sun and sky maps still re-render once per terrain commit. Measured in vitest (CPU,
+  resolution 4, one 40 ft block nudged 5 ft; best / median of 3, a range = several runs; the engine row in
+  jsdom with a fake WebGL renderer, one level, no walls):
+
+  | Per commit | 100×100 before | 100×100 now | 200×200 before | 200×200 now |
+  |---|---|---|---|---|
+  | `applyChange`, arrow nudge | 98 / 124 ms | 1.8–3.5 / 3.7–6.5 ms | 290 / 291 ms | 2.5–2.7 / 4.7–5.7 ms |
+  | `applyChange`, drag release (after a preview of the same move) | 86 / 89 ms | 0.5–0.6 / 0.6–1.0 ms | 237 / 294 ms | 1.5–1.7 / 1.7–1.9 ms |
+  | New proxy geometries | 625 (31 MB) | 0 | 2500 (123 MB) | 0 |
+  | Proxy dirty area | whole level (500 ft) | 8 regions ≤ 40 ft | whole level (1000 ft) | 8 regions ≤ 40 ft |
+  | `engine.updateScene` with the real lighting system | 315 / 317 ms | 17–20 / 21–22 ms | 1064 / 1116 ms | 27–29 / 29–34 ms |
+
+  The committed test (60×60 cells, resolution 4, a nudge with and without a preview) asserts that every
+  chunk equals a fresh rebuild, that no geometry is allocated and that each dirty region is at most 40 ft
+  wide.
+- **Floor outlines are patched, not recomputed.** A hovered, selected or hidden floor's outline is its
+  terrain triangles' feature edges (`THREE.EdgesGeometry`), cached per mesh geometry and object. The first
+  outline of a whole-level terrain floor still costs 2.8 s at 100×100 cells and 12.3 s at 200×200
+  (resolution 4; e.g. its first hover in the Select tool). A commit or cleared preview only records the
+  moved rect (0.07–0.23 ms); the next use recomputes the edges near it from the triangles near it: ≈ 80 ms
+  at 100×100 and 112 ms at 200×200 for an 81 ft rect, instead of the full recompute. Outlines do not
+  follow a live preview.
+- **Terrain overlay caching.** Per-shape prism arrays are cached by shape identity (with the elevation and
+  lattice spacing; a non-planar top's lifted fill is one more merged geometry per op, built only when some top
+  is lifted) and the unselected shapes are one merged layer that a drag of the selection does not touch, so a
+  level of 1000 shapes stays at about 8 draw calls (per-shape meshes would be ~4000). Measured once in vitest
+  with 1000 shapes / 19,000 points (above the 16000-point document limit; noisy, other test runs in parallel):
+  a rebuild with the same shapes 0.2–1.2 ms, dragging one shape 0.4–1 ms, a selection change 5–13 ms
+  (re-merges the unselected layer), dragging all 1000 shapes 23–27 ms per move (mostly re-triangulation).
+- **DM-only data stays out of hot paths.** `terrainEdits` is stripped from the vision worker's scene, a
+  terrain-edit-only change (a rename, painting under a shape) marks no player dirty, and the editor's
+  document guard validates only the touched shapes and base chunks (a full check only when a level, the
+  root or the grid is replaced).
+- **Wall strips.** Sloped wall pieces binary-search their knots and visit only the intervals a ray's clipped
+  span covers, and register per grid cell with the Y range of the part the cell spans. On the same walls
+  without a floor, strips cost about 1.2–1.35× boxes. Door toggles build no joint index (an opening needs
+  only its host wall's profile): 0.1 ms on the large perf scene, against 3.75 ms while an opening's frame
+  still built it. The occlusion and vision perf tests (below) run a terrain + follow-wall variant against
+  1.5× the flat ceilings.
 
 ### 10. Battlemap backdrops (memory and uploads)
 A Forgotten Adventures storey is ~25 MP (the Vineyard's are 3780×6580 px). Three rules keep that affordable:
@@ -190,8 +315,13 @@ Vision budgets (vitest, `core/vision/perf.test.ts`, 100×100×3 dungeon, 20 ligh
 generous CI ceilings, typical desktop numbers in brackets): full line-of-sight compute for one viewer ≤ 50 ms
 target (≈ 14 ms), light-field update for one moved light ≤ 5 ms (≈ 1 ms), a torch bearer's step with 15
 per-viewer recomputes ≈ 25 ms, all in the worker. On a 200×200 map with ~7.4k objects: full compute ≈ 19 ms
-(a dark map: LOS is only tested where perception could succeed). Full-daylight open maps are the expensive
-case: every sample is lit, so LOS is tested on every cell and the cost grows with cells × map width. One
+(a dark map: LOS is only tested where perception could succeed). The same map on rolling terrain with
+follow-terrain walls (sloped pieces become `WallStrip`s) must stay within 1.5× the flat ceilings (full
+compute 600 ms instead of 400, light move 60 instead of 40); measured once: 22 ms, and 18 ms for the flat
+variant. The occlusion benchmark (`core/occlusion/perf.test.ts`, 100k random sight segments over a
+300 ft square) has the same terrain variant (145 strips): segments ≤ 60 ft 63 ms against 36 ms flat
+(ceiling 1500 ms, 1000 flat), ≤ 425 ft 102 ms against 66 ms (ceiling 3000 ms, 2000 flat). Full-daylight
+open maps are the expensive case: every sample is lit, so LOS is tested on every cell and the cost grows with cells × map width. One
 viewer's compute on an open daylit field takes ≈ 110 ms at 120×120 and ≈ 490 ms at 200×200 in Node, about
 3× that in the browser's vision worker, which is why a move's result no longer waits for per-step passes
 (§8 above). Interior maps stay at ~7 ms per compute (Crooked Lantern, Vineyard).

@@ -1,11 +1,29 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
 import { createPillar, createProp, createToken, createWall } from "@/core/scene/factory"
+import { blockShape } from "@/core/scene/terrainShapes"
 import type { DoorObject, PillarObject, PropObject, WallObject } from "@/core/scene/types"
+import type { KeyOverrides } from "@/lib/keymap"
 
 import { createEditorController } from "./controller"
 import { at, fixtureScene, makeStore, pressKey } from "./test-utils"
+import type { ToolDeps } from "./tools"
+import type { ToolKeyEvent } from "./tools/types"
+
+// Capture the ToolDeps the controller creates its tools with.
+const captured = vi.hoisted(() => ({ deps: null as unknown }))
+vi.mock("./tools", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("./tools")>()
+  return {
+    ...mod,
+    createTools: (deps: ToolDeps) => {
+      captured.deps = deps
+      return mod.createTools(deps)
+    },
+  }
+})
+const toolDeps = () => captured.deps as ToolDeps
 
 function setup() {
   const f = fixtureScene()
@@ -50,6 +68,14 @@ describe("editor controller", () => {
     store.getState().setTool("select")
     expect(pressKey(controller, "r")).toBe(true)
     expect((store.getState().scene.objects[table.id] as PropObject).rotationY).toBeCloseTo(Math.PI / 2)
+    // Tools match the bound action, so remapped keys work (and the old key does nothing).
+    const remap: KeyOverrides = { "rotate.cw": ["J"], "rotate.ccw": ["Shift+J"] }
+    expect(pressKey(controller, "j", {}, remap)).toBe(true)
+    expect((store.getState().scene.objects[table.id] as PropObject).rotationY).toBeCloseTo(Math.PI)
+    expect(pressKey(controller, "r", {}, remap)).toBe(false)
+    store.getState().setTool("prop")
+    expect(pressKey(controller, "J", { shift: true }, remap)).toBe(true)
+    expect(store.getState().toolSettings.prop.rotationY).toBeCloseTo(0)
   })
 
   it("undo during a drag cancels the gesture instead of undoing earlier work", () => {
@@ -199,15 +225,129 @@ describe("editor controller", () => {
   it("forwards terrain previews to the engine hook once set", () => {
     const { store, controller } = setup()
     const calls: (Float32Array | null)[] = []
+    toolDeps().previewTerrain!("x", null, null)
+    expect(calls).toEqual([])
     controller.setTerrainPreview((_l, heights) => calls.push(heights))
+    toolDeps().previewTerrain!("x", null, null)
+    expect(calls).toEqual([null])
+    controller.setTerrainPreview(null)
+    toolDeps().previewTerrain!("x", null, null)
+    expect(calls).toEqual([null])
     store.getState().setTool("terrain")
-    controller.pointerDown(at(20, 20))
-    controller.pointerUp(at(20, 20))
-    expect(calls.length).toBe(2)
-    expect(calls[1]).toBeNull()
     controller.dispose()
     store.getState().setTool("wall")
     expect(controller.activeTool().id).toBe("terrain")
+  })
+
+  it("installs the engine projection as ToolDeps.project (a live indirection)", () => {
+    const { controller } = setup()
+    const project = toolDeps().project!
+    expect(project({ x: 1, y: 2, z: 3 })).toBeNull()
+    controller.setProjector((p) => ({ x: p.x * 10, y: p.z * 10, visible: true }))
+    expect(project({ x: 1, y: 2, z: 3 })).toEqual({ x: 10, y: 30, visible: true })
+    controller.setProjector(null)
+    expect(project({ x: 1, y: 2, z: 3 })).toBeNull()
+  })
+
+  it("hands the bound action to the active tool with the key", () => {
+    const { store, controller } = setup()
+    const seen: ToolKeyEvent[] = []
+    controller.tools.floor.onKeyDown = (e) => {
+      seen.push(e)
+      return e.action?.type === "axis"
+    }
+    store.getState().setTool("floor")
+    expect(pressKey(controller, "x")).toBe(true)
+    // Unused tool-only keys are not consumed (the browser default stays).
+    expect(pressKey(controller, "Tab")).toBe(false)
+    expect(pressKey(controller, "g")).toBe(true)
+    expect(seen.map((e) => [e.key, e.action])).toEqual([
+      ["x", { type: "axis", axis: "x" }],
+      ["Tab", { type: "terrain-advanced" }],
+      ["g", { type: "toggle-grid" }],
+    ])
+    // Remapped keys carry their command's action.
+    pressKey(controller, "k", {}, { "axis.y": ["K"], "tool.token": [] })
+    expect(seen[seen.length - 1].action).toEqual({ type: "axis", axis: "y" })
+  })
+
+  it("passes the active tool's cursor and hint through", () => {
+    const { store, controller } = setup()
+    expect(controller.toolCursor()).toBeNull()
+    expect(controller.toolHint()).toBeNull()
+    controller.tools.wall.cursor = () => "crosshair"
+    controller.tools.wall.hint = () => "Click to add a node"
+    store.getState().setTool("wall")
+    expect(controller.toolCursor()).toBe("crosshair")
+    expect(controller.toolHint()).toBe("Click to add a node")
+  })
+
+  it("Q / Shift+B / E switch to the terrain tool's sub-tools", () => {
+    const { store, controller } = setup()
+    expect(pressKey(controller, "e")).toBe(true)
+    expect(store.getState().tool).toBe("terrain")
+    expect(controller.activeTool().id).toBe("terrain")
+    expect(store.getState().toolSettings.terrain.sub).toBe("block")
+    pressKey(controller, "q")
+    expect(store.getState().toolSettings.terrain.sub).toBe("select")
+    pressKey(controller, "B", { shift: true })
+    expect(store.getState().toolSettings.terrain.sub).toBe("brush")
+  })
+
+  describe("terrain mode", () => {
+    const withShape = () => {
+      const t = setup()
+      const shape = blockShape("s1", { x: 60, z: 60, w: 10, d: 10 }, 0, 3, 0)
+      expect(t.store.getState().applyTerrainEdit(t.f.groundId, { upsert: [shape] }, "Add shape")).toBe(true)
+      return t
+    }
+
+    it("shows no object selection or hover, and emits on terrain selection changes", () => {
+      const { f, store, controller, pillar, emitted } = withShape()
+      store.getState().select([pillar.id])
+      controller.pointerMove(at(62.5, 12.5, { objectId: pillar.id }))
+      store.getState().setTool("terrain")
+      const o = controller.overlays()
+      expect(o.selectedIds).toEqual([])
+      expect(o.hoveredId).toBeNull()
+      expect(controller.overlays()).toBe(o)
+      const n = emitted()
+      store.getState().setTerrainSelection({ levelId: f.groundId, shapeIds: ["s1"], elements: [] })
+      expect(emitted()).toBeGreaterThan(n)
+      // Leaving the mode shows the object selection again and clears the shape selection.
+      store.getState().setTool("select")
+      expect(controller.overlays().selectedIds).toEqual([pillar.id])
+      expect(store.getState().terrainSelection).toBeNull()
+    })
+
+    it("keys the terrain tool declines never edit the hidden object selection", () => {
+      const { store, controller, pillar } = withShape()
+      // A terrain tool with nothing to do (no gesture, no shape selection) declines every key.
+      controller.tools.terrain.onKeyDown = () => false
+      store.getState().select([pillar.id])
+      store.getState().setTool("terrain")
+      const scene = store.getState().scene
+      for (const [k, mods] of [
+        ["Delete", {}],
+        ["ArrowRight", {}],
+        ["r", {}],
+        ["d", { ctrl: true }],
+        ["x", { ctrl: true }],
+        ["c", { ctrl: true }],
+        ["a", { ctrl: true }],
+      ] as const) {
+        expect(pressKey(controller, k, mods)).toBe(true)
+      }
+      expect(store.getState().scene.objects).toBe(scene.objects)
+      expect(store.getState().selection).toEqual([pillar.id])
+      expect(store.getState().clipboard).toBeNull()
+      // Escape with nothing to cancel is left to the page (the host leaves edit mode); the selection stays.
+      expect(pressKey(controller, "Escape")).toBe(false)
+      expect(store.getState().selection).toEqual([pillar.id])
+      // Tool-independent keys still work.
+      pressKey(controller, "g")
+      expect(store.getState().view.showGrid).toBe(false)
+    })
   })
 
   it("Escape cancels the gesture and clears the selection", () => {

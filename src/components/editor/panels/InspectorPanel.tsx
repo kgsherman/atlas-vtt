@@ -1,8 +1,9 @@
 import * as React from "react"
-import { Copy, EyeOff, Lock, LockOpen, MousePointerClick, RotateCw, Scan, Trash2 } from "lucide-react"
+import { Copy, EyeOff, Lock, LockOpen, MousePointerClick, RotateCw, Scan, Trash2, TriangleAlert } from "lucide-react"
 
 import { CommandKbd } from "@/components/keybindings/CommandKbd"
 import { useCommandLabel } from "@/components/keybindings/keymapStore"
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
@@ -37,7 +38,9 @@ import { freeTokenModelRef } from "@/core/scene/tokenModel"
 import { FreeAssetScopeContext, useEditorActions, useEditorContext, useEditorShallow, useEditorState } from "../context"
 import { ColorInput, FieldPair, FieldRow, Hint, NotesInput, NumberInput, PanelSection, Segmented, SelectInput, SliderInput, SwitchField, TextInput, type Option } from "../fields"
 import { degrees, formatFeet, itemLabel, LIGHT_PRESET_LABELS, objectKindLabel, OBJECT_TYPE_LABELS, radians, selectionSummary, tokenLabel, trimNumber } from "../lib/format"
+import { wallTerrainWarning } from "../lib/terrainInspect"
 import { DirectionPicker, MaterialSelect, PropPicker } from "../pickers"
+import { TerrainInspector } from "./TerrainInspector"
 
 // ---------------------------------------------------------------------------
 // Shared bits
@@ -179,6 +182,26 @@ function FloorFields({ o }: { o: FloorObject }) {
   )
 }
 
+/** The wall's problems on terrain (DESIGN §3.6), recomputed when the wall or the levels change. */
+function WallTerrainWarning({ o }: { o: WallObject }) {
+  const levels = useEditorState((s) => s.scene.levels)
+  const grid = useEditorState((s) => s.scene.grid)
+  const warning = React.useMemo(() => wallTerrainWarning({ levels, grid }, o), [levels, grid, o])
+  if (!warning) return null
+  return (
+    <Alert>
+      <TriangleAlert />
+      <AlertDescription>
+        {warning.kind === "buried"
+          ? warning.whole
+            ? `Buried where the terrain is higher: the ground rises ${formatFeet(warning.depth, 1)} above its base, over its full height. Turn on Follow terrain to stand it on the ground.`
+            : `Buried where the terrain is higher: the ground rises up to ${formatFeet(warning.depth, 1)} above its base. Turn on Follow terrain to stand it on the ground.`
+          : `Pokes through the level above (“${warning.above}”) by up to ${formatFeet(warning.by, 1)} where the terrain is high. Lower the wall or the terrain under it.`}
+      </AlertDescription>
+    </Alert>
+  )
+}
+
 function WallFields({ o }: { o: WallObject }) {
   const update = useUpdateObject(o.id)
   const { store } = useEditorContext()
@@ -196,6 +219,14 @@ function WallFields({ o }: { o: WallObject }) {
       <FieldRow label="Material">
         <MaterialSelect value={o.material} onValueChange={(material) => update({ material })} />
       </FieldRow>
+      <SwitchField
+        label="Follow terrain"
+        description="The base sits on the terrain along the wall; off: it stands at the level's elevation."
+        checked={o.followTerrain}
+        disabled={readOnly}
+        onCheckedChange={(followTerrain) => update({ followTerrain })}
+      />
+      <WallTerrainWarning o={o} />
       <PointField label="Start" value={o.a} disabled={readOnly} onCommit={(a) => update({ a })} />
       <PointField label="End" value={o.b} disabled={readOnly} onCommit={(b) => update({ b })} />
       <Hint>Length {formatFeet(wallLength(o), 2)}</Hint>
@@ -693,6 +724,9 @@ function MultiInspector({ ids }: { ids: Id[] }) {
   const items = ids.map((id) => (Object.hasOwn(scene.objects, id) ? scene.objects[id] : Object.hasOwn(scene.tokens, id) ? scene.tokens[id] : null)).filter((x) => x !== null)
   const lights = items.filter((x): x is LightObject => "type" in x && x.type === "light")
   const doors = items.filter((x): x is DoorObject => "type" in x && x.type === "door")
+  const walls = items.filter((x): x is WallObject => "type" in x && x.type === "wall")
+  const allFollow = walls.every((w) => w.followTerrain)
+  const someFollow = walls.some((w) => w.followTerrain)
   const allHidden = items.every((x) => x.hidden === true)
   const objects = items.filter((x): x is SceneObject => "type" in x)
   const allLocked = objects.length > 0 && objects.every((o) => o.editorLocked === true)
@@ -762,6 +796,26 @@ function MultiInspector({ ids }: { ids: Id[] }) {
           </div>
         </PanelSection>
       ) : null}
+      {walls.length > 0 ? (
+        <PanelSection title={`${walls.length} wall${walls.length === 1 ? "" : "s"}`}>
+          <SwitchField
+            label="Follow terrain"
+            description={
+              allFollow || !someFollow
+                ? "The bases sit on the terrain along the walls; off: at the level's elevation."
+                : "Mixed: some follow the terrain. Switch on to make them all follow it."
+            }
+            checked={allFollow}
+            disabled={readOnly}
+            onCheckedChange={(on) =>
+              setAll(
+                on ? `Walls follow the terrain` : `Walls stand at the level elevation`,
+                (it) => void ("type" in it && it.type === "wall" && (it.followTerrain = on))
+              )
+            }
+          />
+        </PanelSection>
+      ) : null}
       <PanelSection title="Items">
         <div className="flex flex-col gap-0.5">
           {ids.slice(0, 50).map((id) => (
@@ -781,6 +835,8 @@ export function InspectorPanel() {
   const selection = useEditorState((s) => s.selection)
   const tool = useEditorState((s) => s.tool)
   const selectKey = useCommandLabel("editor", "tool.select")
+  // Terrain mode: the terrain tool's shapes are the selection; objects stay hidden (and uneditable) here.
+  if (tool === "terrain") return <TerrainInspector />
   if (selection.length === 0) {
     return (
       <Empty className="mt-6 gap-3 p-6">

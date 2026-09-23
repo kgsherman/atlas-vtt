@@ -14,7 +14,7 @@
  *    session. Live play state lives in the session's GameState copy (core/session).
  */
 
-export const SCENE_SCHEMA_VERSION = 2 as const
+export const SCENE_SCHEMA_VERSION = 3 as const
 
 export type Id = string
 
@@ -114,6 +114,51 @@ export interface Heightmap {
   chunks: Record<string, string>
 }
 
+export type TerrainShapeKind = "block" | "ramp" | "cylinder"
+
+/** "add": the terrain is raised to the shape's top (max); "carve": it is cut down to it (min). */
+export type TerrainShapeOp = "add" | "carve"
+
+/**
+ * Editable terrain geometry (ARCHITECTURE §3 "Terrain edits"), baked into Level.heightmap. A prism over a
+ * simple polygon footprint: points[k] is footprint vertex k (x, z in world feet) with the height of the
+ * shape's TOP at that vertex (y, feet relative to level.elevation). The top surface is the footprint
+ * triangulated by core/scene/terrainShapes `triangulateFootprint`, with per-vertex heights.
+ *  - Orientation is canonical: the signed area Σ(x_k·z_{k+1} − x_{k+1}·z_k)/2 is > 0.
+ *  - Baking: shapes apply in ascending (order, id) over the painted terrain; "add" → max(terrain, top),
+ *    "carve" → min(terrain, top), per lattice sample inside the footprint.
+ *  - `base` (relative to elevation) is the other end of the prism's vertical sides in the editor; it does
+ *    not affect baking.
+ *  - `kind` is a label (the tool that created it); vertex edits may make a "block" irregular.
+ */
+export interface TerrainShape {
+  id: Id
+  /** DM-facing label. */
+  name?: string
+  kind: TerrainShapeKind
+  op: TerrainShapeOp
+  /** Bake order (integer ≥ 0): shapes apply in ascending (order, id). New shapes get the level's max + 1. */
+  order: number
+  points: Vec3[]
+  base: number
+}
+
+/**
+ * DM-only editing data behind a level's baked heightmap. Never sent to players. Present exactly when the
+ * level has at least one shape (and then the level has a heightmap).
+ */
+export interface TerrainEdits {
+  /** Keyed by id; ids are unique within the level (not across the scene). Non-empty. */
+  shapes: Record<Id, TerrainShape>
+  /**
+   * The painted terrain ("base", what the brush edits) for the heightmap chunks where it differs from the
+   * baked heightmap: key K is present iff base_K ≠ baked_K. A missing key means the base chunk equals
+   * Level.heightmap's chunk (zeros if that is missing too). Values use the Heightmap chunk encoding at the
+   * level's heightmap resolution; "" stands for an all-zero chunk.
+   */
+  baseChunks: Record<string, string>
+}
+
 /**
  * A battlemap image draped over a level's walkable surfaces (floors/terrain) as their albedo, so the
  * 3D lighting, shadows and fog apply to it. The image bytes live in the asset store (Scene.assets[assetId]);
@@ -139,6 +184,8 @@ export interface Level {
   /** Thickness of floor slabs on this level; the slab occupies [surface − thickness, surface]. */
   floorThickness: number
   heightmap: Heightmap | null
+  /** Terrain shapes and the painted base behind `heightmap` (DM-only; absent when the level has no shapes). */
+  terrainEdits?: TerrainEdits
   /** Optional battlemap image for this level. */
   backdrop?: LevelBackdrop | null
 }
@@ -207,11 +254,22 @@ export interface WallObject extends BaseObject {
   type: "wall"
   a: Vec2
   b: Vec2
-  /** Height above the wall's base (ground at its midpoint), feet. */
+  /** Height above the wall's base line (ARCHITECTURE §2 "Walls on terrain"), feet. */
   height: number
   /** Strictly positive. The wall box is centred on the a→b line. */
   thickness: number
   material: MaterialId
+  /**
+   * true: the wall's base line follows the level's terrain along the wall (its top is terrain + height);
+   * false: the base line is the level elevation (terrain above it buries the wall). Same on levels without a heightmap.
+   */
+  followTerrain: boolean
+  /**
+   * Player-reconstructed scenes only (core/session viewToScene), never in DM documents (the scene schema
+   * rejects it): the host's base line (world Y) at this wall piece's profile knots
+   * (core/scene/wallProfile `wallBaseKnots`), so the client draws the host's top where it lacks the terrain.
+   */
+  terrainProfile?: number[]
 }
 
 export type DoorState = "open" | "closed" | "locked"

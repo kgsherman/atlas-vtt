@@ -1,14 +1,14 @@
 /**
- * Level-level editor commands the store does not provide directly (duplicate a level, change the
- * terrain resolution) plus helpers for naming levels from map image file names. Framework-free.
+ * Level-level editor commands the store does not provide directly (duplicate a level) plus helpers for
+ * naming levels from map image file names. Framework-free. Terrain operations (enable, resolution,
+ * flatten, clear, shapes) are store actions (editor/store: enableTerrain, setTerrainResolution, …).
  */
 import { DEFAULT_LEVEL_HEIGHT } from "@/core/scene/defaults"
 import { createLevel } from "@/core/scene/factory"
-import { createHeightmap, sampleCounts, sampleHeight, sampleSpacing, writeHeights } from "@/core/scene/heightmap"
 import { copySelection, pasteClipboard } from "@/core/scene/integrity"
 import { sortedLevels } from "@/core/scene/queries"
 import { SCENE_LIMITS } from "@/core/scene/schema"
-import type { GridSettings, Heightmap, Id, Level, Scene } from "@/core/scene/types"
+import type { Id, Level, Scene } from "@/core/scene/types"
 import type { EditorStore } from "@/editor/store"
 
 import { fileNameWords, nameFromWords } from "./fileNames"
@@ -32,8 +32,9 @@ export function levelBelowElevation(scene: Pick<Scene, "levels">): number {
 }
 
 /**
- * Copy a level (settings, terrain, backdrop and every object on it; tokens are not copied) onto a new
- * level on top of the stack, in one undo step. Returns the new level id, or null when refused.
+ * Copy a level (settings, terrain with its editable shapes, backdrop and every object on it; tokens are
+ * not copied) onto a new level on top of the stack, in one undo step. Returns the new level id, or null
+ * when refused. Shape ids are level-scoped, so the copy keeps them.
  */
 export function duplicateLevel(store: EditorStore, levelId: Id): Id | null {
   const s = store.getState()
@@ -55,28 +56,6 @@ export function duplicateLevel(store: EditorStore, levelId: Id): Id | null {
   if (patches.length === 0) return null
   store.getState().setActiveLevel(level.id)
   return level.id
-}
-
-/** The same terrain on a lattice of another resolution (bilinear on the source triangles). */
-export function resampleHeightmap(hm: Heightmap, grid: Pick<GridSettings, "width" | "depth" | "cellSize">, resolution: Heightmap["resolution"]): Heightmap {
-  if (hm.resolution === resolution) return hm
-  const { samplesX, samplesZ } = sampleCounts(grid, resolution)
-  const step = sampleSpacing(grid.cellSize, resolution)
-  const dense = new Float32Array(samplesX * samplesZ)
-  for (let sz = 0; sz < samplesZ; sz++) {
-    for (let sx = 0; sx < samplesX; sx++) dense[sz * samplesX + sx] = sampleHeight(hm, grid.cellSize, sx * step, sz * step)
-  }
-  return writeHeights(createHeightmap(resolution), grid, dense)
-}
-
-/** Change a level's terrain resolution (resampling existing heights) as one undo step. */
-export function setTerrainResolution(store: EditorStore, levelId: Id, resolution: Heightmap["resolution"]): boolean {
-  const s = store.getState()
-  if (!Object.hasOwn(s.scene.levels, levelId)) return false
-  const hm = s.scene.levels[levelId].heightmap
-  if (!hm) return store.getState().updateLevel(levelId, { heightmap: createHeightmap(resolution) })
-  if (hm.resolution === resolution) return true
-  return store.getState().updateLevel(levelId, { heightmap: resampleHeightmap(hm, s.scene.grid, resolution) })
 }
 
 // ---------------------------------------------------------------------------

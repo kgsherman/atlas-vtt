@@ -1,14 +1,24 @@
 import { applyPatches, type Patch } from "immer"
 import { describe, expect, it } from "vitest"
 
-import { createFloor, createLevel, createLight, createPillar, createProp, createToken, createWall } from "@/core/scene/factory"
-import { createHeightmap, denseHeights, sampleCounts, writeHeights } from "@/core/scene/heightmap"
-import { wallOpenings } from "@/core/scene/queries"
-import type { ConnectorObject, DoorObject, FloorObject, LightObject, PropObject, Scene, WallObject } from "@/core/scene/types"
+import { createFloor, createLevel, createLight, createPillar, createProp, createScene, createToken, createWall } from "@/core/scene/factory"
+import { chunkSamples, createHeightmap, decodeChunk, denseHeights, encodeChunk, sampleCounts, sampleSpacing, writeHeights } from "@/core/scene/heightmap"
+import { levelGround, wallOpenings } from "@/core/scene/queries"
+import {
+  baseLattice,
+  blockShape,
+  hasPaintedBase,
+  nextShapeOrder,
+  resampleTerrain,
+  shapeTopAt,
+  writeTerrain,
+  type TerrainLevel,
+} from "@/core/scene/terrainShapes"
+import type { ConnectorObject, DoorObject, FloorObject, GridSettings, Level, LightObject, PropObject, Scene, WallObject } from "@/core/scene/types"
 import type { DmCommand } from "@/core/session/types"
 
 import { serializeClipboard } from "./clipboard"
-import { editorViewState, repairConnectors } from "./store"
+import { editorViewState, normalizeTerrainSelection, repairConnectors, type EditorStore } from "./store"
 import { fixtureScene, makeStore } from "./test-utils"
 
 const obj = <T>(scene: Scene, id: string) => scene.objects[id] as T
@@ -487,9 +497,10 @@ describe("editor store: object edits", () => {
     expect(store.getState().lastChange).toEqual({ structure: true })
 
     const level = store.getState().activeLevelId
+    const one = encodeChunk(new Float32Array(chunkSamples(1) ** 2).fill(1))
     store.getState().apply((d) => {
-      d.levels[level].heightmap = { ...createHeightmap(1), chunks: { "0,0": "AAAA", "2,0": "AAAA", "0,2": "AAAA" } }
-    }, "fake terrain")
+      d.levels[level].heightmap = { ...createHeightmap(1), chunks: { "0,0": one, "2,0": one, "0,2": one } }
+    }, "Paint terrain")
     store.getState().updateGrid({ width: 10, depth: 300 })
     const s = store.getState().scene
     expect(s.grid.width).toBe(10)
@@ -707,5 +718,361 @@ describe("editor store: detach / restore document", () => {
     expect(st.undo()).toBe(true)
     expect(store.getState().scene.objects[pillar.id]).toBeUndefined()
     expect(store.getState().dirty).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Terrain
+// ---------------------------------------------------------------------------
+
+/** A painted base over the whole extent: h(x, z) = 0.1·x + 0.05·z (feet). */
+function slopeLattice(grid: GridSettings, resolution: number) {
+  const { samplesX, samplesZ } = sampleCounts(grid, resolution)
+  const spacing = sampleSpacing(grid.cellSize, resolution)
+  const heights = new Float32Array(samplesX * samplesZ)
+  for (let sz = 0; sz < samplesZ; sz++) for (let sx = 0; sx < samplesX; sx++) heights[sz * samplesX + sx] = 0.1 * sx * spacing + 0.05 * sz * spacing
+  return { samplesX, samplesZ, heights, spacing }
+}
+
+const extentOf = (grid: GridSettings) => ({ x: 0, z: 0, w: grid.width * grid.cellSize, d: grid.depth * grid.cellSize })
+
+/** Ground level with a painted slope and blocks "b1" (x 10..20, +4 ft) and "b2" (x 50..60, −3 ft carve). */
+function terrainFixture() {
+  const f = fixtureScene()
+  const store = makeStore(f.scene)
+  const grid = store.getState().scene.grid
+  expect(store.getState().applyTerrainEdit(f.groundId, { base: { lattice: slopeLattice(grid, 2), rects: [extentOf(grid)] } }, "Paint terrain")).toBe(true)
+  const b1 = blockShape("b1", { x: 10, z: 10, w: 10, d: 10 }, 0, 4, 0)
+  const b2 = blockShape("b2", { x: 50, z: 50, w: 10, d: 10 }, 0, -3, 1)
+  expect(store.getState().applyTerrainEdit(f.groundId, { upsert: [b1, b2] }, "Add shapes")).toBe(true)
+  return { f, store, grid, b1, b2 }
+}
+
+/** The level's terrain equals a from-scratch write of its painted base and shapes (the writeTerrain invariant). */
+function expectConsistent(level: TerrainLevel, grid: GridSettings) {
+  const hm = level.heightmap!
+  const fresh: TerrainLevel = { heightmap: writeHeights(createHeightmap(hm.resolution), grid, baseLattice(level, grid).heights) }
+  expect(writeTerrain(fresh, grid, { upsert: Object.values(level.terrainEdits?.shapes ?? {}) })).toBe(true)
+  expect(fresh.heightmap!.chunks).toEqual(hm.chunks)
+  expect(fresh.terrainEdits).toEqual(level.terrainEdits)
+}
+
+const selectShapes = (store: EditorStore, levelId: string, shapeIds: string[]) => store.getState().setTerrainSelection({ levelId, shapeIds, elements: [] })
+
+describe("editor store: terrain selection", () => {
+  it("drops missing shapes on edits and syncs, keeps its identity otherwise, and turns advanced off when it empties", () => {
+    const { f, store } = terrainFixture()
+    store.getState().setTool("terrain")
+    store.getState().setTerrainSelection({ levelId: f.groundId, shapeIds: ["b1", "b2", "nope"], elements: [{ shapeId: "b2", kind: "vertex", index: 0 }] })
+    expect(store.getState().terrainSelection).toEqual({ levelId: f.groundId, shapeIds: ["b1", "b2"], elements: [{ shapeId: "b2", kind: "vertex", index: 0 }] })
+    store.getState().setToolSettings("terrain", { advanced: true })
+
+    // Unrelated edits keep the same selection object.
+    const sel = store.getState().terrainSelection
+    store.getState().addObject(createPillar(f.groundId, { x: 3, z: 3 }))
+    expect(store.getState().terrainSelection).toBe(sel)
+
+    // Deleting b2 drops it and its elements; advanced stays on (b1 is still selected).
+    expect(store.getState().applyTerrainEdit(f.groundId, { remove: ["b2"] }, "Delete shape")).toBe(true)
+    expect(store.getState().terrainSelection).toEqual({ levelId: f.groundId, shapeIds: ["b1"], elements: [] })
+    expect(store.getState().toolSettings.terrain.advanced).toBe(true)
+
+    // A host sync without b1 (the last shape): the selection empties and advanced turns off.
+    const scene = store.getState().scene
+    const level: Level = { ...scene.levels[f.groundId] }
+    delete level.terrainEdits
+    const synced = { ...scene, levels: { ...scene.levels, [f.groundId]: level } }
+    const kept = store.getState().terrainSelection
+    store.getState().syncScene({ ...scene })
+    expect(store.getState().terrainSelection).toBe(kept)
+    store.getState().syncScene(synced)
+    expect(store.getState().terrainSelection).toBeNull()
+    expect(store.getState().toolSettings.terrain.advanced).toBe(false)
+  })
+
+  it("advanced only resets when a selection empties", () => {
+    const { f, store } = terrainFixture()
+    store.getState().setToolSettings("terrain", { advanced: true })
+    store.getState().setTerrainSelection(null)
+    store.getState().applyTerrainEdit(f.groundId, { remove: ["b2"] }, "Delete shape")
+    expect(store.getState().toolSettings.terrain.advanced).toBe(true)
+    selectShapes(store, f.groundId, ["b1"])
+    store.getState().setTerrainSelection({ levelId: f.groundId, shapeIds: [], elements: [] })
+    expect(store.getState().terrainSelection).toBeNull()
+    expect(store.getState().toolSettings.terrain.advanced).toBe(false)
+  })
+
+  it("is cleared by level changes, document loads and leaving the terrain tool", () => {
+    const { f, store } = terrainFixture()
+    const reselect = () => {
+      selectShapes(store, f.groundId, ["b1"])
+      expect(store.getState().terrainSelection).not.toBeNull()
+    }
+    store.getState().setTool("terrain")
+    reselect()
+    store.getState().setActiveLevel(f.groundId)
+    expect(store.getState().terrainSelection).not.toBeNull()
+    store.getState().setActiveLevel(f.upperId)
+    expect(store.getState().terrainSelection).toBeNull()
+    store.getState().setActiveLevel(f.groundId)
+
+    reselect()
+    store.getState().stepActiveLevel(1)
+    expect(store.getState().terrainSelection).toBeNull()
+    store.getState().stepActiveLevel(-1)
+
+    reselect()
+    store.getState().addLevel()
+    expect(store.getState().terrainSelection).toBeNull()
+    store.getState().setActiveLevel(f.groundId)
+
+    // Removing the active level moves to another level.
+    reselect()
+    store.getState().removeLevel(f.groundId)
+    expect(store.getState().activeLevelId).not.toBe(f.groundId)
+    expect(store.getState().terrainSelection).toBeNull()
+    store.getState().undo()
+    store.getState().setActiveLevel(f.groundId)
+
+    // Switching TO the terrain tool (or between other tools) keeps it; leaving the terrain tool clears it.
+    reselect()
+    store.getState().setTool("terrain")
+    expect(store.getState().terrainSelection).not.toBeNull()
+    store.getState().setTool("wall")
+    expect(store.getState().terrainSelection).toBeNull()
+    store.getState().setTool("terrain")
+
+    reselect()
+    const stash = store.getState().detachDocument()
+    store.getState().restoreDocument(stash)
+    expect(store.getState().terrainSelection).toBeNull()
+
+    reselect()
+    store.getState().loadScene(store.getState().scene)
+    expect(store.getState().terrainSelection).toBeNull()
+
+    selectShapes(store, store.getState().activeLevelId, ["b1"])
+    store.getState().newScene()
+    expect(store.getState().terrainSelection).toBeNull()
+  })
+
+  it("normalizeTerrainSelection returns the same object when nothing is missing", () => {
+    const { f, store } = terrainFixture()
+    const sel = { levelId: f.groundId, shapeIds: ["b1", "b1", "b2"], elements: [] }
+    expect(normalizeTerrainSelection(store.getState().scene, sel)).toEqual({ levelId: f.groundId, shapeIds: ["b1", "b2"], elements: [] })
+    const clean = { levelId: f.groundId, shapeIds: ["b2"], elements: [] }
+    expect(normalizeTerrainSelection(store.getState().scene, clean)).toBe(clean)
+    expect(normalizeTerrainSelection(store.getState().scene, { levelId: f.upperId, shapeIds: ["b1"], elements: [] })).toBeNull()
+    expect(normalizeTerrainSelection(store.getState().scene, { levelId: "gone", shapeIds: ["b1"], elements: [] })).toBeNull()
+  })
+})
+
+describe("editor store: terrain actions", () => {
+  it("applyTerrainEdit is one undo step, refuses invalid shapes, and coalesces nudges by key", () => {
+    const { f, store, b1 } = terrainFixture()
+    const s = store.getState()
+    const depth = s.history.undoDepth
+    const bad = { ...b1, points: b1.points.slice(0, 2) }
+    expect(s.applyTerrainEdit(f.groundId, { upsert: [bad] }, "Bad")).toBe(false)
+    expect(store.getState().history.undoDepth).toBe(depth)
+    expect(s.applyTerrainEdit("nope", { remove: ["b1"] }, "Nope")).toBe(false)
+
+    const before = store.getState().scene
+    const moved = (dx: number) => ({ ...b1, points: b1.points.map((p) => ({ ...p, x: p.x + dx })) })
+    expect(store.getState().applyTerrainEdit(f.groundId, { upsert: [moved(5)] }, "Nudge", { coalesceKey: "terrain-nudge:b1" })).toBe(true)
+    expect(store.getState().applyTerrainEdit(f.groundId, { upsert: [moved(10)] }, "Nudge", { coalesceKey: "terrain-nudge:b1" })).toBe(true)
+    expect(store.getState().history.undoDepth).toBe(depth + 1)
+    expectConsistent(store.getState().scene.levels[f.groundId], store.getState().scene.grid)
+    store.getState().undo()
+    expect(store.getState().scene.levels[f.groundId]).toEqual(before.levels[f.groundId])
+  })
+
+  it("enableTerrain gives a level an empty heightmap once", () => {
+    const f = fixtureScene()
+    const store = makeStore(f.scene)
+    expect(store.getState().enableTerrain(f.upperId)).toBe(true)
+    expect(store.getState().scene.levels[f.upperId].heightmap).toEqual(createHeightmap(2))
+    expect(store.getState().enableTerrain(f.upperId, 4)).toBe(false)
+    expect(store.getState().enableTerrain(f.groundId, 4)).toBe(true)
+    expect(store.getState().scene.levels[f.groundId].heightmap?.resolution).toBe(4)
+    expect(store.getState().history.undoLabel).toBe("Enable terrain")
+    store.getState().undo()
+    expect(store.getState().scene.levels[f.groundId].heightmap).toBeNull()
+  })
+
+  it("clearTerrain removes the heightmap and the terrain edits in one undo step", () => {
+    const { f, store } = terrainFixture()
+    const before = store.getState().scene.levels[f.groundId]
+    selectShapes(store, f.groundId, ["b1"])
+    expect(store.getState().clearTerrain(f.groundId)).toBe(true)
+    const level = store.getState().scene.levels[f.groundId]
+    expect(level.heightmap).toBeNull()
+    expect("terrainEdits" in level).toBe(false)
+    expect(store.getState().terrainSelection).toBeNull()
+    expect(store.getState().clearTerrain(f.groundId)).toBe(false)
+    store.getState().undo()
+    expect(store.getState().scene.levels[f.groundId]).toEqual(before)
+  })
+
+  it("flattenTerrain zeroes the painted base and keeps the shapes", () => {
+    const { f, store, grid, b1 } = terrainFixture()
+    expect(hasPaintedBase(store.getState().scene.levels[f.groundId])).toBe(true)
+    expect(store.getState().flattenTerrain(f.groundId)).toBe(true)
+    const scene = store.getState().scene
+    const level = scene.levels[f.groundId]
+    expect(Object.keys(level.terrainEdits!.shapes).sort()).toEqual(["b1", "b2"])
+    expect(baseLattice(level, grid).heights.every((h) => h === 0)).toBe(true)
+    expect(levelGround(scene, f.groundId, 15, 15)).toBe(shapeTopAt(b1, 15, 15))
+    expect(levelGround(scene, f.groundId, 55, 55)).toBe(-3)
+    expect(levelGround(scene, f.groundId, 80, 80)).toBe(0)
+    expectConsistent(level, grid)
+    // Already flat (only the shapes raise the terrain): nothing to do, and the Levels panel disables Flatten.
+    expect(Object.keys(level.heightmap!.chunks).length).toBeGreaterThan(0)
+    expect(hasPaintedBase(level)).toBe(false)
+    const revision = store.getState().revision
+    expect(store.getState().flattenTerrain(f.groundId)).toBe(false)
+    expect(store.getState().revision).toBe(revision)
+    expect(store.getState().flattenTerrain(f.upperId)).toBe(false)
+  })
+
+  it("clearTerrainShapes leaves the painted base as the heightmap", () => {
+    const { f, store, grid } = terrainFixture()
+    const painted = baseLattice(store.getState().scene.levels[f.groundId], grid).heights
+    selectShapes(store, f.groundId, ["b1", "b2"])
+    expect(store.getState().clearTerrainShapes(f.groundId)).toBe(true)
+    const level = store.getState().scene.levels[f.groundId]
+    expect(level.terrainEdits).toBeUndefined()
+    expect(denseHeights(level.heightmap!, grid).heights).toEqual(painted)
+    expect(store.getState().terrainSelection).toBeNull()
+    expect(store.getState().clearTerrainShapes(f.groundId)).toBe(false)
+  })
+
+  it("setTerrainResolution resamples the base, rebakes the shapes and rewrites baseChunks in one step", () => {
+    const { f, store, grid } = terrainFixture()
+    const before = store.getState().scene.levels[f.groundId]
+    expect(store.getState().setTerrainResolution(f.groundId, 2)).toBe(false)
+    expect(store.getState().setTerrainResolution(f.groundId, 4)).toBe(true)
+    const level = store.getState().scene.levels[f.groundId]
+    const expected = resampleTerrain(before, grid, 4)
+    expect(level.heightmap).toEqual(expected.heightmap)
+    expect(level.terrainEdits).toEqual(expected.terrainEdits)
+    // Base chunks are encoded at the new resolution; shapes are the same objects.
+    for (const b64 of Object.values(level.terrainEdits!.baseChunks)) if (b64 !== "") expect(decodeChunk(b64, 4)).toHaveLength(chunkSamples(4) ** 2)
+    expect(level.terrainEdits!.shapes.b1).toBe(before.terrainEdits!.shapes.b1)
+    expectConsistent(level, grid)
+    expect(store.getState().history.undoLabel).toBe("Change terrain resolution")
+    store.getState().undo()
+    expect(store.getState().scene.levels[f.groundId]).toEqual(before)
+    // A level without terrain gets an empty heightmap at that resolution.
+    expect(store.getState().setTerrainResolution(f.upperId, 1)).toBe(true)
+    expect(store.getState().scene.levels[f.upperId].heightmap).toEqual(createHeightmap(1))
+  })
+
+  it("applyTerrainShapes bakes shapes into the base and deletes them", () => {
+    const { f, store, grid } = terrainFixture()
+    const heightmap = store.getState().scene.levels[f.groundId].heightmap
+    selectShapes(store, f.groundId, ["b1", "b2"])
+    expect(store.getState().applyTerrainShapes(f.groundId, ["b1", "missing"])).toBe(true)
+    const level = store.getState().scene.levels[f.groundId]
+    expect(Object.keys(level.terrainEdits!.shapes)).toEqual(["b2"])
+    // b1 is the lowest in bake order: the terrain does not change.
+    expect(level.heightmap).toEqual(heightmap)
+    expect(store.getState().terrainSelection?.shapeIds).toEqual(["b2"])
+    expect(store.getState().history.undoLabel).toBe("Apply shape to terrain")
+    expectConsistent(level, grid)
+    expect(store.getState().applyTerrainShapes(f.groundId, ["missing"])).toBe(false)
+    expect(store.getState().applyTerrainShapes(f.groundId, ["b2"])).toBe(true)
+    expect(store.getState().scene.levels[f.groundId].terrainEdits).toBeUndefined()
+    expect(store.getState().scene.levels[f.groundId].heightmap).toEqual(heightmap)
+  })
+
+  it("applyTerrainShapes also applies the older shapes under the selection, so the terrain does not change", () => {
+    const store = makeStore(createScene({ width: 20, depth: 20 }))
+    const g = store.getState().activeLevelId
+    const grid = store.getState().scene.grid
+    expect(store.getState().enableTerrain(g)).toBe(true)
+    // Each shape drawn after the previous one (the tool's order: max + 1).
+    const add = (make: (order: number) => ReturnType<typeof blockShape>) =>
+      expect(store.getState().applyTerrainEdit(g, { upsert: [make(nextShapeOrder(store.getState().scene.levels[g]))] }, "Add shape")).toBe(true)
+    add((o) => blockShape("pit", { x: 10, z: 10, w: 30, d: 30 }, 0, -6, o))
+    add((o) => blockShape("pillar", { x: 20, z: 20, w: 10, d: 10 }, -6, 10, o))
+    add((o) => blockShape("platform", { x: 50, z: 50, w: 30, d: 30 }, 0, 5, o))
+    add((o) => blockShape("trench", { x: 60, z: 55, w: 5, d: 20 }, 5, -8, o))
+    const before = store.getState().scene.levels[g]
+    const ground = (x: number, z: number) => levelGround(store.getState().scene, g, x, z)
+    expect([ground(25, 25), ground(62.5, 65)]).toEqual([4, -3])
+
+    // The pillar stands in the pit: applying it applies the pit too (one undo step), and it still stands.
+    selectShapes(store, g, ["pillar"])
+    expect(store.getState().applyTerrainShapes(g, ["pillar"])).toBe(true)
+    let level = store.getState().scene.levels[g]
+    expect(Object.keys(level.terrainEdits!.shapes).sort()).toEqual(["platform", "trench"])
+    expect(level.heightmap).toEqual(before.heightmap)
+    expect(ground(25, 25)).toBe(4)
+    expect(store.getState().history.undoLabel).toBe("Apply 2 shapes to terrain")
+    expect(store.getState().terrainSelection).toBeNull()
+    expectConsistent(level, grid)
+    // The trench is cut into the platform: applying it applies the platform too, and it does not fill back in.
+    expect(store.getState().applyTerrainShapes(g, ["trench"])).toBe(true)
+    level = store.getState().scene.levels[g]
+    expect(level.terrainEdits).toBeUndefined()
+    expect(level.heightmap).toEqual(before.heightmap)
+    expect(ground(62.5, 65)).toBe(-3)
+    expect(store.getState().history.undoLabel).toBe("Apply 2 shapes to terrain")
+    // Undo brings the shapes back.
+    store.getState().undo()
+    store.getState().undo()
+    expect(store.getState().scene.levels[g]).toEqual(before)
+  })
+
+  it("updateLevel never writes terrain", () => {
+    const { f, store } = terrainFixture()
+    const before = store.getState().scene.levels[f.groundId]
+    const partial = { name: "Yard", heightmap: null, terrainEdits: undefined } as unknown as Parameters<ReturnType<EditorStore["getState"]>["updateLevel"]>[1]
+    expect(store.getState().updateLevel(f.groundId, partial)).toBe(true)
+    const level = store.getState().scene.levels[f.groundId]
+    expect(level.name).toBe("Yard")
+    expect(level.heightmap).toBe(before.heightmap)
+    expect(level.terrainEdits).toBe(before.terrainEdits)
+  })
+
+  it("grid resizes crop the painted base and rebake shapes; other grid edits leave terrain alone", () => {
+    const { f, store, grid } = terrainFixture()
+    const patches: Patch[][] = []
+    store.getState().setPatchSink((p) => patches.push(p))
+    store.getState().updateGrid({ diagonalRule: "5-10-5" })
+    expect(patches).toHaveLength(1)
+    expect(patches[0].every((p) => p.path[0] === "grid")).toBe(true)
+
+    // Shrink through b2 (x 50..60), then grow back: the painted base beyond the cut is gone, b2 is whole again.
+    const before = store.getState().scene.levels[f.groundId]
+    store.getState().updateGrid({ width: 11 })
+    let scene = store.getState().scene
+    expect(scene.grid.width).toBe(11)
+    expectConsistent(scene.levels[f.groundId], scene.grid)
+    store.getState().updateGrid({ width: grid.width })
+    scene = store.getState().scene
+    const level = scene.levels[f.groundId]
+    expect(level.terrainEdits!.shapes).toEqual(before.terrainEdits!.shapes)
+    expectConsistent(level, scene.grid)
+    expect(levelGround(scene, f.groundId, 55, 55)).toBe(-3)
+    expect(levelGround(scene, f.groundId, 80, 0)).toBe(0)
+    expect(levelGround(scene, f.groundId, 40, 0)).toBeCloseTo(4)
+    // Chunks are patched key by key while the resolution is unchanged.
+    expect(patches[patches.length - 1].every((p) => p.path[0] === "grid" || p.path.length === 5)).toBe(true)
+    store.getState().undo()
+    store.getState().undo()
+    expect(store.getState().scene.levels[f.groundId]).toEqual(before)
+  })
+
+  it("a grid shrink that leaves a shape beyond the extent (+50 ft margin) is refused", () => {
+    const store = makeStore(createScene({ width: 20, depth: 20, groundFloor: false }))
+    const id = store.getState().activeLevelId
+    store.getState().applyTerrainEdit(id, { upsert: [blockShape("far", { x: 80, z: 50, w: 10, d: 10 }, 0, -3, 0)] }, "Add shape")
+    store.getState().updateGrid({ width: 5 })
+    expect(store.getState().scene.grid.width).toBe(20)
+    expect(store.getState().lastRejected?.issues.join("\n")).toMatch(/terrainEdits\.shapes\.far\.points/)
+    store.getState().updateGrid({ width: 8 })
+    expect(store.getState().scene.grid.width).toBe(8)
   })
 })

@@ -115,25 +115,28 @@ export function aaLineGeometry(pairs: ArrayLike<number>): THREE.BufferGeometry {
   const position = new Float32Array(n * 12)
   const corner = new Float32Array(n * 8)
   const index = new Uint32Array(n * 6)
-  const CORNERS = [
-    [0, -1],
-    [0, 1],
-    [1, 1],
-    [1, -1],
-  ]
+  // Corners (end, side): (0, -1), (0, 1), (1, 1), (1, -1). Flat loops: overlays merge thousands of segments.
   for (let k = 0; k < n; k++) {
+    const p = k * 6
     for (let v = 0; v < 4; v++) {
       const o = (k * 4 + v) * 3
+      const atEnd = v >= 2 ? 3 : 0
       for (let c = 0; c < 3; c++) {
-        start[o + c] = pairs[k * 6 + c]
-        end[o + c] = pairs[k * 6 + 3 + c]
-        position[o + c] = pairs[k * 6 + (CORNERS[v][0] === 0 ? 0 : 3) + c]
+        start[o + c] = pairs[p + c]
+        end[o + c] = pairs[p + 3 + c]
+        position[o + c] = pairs[p + atEnd + c]
       }
-      corner[(k * 4 + v) * 2] = CORNERS[v][0]
-      corner[(k * 4 + v) * 2 + 1] = CORNERS[v][1]
+      corner[(k * 4 + v) * 2] = v >= 2 ? 1 : 0
+      corner[(k * 4 + v) * 2 + 1] = v === 1 || v === 2 ? 1 : -1
     }
     const b = k * 4
-    index.set([b, b + 1, b + 2, b, b + 2, b + 3], k * 6)
+    const i = k * 6
+    index[i] = b
+    index[i + 1] = b + 1
+    index[i + 2] = b + 2
+    index[i + 3] = b
+    index[i + 4] = b + 2
+    index[i + 5] = b + 3
   }
   const g = new THREE.BufferGeometry()
   g.setAttribute("position", new THREE.BufferAttribute(position, 3))

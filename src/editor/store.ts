@@ -18,7 +18,17 @@ import { createStore, type StoreApi } from "zustand/vanilla"
 import type { SnapMode } from "@/core/grid/grid"
 import { createHistory, type HistoryOptions, type HistoryState } from "@/core/history"
 import { createLevel, createScene } from "@/core/scene/factory"
-import { cropHeightmapToGrid } from "@/core/scene/heightmap"
+import { createHeightmap, DEFAULT_TERRAIN_RESOLUTION, sampleCounts, sampleSpacing } from "@/core/scene/heightmap"
+import {
+  applyShapesEdit,
+  cropTerrainToGrid,
+  hasPaintedBase,
+  resampleTerrain,
+  writeTerrain,
+  type TerrainEdit,
+  type TerrainElementRef,
+  type TerrainResult,
+} from "@/core/scene/terrainShapes"
 import {
   copySelection as copyItems,
   deleteWithDependents,
@@ -34,6 +44,7 @@ import type {
   DoorState,
   Environment,
   GridSettings,
+  Heightmap,
   Id,
   Level,
   Scene,
@@ -75,7 +86,8 @@ export type ObjectUpdate = {
 }[SceneObject["type"]]
 
 export type TokenUpdate = Partial<Omit<Token, "id">>
-export type LevelUpdate = Partial<Omit<Level, "id">>
+/** Level fields editable through updateLevel. Terrain (heightmap, terrainEdits) goes through the terrain actions. */
+export type LevelUpdate = Partial<Omit<Level, "id" | "heightmap" | "terrainEdits">>
 export type EnvironmentUpdate = Partial<Omit<Environment, "directional">> & { directional?: Partial<DirectionalLightSettings> }
 export type GridUpdate = Partial<Pick<GridSettings, "width" | "depth" | "diagonalRule">>
 
@@ -105,6 +117,15 @@ export interface DocumentStash {
   readonly scene: Scene
   /** @internal */
   readonly _state: unknown
+}
+
+/** Terrain shapes (and, in the advanced mode, their elements) selected by the terrain tool on one level. */
+export interface TerrainSelection {
+  levelId: Id
+  /** Non-empty; ids of Level.terrainEdits.shapes. */
+  shapeIds: Id[]
+  /** Advanced mode: selected elements of the selected shapes. */
+  elements: TerrainElementRef[]
 }
 
 interface StashState {
@@ -138,6 +159,13 @@ export interface EditorState {
 
   // ---- editor UI state ----------------------------------------------------
   selection: Id[]
+  /**
+   * The terrain tool's shape selection (not scene objects, so not `selection`). Missing shapes are dropped
+   * on every document change (syncScene included); cleared on level change, a new / loaded / restored
+   * document and when the terrain tool is left. When it becomes empty, toolSettings.terrain.advanced
+   * resets to false (the advanced mode is effective only with shapes selected).
+   */
+  terrainSelection: TerrainSelection | null
   activeLevelId: Id
   tool: ToolId
   toolSettings: ToolSettings
@@ -179,9 +207,42 @@ export interface EditorState {
 
   // ---- levels -------------------------------------------------------------
   addLevel(partial?: Partial<Level>, opts?: { activate?: boolean }): Id | null
+  /** Edit level fields (not its terrain: see the terrain actions below). Returns false when refused. */
   updateLevel(id: Id, partial: LevelUpdate): boolean
   removeLevel(id: Id): boolean
-  clearTerrain(levelId: Id): void
+
+  // ---- terrain (every write goes through core/scene/terrainShapes; each action is one undo step) ----
+  // The boolean actions return true when the document changed; false when refused (read-only, unknown
+  // level, writeTerrain or validateEdit) or when there was nothing to do.
+  /**
+   * Edit a level's terrain through core/scene/terrainShapes writeTerrain (the single writer of heightmap +
+   * terrainEdits) as one undo step. Returns false when the edit was refused (writeTerrain or validateEdit)
+   * or changed nothing. `opts.coalesceKey` merges repeated edits (e.g. terrain nudges) into one step.
+   */
+  applyTerrainEdit(levelId: Id, edit: TerrainEdit, label: string, opts?: ApplyOptions): boolean
+  /** Give a level without terrain an empty heightmap (default resolution DEFAULT_TERRAIN_RESOLUTION). */
+  enableTerrain(levelId: Id, resolution?: Heightmap["resolution"]): boolean
+  /** Remove the level's terrain: heightmap null, terrain shapes and painted base deleted. */
+  clearTerrain(levelId: Id): boolean
+  /**
+   * Painted terrain (the base) back to 0 everywhere; the shapes stay (rebaked on the flat ground). False
+   * when the painted base is already flat (`hasPaintedBase`), even where shapes raise the terrain.
+   */
+  flattenTerrain(levelId: Id): boolean
+  /** Delete every terrain shape of the level (the painted base becomes the heightmap). */
+  clearTerrainShapes(levelId: Id): boolean
+  /**
+   * Change the heightmap resolution: the painted base is resampled, the shapes rebaked at the new
+   * resolution (baseChunks rewritten in the same edit). A level without terrain gets an empty heightmap.
+   */
+  setTerrainResolution(levelId: Id, resolution: Heightmap["resolution"]): boolean
+  /**
+   * "Apply to terrain": bake the given shapes into the painted base and delete them, together with the
+   * older shapes under them (`applyShapesClosure`), so the terrain does not change. The undo label counts
+   * every applied shape ("Apply 2 shapes to terrain").
+   */
+  applyTerrainShapes(levelId: Id, shapeIds: readonly Id[]): boolean
+  /** Changing the active level clears the terrain selection. */
   setActiveLevel(id: Id): void
   /** +1 = the level above, −1 = the level below. */
   stepActiveLevel(delta: number): void
@@ -205,6 +266,8 @@ export interface EditorState {
   updateSceneInfo(partial: { name?: string; meta?: Partial<SceneMeta> }): void
 
   // ---- selection ----------------------------------------------------------
+  /** Set the terrain selection (normalised: unknown shapes dropped, elements limited to selected shapes, empty → null). */
+  setTerrainSelection(selection: TerrainSelection | null): void
   select(ids: Id[], mode?: SelectMode): void
   toggleSelected(id: Id): void
   clearSelection(): void
@@ -229,6 +292,7 @@ export interface EditorState {
   moveTokens(moves: { id: Id; position: Vec2; levelId?: Id }[], label?: string): void
 
   // ---- tools, snapping, view ----------------------------------------------
+  /** Leaving the terrain tool clears the terrain selection. */
   setTool(tool: ToolId): void
   setToolSettings<K extends keyof ToolSettings>(tool: K, partial: Partial<ToolSettings[K]>): void
   /** Multiply the brush radius (clamped). */
@@ -291,6 +355,8 @@ function resolveActiveLevel(next: Scene, id: Id, prev: Scene): Id {
 }
 
 const sameIds = (a: readonly Id[], b: readonly Id[]) => a.length === b.length && a.every((id, k) => id === b[k])
+const sameElements = (a: readonly TerrainElementRef[], b: readonly TerrainElementRef[]) =>
+  a.length === b.length && a.every((e, k) => e.shapeId === b[k].shapeId && e.kind === b[k].kind && e.index === b[k].index)
 
 /**
  * Connectors must lead to an existing, higher level. After level edits, retarget broken ones to the
@@ -375,6 +441,65 @@ const OBJECT_LABELS: Record<SceneObject["type"], string> = {
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`
 
+/**
+ * The terrain selection against `scene`: shapes that no longer exist are dropped, elements are limited to
+ * the remaining shapes, and an empty selection becomes null. Returns `sel` itself when nothing changed.
+ */
+export function normalizeTerrainSelection(scene: Scene, sel: TerrainSelection | null): TerrainSelection | null {
+  if (!sel) return null
+  const shapes = hasOwn(scene.levels, sel.levelId) ? scene.levels[sel.levelId].terrainEdits?.shapes : undefined
+  if (!shapes) return null
+  const shapeIds = sel.shapeIds.filter((id, k) => hasOwn(shapes, id) && sel.shapeIds.indexOf(id) === k)
+  if (shapeIds.length === 0) return null
+  const elements = sel.elements.filter((e) => shapeIds.includes(e.shapeId))
+  if (shapeIds.length === sel.shapeIds.length && elements.length === sel.elements.length) return sel
+  return { levelId: sel.levelId, shapeIds, elements }
+}
+
+/**
+ * State update that sets the terrain selection to `next`: when a selection becomes empty, the advanced
+ * (element editing) mode switches off too.
+ */
+function terrainSelectionUpdate(
+  s: Pick<EditorState, "terrainSelection" | "toolSettings">,
+  next: TerrainSelection | null
+): Pick<EditorState, "terrainSelection"> & Partial<Pick<EditorState, "toolSettings">> {
+  if (next === null && s.terrainSelection !== null && s.toolSettings.terrain.advanced) {
+    return { terrainSelection: null, toolSettings: { ...s.toolSettings, terrain: { ...s.toolSettings.terrain, advanced: false } } }
+  }
+  return { terrainSelection: next }
+}
+
+/**
+ * Write new terrain fields (a core/scene/terrainShapes level operation's result for `prev`, the level
+ * the draft started from) into the draft level, assigning only what changed: heightmap chunks, shapes
+ * and base chunks key by key while the resolution is unchanged (small, per-chunk undo patches), whole
+ * records otherwise.
+ */
+function assignTerrain(draft: Draft<Level>, prev: Level, next: TerrainResult): void {
+  const ph = prev.heightmap
+  const nh = next.heightmap
+  if (nh !== ph) {
+    if (!ph || !nh || !draft.heightmap || ph.resolution !== nh.resolution) draft.heightmap = nh
+    else assignRecord(draft.heightmap.chunks, ph.chunks, nh.chunks)
+  }
+  const pt = prev.terrainEdits
+  const nt = next.terrainEdits
+  if (nt === pt) return
+  if (!nt) delete draft.terrainEdits
+  else if (!pt || !draft.terrainEdits) draft.terrainEdits = nt
+  else {
+    assignRecord(draft.terrainEdits.shapes, pt.shapes, nt.shapes)
+    assignRecord(draft.terrainEdits.baseChunks, pt.baseChunks, nt.baseChunks)
+  }
+}
+
+/** Make `draft` (a draft of `prev`) equal to `next`, touching only keys whose value (identity) changed. */
+function assignRecord<T>(draft: Record<string, T>, prev: Readonly<Record<string, T>>, next: Readonly<Record<string, T>>): void {
+  for (const k of Object.keys(prev)) if (!hasOwn(next, k)) delete draft[k]
+  for (const k of Object.keys(next)) if (!hasOwn(prev, k) || prev[k] !== next[k]) draft[k] = next[k]
+}
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -394,17 +519,23 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
   return createStore<EditorState>()((set, get) => {
     const isDirty = () => history.state().head !== savedHead || (history.inTransaction && txnChanged)
 
+    /** The terrain selection after the document became `next`: missing shapes dropped; cleared when the active level changed. */
+    const adoptedTerrainSelection = (s: EditorState, next: Scene, activeLevelId: Id) =>
+      terrainSelectionUpdate(s, activeLevelId === s.activeLevelId ? normalizeTerrainSelection(next, s.terrainSelection) : null)
+
     /** Publish a new document revision produced by `patches`, and forward the patches to a live host. */
     const commitDoc = (next: Scene, patches: Patch[], label: string, source: PatchSource) => {
       const s = get()
       const selection = s.selection.filter((id) => itemExists(next, id))
+      const activeLevelId = resolveActiveLevel(next, s.activeLevelId, s.scene)
       set({
         scene: next,
         revision: s.revision + 1,
         lastChange: sceneChangeFromPatches(patches),
         lastRejected: null,
         selection: sameIds(selection, s.selection) ? s.selection : selection,
-        activeLevelId: resolveActiveLevel(next, s.activeLevelId, s.scene),
+        ...adoptedTerrainSelection(s, next, activeLevelId),
+        activeLevelId,
         history: history.state(),
         dirty: isDirty(),
       })
@@ -506,6 +637,7 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
       playActions: false,
 
       selection: [],
+      terrainSelection: null,
       activeLevelId: defaultActiveLevel(initialScene),
       tool: "select",
       toolSettings: defaultToolSettings(),
@@ -602,6 +734,7 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
           dirty: false,
           history: history.state(),
           selection: [],
+          ...terrainSelectionUpdate(s, null),
           activeLevelId: defaultActiveLevel(scene),
           view: { ...s.view, levelVisibility: {} },
         })
@@ -633,6 +766,7 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
           history: history.state(),
           dirty: isDirty(),
           selection: st.selection.filter((id) => itemExists(scene, id)),
+          ...terrainSelectionUpdate(s, null),
           activeLevelId: Object.hasOwn(scene.levels, st.activeLevelId) ? st.activeLevelId : defaultActiveLevel(scene),
           view: { ...s.view, levelVisibility: {} },
         })
@@ -646,12 +780,15 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
         const s = get()
         if (scene === s.scene) return
         const selection = s.selection.filter((id) => itemExists(scene, id))
+        const activeLevelId = resolveActiveLevel(scene, s.activeLevelId, s.scene)
         set({
           scene,
           revision: s.revision + 1,
           lastChange: null,
           selection: sameIds(selection, s.selection) ? s.selection : selection,
-          activeLevelId: resolveActiveLevel(scene, s.activeLevelId, s.scene),
+          // Live hosts re-sync on every player step: drop missing shapes only, never the whole selection.
+          ...adoptedTerrainSelection(s, scene, activeLevelId),
+          activeLevelId,
         })
       },
 
@@ -685,14 +822,19 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
         apply((d) => {
           d.levels[level.id] = level
         }, "Add level")
-        if (levelOpts.activate !== false && hasOwn(get().scene.levels, level.id)) set({ activeLevelId: level.id, selection: [] })
+        if (levelOpts.activate !== false && hasOwn(get().scene.levels, level.id)) {
+          set({ activeLevelId: level.id, selection: [], ...terrainSelectionUpdate(get(), null) })
+        }
         return level.id
       },
 
       updateLevel(id, partial) {
         if (!hasOwn(get().scene.levels, id)) return false
-        const rest: LevelUpdate & { id?: unknown } = { ...partial }
+        const rest: LevelUpdate & { id?: unknown; heightmap?: unknown; terrainEdits?: unknown } = { ...partial }
         delete rest.id
+        // Terrain has its own actions (writeTerrain keeps heightmap and terrainEdits consistent).
+        delete rest.heightmap
+        delete rest.terrainEdits
         return tryApply(
           (d) => {
             Object.assign(d.levels[id], rest)
@@ -710,15 +852,86 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
         return true
       },
 
+      applyTerrainEdit(levelId, edit, label, applyOpts) {
+        if (!hasOwn(get().scene.levels, levelId)) return false
+        let ok = true
+        const patches = apply(
+          (d) => {
+            if (!hasOwn(d.levels, levelId)) return
+            ok = writeTerrain(d.levels[levelId], d.grid, edit)
+          },
+          label,
+          applyOpts
+        )
+        return ok && patches.length > 0
+      },
+
+      enableTerrain(levelId, resolution = DEFAULT_TERRAIN_RESOLUTION) {
+        const s = get()
+        if (!hasOwn(s.scene.levels, levelId) || s.scene.levels[levelId].heightmap) return false
+        return (
+          apply((d) => {
+            d.levels[levelId].heightmap = createHeightmap(resolution)
+          }, "Enable terrain").length > 0
+        )
+      },
+
       clearTerrain(levelId) {
-        if (!hasOwn(get().scene.levels, levelId)) return
-        apply((d) => {
-          d.levels[levelId].heightmap = null
-        }, "Clear terrain")
+        const s = get()
+        if (!hasOwn(s.scene.levels, levelId)) return false
+        const level = s.scene.levels[levelId]
+        if (!level.heightmap && !level.terrainEdits) return false
+        return (
+          apply((d) => {
+            const l = d.levels[levelId]
+            l.heightmap = null
+            delete l.terrainEdits
+          }, "Clear terrain").length > 0
+        )
+      },
+
+      flattenTerrain(levelId) {
+        const s = get()
+        if (!hasOwn(s.scene.levels, levelId)) return false
+        const level = s.scene.levels[levelId]
+        const hm = level.heightmap
+        if (!hm || !hasPaintedBase(level)) return false
+        // A zero base over the whole extent: shapes stay and are rebaked on the flat ground.
+        const grid = s.scene.grid
+        const { samplesX, samplesZ } = sampleCounts(grid, hm.resolution)
+        const lattice = { samplesX, samplesZ, heights: new Float32Array(samplesX * samplesZ), spacing: sampleSpacing(grid.cellSize, hm.resolution) }
+        const extent = { x: 0, z: 0, w: grid.width * grid.cellSize, d: grid.depth * grid.cellSize }
+        return get().applyTerrainEdit(levelId, { base: { lattice, rects: [extent] } }, "Flatten terrain")
+      },
+
+      clearTerrainShapes(levelId) {
+        const s = get()
+        const shapes = hasOwn(s.scene.levels, levelId) ? s.scene.levels[levelId].terrainEdits?.shapes : undefined
+        if (!shapes) return false
+        return get().applyTerrainEdit(levelId, { remove: Object.keys(shapes) }, "Delete terrain shapes")
+      },
+
+      setTerrainResolution(levelId, resolution) {
+        const s = get()
+        if (!hasOwn(s.scene.levels, levelId)) return false
+        const level = s.scene.levels[levelId]
+        if (level.heightmap?.resolution === resolution) return false
+        const next = resampleTerrain(level, s.scene.grid, resolution)
+        return tryApply((d) => assignTerrain(d.levels[levelId], level, next), "Change terrain resolution") && get().scene !== s.scene
+      },
+
+      applyTerrainShapes(levelId, shapeIds) {
+        const s = get()
+        if (!hasOwn(s.scene.levels, levelId)) return false
+        const edit = applyShapesEdit(s.scene.levels[levelId], s.scene.grid, shapeIds)
+        if (!edit) return false
+        const n = edit.remove?.length ?? 0
+        return get().applyTerrainEdit(levelId, edit, n === 1 ? "Apply shape to terrain" : `Apply ${plural(n, "shape")} to terrain`)
       },
 
       setActiveLevel(id) {
-        if (hasOwn(get().scene.levels, id) && get().activeLevelId !== id) set({ activeLevelId: id })
+        const s = get()
+        if (hasOwn(s.scene.levels, id) && s.activeLevelId !== id) set({ activeLevelId: id, ...terrainSelectionUpdate(s, null) })
       },
 
       stepActiveLevel(delta) {
@@ -848,17 +1061,20 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
 
       updateGrid(partial) {
         const clampCells = (v: number) => Math.min(SCENE_LIMITS.maxGridCells, Math.max(1, Math.round(v)))
+        const s = get()
+        const prevGrid = s.scene.grid
         apply((d) => {
           if (partial.width !== undefined) d.grid.width = clampCells(partial.width)
           if (partial.depth !== undefined) d.grid.depth = clampCells(partial.depth)
           if (partial.diagonalRule !== undefined) d.grid.diagonalRule = partial.diagonalRule
-          // Restrict heightmaps to the (possibly smaller) lattice: chunks beyond it are dropped and the
-          // padding of boundary chunks is zeroed, so old heights can't come back if the grid grows again.
-          for (const level of Object.values(d.levels)) {
-            const hm = level.heightmap
-            if (!hm) continue
-            const cropped = cropHeightmapToGrid(hm, d.grid)
-            if (cropped !== hm) level.heightmap = cropped
+          if (d.grid.width === prevGrid.width && d.grid.depth === prevGrid.depth) return
+          // Terrain follows the new lattice: the painted base is cropped (samples beyond it dropped, so old
+          // heights can't come back if the grid grows again) and the shapes rebaked (a grown grid shows the
+          // parts of shapes it re-exposes). Shapes beyond the new extent make validateEdit refuse the edit.
+          const grid = { width: d.grid.width, depth: d.grid.depth, cellSize: d.grid.cellSize }
+          for (const id of Object.keys(s.scene.levels)) {
+            const level = s.scene.levels[id]
+            if (level.heightmap) assignTerrain(d.levels[id], level, cropTerrainToGrid(level, grid, prevGrid))
           }
         }, "Edit grid")
       },
@@ -907,6 +1123,15 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
 
       toggleSelected(id) {
         get().select([id], "toggle")
+      },
+
+      setTerrainSelection(selection) {
+        const s = get()
+        const next = normalizeTerrainSelection(s.scene, selection)
+        const cur = s.terrainSelection
+        if (next === cur) return
+        if (next && cur && next.levelId === cur.levelId && sameIds(next.shapeIds, cur.shapeIds) && sameElements(next.elements, cur.elements)) return
+        set(terrainSelectionUpdate(s, next))
       },
 
       clearSelection() {
@@ -1064,7 +1289,9 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
       // ---- tools, snapping, view ----------------------------------------------
 
       setTool(tool) {
-        if (get().tool !== tool) set({ tool })
+        const s = get()
+        if (s.tool === tool) return
+        set(s.tool === "terrain" ? { tool, ...terrainSelectionUpdate(s, null) } : { tool })
       },
 
       setToolSettings(tool, partial) {

@@ -2,7 +2,7 @@
  * Viewer eyes and token test points (docs/ARCHITECTURE.md §5.2 "Viewer eye" and "Tokens").
  * The renderer uses resolveViewerEye too, so CPU and GPU line of sight start from the same point.
  */
-import { heightfieldSurfaceAt, primitiveContains, pushOutOfPrimitive } from "../occlusion/primitives"
+import { heightfieldSurfaceAt, primitiveContains, primitiveTopAt, pushOutOfPrimitive } from "../occlusion/primitives"
 import type { OccluderPrimitive, OcclusionWorld, SegmentQueryOptions } from "../occlusion/types"
 import { SIZE_FOOTPRINT } from "../scene/defaults"
 import type { Token, Vec3 } from "../scene/types"
@@ -62,15 +62,23 @@ const OWN_FLOOR_TOLERANCE = 0.01
 function pushOutOfSlab(p: OccluderPrimitive, q: Vec3, groundY: number): Vec3 {
   let top: number | null
   let bottom: number
-  if (p.shape === "heightfield") {
-    top = heightfieldSurfaceAt(p, q.x, q.z)
-    bottom = top === null ? 0 : top - p.thickness
-  } else if (p.shape === "box") {
-    top = p.center.y + p.halfExtents.y
-    bottom = p.center.y - p.halfExtents.y
-  } else {
-    top = p.base.y + p.height
-    bottom = p.base.y
+  switch (p.shape) {
+    case "heightfield":
+      top = heightfieldSurfaceAt(p, q.x, q.z)
+      bottom = top === null ? 0 : top - p.thickness
+      break
+    case "box":
+      top = p.center.y + p.halfExtents.y
+      bottom = p.center.y - p.halfExtents.y
+      break
+    case "cylinder":
+      top = p.base.y + p.height
+      bottom = p.base.y
+      break
+    case "strip":
+      top = primitiveTopAt(p, q.x, q.z)
+      bottom = p.bottom
+      break
   }
   if (top === null) return pushOutOfPrimitive(p, q, EYE_PUSH_MARGIN)
   const y = top <= groundY + OWN_FLOOR_TOLERANCE ? top + EYE_PUSH_MARGIN : bottom - EYE_PUSH_MARGIN

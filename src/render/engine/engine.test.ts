@@ -7,14 +7,17 @@ import * as THREE from "three"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createDoor, createFloor, createLevel, createLight, createProp, createScene, createToken, createWall } from "@/core/scene/factory"
-import { denseHeights, createHeightmap } from "@/core/scene/heightmap"
-import type { DoorObject, Scene } from "@/core/scene/types"
+import { denseHeights, createHeightmap, writeHeights } from "@/core/scene/heightmap"
+import { blockShape, writeTerrain } from "@/core/scene/terrainShapes"
+import type { DoorObject, FloorObject, Scene } from "@/core/scene/types"
 
 import type { FrameStats, SceneChange } from "../contracts"
 
 const calls = vi.hoisted(() => ({
   setScene: 0,
   applyChange: [] as { change: SceneChange; dirty: unknown[] }[],
+  /** LightingSystem.previewTerrain calls (ground: the sampler passed, or null). */
+  lightPreviews: [] as { levelId: string; ground: unknown; dirty: unknown }[],
   setView: [] as { mode: string; activeLevelId: string | null }[],
   setQuality: [] as string[],
   prepareQuality: [] as string[],
@@ -141,6 +144,9 @@ vi.mock("../lighting/system", async () => {
       applyChange: (_s: unknown, _w: unknown, change: SceneChange, dirty: unknown[]) => {
         calls.applyChange.push({ change, dirty })
       },
+      previewTerrain: (levelId: string, ground: unknown, dirty: unknown) => {
+        calls.lightPreviews.push({ levelId, ground, dirty })
+      },
       setView: (v: { mode: string; activeLevelId: string | null }) => {
         calls.setView.push({ mode: v.mode, activeLevelId: v.activeLevelId })
       },
@@ -173,6 +179,10 @@ const { createEngine } = await import("../index")
 const { placeholderFloatTexture } = await import("../materials/placeholders")
 const { noiseTexture } = await import("../materials/surface")
 const { tokenBaseGeometry } = await import("../builders/tokens")
+const { BuildContext, buildBucket } = await import("../builders")
+const { GroundSampler } = await import("../builders/ground")
+const { gridGeometry } = await import("../overlays/grid")
+const { LevelView } = await import("./levels")
 
 interface Internals {
   levels: Map<string, { group: THREE.Group; mode: string; doorLeaves(): { pivot: THREE.Object3D; mesh: THREE.Mesh }[]; terrain(): { mesh: THREE.Mesh } | null }>
@@ -210,6 +220,7 @@ describe("engine", () => {
   beforeEach(() => {
     calls.setScene = 0
     calls.applyChange = []
+    calls.lightPreviews = []
     calls.setView = []
     calls.setQuality = []
     calls.prepareQuality = []
@@ -513,6 +524,448 @@ describe("engine", () => {
     expect(peak).toBeCloseTo(6)
     engine.previewTerrain(ground, null, null)
     expect(lv.terrain()).toBeNull()
+    engine.dispose()
+  })
+
+  it("moves an existing terrain mesh in place from the first preview frame and grows the camera bounds", () => {
+    const { scene, ground } = sampleScene()
+    const level = scene.levels[ground]
+    const withTerrain: Scene = { ...scene, levels: { ...scene.levels, [ground]: { ...level, heightmap: createHeightmap(2) } } }
+    const engine = createEngine(canvasEl())
+    const internals = engine as unknown as Internals & { bounds: { max: { y: number } } }
+    engine.setScene(withTerrain)
+    const lv = internals.levels.get(ground)!
+    const terrain = lv.terrain()!
+    expect(terrain).not.toBeNull()
+    const maxBefore = internals.bounds.max.y
+    const heights = denseHeights(createHeightmap(2), scene.grid).heights.slice()
+    heights[10 * 41 + 10] = 30
+    engine.previewTerrain(ground, heights, { x: 24, z: 24, w: 2, d: 2 })
+    // No rebuild: the same mesh, its vertices moved; the bounds cover the raised ground.
+    expect(lv.terrain()!.mesh).toBe(terrain.mesh)
+    const pos = terrain.mesh.geometry.getAttribute("position")
+    let peak = -Infinity
+    for (let k = 0; k < pos.count; k++) peak = Math.max(peak, pos.getY(k))
+    expect(peak).toBeCloseTo(30)
+    expect(terrain.mesh.geometry.boundingBox!.max.y).toBeCloseTo(30)
+    expect(internals.bounds.max.y).toBeCloseTo(Math.max(maxBefore, 30 + level.height))
+    engine.dispose()
+  })
+
+  it("refreshes the camera bounds when committed terrain changes", () => {
+    const { scene, ground } = sampleScene()
+    const engine = createEngine(canvasEl())
+    const internals = engine as unknown as { bounds: { max: { y: number } } }
+    engine.setScene(scene)
+    const before = internals.bounds.max.y
+    const heights = denseHeights(createHeightmap(2), scene.grid).heights.slice()
+    heights[10 * 41 + 10] = 40
+    const heightmap = writeHeights(createHeightmap(2), scene.grid, heights)
+    const raised: Scene = { ...scene, levels: { ...scene.levels, [ground]: { ...scene.levels[ground], heightmap } } }
+    engine.updateScene(raised, { terrain: [ground] })
+    expect(internals.bounds.max.y).toBeGreaterThan(before)
+    expect(internals.bounds.max.y).toBeCloseTo(40 + scene.levels[ground].height)
+    engine.dispose()
+  })
+
+  it("rebuilds follow-terrain walls on a terrain preview, throttled, and restores them when it ends", () => {
+    const { scene, ground, wall } = sampleScene()
+    const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+    const engine = createEngine(canvasEl())
+    const internals = engine as unknown as Internals
+    engine.setScene(scene)
+    const lv = internals.levels.get(ground)!
+    const wallsRoot = lv.group.children[1]
+    const wallTop = () => {
+      const g = (wallsRoot.children[0] as THREE.Mesh).geometry
+      g.computeBoundingBox()
+      return g.boundingBox!.max.y
+    }
+    expect(wallTop()).toBeCloseTo(wall.height)
+    const heights = denseHeights(createHeightmap(2), scene.grid).heights.slice()
+    // Raise the ground under the wall (z = 30 → lattice row 12; x = 30 → column 12).
+    heights[12 * 41 + 12] = 5
+    engine.previewTerrain(ground, heights, { x: 29, z: 29, w: 2, d: 2 })
+    const first = wallsRoot.children[0]
+    expect(wallTop()).toBeCloseTo(5 + wall.height)
+    // Within the interval: no rebuild yet...
+    heights[12 * 41 + 12] = 8
+    now.mockReturnValue(1050)
+    engine.previewTerrain(ground, heights, { x: 29, z: 29, w: 2, d: 2 })
+    expect(wallsRoot.children[0]).toBe(first)
+    // ... the next frame after it rebuilds once more.
+    frame(16)
+    expect(wallsRoot.children[0]).toBe(first)
+    now.mockReturnValue(1101)
+    frame(32)
+    expect(wallsRoot.children[0]).not.toBe(first)
+    expect(wallTop()).toBeCloseTo(8 + wall.height)
+    // A preview away from every follow-terrain wall leaves them alone.
+    const rebuilt = wallsRoot.children[0]
+    now.mockReturnValue(2000)
+    heights[2 * 41 + 2] = 3
+    engine.previewTerrain(ground, heights, { x: 4, z: 4, w: 2, d: 2 })
+    expect(wallsRoot.children[0]).toBe(rebuilt)
+    // Clearing the preview puts the walls back on the document terrain.
+    engine.previewTerrain(ground, null, null)
+    expect(wallTop()).toBeCloseTo(wall.height)
+    now.mockRestore()
+    engine.dispose()
+  })
+
+  it("waits after a slow preview wall rebuild in proportion to its cost, measured from its end", () => {
+    const { scene, ground } = sampleScene()
+    let clock = 1000
+    const now = vi.spyOn(performance, "now").mockImplementation(() => clock)
+    const engine = createEngine(canvasEl())
+    const internals = engine as unknown as Internals
+    engine.setScene(scene)
+    // Every walls / doors bucket build takes 25 ms of the fake clock (a 50 ms rebuild).
+    const setBucket = LevelView.prototype.setBucket
+    const slow = vi.spyOn(LevelView.prototype, "setBucket").mockImplementation(function (this: InstanceType<typeof LevelView>, kind, build) {
+      if (kind === "walls" || kind === "doors") clock += 25
+      setBucket.call(this, kind, build)
+    })
+    const wallsRoot = internals.levels.get(ground)!.group.children[1]
+    const heights = denseHeights(createHeightmap(2), scene.grid).heights.slice()
+    const at = { x: 29, z: 29, w: 2, d: 2 }
+    heights[12 * 41 + 12] = 5
+    engine.previewTerrain(ground, heights, at)
+    const first = wallsRoot.children[0]
+    expect(clock).toBe(1050)
+    // 150 ms after the rebuild started: the old throttle (100 ms from its start) rebuilt again here. Now the
+    // next one waits 8 × 50 ms after the rebuild ended (1450).
+    clock = 1150
+    heights[12 * 41 + 12] = 6
+    engine.previewTerrain(ground, heights, at)
+    expect(wallsRoot.children[0]).toBe(first)
+    clock = 1440
+    frame(16)
+    expect(wallsRoot.children[0]).toBe(first)
+    // The trailing rebuild once the wait is over.
+    clock = 1450
+    frame(32)
+    expect(wallsRoot.children[0]).not.toBe(first)
+    slow.mockRestore()
+    now.mockRestore()
+    engine.dispose()
+  })
+
+  it("rebuilds outlines after a preview wall rebuild only when they hang on that level's walls", () => {
+    const { scene, ground, wall } = sampleScene()
+    const now = vi.spyOn(performance, "now").mockReturnValue(1000)
+    const engine = createEngine(canvasEl())
+    const internals = engine as unknown as Internals & { overlays: { sceneChanged(): void } }
+    engine.setScene(scene)
+    const sceneChanged = vi.spyOn(internals.overlays, "sceneChanged")
+    const wallsRoot = internals.levels.get(ground)!.group.children[1]
+    const heights = denseHeights(createHeightmap(2), scene.grid).heights.slice()
+    heights[12 * 41 + 12] = 5
+    engine.previewTerrain(ground, heights, { x: 29, z: 29, w: 2, d: 2 })
+    const first = wallsRoot.children[0]
+    // Walls rebuilt, nothing outlined on them: outlines and light rings are left alone.
+    expect(sceneChanged).not.toHaveBeenCalled()
+    engine.setOverlays({ selectedIds: [wall.id] })
+    now.mockReturnValue(2000)
+    heights[12 * 41 + 12] = 6
+    engine.previewTerrain(ground, heights, { x: 29, z: 29, w: 2, d: 2 })
+    expect(wallsRoot.children[0]).not.toBe(first)
+    expect(sceneChanged).toHaveBeenCalledTimes(1)
+    now.mockRestore()
+    engine.dispose()
+  })
+
+  it("passes terrain previews on to the lighting system, throttled, and ends them on clear but not on commit", () => {
+    const { scene, ground } = sampleScene()
+    let clock = 1000
+    const now = vi.spyOn(performance, "now").mockImplementation(() => clock)
+    const engine = createEngine(canvasEl())
+    engine.setScene(scene)
+    const heights = denseHeights(createHeightmap(2), scene.grid).heights.slice()
+    heights[2 * 41 + 2] = 3
+    engine.previewTerrain(ground, heights, { x: 4, z: 4, w: 2, d: 2 })
+    expect(calls.lightPreviews).toHaveLength(1)
+    expect(calls.lightPreviews[0]).toMatchObject({ levelId: ground, dirty: { x: 4, z: 4, w: 2, d: 2 } })
+    const sampler = calls.lightPreviews[0].ground as { heightAt(x: number, z: number): number }
+    expect(sampler.heightAt(5, 5)).toBeCloseTo(3)
+    // Within the interval: folded into one trailing call over the union of the dirty rects.
+    clock = 1040
+    heights[3 * 41 + 3] = 4
+    engine.previewTerrain(ground, heights, { x: 6, z: 6, w: 2, d: 2 })
+    clock = 1060
+    heights[6 * 41 + 6] = 4
+    engine.previewTerrain(ground, heights, { x: 14, z: 14, w: 2, d: 2 })
+    expect(calls.lightPreviews).toHaveLength(1)
+    frame(16)
+    expect(calls.lightPreviews).toHaveLength(1)
+    clock = 1100
+    frame(32)
+    expect(calls.lightPreviews).toHaveLength(2)
+    expect(calls.lightPreviews[1].dirty).toEqual({ x: 6, z: 6, w: 10, d: 10 })
+    // Clearing ends the lighting preview at once.
+    engine.previewTerrain(ground, null, null)
+    expect(calls.lightPreviews[2]).toEqual({ levelId: ground, ground: null, dirty: null })
+    // A commit replaces a preview: its pending update is dropped (applyChange brings the lighting system
+    // the committed terrain), no stale preview reaches it afterwards.
+    clock = 2000
+    engine.previewTerrain(ground, heights, { x: 4, z: 4, w: 2, d: 2 })
+    clock = 2010
+    engine.previewTerrain(ground, heights, { x: 14, z: 14, w: 2, d: 2 })
+    expect(calls.lightPreviews).toHaveLength(4)
+    const heightmap = writeHeights(createHeightmap(2), scene.grid, heights)
+    engine.updateScene({ ...scene, levels: { ...scene.levels, [ground]: { ...scene.levels[ground], heightmap } } }, { terrain: [ground] })
+    clock = 3000
+    frame(48)
+    expect(calls.lightPreviews).toHaveLength(4)
+    now.mockRestore()
+    engine.dispose()
+  })
+
+  it("commits a terrain edit in place: a one-shape nudge on a 100×100-cell resolution-4 level rebuilds neither the terrain mesh nor the grid", () => {
+    const scene: Scene = createScene({ width: 100, depth: 100 })
+    const ground = Object.keys(scene.levels)[0]
+    const far = createWall(ground, { x: 20, z: 450 }, { x: 80, z: 450 })
+    scene.objects[far.id] = far
+    const level = { ...scene.levels[ground], heightmap: createHeightmap(4) }
+    writeTerrain(level, scene.grid, { upsert: [blockShape("hill", { x: 200, z: 200, w: 40, d: 40 }, 0, 5, 0)] })
+    scene.levels[ground] = level
+    const engine = createEngine(canvasEl())
+    const internals = engine as unknown as Internals & { overlays: { grid: { mesh: THREE.Mesh } } }
+    engine.setScene(scene)
+    frame(0)
+    const lv = internals.levels.get(ground)!
+    const mesh = lv.terrain()!.mesh
+    const grid = internals.overlays.grid.mesh.geometry
+    expect(grid.getAttribute("position").count).toBe(401 * 401)
+    // Nudge the shape 5 ft east: the commit rewrites the chunks its old ∪ new footprint reaches.
+    const hm = level.heightmap!
+    const te = level.terrainEdits!
+    const nudged = { ...level, heightmap: { ...hm, chunks: { ...hm.chunks } }, terrainEdits: { shapes: { ...te.shapes }, baseChunks: { ...te.baseChunks } } }
+    writeTerrain(nudged, scene.grid, { upsert: [blockShape("hill", { x: 205, z: 200, w: 40, d: 40 }, 0, 5, 0)] })
+    const next: Scene = { ...scene, levels: { ...scene.levels, [ground]: nudged } }
+    const setBucket = vi.spyOn(LevelView.prototype, "setBucket")
+    const t0 = performance.now()
+    engine.updateScene(next, { terrain: [ground] })
+    const commitMs = performance.now() - t0
+    const rebuilt = setBucket.mock.calls.map((c) => c[0])
+    setBucket.mockRestore()
+    // Neither the terrain mesh nor the walls (none near the shape) are rebuilt.
+    expect(rebuilt).not.toContain("floors")
+    expect(rebuilt).not.toContain("walls")
+    expect(rebuilt).not.toContain("doors")
+    expect(lv.terrain()!.mesh).toBe(mesh)
+    // The mesh moved in place is what a full rebuild on the committed terrain draws.
+    const t1 = performance.now()
+    const fresh = buildBucket(new BuildContext(next), ground, "floors").meshes[0].geometry
+    const rebuildMs = performance.now() - t1
+    for (const name of ["position", "normal"]) {
+      const a = mesh.geometry.getAttribute(name).array
+      const b = fresh.getAttribute(name).array
+      expect(a.length).toBe(b.length)
+      let worst = 0
+      for (let k = 0; k < a.length; k++) worst = Math.max(worst, Math.abs(a[k] - b[k]))
+      expect(worst, name).toBeLessThan(1e-4)
+    }
+    fresh.dispose()
+    // The draped grid moved in place too.
+    frame(16)
+    expect(internals.overlays.grid.mesh.geometry).toBe(grid)
+    const want = gridGeometry(500, 500, GroundSampler.forLevel(nudged, next.grid)).getAttribute("position").array
+    const got = grid.getAttribute("position").array
+    let worst = 0
+    for (let k = 1; k < got.length; k += 3) worst = Math.max(worst, Math.abs(got[k] - want[k]))
+    expect(worst).toBeLessThan(1e-4)
+    // Measured ≈ 35 ms against ≈ 345 ms for the floors rebuild alone (the grid and the other buckets came on top).
+    console.log(`terrain commit, 100×100 cells at resolution 4: updateScene ${commitMs.toFixed(1)} ms in place (a floors rebuild alone: ${rebuildMs.toFixed(1)} ms)`)
+    expect(commitMs).toBeLessThan(rebuildMs / 2)
+    engine.dispose()
+  }, 30000)
+
+  it("rebuilds walls and doors on a terrain commit only when the change reaches a wall", () => {
+    const { scene, ground, wall } = sampleScene()
+    const withTerrain: Scene = { ...scene, levels: { ...scene.levels, [ground]: { ...scene.levels[ground], heightmap: createHeightmap(2) } } }
+    const engine = createEngine(canvasEl())
+    const internals = engine as unknown as Internals
+    engine.setScene(withTerrain)
+    const lv = internals.levels.get(ground)!
+    const mesh = lv.terrain()!.mesh
+    const wallsRoot = lv.group.children[1]
+    const heights = denseHeights(createHeightmap(2), scene.grid).heights.slice()
+    const commit = (prev: Scene) => {
+      const next: Scene = { ...prev, levels: { ...prev.levels, [ground]: { ...prev.levels[ground], heightmap: writeHeights(prev.levels[ground].heightmap!, scene.grid, heights) } } }
+      engine.updateScene(next, { terrain: [ground] })
+      return next
+    }
+    // Far from the wall (x 10..60 at z = 30): chunk (2, 2) only.
+    const wallMesh = wallsRoot.children[0]
+    const [leaf] = lv.doorLeaves()
+    heights[36 * 41 + 36] = 3
+    const far = commit(withTerrain)
+    expect(wallsRoot.children[0]).toBe(wallMesh)
+    expect(lv.doorLeaves()[0]).toBe(leaf)
+    // Under the wall: walls (with their follow-terrain tops) and doors are rebuilt.
+    heights[12 * 41 + 12] = 4
+    commit(far)
+    const rebuilt = wallsRoot.children[0] as THREE.Mesh
+    expect(rebuilt).not.toBe(wallMesh)
+    expect(lv.doorLeaves()[0]).not.toBe(leaf)
+    rebuilt.geometry.computeBoundingBox()
+    expect(rebuilt.geometry.boundingBox!.max.y).toBeCloseTo(4 + wall.height)
+    expect(lv.terrain()!.mesh).toBe(mesh)
+    engine.dispose()
+  })
+
+  it("moves the terrain back over every area a preview drew, on commit and on clear, without rebuilding it", () => {
+    const { scene, ground } = sampleScene()
+    const withTerrain: Scene = { ...scene, levels: { ...scene.levels, [ground]: { ...scene.levels[ground], heightmap: createHeightmap(2) } } }
+    const engine = createEngine(canvasEl())
+    const internals = engine as unknown as Internals
+    engine.setScene(withTerrain)
+    const lv = internals.levels.get(ground)!
+    const mesh = lv.terrain()!.mesh
+    const peakNear = (x: number, z: number) => {
+      const pos = mesh.geometry.getAttribute("position")
+      let peak = -Infinity
+      for (let k = 0; k < pos.count; k++) if (Math.abs(pos.getX(k) - x) < 1e-6 && Math.abs(pos.getZ(k) - z) < 1e-6) peak = Math.max(peak, pos.getY(k))
+      return peak
+    }
+    const base = denseHeights(createHeightmap(2), scene.grid).heights
+    // A preview raises (10, 10); the commit changes only (90, 90): the net change does not reach (10, 10).
+    const preview = base.slice()
+    preview[4 * 41 + 4] = 6
+    engine.previewTerrain(ground, preview, { x: 9, z: 9, w: 2, d: 2 })
+    expect(peakNear(10, 10)).toBeCloseTo(6)
+    const committed = base.slice()
+    committed[36 * 41 + 36] = 3
+    const next: Scene = { ...withTerrain, levels: { ...withTerrain.levels, [ground]: { ...withTerrain.levels[ground], heightmap: writeHeights(createHeightmap(2), scene.grid, committed) } } }
+    engine.updateScene(next, { terrain: [ground] })
+    expect(lv.terrain()!.mesh).toBe(mesh)
+    expect(peakNear(10, 10)).toBeCloseTo(0)
+    expect(peakNear(90, 90)).toBeCloseTo(3)
+    // A cleared preview goes back to the document in place as well.
+    preview.set(committed)
+    preview[8 * 41 + 30] = -4
+    engine.previewTerrain(ground, preview, { x: 74, z: 19, w: 2, d: 2 })
+    expect(peakNear(75, 20)).toBeCloseTo(-4)
+    engine.previewTerrain(ground, null, null)
+    expect(lv.terrain()!.mesh).toBe(mesh)
+    expect(peakNear(75, 20)).toBeCloseTo(0)
+    expect(peakNear(90, 90)).toBeCloseTo(3)
+    engine.dispose()
+  })
+
+  it("keeps floor outlines (hover, selection, hidden helpers) on the terrain as it moves in place on commits and cleared previews", () => {
+    const { scene, ground } = sampleScene()
+    const withTerrain: Scene = { ...scene, levels: { ...scene.levels, [ground]: { ...scene.levels[ground], heightmap: createHeightmap(2) } } }
+    const engine = createEngine(canvasEl())
+    type Outlines = { line: THREE.Mesh }[]
+    const internals = engine as unknown as Internals & { overlays: { outlines: Outlines; helperOutlines: Outlines; sceneChanged(): void } }
+    engine.setScene(withTerrain)
+    const mesh = internals.levels.get(ground)!.terrain()!.mesh
+    const floorId = Object.keys(scene.objects).find((id) => scene.objects[id].type === "floor" && scene.objects[id].levelId === ground)!
+    const top = (list: Outlines) => {
+      let y = -Infinity
+      for (const { line } of list) {
+        const a = line.geometry.getAttribute("position").array
+        for (let k = 1; k < a.length; k += 3) y = Math.max(y, a[k])
+      }
+      return y
+    }
+    /** A 6 ft spike at (10, 10) (its slopes are feature edges), or a flat ground. */
+    const spike = (on: boolean) => {
+      const h = denseHeights(createHeightmap(2), scene.grid).heights.slice()
+      if (on) h[4 * 41 + 4] = 6
+      return h
+    }
+    const commit = (prev: Scene, on: boolean): Scene => {
+      const next: Scene = {
+        ...prev,
+        levels: { ...prev.levels, [ground]: { ...prev.levels[ground], heightmap: writeHeights(createHeightmap(2), scene.grid, spike(on)) } },
+      }
+      engine.updateScene(next, { terrain: [ground] })
+      return next
+    }
+    let t = 0
+    const tick = () => frame((t += 16))
+    // Hovered once (its edges cached), then committed: hovered again, the outline is on the new terrain.
+    engine.setOverlays({ hoveredId: floorId })
+    tick()
+    expect(top(internals.overlays.outlines)).toBeCloseTo(0)
+    engine.setOverlays({ hoveredId: null })
+    tick()
+    let doc = commit(withTerrain, true)
+    tick()
+    expect(internals.levels.get(ground)!.terrain()!.mesh).toBe(mesh)
+    engine.setOverlays({ hoveredId: floorId })
+    tick()
+    expect(top(internals.overlays.outlines)).toBeCloseTo(6)
+    // Selected through a commit: rebuilt on it.
+    engine.setOverlays({ hoveredId: null, selectedIds: [floorId] })
+    tick()
+    doc = commit(doc, false)
+    tick()
+    expect(top(internals.overlays.outlines)).toBeCloseTo(0)
+    // First outlined during a preview (flattening the committed spike), which is then cleared: back on the
+    // document terrain. (Outlines drawn before a preview still lag behind it until it ends.)
+    engine.setOverlays({ selectedIds: [] })
+    tick()
+    doc = commit(doc, true)
+    engine.previewTerrain(ground, spike(false), { x: 9, z: 9, w: 2, d: 2 })
+    engine.setOverlays({ selectedIds: [floorId] })
+    tick()
+    expect(top(internals.overlays.outlines)).toBeCloseTo(0)
+    const sceneChanged = vi.spyOn(internals.overlays, "sceneChanged")
+    engine.previewTerrain(ground, null, null)
+    expect(sceneChanged).toHaveBeenCalledTimes(1)
+    tick()
+    expect(internals.levels.get(ground)!.terrain()!.mesh).toBe(mesh)
+    expect(top(internals.overlays.outlines)).toBeCloseTo(6)
+    // Nothing outlined on the level's floors: a cleared preview leaves the overlays alone.
+    engine.setOverlays({ selectedIds: [] })
+    engine.previewTerrain(ground, spike(true), { x: 9, z: 9, w: 2, d: 2 })
+    engine.previewTerrain(ground, null, null)
+    expect(sceneChanged).toHaveBeenCalledTimes(1)
+    sceneChanged.mockRestore()
+    // A hidden floor's helper outline follows commits too.
+    const floor = doc.objects[floorId] as FloorObject
+    doc = { ...doc, objects: { ...doc.objects, [floorId]: { ...floor, hidden: true } } }
+    engine.updateScene(doc)
+    tick()
+    expect(internals.overlays.helperOutlines.length).toBeGreaterThan(0)
+    expect(top(internals.overlays.helperOutlines)).toBeCloseTo(6)
+    const hiddenMesh = internals.levels.get(ground)!.terrain()!.mesh
+    commit(doc, false)
+    tick()
+    expect(internals.levels.get(ground)!.terrain()!.mesh).toBe(hiddenMesh)
+    expect(top(internals.overlays.helperOutlines)).toBeCloseTo(0)
+    engine.dispose()
+  })
+
+  it("rebuilds the terrain mesh on a commit it cannot apply in place (floors changed too, another resolution)", () => {
+    const { scene, ground } = sampleScene()
+    const withTerrain: Scene = { ...scene, levels: { ...scene.levels, [ground]: { ...scene.levels[ground], heightmap: createHeightmap(2) } } }
+    const engine = createEngine(canvasEl())
+    const internals = engine as unknown as Internals
+    engine.setScene(withTerrain)
+    const lv = internals.levels.get(ground)!
+    const mesh = lv.terrain()!.mesh
+    const heights = denseHeights(createHeightmap(2), scene.grid).heights.slice()
+    heights[36 * 41 + 36] = 3
+    const floorId = Object.keys(scene.objects).find((id) => scene.objects[id].type === "floor" && scene.objects[id].levelId === ground)!
+    const floor = scene.objects[floorId] as FloorObject
+    const changed: Scene = {
+      ...withTerrain,
+      levels: { ...withTerrain.levels, [ground]: { ...withTerrain.levels[ground], heightmap: writeHeights(createHeightmap(2), scene.grid, heights) } },
+      objects: { ...withTerrain.objects, [floorId]: { ...floor, material: "dirt" } },
+    }
+    engine.updateScene(changed, { terrain: [ground], objects: [floorId] })
+    const rebuilt = lv.terrain()!.mesh
+    expect(rebuilt).not.toBe(mesh)
+    // Another lattice spacing.
+    const fine: Scene = { ...changed, levels: { ...changed.levels, [ground]: { ...changed.levels[ground], heightmap: createHeightmap(4) } } }
+    engine.updateScene(fine, { terrain: [ground] })
+    expect(lv.terrain()!.mesh).not.toBe(rebuilt)
+    expect(lv.terrain()!.mesh.geometry.userData.terrainSpacing).toBeCloseTo(1.25)
     engine.dispose()
   })
 

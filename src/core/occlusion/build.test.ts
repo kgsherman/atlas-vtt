@@ -13,13 +13,28 @@ import {
 } from "../scene/factory"
 import { connectorGround, levelCeilingY, levelGround } from "../scene/queries"
 import { buildAll, connectorRows } from "./build"
-import { primitiveBounds } from "./primitives"
-import { add, addLevel, flatScene, paintHeightmap } from "./test-utils"
-import type { Heightfield, OccluderPrimitive, OrientedBox, VerticalCylinder } from "./types"
+import { MIN_EXTENT } from "../scene/wallProfile"
+import type { WallObject } from "../scene/types"
+import { primitiveBounds, primitiveTopAt } from "./primitives"
+import { add, addLevel, flatScene, paintHeightmap, rng } from "./test-utils"
+import type { Heightfield, OccluderPrimitive, OrientedBox, VerticalCylinder, WallStrip } from "./types"
 
 const byKey = (prims: OccluderPrimitive[]) => new Map(prims.map((p) => [p.key, p]))
 const asBox = (p: OccluderPrimitive | undefined) => p as OrientedBox
+const asStrip = (p: OccluderPrimitive | undefined) => p as WallStrip
 const bounds = (p: OccluderPrimitive | undefined) => primitiveBounds(p!)
+
+/** The WallStrip invariants (core/occlusion/types). */
+function expectStripInvariants(p: WallStrip) {
+  const k = p.knots
+  expect(k.length).toBe(p.top.length)
+  expect(k.length).toBeGreaterThanOrEqual(2)
+  expect(k[0]).toBe(-p.halfExtents.x)
+  expect(k[k.length - 1]).toBe(p.halfExtents.x)
+  for (let i = 1; i < k.length; i++) expect(k[i] - k[i - 1]).toBeGreaterThanOrEqual(MIN_EXTENT * 0.999)
+  for (const t of p.top) expect(t).toBeGreaterThanOrEqual(p.bottom)
+  expect(Math.max(...p.top) - p.bottom).toBeGreaterThanOrEqual(MIN_EXTENT)
+}
 
 describe("walls and openings", () => {
   it("a plain wall is one box from ground − 0.05 to its height", () => {
@@ -105,16 +120,108 @@ describe("walls and openings", () => {
   it("follows the Terrain rule on slopes", () => {
     const { scene, levelId } = flatScene()
     paintHeightmap(scene, levelId, (x) => x / 10) // 1 ft rise per 10 ft along x
-    const w = add(scene, createWall(levelId, { x: 10, z: 20 }, { x: 30, z: 20 }, { height: 6, thickness: 0.5 }))
+    const w = add(scene, createWall(levelId, { x: 10, z: 20 }, { x: 30, z: 20 }, { height: 6, thickness: 0.5, followTerrain: true }))
     const door = add(scene, createDoor(w, 10, { width: 4, height: 5 }))
     const m = byKey(buildAll(scene))
-    const base = levelGround(scene, levelId, 20, 20)
-    expect(base).toBeCloseTo(2)
+    // Base: the ground along the wall (1 at x = 10 → 3 at x = 30); opening base: ground at its centre (x = 20).
+    expect(levelGround(scene, levelId, 20, 20)).toBeCloseTo(2)
     // Bottom: lowest ground under the footprint incl. the thickness/2 end extension (x = 9.75) − 0.05.
-    expect(bounds(m.get(w.id)).minY).toBeCloseTo(0.975 - 0.05)
-    expect(bounds(m.get(w.id)).maxY).toBeCloseTo(8)
+    const first = asStrip(m.get(w.id))
+    expect(first.shape).toBe("strip")
+    expect(first.bottom).toBeCloseTo(0.975 - 0.05)
+    expect(first.top[0]).toBeCloseTo(7)
+    expect(first.top[first.top.length - 1]).toBeCloseTo(7.8)
+    expect(bounds(m.get(w.id)).maxY).toBeCloseTo(7.8)
+    expect(bounds(m.get(`${w.id}#after:${door.id}`)).maxY).toBeCloseTo(9)
+    // Door: base 2 + 5, flat (a box); the lintel follows the top line above it.
+    expect(m.get(door.id)!.shape).toBe("box")
+    expect(bounds(m.get(door.id)).minY).toBeCloseTo(0.925)
     expect(bounds(m.get(door.id)).maxY).toBeCloseTo(7)
-    expect(bounds(m.get(`${w.id}#lintel:${door.id}`)).minY).toBeCloseTo(7)
+    const lintel = asStrip(m.get(`${w.id}#lintel:${door.id}`))
+    expect(lintel.bottom).toBeCloseTo(7)
+    expect(lintel.top[0]).toBeCloseTo(7.8)
+    expect(lintel.top[lintel.top.length - 1]).toBeCloseTo(8.2)
+
+    // Follow-terrain off: the wall stands on the level elevation (boxes), buried where the ground is higher.
+    const off = add(scene, createWall(levelId, { x: 10, z: 40 }, { x: 30, z: 40 }, { height: 6, thickness: 0.5, followTerrain: false }))
+    const offDoor = add(scene, createDoor(off, 10, { width: 4, height: 5 }))
+    const n = byKey(buildAll(scene))
+    expect(n.get(off.id)!.shape).toBe("box")
+    expect(bounds(n.get(off.id)).minY).toBeCloseTo(-0.05)
+    expect(bounds(n.get(off.id)).maxY).toBeCloseTo(6)
+    expect(bounds(n.get(offDoor.id)).maxY).toBeCloseTo(5)
+    expect(bounds(n.get(`${off.id}#lintel:${offDoor.id}`)).minY).toBeCloseTo(5)
+  })
+
+  it("follow-terrain strips: tops are the ground + height at any point along the wall", () => {
+    const { scene, levelId } = flatScene(30, 30)
+    paintHeightmap(scene, levelId, (x, z) => 3 * Math.sin(x / 9) * Math.cos(z / 13) + 0.03 * x, 4)
+    const r = rng(21)
+    const walls: WallObject[] = []
+    for (let k = 0; k < 12; k++) {
+      const a = { x: 10 + r() * 100, z: 10 + r() * 100 }
+      const ang = k % 3 === 0 ? (Math.floor(r() * 4) * Math.PI) / 2 : r() * Math.PI * 2
+      walls.push(add(scene, createWall(levelId, a, { x: a.x + Math.cos(ang) * 25, z: a.z + Math.sin(ang) * 25 }, { height: 8, followTerrain: true })))
+    }
+    const prims = buildAll(scene)
+    let strips = 0
+    for (const p of prims) {
+      if (p.shape !== "strip") continue
+      strips++
+      expectStripInvariants(p)
+      const c = Math.cos(p.yaw)
+      const s = Math.sin(p.yaw)
+      for (let m = 0; m <= 20; m++) {
+        const lx = -p.halfExtents.x + (2 * p.halfExtents.x * m) / 20
+        const x = p.center.x + c * lx
+        const z = p.center.z - s * lx
+        expect(primitiveTopAt(p, x, z)!).toBeCloseTo(levelGround(scene, levelId, x, z) + 8, 6)
+      }
+    }
+    expect(strips).toBe(walls.length)
+  })
+
+  it("constant tops stay boxes: flat levels (either option) and flat ground under a follow wall", () => {
+    const { scene, levelId } = flatScene()
+    const on = add(scene, createWall(levelId, { x: 0, z: 10 }, { x: 40, z: 10 }, { height: 10, followTerrain: true }))
+    add(scene, createDoor(on, 10, { width: 4, height: 7 }))
+    add(scene, createWindow(on, 30, { width: 3, sillHeight: 3, height: 3 }))
+    const flatOn = buildAll(scene)
+    scene.objects[on.id] = { ...on, followTerrain: false }
+    const flatOff = buildAll(scene)
+    expect(flatOn).toEqual(flatOff)
+    expect(flatOn.every((p) => p.shape === "box")).toBe(true)
+    // Terrain that is flat under the wall: the same boxes, 2 ft higher.
+    paintHeightmap(scene, levelId, (x, z) => (z < 30 ? 2 : x))
+    scene.objects[on.id] = on
+    const walls = (ps: OccluderPrimitive[]) => ps.filter((p) => p.sourceType !== "floor" && p.sourceType !== "terrain")
+    const raised = walls(buildAll(scene))
+    const flatWalls = walls(flatOn)
+    expect(raised.map((p) => p.key)).toEqual(flatWalls.map((p) => p.key))
+    raised.forEach((p, k) => {
+      expect(p.shape).toBe("box")
+      expect(bounds(p).maxY).toBeCloseTo(bounds(flatWalls[k]).maxY + 2, 9)
+    })
+  })
+
+  it("openings over a steep drop: flat door / sill / window boxes, lintel strips never inverted", () => {
+    const { scene, levelId } = flatScene()
+    // The ground falls 12 ft over 5 ft under an 8 ft wall.
+    paintHeightmap(scene, levelId, (x) => (x < 20 ? 20 : x > 25 ? 8 : 20 - ((x - 20) * 12) / 5), 4)
+    const w = add(scene, createWall(levelId, { x: 10, z: 20 }, { x: 35, z: 20 }, { height: 8, followTerrain: true }))
+    const door = add(scene, createDoor(w, 11, { width: 4, height: 7 }))
+    const win = add(scene, createWindow(w, 16, { width: 4, sillHeight: 3, height: 3 }))
+    const m = byKey(buildAll(scene))
+    for (const p of m.values()) if (p.shape === "strip") expectStripInvariants(p)
+    expect(m.get(door.id)!.shape).toBe("box")
+    expect(m.get(win.id)!.shape).toBe("box")
+    expect(m.get(`${w.id}#sill:${win.id}`)!.shape).toBe("box")
+    const sill = bounds(m.get(`${w.id}#sill:${win.id}`))
+    const lintel = m.get(`${w.id}#lintel:${win.id}`)!
+    expect(sill.maxY).toBeLessThanOrEqual(bounds(lintel).minY + 1e-9)
+    // The window's movement box reaches the highest top over its span.
+    expect(bounds(m.get(win.id)).maxY).toBeCloseTo(levelGround(scene, levelId, 24, 20) + 8, 6)
+    expect(bounds(m.get(door.id)).maxY).toBeLessThanOrEqual(bounds(m.get(`${w.id}#lintel:${door.id}`)).minY + 1e-9)
   })
 
   it("skips openings whose host is missing and objects on missing levels", () => {

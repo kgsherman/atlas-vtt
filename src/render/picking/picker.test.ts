@@ -1,9 +1,9 @@
 import * as THREE from "three"
 import { describe, expect, it } from "vitest"
 
-import { createProp, createScene, createWall } from "@/core/scene/factory"
-import { createHeightmap, denseHeights } from "@/core/scene/heightmap"
-import { effectiveFloorRects } from "@/core/scene/queries"
+import { createFloor, createProp, createScene, createWall } from "@/core/scene/factory"
+import { createHeightmap, denseHeights, writeHeights } from "@/core/scene/heightmap"
+import { effectiveFloorRects, levelGround } from "@/core/scene/queries"
 import type { SceneLike } from "@/core/scene/types"
 
 import { BuildContext, buildLevel, BUCKETS } from "../builders"
@@ -120,5 +120,113 @@ describe("Picker", () => {
     expect(p.x).toBeCloseTo(70)
     expect(p.y).toBeCloseTo(60)
     expect(picker.project({ x: 500, y: 0, z: 25 }).visible).toBe(false)
+  })
+})
+
+describe("Picker on terrain", () => {
+  /** 20×20-cell level with a 12 ft hill at (70, 50); its floor covers x < 40 only. */
+  function setup(camera: THREE.Camera) {
+    const scene: SceneLike = createScene({ width: 20, depth: 20, groundFloor: false })
+    const lv = Object.keys(scene.levels)[0]
+    const floor = createFloor(lv, { x: 0, z: 0, w: 40, d: 100 }, "grass")
+    scene.objects[floor.id] = floor
+    const hm = createHeightmap(2)
+    const { samplesX, samplesZ, heights } = denseHeights(hm, scene.grid)
+    for (let j = 0; j < samplesZ; j++) {
+      for (let i = 0; i < samplesX; i++) heights[j * samplesX + i] = 12 * Math.max(0, 1 - Math.hypot(i * 2.5 - 70, j * 2.5 - 50) / 25) + 0.02 * i
+    }
+    scene.levels[lv].heightmap = writeHeights(hm, scene.grid, heights)
+    const canvas = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 200, height: 100 }) } as unknown as HTMLCanvasElement
+    const picker = new Picker({
+      canvas,
+      camera: () => camera,
+      scene: () => scene,
+      // Floors are hit analytically: the level only needs to be drawn solid.
+      solidLevels: () => [{ levelId: lv, meshes: [] }],
+      tokenMeshes: () => [],
+      ground: (id) => GroundSampler.forLevel(scene.levels[id], scene.grid),
+      effectiveFloors: (id) => effectiveFloorRects(scene, id),
+    })
+    return { scene, lv, floor, picker }
+  }
+
+  /** Oblique perspective camera looking at (x, y, z) from the south-west, above. */
+  function oblique(x: number, y: number, z: number): THREE.PerspectiveCamera {
+    const camera = new THREE.PerspectiveCamera(50, 2, 0.5, 2000)
+    camera.position.set(x - 40, y + 45, z + 60)
+    camera.lookAt(x, y, z)
+    camera.updateMatrixWorld()
+    camera.updateProjectionMatrix()
+    return camera
+  }
+
+  it("casts to the terrain wherever it lies inside the grid, not only under floors", () => {
+    // Aim at the hill's flank (no floor there): the camera looks at a point on the terrain.
+    const aim = { x: 64, z: 46 }
+    const camera = oblique(aim.x, 0, aim.z)
+    const { scene, lv, picker } = setup(camera)
+    const y = levelGround(scene, lv, aim.x, aim.z)
+    camera.lookAt(aim.x, y, aim.z)
+    camera.updateMatrixWorld()
+    const onTerrain = picker.pick(100, 50, { levelId: lv, terrain: true })
+    expect(onTerrain.ground!.x).toBeCloseTo(aim.x, 3)
+    expect(onTerrain.ground!.z).toBeCloseTo(aim.z, 3)
+    expect(onTerrain.ground!.y).toBeCloseTo(y, 3)
+    // Without the option the floorless hill is skipped: the cast lands on the elevation plane, far behind it.
+    const plane = picker.pick(100, 50, { levelId: lv })
+    expect(plane.ground!.y).toBe(0)
+    expect(Math.hypot(plane.ground!.x - aim.x, plane.ground!.z - aim.z)).toBeGreaterThan(5)
+  })
+
+  it("keeps the floor-object hit and falls back to the plane outside the grid", () => {
+    const camera = oblique(20, 0, 50)
+    const { scene, lv, floor, picker } = setup(camera)
+    // On the floor both casts agree and the floor is the object hit.
+    const a = picker.pick(100, 50, { levelId: lv, terrain: true, objects: true })
+    const b = picker.pick(100, 50, { levelId: lv, objects: true })
+    expect(a.ground!.x).toBeCloseTo(b.ground!.x, 6)
+    expect(a.ground!.y).toBeCloseTo(levelGround(scene, lv, a.ground!.x, a.ground!.z), 3)
+    expect(a.objectId).toBe(floor.id)
+    // Off the grid (x < 0): the elevation plane.
+    const far = oblique(-30, 0, 50)
+    const { lv: lv2, picker: p2 } = setup(far)
+    const off = p2.pick(100, 50, { levelId: lv2, terrain: true, objects: true })
+    expect(off.ground!.x).toBeCloseTo(-30, 3)
+    expect(off.ground!.y).toBe(0)
+    expect(off.objectId).toBeNull()
+  })
+
+  it("reports the pointer ray: unit direction, parallel with per-pixel origins for orthographic cameras", () => {
+    const camera = new THREE.OrthographicCamera(-50, 50, 25, -25, 0.1, 500)
+    camera.position.set(50, 100, 80)
+    camera.lookAt(50, 0, 50)
+    camera.updateMatrixWorld()
+    camera.updateProjectionMatrix()
+    const { lv, picker } = setup(camera)
+    const a = picker.pick(20, 30, { levelId: lv, terrain: true })
+    const b = picker.pick(180, 70, { levelId: lv, terrain: true })
+    const len = (v: { x: number; y: number; z: number }) => Math.hypot(v.x, v.y, v.z)
+    expect(len(a.ray!.direction)).toBeCloseTo(1, 9)
+    expect(a.ray!.direction.x).toBeCloseTo(b.ray!.direction.x, 9)
+    expect(a.ray!.direction.y).toBeCloseTo(b.ray!.direction.y, 9)
+    expect(Math.hypot(a.ray!.origin.x - b.ray!.origin.x, a.ray!.origin.z - b.ray!.origin.z)).toBeGreaterThan(10)
+    // The ground point lies on the ray.
+    const g = a.ground!
+    const o = a.ray!.origin
+    const d = a.ray!.direction
+    const t = (g.y - o.y) / d.y
+    expect(o.x + d.x * t).toBeCloseTo(g.x, 6)
+    expect(o.z + d.z * t).toBeCloseTo(g.z, 6)
+    // No canvas size: no ray.
+    const flat = new Picker({
+      canvas: { getBoundingClientRect: () => ({ left: 0, top: 0, width: 0, height: 0 }) } as unknown as HTMLCanvasElement,
+      camera: () => camera,
+      scene: () => null,
+      solidLevels: () => [],
+      tokenMeshes: () => [],
+      ground: () => new GroundSampler(0, 5, 2, 2, null),
+      effectiveFloors: () => [],
+    })
+    expect(flat.pick(10, 10, { levelId: lv }).ray).toBeUndefined()
   })
 })

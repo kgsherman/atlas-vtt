@@ -542,8 +542,8 @@ export function splitWall(draft: Scene, wallId: Id, distance: number): Id | null
 // ---------------------------------------------------------------------------
 
 /**
- * Human-readable reference problems; empty = valid. Checks record keys against ids, id uniqueness
- * across levels/objects/tokens, levelId of every object and token, opening hosts (an existing wall on
+ * Human-readable reference problems; empty = valid. Checks record keys against ids (including each
+ * level's terrain shapes), id uniqueness across levels/objects/tokens, levelId of every object and token, opening hosts (an existing wall on
  * the same level that the opening fits on), connector targets (an existing, different, higher level)
  * and attached-light carriers.
  */
@@ -562,6 +562,10 @@ export function validateReferences(scene: Scene): string[] {
     claim(level.id, "level")
     if (level.backdrop && !(scene.assets && hasOwn(scene.assets, level.backdrop.assetId))) {
       issues.push(`level "${level.id}": backdrop asset "${level.backdrop.assetId}" does not exist`)
+    }
+    // Terrain shape ids are scoped to their level (not claimed scene-wide).
+    for (const [sid, shape] of Object.entries(level.terrainEdits?.shapes ?? {})) {
+      if (shape.id !== sid) issues.push(`level "${level.id}": terrain shape ["${sid}"]: id "${shape.id}" does not match its key`)
     }
   }
   for (const [key, asset] of Object.entries(scene.assets ?? {})) {

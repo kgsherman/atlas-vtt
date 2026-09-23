@@ -611,6 +611,66 @@ describe("terrain", () => {
     expect(stepResult(scene, t, at(3, 3, levelId), at(4, 3, levelId))).toBe("blocked")
     expect(stepResult(scene, t, at(1, 5, levelId), at(2, 5, levelId))).toBe("blocked")
   })
+
+  it("a low follow-terrain wall along a slope is judged by its height where it is crossed", () => {
+    const { scene, levelId } = flatScene()
+    paintHeightmap(scene, levelId, (x) => x * 0.02) // 1 ft over the 50 ft wall
+    const low = add(scene, createWall(levelId, { x: 0, z: 25 }, { x: 50, z: 25 }, { height: 0.3, followTerrain: true }))
+    const t = tokenAt(scene, levelId, { i: 1, j: 4 })
+    // Its highest point (1.3 ft, at x = 50) is above the step-up from the low end, but not where the token crosses.
+    expect(stepResult(scene, t, at(1, 4, levelId), at(1, 5, levelId))).toBe("ok")
+    expect(stepResult(scene, t, at(8, 4, levelId), at(8, 5, levelId))).toBe("ok")
+    scene.objects[low.id] = { ...low, height: 2 }
+    expect(stepResult(scene, t, at(1, 4, levelId), at(1, 5, levelId))).toBe("blocked")
+    expect(stepResult(scene, t, at(8, 5, levelId), at(8, 4, levelId))).toBe("blocked")
+  })
+
+  it("open doors in rotated follow-terrain walls on a slope let a token through the doorway, not beside it", () => {
+    const { scene, levelId } = flatScene(20, 20)
+    paintHeightmap(scene, levelId, (x, z) => 0.03 * x + 0.02 * z)
+    const u = { x: Math.cos((38 * Math.PI) / 180), z: Math.sin((38 * Math.PI) / 180) }
+    const c = { x: 52.5, z: 52.5 }
+    const wall = add(scene, createWall(levelId, { x: c.x - 40 * u.x, z: c.z - 40 * u.z }, { x: c.x + 40 * u.x, z: c.z + 40 * u.z }, { thickness: 0.75, followTerrain: true }))
+    add(scene, createDoor(wall, 40, { width: 4, height: 7, state: "open" }))
+    expect(buildOcclusionWorld(scene).primitives.some((p) => p.sourceId === wall.id && p.shape === "strip")).toBe(true)
+    const t = tokenAt(scene, levelId, { i: 12, j: 8 })
+    const across: [number, number][] = [
+      [12, 8],
+      [11, 9],
+      [10, 10],
+      [9, 11],
+      [8, 12],
+    ]
+    expect(check(scene, t, walk(levelId, across))).toMatchObject({ ok: true, legalSteps: 4 })
+    place(scene, t, at(13, 9, levelId))
+    const beside = walk(levelId, [
+      [13, 9],
+      [12, 10],
+      [11, 11],
+      [10, 12],
+    ])
+    expect(check(scene, t, beside)).toMatchObject({ ok: false, legalSteps: 1 })
+  })
+
+  it("a 5 ft corridor at 45° between follow-terrain walls on a slope can be walked down its middle", () => {
+    const { scene, levelId } = flatScene()
+    paintHeightmap(scene, levelId, (x, z) => 0.04 * x + 0.01 * z)
+    const k = 2.5 * Math.SQRT1_2
+    add(scene, createWall(levelId, { x: 5 + k, z: 5 - k }, { x: 45 + k, z: 45 - k }, { followTerrain: true }))
+    add(scene, createWall(levelId, { x: 5 - k, z: 5 + k }, { x: 45 - k, z: 45 + k }, { followTerrain: true }))
+    expect(buildOcclusionWorld(scene).primitives.filter((p) => p.shape === "strip")).toHaveLength(2)
+    const t = tokenAt(scene, levelId, { i: 2, j: 2 })
+    const corridor: [number, number][] = [
+      [2, 2],
+      [3, 3],
+      [4, 4],
+      [5, 5],
+      [6, 6],
+    ]
+    expect(check(scene, t, walk(levelId, corridor))).toMatchObject({ ok: true, legalSteps: 4 })
+    expect(stepResult(scene, t, at(3, 3, levelId), at(4, 3, levelId))).toBe("blocked")
+    expect(stepResult(scene, t, at(3, 3, levelId), at(3, 4, levelId))).toBe("blocked")
+  })
 })
 
 describe("world consistency", () => {

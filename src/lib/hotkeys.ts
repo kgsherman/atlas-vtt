@@ -18,7 +18,7 @@ export interface AppHotkey {
   run(e: KeyboardEvent): boolean | void
   /** Fire in text fields and under dialogs too (Mod+S). */
   anywhere?: boolean
-  /** Fire on auto-repeat while held (default true; false = once per press). */
+  /** Fire on auto-repeat while held (default true; false = once per press, e.g. a keymap Command with `repeat: false`). */
   repeat?: boolean
 }
 

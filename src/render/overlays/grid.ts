@@ -130,12 +130,19 @@ export class GridOverlay {
   }
 
   /**
-   * Refresh vertex heights in place (terrain brush preview) inside `dirty` (whole grid when null).
-   * Returns false when the current geometry is not a lattice with the sampler's spacing.
+   * Refresh vertex heights in place (terrain previews and commits) inside `dirty` (grown by one lattice
+   * spacing; the whole grid when null). One upload range covers the touched rows (first row's start to
+   * the last row's end), merged with any range not uploaded yet: per-row bufferSubData calls into a big
+   * buffer the GPU may still be reading can each cost a copy of the whole buffer on some drivers (see
+   * builders/floors.ts updateTerrainGeometry). The bounds grow by union (a preview never shrinks them;
+   * setLevel rebuilds them), so the cost follows the dirty rect, not the lattice (641k vertices on a
+   * 200×200-cell level at resolution 4). Returns false when the current geometry is not a lattice with
+   * the sampler's spacing.
    */
   refreshHeights(ground: GroundSampler, dirty: { x: number; z: number; w: number; d: number } | null): boolean {
-    const lattice = this.mesh.geometry.userData.lattice as { nx: number; nz: number; W: number; D: number } | undefined
-    const pos = this.mesh.geometry.getAttribute("position") as THREE.BufferAttribute | undefined
+    const geometry = this.mesh.geometry
+    const lattice = geometry.userData.lattice as { nx: number; nz: number; W: number; D: number } | undefined
+    const pos = geometry.getAttribute("position") as THREE.BufferAttribute | undefined
     if (!lattice || !pos || ground.flat || Math.abs(lattice.W / lattice.nx - ground.spacing) > 1e-9) return false
     const { nx, nz, W, D } = lattice
     const sx = W / nx
@@ -144,14 +151,38 @@ export class GridOverlay {
     const i1 = dirty ? Math.min(nx, Math.ceil((dirty.x + dirty.w) / sx) + 1) : nx
     const j0 = dirty ? Math.max(0, Math.floor(dirty.z / sz) - 1) : 0
     const j1 = dirty ? Math.min(nz, Math.ceil((dirty.z + dirty.d) / sz) + 1) : nz
+    if (i0 > i1 || j0 > j1) return true
+    const P = pos.array as Float32Array
+    // Vertex (i, j) is lattice sample (i, j) when the lattice spans the grid exactly (it does for a grid
+    // built on this sampler's spacing): read it directly instead of interpolating.
+    const direct = ground.samplesX === nx + 1 && ground.samplesZ === nz + 1
+    let minY = Infinity
+    let maxY = -Infinity
     for (let j = j0; j <= j1; j++) {
-      for (let i = i0; i <= i1; i++) {
-        const k = j * (nx + 1) + i
-        pos.setY(k, ground.heightAt(pos.getX(k), pos.getZ(k)) + LIFT)
+      const first = (j * (nx + 1) + i0) * 3
+      for (let i = i0, o = first; i <= i1; i++, o += 3) {
+        P[o + 1] = (direct ? ground.elevation + ground.sample(i, j) : ground.heightAt(P[o], P[o + 2])) + LIFT
+        // The stored (float32) value: the bounds must contain it.
+        const y = P[o + 1]
+        if (y < minY) minY = y
+        if (y > maxY) maxY = y
       }
     }
+    // Upload range [lo, hi) in floats.
+    let lo = (j0 * (nx + 1) + i0) * 3
+    let hi = (j1 * (nx + 1) + i1 + 1) * 3
+    for (const r of pos.updateRanges) {
+      if (r.start < lo) lo = r.start
+      if (r.start + r.count > hi) hi = r.start + r.count
+    }
+    pos.clearUpdateRanges()
+    pos.addUpdateRange(lo, hi - lo)
     pos.needsUpdate = true
-    this.mesh.geometry.computeBoundingSphere()
+    // Bounds not computed yet are computed lazily (from the current positions) by whoever needs them.
+    _box.min.set(i0 * sx, minY, j0 * sz)
+    _box.max.set(i1 * sx, maxY, j1 * sz)
+    geometry.boundingBox?.union(_box)
+    geometry.boundingSphere?.union(_box.getBoundingSphere(_sphere))
     return true
   }
 
@@ -185,6 +216,9 @@ export class GridOverlay {
 }
 
 const LIFT = 0.04
+
+const _box = new THREE.Box3()
+const _sphere = new THREE.Sphere()
 
 /** Plane (flat level) or terrain-draped lattice over [0, W] × [0, D]. */
 export function gridGeometry(W: number, D: number, ground: GroundSampler | null): THREE.BufferGeometry {

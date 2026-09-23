@@ -23,11 +23,13 @@ export function Sidebar() {
   const { store } = useEditorContext()
   const [tab, setTab] = React.useState<SidebarTab>("levels")
 
-  // Selecting something (from nothing) brings up the inspector, unless the lights list is in use.
+  // Selecting something (from nothing) brings up the inspector, unless the lights list is in use. In the
+  // terrain mode that is a terrain shape (the Inspector shows the shape selection there).
   React.useEffect(
     () =>
       store.subscribe((s, prev) => {
-        if (s.selection.length > 0 && prev.selection.length === 0) setTab((t) => (t === "lights" ? t : "inspector"))
+        const picked = (s.selection.length > 0 && prev.selection.length === 0) || (s.terrainSelection !== null && prev.terrainSelection === null)
+        if (picked) setTab((t) => (t === "lights" ? t : "inspector"))
       }),
     [store]
   )

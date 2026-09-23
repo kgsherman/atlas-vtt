@@ -14,10 +14,28 @@ import { SCENE_SCHEMA_VERSION } from "./types"
 /** Converts a document of version N (the key) into version N+1. Input is a private deep copy; mutate or rebuild freely. */
 export type Migration = (doc: unknown) => unknown
 
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
+
+/**
+ * v2 → v3 (terrain shapes, follow-terrain walls): every wall gains `followTerrain: true`. A v2 wall stood on
+ * the ground at its midpoint; on terrain a conforming base is the closest v3 equivalent (off would bury
+ * walls on hills), and on flat levels both settings are identical. Levels are untouched (terrainEdits is
+ * optional). Duck-typed and idempotent: anything that is not a wall record is left for the schema to report,
+ * and a boolean `followTerrain` is kept.
+ */
+function wallsFollowTerrain(doc: unknown): unknown {
+  if (!isRecord(doc) || !isRecord(doc.objects)) return doc
+  for (const o of Object.values(doc.objects)) {
+    if (isRecord(o) && o.type === "wall" && typeof o.followTerrain !== "boolean") o.followTerrain = true
+  }
+  return doc
+}
+
 /** vN → vN+1 migrations keyed by N. */
 export const MIGRATIONS: Readonly<Record<number, Migration>> = Object.freeze({
   // v2 added the optional Token.model; v1 documents are valid v2 documents.
   1: (doc: unknown) => doc,
+  2: wallsFollowTerrain,
 })
 
 export type MigrateResult =
@@ -30,8 +48,6 @@ export interface MigrateOptions {
   /** Override the current version (tests). */
   currentVersion?: number
 }
-
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
 
 /** The document's schemaVersion if it is a positive integer, else null. */
 export function readSchemaVersion(json: unknown): number | null {

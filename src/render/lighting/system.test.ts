@@ -6,9 +6,10 @@
 import * as THREE from "three"
 import { describe, expect, it } from "vitest"
 
-import type { OccluderPrimitive, OcclusionWorld, OrientedBox } from "@/core/occlusion/types"
+import type { Heightfield, OccluderPrimitive, OcclusionWorld, OrientedBox } from "@/core/occlusion/types"
 import { createLevel, createLight, createScene, createToken } from "@/core/scene/factory"
 import type { LightObject, Scene, Vec3 } from "@/core/scene/types"
+import { GroundSampler } from "../builders/ground"
 import { LAYER } from "../internal"
 import { AtlasLightingSystem, DEFAULT_VIEW_STATE, QUALITY_CONFIG, viewerTouch } from "./system"
 import { DARK_VISION_STRIPE_PX, LIGHT_VEC4S, VIEWER_VEC4S } from "./uniforms"
@@ -535,6 +536,112 @@ describe("AtlasLightingSystem", () => {
     sys.applyChange(scene, world, { objects: ["w1"] }, [{ levelId: "ground", min: { x: 0, y: 0, z: 0 }, max: { x: 1, y: 1, z: 1 } }])
     sys.beforeRender(renderer, camera, 2)
     expect(sunPasses()).toHaveLength(2)
+  })
+
+  it("keeps the terrain occluders, nearby tiles and the sun / sky maps in step with a terrain preview", () => {
+    const { sys, renderer, camera, scene, ground, calls } = setup(5)
+    scene.environment = { ...scene.environment, directional: { ...scene.environment.directional, enabled: true } }
+    // A floor on terrain under the torches (x 0..120, z 80..120, 2.5 ft lattice), flat at 0.
+    const floor: Heightfield = {
+      key: "floor",
+      sourceId: "floor",
+      sourceType: "terrain",
+      levelId: ground,
+      blocks: { movement: true, sight: true, light: true },
+      shape: "heightfield",
+      originX: 0,
+      originZ: 80,
+      spacing: 2.5,
+      samplesX: 49,
+      samplesZ: 17,
+      heights: new Float32Array(49 * 17),
+      solid: new Uint8Array(48 * 16).fill(1),
+      thickness: 1,
+    }
+    const world = fakeWorld([wall("w1", 30, 105), floor])
+    sys.setScene(scene, world)
+    for (let k = 0; k < 3; k++) sys.beforeRender(renderer, camera, k)
+    const sunPasses = () => calls.filter((c) => c.target === "atlas-sun").length
+    const suns = sunPasses()
+    const floorMeshes = () => sys.proxies.scene.children.filter((o) => o.name.startsWith("occluders:floor@")) as THREE.Mesh[]
+    const lowest = () => Math.min(...floorMeshes().map((m) => m.geometry.boundingBox!.min.y))
+    expect(lowest()).toBe(-1)
+    expect(floorMeshes().every((m) => (m.layers.mask & (1 << LAYER.LIGHT)) !== 0)).toBe(true)
+
+    // The DM drags a 3 ft pit under torch t0 (x = 20): the preview lattice (grid 200 ft, 2.5 ft spacing).
+    const n = 81
+    const heights = new Float32Array(n * n)
+    for (let sz = 38; sz <= 42; sz++) for (let sx = 6; sx <= 10; sx++) heights[sz * n + sx] = -3
+    const preview = new GroundSampler(0, 2.5, n, n, heights)
+    sys.previewTerrain(ground, preview, { x: 15, z: 95, w: 10, d: 10 })
+    // The LIGHT / SIGHT occluders are the previewed terrain (the committed floor would shade the pit)...
+    expect(lowest()).toBe(-4)
+    // ...the tiles that can see the change are recaptured, the far ones kept...
+    expect(sys.tileOf("light:t0")?.dirty).toBe(true)
+    expect(sys.tileOf("light:t4")?.dirty).toBe(false) // x = 100
+    // ...and the sun map is rendered again from them.
+    sys.beforeRender(renderer, camera, 3)
+    expect(sunPasses()).toBe(suns + 1)
+    expect(sys.tileOf("light:t0")?.dirty).toBe(false)
+
+    // Cancelled (Esc): back to the document's terrain, invalidated the same way.
+    sys.previewTerrain(ground, null, null)
+    expect(lowest()).toBe(-1)
+    expect(sys.tileOf("light:t0")?.dirty).toBe(true)
+    sys.beforeRender(renderer, camera, 4)
+    expect(sunPasses()).toBe(suns + 2)
+    // Nothing previewed: nothing to do.
+    sys.previewTerrain(ground, null, null)
+    sys.beforeRender(renderer, camera, 5)
+    expect(sunPasses()).toBe(suns + 2)
+
+    // A committed terrain change of the level ends its preview even when the world's floor is unchanged
+    // (a refused or no-op commit).
+    sys.previewTerrain(ground, preview, null)
+    expect(lowest()).toBe(-4)
+    sys.applyChange(scene, world, { terrain: [ground] }, [])
+    expect(lowest()).toBe(-1)
+    expect(sys.proxies.previewedLevels).toEqual([])
+  })
+
+  it("stands the lights and viewer eyes of a previewed level on the previewed ground until it ends", () => {
+    const { sys, renderer, camera, scene, ground, world } = setup(5)
+    const viewer = createToken(ground, { x: 22.5, z: 102.5 }, { id: "v" })
+    scene.tokens = { v: viewer }
+    sys.applyChange(scene, world, { tokens: ["v"] }, [])
+    sys.setView({ ...DEFAULT_VIEW_STATE, mode: "dm-play", vision: "preview", viewerTokenIds: ["v"], gpuVisionRefine: true })
+    const u = sys.shared.uLights.value
+    /** Packed position y and capture origin y of the torch at `x`, after a few frames (tiles captured). */
+    let frame = 0
+    const torch = (x: number) => {
+      for (let k = 0; k < 4; k++) sys.beforeRender(renderer, camera, frame++)
+      const o = lightIds(sys, sys.shared.uLightCount.value).indexOf(x) * LIGHT_VEC4S * 4
+      expect(o).toBeGreaterThanOrEqual(0)
+      return { y: u[o + 1], capture: u[o + 13] }
+    }
+    const eyeY = () => sys.shared.uViewers.value[1]
+    expect(torch(20)).toEqual({ y: 5, capture: 5 })
+    expect(eyeY()).toBeCloseTo(viewer.eyeHeight, 6)
+    // The DM drags a 7.5 ft block over torch t0 (x 20) and the viewer: they stand on it, as the occluders
+    // do (inside the previewed block the torch would light nothing and the viewer see nothing).
+    const n = 81
+    const heights = new Float32Array(n * n)
+    for (let sz = 38; sz <= 42; sz++) for (let sx = 6; sx <= 10; sx++) heights[sz * n + sx] = 7.5
+    sys.previewTerrain(ground, new GroundSampler(0, 2.5, n, n, heights), { x: 15, z: 95, w: 10, d: 10 })
+    expect(torch(20)).toEqual({ y: 12.5, capture: 12.5 })
+    expect(torch(40).y).toBe(5)
+    expect(eyeY()).toBeCloseTo(7.5 + viewer.eyeHeight, 6)
+    expect(sys.tileOf("viewer:v")?.origin.y).toBeCloseTo(7.5 + viewer.eyeHeight, 6)
+    // Cancelled: back on the document's ground.
+    sys.previewTerrain(ground, null, null)
+    expect(torch(20)).toEqual({ y: 5, capture: 5 })
+    expect(eyeY()).toBeCloseTo(viewer.eyeHeight, 6)
+    // Committed (here: the document unchanged): the document's ground too.
+    sys.previewTerrain(ground, new GroundSampler(0, 2.5, n, n, heights), null)
+    expect(torch(20).y).toBe(12.5)
+    sys.applyChange(scene, world, { terrain: [ground] }, [])
+    expect(torch(20).y).toBe(5)
+    expect(eyeY()).toBeCloseTo(viewer.eyeHeight, 6)
   })
 
   it("keeps world materials attached to per-level mask layers", () => {

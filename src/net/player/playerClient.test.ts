@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { createScene } from "@/core/scene/factory"
+import { createScene, createWall } from "@/core/scene/factory"
+import { createHeightmap, sampleCounts, writeHeights } from "@/core/scene/heightmap"
 import type { Scene } from "@/core/scene/types"
-import { addToken, flatScene, TestHost } from "@/core/session/test-utils"
-import type { ClientToHost, HostToClient, PlayerView } from "@/core/session/types"
+import { add, addToken, flatScene, TestHost } from "@/core/session/test-utils"
+import type { ClientToHost, HostToClient, PlayerView, PlayerWall } from "@/core/session/types"
 
 import type { AtlasIdentity } from "../auth"
 import { createMemoryStore } from "../localStore"
@@ -15,7 +16,9 @@ import { FakeHost } from "./fakeHost"
 import { createPlayerClient } from "./index"
 import {
   bindBackdropsToEngine,
+  buildPlayerScene,
   describeRequestResult,
+  looksLikeView,
   parseStoredView,
   pendingMovesOverlay,
   sceneChangeFromOps,
@@ -354,6 +357,41 @@ describe("PlayerClient: stored views", () => {
     expect(parseStoredView(JSON.parse(JSON.stringify(view)))).toEqual(view)
     expect(parseStoredView({ ...view, extra: 1 })).toBeNull()
     expect(parseStoredView({ ...view, backdrops: { x: { rect: { x: 0, z: 0, w: -1, d: 1 }, opacity: 1, tintWalls: false, tilePx: 140 } } })).toBeNull()
+  })
+
+  it("accepts views stored before walls had followTerrain (they follow the terrain) and walls with a terrain profile", () => {
+    const { scene, ground } = flatScene(8, 8, "bright")
+    const { samplesX, samplesZ } = sampleCounts(scene.grid, 2)
+    const dense = new Float32Array(samplesX * samplesZ)
+    for (let j = 0; j < samplesZ; j++) for (let i = 0; i < samplesX; i++) dense[j * samplesX + i] = 0.25 * i
+    scene.levels[ground] = { ...scene.levels[ground], heightmap: writeHeights(createHeightmap(2), scene.grid, dense) }
+    const wall = add(scene, createWall(ground, { x: 0, z: 20 }, { x: 40, z: 20 }))
+    const token = addToken(scene, ground, 12.5, 12.5)
+    const sim = new TestHost(scene, [P1])
+    sim.assign(token.id, P1)
+    const view = sim.refresh(P1).view
+    const pieces = Object.values(view.objects).filter((o): o is PlayerWall => o.type === "wall" && o.id.startsWith(`${wall.id}@`))
+    expect(pieces.length).toBeGreaterThan(0)
+    // Current views: the profile travels and reaches the rebuilt scene.
+    expect(parseStoredView(JSON.parse(JSON.stringify(view)))).toEqual(view)
+    for (const p of pieces) {
+      expect(p.terrainProfile?.length).toBeGreaterThanOrEqual(2)
+      expect(buildPlayerScene(view).objects[p.id]).toMatchObject({ followTerrain: true, terrainProfile: p.terrainProfile })
+    }
+    // A row written by an older host: no followTerrain, no profile.
+    const old = JSON.parse(JSON.stringify(view)) as PlayerView
+    for (const p of pieces) {
+      delete (old.objects[p.id] as Partial<PlayerWall>).followTerrain
+      delete (old.objects[p.id] as Partial<PlayerWall>).terrainProfile
+    }
+    expect(looksLikeView(old)).toBe(true)
+    const parsed = parseStoredView(old)!
+    for (const p of pieces) {
+      expect(parsed.objects[p.id]).toMatchObject({ followTerrain: true })
+      expect(parsed.objects[p.id]).not.toHaveProperty("terrainProfile")
+      // Even unparsed (the structural fallback), the rebuilt wall follows the terrain.
+      expect(buildPlayerScene(old).objects[p.id]).toMatchObject({ type: "wall", followTerrain: true })
+    }
   })
 
   it("loads the row on snapshot_ready; accepts only the announced epoch with seq ≥", async () => {

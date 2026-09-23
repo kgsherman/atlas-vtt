@@ -4,7 +4,7 @@ import { createConnector, createDoor, createFloor, createLevel, createLight, cre
 import { createHeightmap, denseHeights, writeHeights } from "@/core/scene/heightmap"
 import type { Scene } from "@/core/scene/types"
 
-import { classifyStructure, deepEqual, diffScenes, heightmapDiffRect, invalidation, occlusionClosure } from "./diff"
+import { classifyStructure, deepEqual, diffScenes, heightmapDiffRect, invalidateTerrain, invalidation, occlusionClosure } from "./diff"
 
 function base() {
   const scene = createScene({ width: 16, depth: 16 })
@@ -92,6 +92,13 @@ describe("scene diff", () => {
     const inv = invalidation(scene, scene, { terrain: [upper] })
     expect(inv.buckets.get(upper)!.size).toBe(7)
     expect([...inv.buckets.get(ground)!]).toEqual(["connectors"])
+    // An in-place terrain commit (the engine moved the mesh itself) marks only what it asks for, plus the
+    // connectors reaching the level and the tokens.
+    const partial = invalidation(scene, scene, {})
+    invalidateTerrain(partial, scene, upper, ["props"])
+    expect([...partial.buckets.get(upper)!]).toEqual(["props"])
+    expect([...partial.buckets.get(ground)!]).toEqual(["connectors"])
+    expect(partial.tokens).toBe(true)
   })
 
   it("closes occlusion updates over openings, host walls and joints", () => {

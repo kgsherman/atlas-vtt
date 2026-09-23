@@ -5,6 +5,10 @@
  *  - objects come from the player's MEMORY only (never straight from the scene), clipped to explored
  *    cells without dilation (clip.ts). The live scene is consulted only to drop things that must not
  *    exist for players any more (hidden objects, secret doors not revealed to this player);
+ *  - wall pieces keep `followTerrain`; a follow-terrain piece on a heightmap level also carries the host's
+ *    base line along its centreline (`terrainProfile`, at core/scene/wallProfile `wallBaseKnots`), so the
+ *    client draws the host's tops and opening heights even where its clipped terrain lacks samples. It
+ *    reveals only the ground under the piece's centreline, which the piece's own top already reveals;
  *  - lights: remembered static lights (emitting = currently illuminating something perceived) and lights
  *    carried by tokens in the view (resolved, emitting = on). Never attachment ids;
  *  - tokens: controlled + vision tokens always, others while visible, never hidden ones; DM names,
@@ -17,14 +21,18 @@
  * mask never reaches a player.
  * Precondition: updateKnowledge(state, uid, vis) has been applied for the same `vis`.
  */
-import { groundHeightAt, levelById, levelGround, lightEffectivelyHidden, lightWorldPosition, sortedLevels, wallLength } from "../scene/queries"
-import type { ConnectorObject, Environment, Id, Level, LightObject, Scene, SceneObject, Token } from "../scene/types"
+import { TerrainSampler } from "../occlusion/terrain"
+import { sampleSpacing } from "../scene/heightmap"
+import { groundHeightAt, levelById, lightEffectivelyHidden, lightWorldPosition, sortedLevels, wallLength } from "../scene/queries"
+import type { ConnectorObject, Environment, Id, Level, LightObject, Scene, SceneObject, Token, Vec2 } from "../scene/types"
+import { wallBaseKnots, wallProfile, type WallProfile } from "../scene/wallProfile"
 import { encodeGrades, encodeMask, createCellMask, getCell, setCell } from "../vision/mask"
 import { objectFootprint } from "../vision/observe"
 import type { EncodedGrades, EncodedMask, VisibilityResult } from "../vision/types"
 import { clipTerrainChunk, exploredLevel, footprintTouchesExplored, maskedFloorExploredRects, mergeRuns, wallExploredRuns, type ExploredLevel, type Run } from "./clip"
 import { emptyEncodedCellMask, emptyEncodedGrades, encodedMaskIsEmpty, maskMatchesGrid } from "./masks"
 import { connectorsOnly, rememberedFootprint } from "./memory"
+import { MAX_TERRAIN_PROFILE } from "./playerViewSchema"
 import { sanitizeLight, type MemoryFloor } from "./sanitize"
 import { controlledTokenIds, movementLockedFor, own, tokenExistsForPlayers, viewerTokenIds } from "./state"
 import {
@@ -78,6 +86,11 @@ const wallRunsCache: MemoCache<Run[]> = new WeakMap()
 const floorCache: MemoCache<{ x: number; z: number; w: number; d: number }[]> = new WeakMap()
 const wholeCache: MemoCache<boolean> = new WeakMap()
 const attachedCache = new WeakMap<object, LightObject[]>()
+/** Base line of a remembered follow-terrain wall on the host terrain, per heightmap revision (shared by players). */
+const hostProfileCache: MemoCache<WallProfile> = new WeakMap()
+/** terrainProfile per piece span of a host base line (the same array across flushes and players). */
+const pieceProfileCache = new WeakMap<WallProfile, Map<string, number[]>>()
+const PIECE_PROFILE_LIMIT = 64
 
 /** Lights attached to a token (cached per objects-record revision). */
 function attachedLights(scene: Pick<Scene, "objects">): LightObject[] {
@@ -207,7 +220,23 @@ function copyWhole(m: PlayerObject): PlayerObject | null {
   }
 }
 
-const clamp = (v: number, lo: number, hi: number): number => (v < lo ? lo : v > hi ? hi : v)
+/**
+ * PlayerWall.terrainProfile of the piece a→b spanning [t0, t1] along its host wall: the host's base line
+ * (world Y) at the piece's base knots (wallBaseKnots, u feet from a ⇒ t0 + u on the host). Points on the
+ * piece's centreline only. null when it would exceed the wire limit (the client then uses its own ground).
+ */
+function pieceTerrainProfile(host: WallProfile, spacing: number, t0: number, t1: number, a: Vec2, b: Vec2): number[] | null {
+  let byPiece = pieceProfileCache.get(host)
+  if (!byPiece) pieceProfileCache.set(host, (byPiece = new Map()))
+  const key = `${t0},${t1}`
+  let out = byPiece.get(key)
+  if (out === undefined) {
+    out = wallBaseKnots({ a, b }, spacing).map((u) => host.baseAt(t0 + u))
+    if (byPiece.size >= PIECE_PROFILE_LIMIT) byPiece.clear()
+    byPiece.set(key, out)
+  }
+  return out.length <= MAX_TERRAIN_PROFILE ? out : null
+}
 
 interface LightOut {
   base: PlayerLight
@@ -329,9 +358,17 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
     list.push({ o, t0, t1 })
   }
 
-  // Walls → pieces (runs widened to contain their sent openings), openings re-parented. Pieces on
-  // heightmap levels are rebased below, once the client's terrain is known.
-  const wallPieces: { pid: Id; wall: PlayerWall; mid: { x: number; z: number }; openings: Id[] }[] = []
+  // Host terrain per level, built only when a follow-terrain wall's base line is not cached yet.
+  const grounds = new Map<Id, TerrainSampler>()
+  const hostGround = (level: Level): TerrainSampler => {
+    let g = grounds.get(level.id)
+    if (!g) grounds.set(level.id, (g = new TerrainSampler(level, grid)))
+    return g
+  }
+
+  // Walls → pieces (runs widened to contain their sent openings), openings re-parented. Pieces keep the
+  // wall's followTerrain; on heightmap levels follow-terrain pieces carry the host's base line, so the
+  // client's tops and opening heights are the host's whatever terrain it lacks (no rebasing needed).
   for (const [id, { wall, runs }] of walls) {
     const ops = wallOpenings.get(id) ?? []
     const rs = mergeRuns([...runs.map((r): Run => [r[0], r[1]]), ...ops.map((op): Run => [op.t0, op.t1])])
@@ -340,13 +377,24 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
     const ux = (wall.b.x - wall.a.x) / len
     const uz = (wall.b.z - wall.a.z) / len
     const at = (t: number) => (t <= 0 ? wall.a : t >= len ? wall.b : { x: wall.a.x + ux * t, z: wall.a.z + uz * t })
+    // Memory written before followTerrain existed: such walls follow the terrain (like migrated scenes).
+    const follow = wall.followTerrain !== false
+    const level = levelById(scene, wall.levelId)!
+    const hm = follow ? level.heightmap : null
+    const host = hm
+      ? memo(hostProfileCache, hm, wall, [level.elevation, cellSize, grid.width, grid.depth], () => {
+          const hostWall = { a: wall.a, b: wall.b, height: wall.height, thickness: wall.thickness, followTerrain: true }
+          return wallProfile(hostWall, hostGround(level), level.elevation, { a: 0, b: 0 })
+        })
+      : null
+    const spacing = hm ? sampleSpacing(cellSize, hm.resolution) : 0
     const pieces: { pid: Id; t0: number; t1: number }[] = []
     for (const [t0, t1] of rs) {
       if (!(t1 - t0 > 1e-6)) continue
       const pa = at(t0)
       const pb = at(t1)
       const pid = pieceId(id, pa.x, pa.z)
-      objects[pid] = {
+      const piece: PlayerWall = {
         id: pid,
         type: "wall",
         levelId: wall.levelId,
@@ -355,16 +403,16 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
         height: wall.height,
         thickness: wall.thickness,
         material: wall.material,
+        followTerrain: follow,
       }
+      const profile = host ? pieceTerrainProfile(host, spacing, t0, t1, piece.a, piece.b) : null
+      if (profile) piece.terrainProfile = profile
+      objects[pid] = piece
       pieces.push({ pid, t0, t1 })
-      wallPieces.push({ pid, wall, mid: { x: (pa.x + pb.x) / 2, z: (pa.z + pb.z) / 2 }, openings: [] })
     }
-    const first = wallPieces.length - pieces.length
     for (const op of ops) {
       const k = pieces.findIndex((p) => p.t0 <= op.t0 + 1e-6 && op.t1 <= p.t1 + 1e-6)
-      if (k < 0) continue
-      objects[op.o.id] = copyOpening(op.o, pieces[k].pid, op.o.offset - pieces[k].t0)
-      wallPieces[first + k].openings.push(op.o.id)
+      if (k >= 0) objects[op.o.id] = copyOpening(op.o, pieces[k].pid, op.o.offset - pieces[k].t0)
     }
   }
 
@@ -428,44 +476,6 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
   }
   const clientScene = { grid, levels: clientLevels, objects: clientConnectors }
 
-  // ---- wall pieces, rebased onto the ground the player's client will compute --------------------
-  // A wall's base is the ground at ITS midpoint (Terrain rule), so on terrain a piece would stand on
-  // the ground at the piece's midpoint instead. Shift each piece (and its openings) by
-  // d = host base − client base so the top, lintels, sills and door heads keep the host's world Y.
-  // Heights are clamped against the host height H first, which makes the client's own clamps against
-  // H + d no-ops. Flat levels need nothing (d = 0) and stay byte-identical.
-  for (const piece of wallPieces) {
-    const { wall } = piece
-    if (!own(scene.levels, wall.levelId)?.heightmap) continue
-    const hostBase = levelGround(scene, wall.levelId, (wall.a.x + wall.b.x) / 2, (wall.a.z + wall.b.z) / 2)
-    const d = hostBase - levelGround(clientScene, wall.levelId, piece.mid.x, piece.mid.z)
-    if (d === 0) continue
-    const H = wall.height
-    if (!(H + d > 0)) {
-      // The client's ground at the piece midpoint is above the host wall's top (the wall is buried
-      // there): nothing of it stands above that ground, so the piece is not sent.
-      delete objects[piece.pid]
-      for (const oid of piece.openings) delete objects[oid]
-      continue
-    }
-    const w = objects[piece.pid] as PlayerWall
-    w.height = H + d
-    for (const oid of piece.openings) {
-      const o = objects[oid]
-      if (o.type === "door") {
-        o.height = Math.max(0, clamp(o.height, 0, H) + d)
-      } else if (o.type === "window") {
-        const sill = clamp(o.sillHeight, 0, H)
-        const head = clamp(o.sillHeight + o.height, sill, H)
-        // No host sill → none on the client either. A host sill whose top is below the client's
-        // ground at the piece midpoint (sill + d ≤ 0) makes the client window sill-less: the only
-        // residual difference, and it lies below that ground.
-        const sillOut = sill > 0 ? Math.max(0, sill + d) : 0
-        o.sillHeight = sillOut
-        o.height = Math.max(0, head + d - sillOut)
-      }
-    }
-  }
   for (const id of [...lights.keys()].sort()) {
     const l = lights.get(id)!
     if (!Object.hasOwn(levels, l.levelId)) continue

@@ -26,7 +26,22 @@ const noop = (state: GameState, error?: string): ReduceResult => {
 
 const sorted = (ids: Iterable<Id>): Id[] => [...new Set(ids)].sort()
 
-/** Changes of a scene revision, derived from the paths of the immer patches that produced it. */
+/** Is this a patch of a level's terrain edits (levels/<id>/terrainEdits/…)? */
+const isTerrainEditsPatch = (p: Patch): boolean => p.path.length >= 3 && p.path[0] === "levels" && p.path[2] === "terrainEdits"
+
+/**
+ * Do these patches change only DM-only terrain editing data (Level.terrainEdits: shapes and painted base,
+ * never sent to players)? Such an edit changes nothing any player sees or knows: the baked result, when
+ * there is one, arrives as heightmap patches.
+ */
+export function onlyTerrainEdits(patches: readonly Patch[]): boolean {
+  return patches.length > 0 && patches.every(isTerrainEditsPatch)
+}
+
+/**
+ * Changes of a scene revision, derived from the paths of the immer patches that produced it.
+ * levels/<id>/terrainEdits/… is ignored (DM-only editing data; the visual change is in the heightmap patches).
+ */
 export function deltaFromPatches(prev: Scene, next: Scene, patches: readonly Patch[]): SceneDelta {
   const objects = new Set<Id>()
   const tokens = new Set<Id>()
@@ -55,6 +70,7 @@ export function deltaFromPatches(prev: Scene, next: Scene, patches: readonly Pat
         break
       case "levels": {
         const levelId = path[1]
+        if (levelId !== undefined && path[2] === "terrainEdits") break
         if (levelId !== undefined && path[2] === "heightmap") {
           // Chunk edits are terrain changes; creating/removing a heightmap or changing its resolution
           // changes the level's structure.
@@ -246,7 +262,8 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
       // The live map now differs from the library version it came from.
       if (state.origin && !state.origin.dirty) edited.origin = { ...state.origin, dirty: true }
       const next = reconcileKnowledge(edited, state.scene, scene)
-      return { state: next, delta, dirtyPlayers: "all" }
+      // Terrain-edit bookkeeping only (e.g. a shape renamed, or painting under a shape): no player view changes.
+      return { state: next, delta, dirtyPlayers: onlyTerrainEdits(cmd.patches) ? [] : "all" }
     }
     case "set-origin": {
       const o = cmd.origin

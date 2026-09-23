@@ -6,6 +6,11 @@
  * ±Infinity). Geometric checks that need the grid (coordinates within the extent ± margin,
  * connector cell alignment, heightmap chunk ranges) run in a scene-level refinement; reference
  * checks (ids pointing at existing things) run in integrity.validateReferences.
+ *
+ * Terrain edits (Level.terrainEdits, DM-only shapes + painted base) are validated for shape and range
+ * only: the bake invariant tying them to Level.heightmap is maintained by core/scene/terrainShapes
+ * `writeTerrain` and is NOT checked here (consumers read only the heightmap; a document that breaks it
+ * only "jumps" the next time the affected chunk is edited).
  */
 import { z } from "zod"
 
@@ -14,8 +19,9 @@ import { base64ToBytes, chunkSamples, parseChunkKey, sampleCounts } from "./heig
 import { MAX_TERRAIN_HEIGHT } from "./heightmapBrush"
 import { validateReferences } from "./integrity"
 import { migrateToCurrent } from "./migrations"
+import { signedArea } from "./polygon"
 import { TOKEN_MODEL_REF_RE } from "./tokenModel"
-import { SCENE_SCHEMA_VERSION, type Scene } from "./types"
+import { SCENE_SCHEMA_VERSION, type GridSettings, type Scene } from "./types"
 
 export const SCENE_LIMITS = {
   /** Max grid width / depth in cells. */
@@ -43,6 +49,12 @@ export const SCENE_LIMITS = {
   maxTerrainHeight: MAX_TERRAIN_HEIGHT,
   /** Shortest wall (feet). */
   minWallLength: MIN_WALL_LENGTH,
+  /** Terrain shapes per level (Level.terrainEdits.shapes). */
+  maxTerrainShapesPerLevel: 1_000,
+  /** Footprint vertices per terrain shape (the largest cylinder has 64 sides; no edit adds vertices). */
+  maxTerrainShapePoints: 64,
+  /** Footprint vertices over all the shapes of a level. */
+  maxTerrainPointsPerLevel: 16_000,
 } as const
 
 /** Max issues reported by parseScene (a garbage document could otherwise yield thousands). */
@@ -120,47 +132,116 @@ const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/
 /** Base64 length of n bytes (with padding). */
 const base64Length = (bytes: number) => 4 * Math.ceil(bytes / 3)
 
+/** Chunk records (heightmap chunks, terrain base chunks): key syntax and a length cap before decoding. */
+const chunkRecordSchema = z.record(
+  z.string().regex(CHUNK_KEY, "invalid chunk key"),
+  z
+    .string()
+    .max(base64Length(chunkSamples(4) ** 2 * 4))
+    .regex(BASE64, "invalid base64")
+)
+
+type Ctx = z.RefinementCtx
+type IssuePath = (string | number)[]
+
+/**
+ * Payload checks of a chunk record at `resolution`: at most as many chunks as a 200×200 grid can have
+ * (checked before decoding anything), each an exact-length base64 Float32 chunk of finite heights within
+ * ±MAX_TERRAIN_HEIGHT. `allowEmpty`: "" stands for an all-zero chunk (terrain base chunks only).
+ * Issues are reported at `path`/<key>.
+ */
+function checkChunkPayloads(
+  chunks: Readonly<Record<string, string>>,
+  resolution: number,
+  ctx: Ctx,
+  path: IssuePath,
+  opts: { allowEmpty?: boolean } = {}
+): void {
+  const n = chunkSamples(resolution)
+  const bytes = n * n * 4
+  const entries = Object.entries(chunks)
+  const maxPerAxis = Math.ceil((SCENE_LIMITS.maxGridCells * resolution + 1) / n)
+  if (entries.length > maxPerAxis * maxPerAxis) {
+    ctx.addIssue({ code: "custom", message: `too many chunks (${entries.length})`, path })
+    return
+  }
+  for (const [key, b64] of entries) {
+    if (opts.allowEmpty && b64 === "") continue
+    if (b64.length !== base64Length(bytes)) {
+      ctx.addIssue({ code: "custom", message: `chunk must decode to exactly ${bytes} bytes`, path: [...path, key] })
+      continue
+    }
+    let raw: Uint8Array
+    try {
+      raw = base64ToBytes(b64)
+    } catch {
+      ctx.addIssue({ code: "custom", message: "invalid base64", path: [...path, key] })
+      continue
+    }
+    if (raw.byteLength !== bytes) {
+      ctx.addIssue({ code: "custom", message: `chunk must decode to exactly ${bytes} bytes`, path: [...path, key] })
+      continue
+    }
+    const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength)
+    for (let k = 0; k < n * n; k++) {
+      const h = view.getFloat32(k * 4, true)
+      if (!Number.isFinite(h) || Math.abs(h) > MAX_TERRAIN_HEIGHT) {
+        ctx.addIssue({ code: "custom", message: `chunk sample ${k} is not a finite height within ±${MAX_TERRAIN_HEIGHT} ft`, path: [...path, key] })
+        break
+      }
+    }
+  }
+}
+
+/** Every key of a chunk record (canonical "ci,cj", already checked) lies inside the grid's chunk range at `resolution`. */
+function checkChunkRange(
+  chunks: Readonly<Record<string, string>>,
+  grid: Pick<GridSettings, "width" | "depth">,
+  resolution: number,
+  ctx: Ctx,
+  path: IssuePath
+): void {
+  const n = chunkSamples(resolution)
+  const { samplesX, samplesZ } = sampleCounts(grid, resolution)
+  const chunksX = Math.ceil(samplesX / n)
+  const chunksZ = Math.ceil(samplesZ / n)
+  for (const key of Object.keys(chunks)) {
+    const { ci, cj } = parseChunkKey(key)
+    if (ci >= chunksX || cj >= chunksZ) {
+      ctx.addIssue({ code: "custom", message: `chunk lies outside the grid (${chunksX}×${chunksZ} chunks)`, path: [...path, key] })
+    }
+  }
+}
+
 const heightmapSchema = z
   .strictObject({
     resolution: z.union([z.literal(1), z.literal(2), z.literal(4)]),
-    chunks: z.record(z.string().regex(CHUNK_KEY, "invalid chunk key"), z.string().max(base64Length(chunkSamples(4) ** 2 * 4)).regex(BASE64, "invalid base64")),
+    chunks: chunkRecordSchema,
   })
-  .superRefine((hm, ctx) => {
-    const n = chunkSamples(hm.resolution)
-    const bytes = n * n * 4
-    const entries = Object.entries(hm.chunks)
-    // More chunks than a 200×200 grid can have at this resolution: reject before decoding anything.
-    const maxPerAxis = Math.ceil((SCENE_LIMITS.maxGridCells * hm.resolution + 1) / n)
-    if (entries.length > maxPerAxis * maxPerAxis) {
-      ctx.addIssue({ code: "custom", message: `too many heightmap chunks (${entries.length})`, path: ["chunks"] })
-      return
-    }
-    for (const [key, b64] of entries) {
-      if (b64.length !== base64Length(bytes)) {
-        ctx.addIssue({ code: "custom", message: `chunk must decode to exactly ${bytes} bytes`, path: ["chunks", key] })
-        continue
-      }
-      let raw: Uint8Array
-      try {
-        raw = base64ToBytes(b64)
-      } catch {
-        ctx.addIssue({ code: "custom", message: "invalid base64", path: ["chunks", key] })
-        continue
-      }
-      if (raw.byteLength !== bytes) {
-        ctx.addIssue({ code: "custom", message: `chunk must decode to exactly ${bytes} bytes`, path: ["chunks", key] })
-        continue
-      }
-      const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength)
-      for (let k = 0; k < n * n; k++) {
-        const h = view.getFloat32(k * 4, true)
-        if (!Number.isFinite(h) || Math.abs(h) > MAX_TERRAIN_HEIGHT) {
-          ctx.addIssue({ code: "custom", message: `chunk sample ${k} is not a finite height within ±${MAX_TERRAIN_HEIGHT} ft`, path: ["chunks", key] })
-          break
-        }
-      }
-    }
+  .superRefine((hm, ctx) => checkChunkPayloads(hm.chunks, hm.resolution, ctx, ["chunks"]))
+
+/** Terrain heights (feet relative to the level elevation): the range a heightmap chunk can store. */
+const terrainY = z.number().min(-MAX_TERRAIN_HEIGHT).max(MAX_TERRAIN_HEIGHT)
+
+/** Smallest canonical signed footprint area of a terrain shape (ft²). */
+const MIN_SHAPE_AREA = 1e-6
+
+const terrainShapeSchema = z
+  .strictObject({
+    id: idSchema,
+    name: text.optional(),
+    kind: z.enum(["block", "ramp", "cylinder"]),
+    op: z.enum(["add", "carve"]),
+    order: z.int().min(0).max(1_000_000),
+    points: z.array(z.strictObject({ x: num, y: terrainY, z: num })).min(3).max(SCENE_LIMITS.maxTerrainShapePoints),
+    base: terrainY,
   })
+  .refine((s) => signedArea(s.points) > MIN_SHAPE_AREA, { message: "footprint must have a positive (canonical) signed area", path: ["points"] })
+
+const terrainEditsSchema = z.strictObject({
+  shapes: z.record(idSchema, terrainShapeSchema).refine((r) => Object.keys(r).length > 0, "terrain edits need at least one shape"),
+  baseChunks: chunkRecordSchema,
+})
 
 const backdropSchema = z.strictObject({
   assetId: idSchema,
@@ -169,15 +250,24 @@ const backdropSchema = z.strictObject({
   tintWalls: z.boolean(),
 })
 
-const levelSchema = z.strictObject({
-  id: idSchema,
-  name: text,
-  elevation: ycoord,
-  height: positive(SCENE_LIMITS.maxLength),
-  floorThickness: positive(SCENE_LIMITS.maxLength),
-  heightmap: heightmapSchema.nullable(),
-  backdrop: backdropSchema.nullable().optional(),
-})
+const levelSchema = z
+  .strictObject({
+    id: idSchema,
+    name: text,
+    elevation: ycoord,
+    height: positive(SCENE_LIMITS.maxLength),
+    floorThickness: positive(SCENE_LIMITS.maxLength),
+    heightmap: heightmapSchema.nullable(),
+    terrainEdits: terrainEditsSchema.optional(),
+    backdrop: backdropSchema.nullable().optional(),
+  })
+  .superRefine((level, ctx) => {
+    const te = level.terrainEdits
+    if (!te) return
+    // Terrain edits are the editing data behind a heightmap; base chunks use its resolution.
+    if (!level.heightmap) ctx.addIssue({ code: "custom", message: "terrain edits require a heightmap", path: ["terrainEdits"] })
+    else checkChunkPayloads(te.baseChunks, level.heightmap.resolution, ctx, ["terrainEdits", "baseChunks"], { allowEmpty: true })
+  })
 
 // ---------------------------------------------------------------------------
 // Objects
@@ -245,6 +335,8 @@ const wallSchema = z
     height: positive(SCENE_LIMITS.maxLength),
     thickness: positive(SCENE_LIMITS.maxLength),
     material: materialSchema,
+    // WallObject.terrainProfile is player-side only and not part of DM documents (rejected as unknown).
+    followTerrain: z.boolean(),
   })
   .refine((w) => Math.hypot(w.b.x - w.a.x, w.b.z - w.a.z) >= MIN_WALL_LENGTH, { message: `wall must be at least ${MIN_WALL_LENGTH} ft long`, path: ["b"] })
 
@@ -355,8 +447,6 @@ const tokenSchema = z.strictObject({
 // Scene
 // ---------------------------------------------------------------------------
 
-type Ctx = z.RefinementCtx
-
 /** Extent checks against the grid (points and rects within [−margin, extent + margin]). */
 function checkExtent(scene: z.infer<typeof sceneShape>, ctx: Ctx): void {
   const m = SCENE_LIMITS.coordMargin
@@ -365,10 +455,10 @@ function checkExtent(scene: z.infer<typeof sceneShape>, ctx: Ctx): void {
   const maxZ = scene.grid.depth * s + m
   const inX = (x: number) => x >= -m && x <= maxX
   const inZ = (z: number) => z >= -m && z <= maxZ
-  const point = (p: { x: number; z: number }, path: (string | number)[]) => {
+  const point = (p: { x: number; z: number }, path: IssuePath) => {
     if (!inX(p.x) || !inZ(p.z)) ctx.addIssue({ code: "custom", message: "point lies outside the scene extent", path })
   }
-  const rect = (r: { x: number; z: number; w: number; d: number }, path: (string | number)[]) => {
+  const rect = (r: { x: number; z: number; w: number; d: number }, path: IssuePath) => {
     if (!inX(r.x) || !inZ(r.z) || !inX(r.x + r.w) || !inZ(r.z + r.d)) ctx.addIssue({ code: "custom", message: "rect lies outside the scene extent", path })
   }
   /** Is v a whole multiple of the cell size (within float noise)? */
@@ -410,18 +500,16 @@ function checkExtent(scene: z.infer<typeof sceneShape>, ctx: Ctx): void {
   for (const [id, t] of Object.entries(scene.tokens)) point(t.position, ["tokens", id, "position"])
 
   for (const [id, level] of Object.entries(scene.levels)) {
-    const hm = level.heightmap
-    if (!hm) continue
-    const n = chunkSamples(hm.resolution)
-    const { samplesX, samplesZ } = sampleCounts(scene.grid, hm.resolution)
-    const chunksX = Math.ceil(samplesX / n)
-    const chunksZ = Math.ceil(samplesZ / n)
-    for (const key of Object.keys(hm.chunks)) {
-      const { ci, cj } = parseChunkKey(key)
-      if (ci >= chunksX || cj >= chunksZ) {
-        ctx.addIssue({ code: "custom", message: `chunk lies outside the grid (${chunksX}×${chunksZ} chunks)`, path: ["levels", id, "heightmap", "chunks", key] })
+    const te = level.terrainEdits
+    if (te) {
+      for (const [sid, shape] of Object.entries(te.shapes)) {
+        shape.points.forEach((p, k) => point(p, ["levels", id, "terrainEdits", "shapes", sid, "points", k]))
       }
     }
+    const hm = level.heightmap
+    if (!hm) continue
+    checkChunkRange(hm.chunks, scene.grid, hm.resolution, ctx, ["levels", id, "heightmap", "chunks"])
+    if (te) checkChunkRange(te.baseChunks, scene.grid, hm.resolution, ctx, ["levels", id, "terrainEdits", "baseChunks"])
   }
 }
 
@@ -443,6 +531,28 @@ const sceneShape = z.strictObject({
     tags: z.array(z.string().max(64)).max(SCENE_LIMITS.maxTags),
   }),
 })
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
+
+/**
+ * Size problem of a level's raw `terrainEdits` (shape count, vertices per shape, vertices per level),
+ * or null. Counts only (no per-entry validation), so it is cheap on untrusted input; editor/validate
+ * uses it for touched levels whose shapes are not all re-validated.
+ */
+export function terrainSizeIssue(terrainEdits: unknown): string | null {
+  if (!isRecord(terrainEdits) || !isRecord(terrainEdits.shapes)) return null
+  const { maxTerrainShapesPerLevel, maxTerrainShapePoints, maxTerrainPointsPerLevel } = SCENE_LIMITS
+  const shapes = Object.values(terrainEdits.shapes)
+  if (shapes.length > maxTerrainShapesPerLevel) return `expected at most ${maxTerrainShapesPerLevel} terrain shapes, got ${shapes.length}`
+  let points = 0
+  for (const shape of shapes) {
+    const n = isRecord(shape) && Array.isArray(shape.points) ? shape.points.length : 0
+    if (n > maxTerrainShapePoints) return `expected at most ${maxTerrainShapePoints} points per terrain shape, got ${n}`
+    points += n
+  }
+  if (points > maxTerrainPointsPerLevel) return `expected at most ${maxTerrainPointsPerLevel} terrain shape points per level, got ${points}`
+  return null
+}
 
 /**
  * Collection sizes are checked on the raw input BEFORE the per-entry schemas run, so an oversized
@@ -466,10 +576,21 @@ function checkSizes(input: unknown, ctx: Ctx): boolean {
       ok = false
     }
   }
+  // Terrain shapes and their footprint vertices, per level (only when the level count itself is sane).
+  const levels = doc.levels
+  if (ok && isRecord(levels)) {
+    for (const [id, level] of Object.entries(levels)) {
+      const issue = terrainSizeIssue(isRecord(level) ? level.terrainEdits : undefined)
+      if (issue) {
+        ctx.addIssue({ code: "custom", message: issue, path: ["levels", id, "terrainEdits", "shapes"] })
+        ok = false
+      }
+    }
+  }
   return ok
 }
 
-/** Strict schema of the current (v1) scene document, including grid-dependent geometry checks. */
+/** Strict schema of the current (v3) scene document, including grid-dependent geometry checks. */
 export const sceneSchema = z
   .unknown()
   .superRefine((input, ctx) => {

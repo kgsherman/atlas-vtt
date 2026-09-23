@@ -11,7 +11,7 @@ import { groundIndex } from "@/core/scene/queries"
 import type { Id, Vec2 } from "@/core/scene/types"
 import type { RulerOverlay } from "@/render/contracts"
 
-import { createClickTracker, defaultNow, pointerSnapMode, samePoint, type ToolDeps } from "./shared"
+import { createClickTracker, defaultNow, isKeyAction, pointerSnapMode, samePoint, type ToolDeps } from "./shared"
 import type { Tool, ToolPointerEvent } from "./types"
 
 /**
@@ -110,11 +110,11 @@ export function createMeasureTool(deps: ToolDeps): MeasureTool {
     },
 
     onKeyDown(e) {
-      if (e.key === "Escape" && points.length > 0) {
+      if (isKeyAction(e, "escape") && points.length > 0) {
         clear()
         return true
       }
-      if (e.key === "Enter" && points.length > 0 && !done) {
+      if (isKeyAction(e, "confirm") && points.length > 0 && !done) {
         done = true
         changed()
         return true

@@ -10,7 +10,7 @@ import {
   tokenAt,
 } from "@/core/movement/test-utils"
 import { createConnector, createDoor, createWall } from "@/core/scene/factory"
-import type { Id, Scene } from "@/core/scene/types"
+import type { Id, Scene, TerrainShape } from "@/core/scene/types"
 import type { VisibilityResult } from "@/core/vision/types"
 import {
   createCellMask,
@@ -644,6 +644,34 @@ describe("host helpers", () => {
       d.levels[levelId].name = "Other"
     })
     expect(sceneChangeBetween(terrain, renamed)).toEqual({ structure: true })
+    // Terrain edits are DM-only editing data: alone they change nothing; with
+    // the baked heightmap they are a terrain change.
+    const shape: TerrainShape = {
+      id: "s1",
+      kind: "block",
+      op: "add",
+      order: 0,
+      base: 0,
+      points: [
+        { x: 0, y: 2, z: 0 },
+        { x: 5, y: 2, z: 0 },
+        { x: 5, y: 2, z: 5 },
+      ],
+    }
+    const edited = produce(renamed, (d) => {
+      d.levels[levelId].terrainEdits = { shapes: { s1: shape }, baseChunks: {} }
+    })
+    expect(sceneChangeBetween(renamed, edited)).toEqual({})
+    const baked = produce(edited, (d) => {
+      d.levels[levelId].terrainEdits!.shapes.s1.name = "Mound"
+      d.levels[levelId].heightmap = { resolution: 2, chunks: {} }
+    })
+    expect(sceneChangeBetween(edited, baked)).toEqual({ terrain: [levelId] })
+    const cleared = produce(baked, (d) => {
+      delete d.levels[levelId].terrainEdits
+      d.levels[levelId].elevation = 1
+    })
+    expect(sceneChangeBetween(baked, cleared)).toEqual({ structure: true })
     expect(
       sceneChangeBetween(scene, { ...scene, id: "other" } as Scene)
     ).toBeNull()

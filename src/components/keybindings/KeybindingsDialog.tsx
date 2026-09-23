@@ -13,7 +13,7 @@ import { Kbd, KbdGroup } from "@/components/ui/kbd"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { EDITOR_POINTER_HELP } from "@/editor/shortcuts"
+import { EDITOR_COMMAND_GROUPS, EDITOR_POINTER_HELP } from "@/editor/shortcuts"
 import { hotkeyLabel, hotkeyParts } from "@/lib/hotkeys"
 import { assignKey, commandUsing, conflictsOf, keysOf, removeKey, resetCommand, type Command } from "@/lib/keymap"
 import { cn } from "@/lib/utils"
@@ -43,11 +43,29 @@ function commandsFor(scope: KeymapScope, host: boolean): Command[] {
 
 function groupsFor(scope: KeymapScope, host: boolean): { title: string; commands: Command[] }[] {
   if (scope === "play") return [{ title: "Keys", commands: commandsFor("play", host) }]
-  return (["Tools", "Editing", "View"] as const).map((group) => ({ title: group, commands: KEYMAPS.editor.filter((c) => c.group === group) }))
+  return EDITOR_COMMAND_GROUPS.map((group) => ({ title: group, commands: KEYMAPS.editor.filter((c) => c.group === group) }))
 }
 
-function helpFor(scope: KeymapScope, host: boolean): HelpRow[] {
-  return scope === "play" ? PLAY_POINTER_HELP.filter((h) => host || !h.hostOnly) : EDITOR_POINTER_HELP
+/** "Drag an arrow (terrain, advanced)": the context in parentheses names the tool / mode a gesture belongs to. */
+const TERRAIN_CONTEXT = /\s*\(terrain(?:,\s*([^)]+))?\)$/
+
+/**
+ * Mouse and held-key rows as titled sections: the terrain mode's gestures get their own (context moved from
+ * the keys to the label, so the key caps stay short).
+ */
+function helpFor(scope: KeymapScope, host: boolean): { title: string; rows: HelpRow[] }[] {
+  if (scope === "play") return [{ title: "Mouse & held keys", rows: PLAY_POINTER_HELP.filter((h) => host || !h.hostOnly) }]
+  const general: HelpRow[] = []
+  const terrain: HelpRow[] = []
+  for (const h of EDITOR_POINTER_HELP) {
+    const m = TERRAIN_CONTEXT.exec(h.keys)
+    if (!m) general.push(h)
+    else terrain.push({ keys: h.keys.slice(0, m.index), label: m[1] ? `${h.label} (${m[1]})` : h.label })
+  }
+  return [
+    { title: "Mouse & held keys", rows: general },
+    { title: "Terrain mouse", rows: terrain },
+  ].filter((g) => g.rows.length > 0)
 }
 
 /** Why `hotkey` can't be bound here, or null. */
@@ -166,24 +184,26 @@ export function KeybindingsDialog({ open, onOpenChange, scopes, host = false }: 
                 </div>
               </section>
             ))}
-            <section className="flex flex-col gap-1">
-              <h3 className="px-1 text-[0.6875rem] font-semibold tracking-wider text-muted-foreground uppercase">Mouse & held keys</h3>
-              <div className="flex flex-col">
-                {help.map((h) => (
-                  <div key={h.keys + h.label} className="flex min-h-7 items-center justify-between gap-4 px-1 text-xs">
-                    <span className="text-foreground/85">{h.label}</span>
-                    <span className="flex flex-wrap items-center justify-end gap-1">
-                      {h.keys.split(" / ").map((k, i) => (
-                        <React.Fragment key={k}>
-                          {i > 0 ? <span className="text-[0.625rem] text-muted-foreground">or</span> : null}
-                          <Kbd>{k}</Kbd>
-                        </React.Fragment>
-                      ))}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </section>
+            {help.map((g) => (
+              <section key={g.title} className="flex flex-col gap-1">
+                <h3 className="px-1 text-[0.6875rem] font-semibold tracking-wider text-muted-foreground uppercase">{g.title}</h3>
+                <div className="flex flex-col">
+                  {g.rows.map((h) => (
+                    <div key={h.keys + h.label} className="flex min-h-7 items-center justify-between gap-4 px-1 text-xs">
+                      <span className="text-foreground/85">{h.label}</span>
+                      <span className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+                        {h.keys.split(" / ").map((k, i) => (
+                          <React.Fragment key={k}>
+                            {i > 0 ? <span className="text-[0.625rem] text-muted-foreground">or</span> : null}
+                            <Kbd className="whitespace-nowrap">{k}</Kbd>
+                          </React.Fragment>
+                        ))}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            ))}
           </div>
         </ScrollArea>
         <DialogFooter className="items-center sm:justify-between">

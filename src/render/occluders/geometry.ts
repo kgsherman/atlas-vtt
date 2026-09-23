@@ -8,11 +8,15 @@
  *    scaled so the polygon has the circle's area (radial error ≤ 1.3% either way)
  *  - heightfields → closed meshes (top surface on the terrain triangle split, bottom = top − thickness,
  *    skirts along the boundary of the solid lattice cells), cut into chunks so the per-face frustum of
- *    a light's cube pass culls the terrain it cannot see.
+ *    a light's cube pass culls the terrain it cannot see. A chunk's triangle order depends only on the
+ *    lattice size and the solid mask, so a terrain preview rewrites a chunk's positions in place
+ *    (heightfieldChunkTriangles into an ArrayTriangleSink).
+ *  - wall strips → closed world-space meshes: per knot interval a top quad on the profile, a bottom
+ *    quad and the two side trapezoids (shared edges, no internal faces), plus the two end caps.
  */
 import * as THREE from "three"
 
-import type { Heightfield, OrientedBox, VerticalCylinder } from "@/core/occlusion/types"
+import type { Heightfield, OrientedBox, VerticalCylinder, WallStrip } from "@/core/occlusion/types"
 
 export const PRISM_SIDES = 16
 /** Vertex radius / circle radius giving the 16-gon the circle's area. */
@@ -20,11 +24,50 @@ export const PRISM_RADIUS_SCALE = Math.sqrt((2 * Math.PI) / (PRISM_SIDES * Math.
 /** Lattice cells per heightfield chunk edge. */
 export const HEIGHTFIELD_CHUNK_CELLS = 16
 /** Minimum slab thickness used for proxies (keeps the volume closed and non-degenerate). */
-const MIN_THICKNESS = 0.05
+export const HEIGHTFIELD_MIN_THICKNESS = 0.05
 
 type P3 = readonly [number, number, number]
 
-class TriangleSink {
+/** Where triangle emitters write (TriangleSink grows, ArrayTriangleSink overwrites a fixed array). */
+export interface TriangleWriter {
+  tri(a: P3, b: P3, c: P3): void
+  /** Quad a→b→c→d, counter-clockwise seen from its front: triangles (a, b, c), (a, c, d). */
+  quad(a: P3, b: P3, c: P3, d: P3): void
+}
+
+/**
+ * Writes triangles over a preallocated array from index 0 (a mesh of the same topology rewritten in
+ * place). `offset` is where the next triangle goes; triangles past the end are counted but dropped, so
+ * `offset === array.length` after emission means the topology matched.
+ */
+export class ArrayTriangleSink implements TriangleWriter {
+  offset = 0
+  readonly array: Float32Array
+  constructor(array: Float32Array) {
+    this.array = array
+  }
+  tri(a: P3, b: P3, c: P3): void {
+    const o = this.offset
+    this.offset = o + 9
+    if (o + 9 > this.array.length) return
+    const d = this.array
+    d[o] = a[0]
+    d[o + 1] = a[1]
+    d[o + 2] = a[2]
+    d[o + 3] = b[0]
+    d[o + 4] = b[1]
+    d[o + 5] = b[2]
+    d[o + 6] = c[0]
+    d[o + 7] = c[1]
+    d[o + 8] = c[2]
+  }
+  quad(a: P3, b: P3, c: P3, d: P3): void {
+    this.tri(a, b, c)
+    this.tri(a, c, d)
+  }
+}
+
+export class TriangleSink implements TriangleWriter {
   private data: number[] = []
   tri(a: P3, b: P3, c: P3): void {
     this.data.push(a[0], a[1], a[2], b[0], b[1], b[2], c[0], c[1], c[2])
@@ -34,12 +77,33 @@ class TriangleSink {
     this.tri(a, b, c)
     this.tri(a, c, d)
   }
+  /** Triangle wound counter-clockwise seen from the side `out` points to. */
+  triOutward(a: P3, b: P3, c: P3, out: P3): void {
+    if (crossDot(a, b, c, out) < 0) this.tri(a, c, b)
+    else this.tri(a, b, c)
+  }
+  /** Planar quad a→b→c→d (cyclic order) wound counter-clockwise seen from the side `out` points to. */
+  quadOutward(a: P3, b: P3, c: P3, d: P3, out: P3): void {
+    if (crossDot(a, b, c, out) + crossDot(a, c, d, out) < 0) this.quad(a, d, c, b)
+    else this.quad(a, b, c, d)
+  }
   get length(): number {
     return this.data.length
   }
   toArray(): Float32Array {
     return new Float32Array(this.data)
   }
+}
+
+/** (b − a) × (c − a) · out. */
+function crossDot(a: P3, b: P3, c: P3, out: P3): number {
+  const ux = b[0] - a[0]
+  const uy = b[1] - a[1]
+  const uz = b[2] - a[2]
+  const vx = c[0] - a[0]
+  const vy = c[1] - a[1]
+  const vz = c[2] - a[2]
+  return (uy * vz - uz * vy) * out[0] + (uz * vx - ux * vz) * out[1] + (ux * vy - uy * vx) * out[2]
 }
 
 /** Closed unit cube [−½, ½]³, non-indexed triangles. */
@@ -104,31 +168,42 @@ export interface HeightfieldChunk {
   positions: Float32Array
 }
 
+export type HeightfieldSurface = Pick<Heightfield, "originX" | "originZ" | "spacing" | "samplesX" | "samplesZ" | "heights" | "solid" | "thickness">
+
 /**
  * Closed triangle soup of a heightfield's solid, split into chunks by lattice cell. The union of all
  * chunks is a closed, outward-wound surface (skirts are emitted only on the region's boundary).
  */
-export function heightfieldChunks(hf: Pick<Heightfield, "originX" | "originZ" | "spacing" | "samplesX" | "samplesZ" | "heights" | "solid" | "thickness">, chunkCells = HEIGHTFIELD_CHUNK_CELLS): HeightfieldChunk[] {
+export function heightfieldChunks(hf: HeightfieldSurface, chunkCells = HEIGHTFIELD_CHUNK_CELLS): HeightfieldChunk[] {
+  const out: HeightfieldChunk[] = []
+  for (let cj = 0; cj * chunkCells < hf.samplesZ - 1; cj++) {
+    for (let ci = 0; ci * chunkCells < hf.samplesX - 1; ci++) {
+      const sink = new TriangleSink()
+      heightfieldChunkTriangles(hf, ci, cj, sink, chunkCells)
+      if (sink.length > 0) out.push({ ci, cj, positions: sink.toArray() })
+    }
+  }
+  return out
+}
+
+/**
+ * The triangles of chunk (ci, cj) of a heightfield's solid (lattice cells [ci·C, (ci + 1)·C) ×
+ * [cj·C, (cj + 1)·C), C = chunkCells), in heightfieldChunks' order: solid cells by row then column, each
+ * its two top triangles, two bottom triangles and the skirts on the solid region's boundary. The order
+ * depends only on the lattice size and the solid mask, not on the heights.
+ */
+export function heightfieldChunkTriangles(hf: HeightfieldSurface, ci: number, cj: number, s: TriangleWriter, chunkCells = HEIGHTFIELD_CHUNK_CELLS): void {
   const cx = hf.samplesX - 1
   const cz = hf.samplesZ - 1
-  const th = Math.max(hf.thickness, MIN_THICKNESS)
+  const th = Math.max(hf.thickness, HEIGHTFIELD_MIN_THICKNESS)
   const solid = (i: number, j: number): boolean => i >= 0 && j >= 0 && i < cx && j < cz && hf.solid[j * cx + i] !== 0
-  const sinks = new Map<string, { ci: number; cj: number; sink: TriangleSink }>()
   const top = (i: number, j: number): P3 => [hf.originX + i * hf.spacing, hf.heights[j * hf.samplesX + i], hf.originZ + j * hf.spacing]
   const bot = (i: number, j: number): P3 => [hf.originX + i * hf.spacing, hf.heights[j * hf.samplesX + i] - th, hf.originZ + j * hf.spacing]
-
-  for (let j = 0; j < cz; j++) {
-    for (let i = 0; i < cx; i++) {
+  const i1 = Math.min((ci + 1) * chunkCells, cx)
+  const j1 = Math.min((cj + 1) * chunkCells, cz)
+  for (let j = cj * chunkCells; j < j1; j++) {
+    for (let i = ci * chunkCells; i < i1; i++) {
       if (!solid(i, j)) continue
-      const ci = Math.floor(i / chunkCells)
-      const cj = Math.floor(j / chunkCells)
-      const key = `${ci},${cj}`
-      let entry = sinks.get(key)
-      if (!entry) {
-        entry = { ci, cj, sink: new TriangleSink() }
-        sinks.set(key, entry)
-      }
-      const s = entry.sink
       const p00 = top(i, j)
       const p10 = top(i + 1, j)
       const p01 = top(i, j + 1)
@@ -150,9 +225,51 @@ export function heightfieldChunks(hf: Pick<Heightfield, "originX" | "originZ" | 
       if (!solid(i + 1, j)) s.quad(p10, p11, b11, b10) // +X
     }
   }
-  return [...sinks.values()]
-    .sort((a, b) => a.cj - b.cj || a.ci - b.ci)
-    .map((e) => ({ ci: e.ci, cj: e.cj, positions: e.sink.toArray() }))
+}
+
+/**
+ * Closed, outward-wound triangles of a wall strip in world space, appended to `sink`. Local x runs
+ * along the strip (the knots), local z across it (±halfExtents.z), rotated by yaw as OrientedBox:
+ * world = centre + (cos·lx + sin·lz, −sin·lx + cos·lz). Side triangles and caps of zero height (the
+ * top touching the bottom at a knot) are skipped; the surface stays closed.
+ */
+export function stripTriangles(st: Pick<WallStrip, "center" | "halfExtents" | "yaw" | "knots" | "top" | "bottom">, sink: TriangleSink): void {
+  const n = st.knots.length
+  if (n < 2 || st.top.length !== n) return
+  const c = Math.cos(st.yaw)
+  const s = Math.sin(st.yaw)
+  const hz = st.halfExtents.z
+  const b = st.bottom
+  const P = (lx: number, y: number, lz: number): P3 => [st.center.x + c * lx + s * lz, y, st.center.z - s * lx + c * lz]
+  // World directions of local +x and +z.
+  const ex: P3 = [c, 0, -s]
+  const ez: P3 = [s, 0, c]
+  const up: P3 = [0, 1, 0]
+  const down: P3 = [0, -1, 0]
+  const EPS = 1e-9
+  for (let i = 0; i + 1 < n; i++) {
+    const ka = st.knots[i]
+    const kb = st.knots[i + 1]
+    const ta = st.top[i]
+    const tb = st.top[i + 1]
+    sink.quadOutward(P(ka, ta, -hz), P(kb, tb, -hz), P(kb, tb, hz), P(ka, ta, hz), up)
+    sink.quadOutward(P(ka, b, -hz), P(kb, b, -hz), P(kb, b, hz), P(ka, b, hz), down)
+    const ha = ta - b > EPS
+    const hb = tb - b > EPS
+    for (const [lz, out] of [
+      [-hz, [-ez[0], 0, -ez[2]]],
+      [hz, ez],
+    ] as const) {
+      if (ha && hb) sink.quadOutward(P(ka, b, lz), P(kb, b, lz), P(kb, tb, lz), P(ka, ta, lz), out)
+      else if (ha) sink.triOutward(P(ka, b, lz), P(kb, b, lz), P(ka, ta, lz), out)
+      else if (hb) sink.triOutward(P(ka, b, lz), P(kb, b, lz), P(kb, tb, lz), out)
+    }
+  }
+  const cap = (k: number, t: number, out: P3) => {
+    if (t - b > EPS) sink.quadOutward(P(k, b, -hz), P(k, b, hz), P(k, t, hz), P(k, t, -hz), out)
+  }
+  cap(st.knots[0], st.top[0], [-ex[0], 0, -ex[2]])
+  cap(st.knots[n - 1], st.top[n - 1], ex)
 }
 
 /** BufferGeometry with only a position attribute (the occluder shaders need nothing else). */

@@ -5,7 +5,7 @@
 import { snapPoint, type SnapMode } from "@/core/grid/grid"
 import { openingFits, selectionBounds, type AtlasClipboard } from "@/core/scene/integrity"
 import { openingSegment, wallDirection, wallLength } from "@/core/scene/queries"
-import type { Id, Rect, Scene, SceneObject, Token, Vec2 } from "@/core/scene/types"
+import type { GridSettings, Id, Rect, Scene, SceneObject, Token, Vec2 } from "@/core/scene/types"
 
 import { edgeSnapMode, placeOpening, snapTokenPosition } from "./snapping"
 
@@ -194,9 +194,16 @@ export function rotationPivot(scene: Scene, plan: MovePlan, mode: SnapMode): Vec
     if (plan.tokens[0]) return { ...plan.tokens[0].position }
   }
   const bounds = selectionBounds(scene, [...plan.objects.map((o) => o.id), ...plan.tokens.map((t) => t.id)])
-  if (!bounds) return null
+  return bounds ? boundsPivot(scene.grid, bounds, mode) : null
+}
+
+/**
+ * Pivot for quarter-turning something with these XZ bounds (rotationPivot's rule for extended items,
+ * also used for terrain shapes): the bounds' centre, snapped to the nearest cell vertex unless free.
+ */
+export function boundsPivot(grid: GridSettings, bounds: Rect, mode: SnapMode): Vec2 {
   const centre = { x: bounds.x + bounds.w / 2, z: bounds.z + bounds.d / 2 }
-  return mode === "free" ? centre : snapPoint(scene.grid, centre, "vertex")
+  return mode === "free" ? centre : snapPoint(grid, centre, "vertex")
 }
 
 /**

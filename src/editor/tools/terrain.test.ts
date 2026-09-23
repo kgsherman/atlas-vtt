@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest"
 
 import { createScene } from "@/core/scene/factory"
 import { chunkSamples, parseChunkKey, sampleHeight, sampleSpacing } from "@/core/scene/heightmap"
+import { sampleLattice } from "@/core/scene/heightmapBrush"
+import { baseLattice, blockShape } from "@/core/scene/terrainShapes"
 import type { Id, Rect } from "@/core/scene/types"
 
 import { at, key, makeStore } from "../test-utils"
@@ -41,11 +43,14 @@ describe("terrain brush tool", () => {
     expect(previews.length).toBeGreaterThan(1)
     expect(previews[0].heights).toBeInstanceOf(Float32Array)
     expect(previews[0].dirty).not.toBeNull()
-    expect(tool.preview()).toMatchObject({ kind: "brush", levelId, center: { x: 30, z: 20 }, radius: 6, mode: "raise" })
+    expect(tool.preview()).toMatchObject({ kind: "terrain", levelId, brush: { center: { x: 30, z: 20 }, radius: 6, mode: "raise" } })
 
+    const pushed = previews.length
     tool.onPointerUp!(at(30, 20))
     expect(tool.painting()).toBe(false)
-    expect(previews[previews.length - 1]).toEqual({ levelId, heights: null, dirty: null })
+    // The commit changed the heightmap: the engine drops the preview with the new terrain in place
+    // (clearing it first would flash the old terrain).
+    expect(previews).toHaveLength(pushed)
     const s = store.getState()
     expect(s.history).toMatchObject({ undoDepth: 1, undoLabel: "Paint terrain" })
     expect(s.lastChange).toEqual({ terrain: [levelId] })
@@ -114,5 +119,62 @@ describe("terrain brush tool", () => {
     tool.cancel!()
     expect(store.getState().history.canUndo).toBe(false)
     expect(store.getState().scene.levels[levelId].heightmap).toBeNull()
+  })
+})
+
+describe("terrain brush over shapes", () => {
+  /** A level with a 10×10 ft block 5 ft high at (20..30, 20..30). */
+  function withBlock() {
+    const t = setup()
+    t.store.getState().applyTerrainEdit(t.levelId, { upsert: [blockShape("blk", { x: 20, z: 20, w: 10, d: 10 }, 0, 5, 0)] }, "Add block")
+    const heightAt = (x: number, z: number) => {
+      const s = t.store.getState()
+      return sampleHeight(s.scene.levels[t.levelId].heightmap, 5, x, z, s.scene.grid)
+    }
+    const baseAt = (x: number, z: number) => {
+      const s = t.store.getState()
+      return sampleLattice(baseLattice(s.scene.levels[t.levelId], s.scene.grid), { x, z })
+    }
+    /** A preview lattice's height at a sample (res 2: every 2.5 ft, 41 samples per row). */
+    const previewAt = (heights: Float32Array, x: number, z: number) => heights[(z / 2.5) * 41 + x / 2.5]
+    return { ...t, heightAt, baseAt, previewAt }
+  }
+
+  it("paints the ground under shapes: the preview and the commit keep the shapes on top", () => {
+    const { store, tool, levelId, previews, heightAt, baseAt, previewAt } = withBlock()
+    store.getState().setToolSettings("brush", { mode: "raise", radius: 12, strength: 2, falloff: "constant" })
+    const depth = store.getState().history.undoDepth
+    tool.onPointerDown!(at(25, 25))
+    const heights = previews.at(-1)!.heights!
+    // The engine sees the BAKED terrain: the block (5) over the raised ground (2).
+    expect(previewAt(heights, 25, 25)).toBe(5)
+    expect(previewAt(heights, 25, 32.5)).toBe(2)
+    tool.onPointerUp!(at(25, 25))
+    expect(store.getState().history).toMatchObject({ undoDepth: depth + 1, undoLabel: "Paint terrain" })
+    expect(heightAt(25, 25)).toBe(5)
+    expect(heightAt(25, 32.5)).toBe(2)
+    expect(baseAt(25, 25)).toBe(2)
+    expect(store.getState().scene.levels[levelId].terrainEdits!.shapes.blk.points[0]).toEqual({ x: 20, y: 5, z: 20 })
+  })
+
+  it("flattens to the baked height under the stroke start", () => {
+    const { store, tool, heightAt } = withBlock()
+    store.getState().setToolSettings("brush", { mode: "flatten", radius: 8, strength: 1, falloff: "constant" })
+    tool.onPointerDown!(at(25, 25))
+    tool.onPointerUp!(at(25, 25))
+    expect(heightAt(25, 32.5)).toBe(5)
+    expect(heightAt(25, 40)).toBe(0)
+  })
+
+  it("a stroke hidden under a shape changes only the base, and the preview is cleared", () => {
+    const { store, tool, levelId, previews, baseAt } = withBlock()
+    store.getState().setToolSettings("brush", { mode: "raise", radius: 3, strength: 1, falloff: "constant" })
+    const hm = store.getState().scene.levels[levelId].heightmap
+    tool.onPointerDown!(at(25, 25))
+    tool.onPointerUp!(at(25, 25))
+    expect(store.getState().scene.levels[levelId].heightmap).toBe(hm)
+    expect(baseAt(25, 25)).toBe(1)
+    expect(store.getState().history.undoLabel).toBe("Paint terrain")
+    expect(previews.at(-1)).toEqual({ levelId, heights: null, dirty: null })
   })
 })

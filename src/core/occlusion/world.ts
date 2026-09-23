@@ -33,6 +33,8 @@ import {
   heightfieldEntry,
   primitiveBounds,
   primitiveContains,
+  stripEntry,
+  stripMaxTop,
 } from "./primitives"
 import type {
   BlockChannel,
@@ -43,6 +45,7 @@ import type {
   OcclusionWorld,
   RayHit,
   SegmentQueryOptions,
+  WallStrip,
 } from "./types"
 
 const CHANNEL_BIT: Record<BlockChannel, number> = { movement: 1, sight: 2, light: 4 }
@@ -61,7 +64,7 @@ interface Entry {
   prim: OccluderPrimitive
   bounds: AABB3
   mask: number
-  /** cos/sin of the yaw (boxes). */
+  /** cos/sin of the yaw (boxes and strips). */
   cos: number
   sin: number
   /** Query stamp (mailboxing). */
@@ -140,6 +143,18 @@ export function primitivesEqual(a: OccluderPrimitive, b: OccluderPrimitive): boo
   }
   if (a.shape === "heightfield" && b.shape === "heightfield") {
     return sameHeightfieldLayout(a, b) && sameArray(a.heights, b.heights) && sameArray(a.solid, b.solid)
+  }
+  if (a.shape === "strip" && b.shape === "strip") {
+    return (
+      a.yaw === b.yaw &&
+      a.center.x === b.center.x &&
+      a.center.z === b.center.z &&
+      a.halfExtents.x === b.halfExtents.x &&
+      a.halfExtents.z === b.halfExtents.z &&
+      a.bottom === b.bottom &&
+      sameArray(a.knots, b.knots) &&
+      sameArray(a.top, b.top)
+    )
   }
   return false
 }
@@ -339,6 +354,8 @@ export class GridOcclusionWorld implements OcclusionWorld {
         return cylinderEntry(p, ox, oy, oz, dx, dy, dz, len)
       case "heightfield":
         return heightfieldEntry(p, ox, oy, oz, dx, dy, dz, len)
+      case "strip":
+        return stripEntry(p, e.cos, e.sin, e.bounds.maxY, ox, oy, oz, dx, dy, dz, len)
     }
   }
 
@@ -716,7 +733,7 @@ export class GridOcclusionWorld implements OcclusionWorld {
   // -------------------------------------------------------------------------
 
   private createEntry(prim: OccluderPrimitive): Entry {
-    const yaw = prim.shape === "box" ? prim.yaw : 0
+    const yaw = prim.shape === "box" || prim.shape === "strip" ? prim.yaw : 0
     return { prim, bounds: primitiveBounds(prim), mask: maskOf(prim.blocks), cos: Math.cos(yaw), sin: Math.sin(yaw), stamp: 0, cells: [] }
   }
 
@@ -803,6 +820,10 @@ export class GridOcclusionWorld implements OcclusionWorld {
       this.registerHeightfield(e, p, i0, j0, i1, j1)
       return
     }
+    if (p.shape === "strip") {
+      this.registerStrip(e, p, i0, j0, i1, j1)
+      return
+    }
     // Axis-aligned boxes fill their AABB; rotated boxes and cylinders are tested per cell.
     const exact = p.shape === "cylinder" || (Math.abs(e.sin) > 1e-12 && Math.abs(e.cos) > 1e-12)
     for (let j = j0; j <= j1; j++) {
@@ -816,6 +837,30 @@ export class GridOcclusionWorld implements OcclusionWorld {
           if (!hit) continue
         }
         this.addToCell(j * nx + i, e, b.minY, b.maxY)
+      }
+    }
+  }
+
+  /**
+   * Register a strip in the cells its footprint overlaps (exact for rotated strips), each with the Y
+   * range [bottom, highest top over the part of the strip whose local x the cell spans].
+   */
+  private registerStrip(e: Entry, st: WallStrip, i0: number, j0: number, i1: number, j1: number): void {
+    const { x0, z0, size, nx } = this.grid
+    const c = e.cos
+    const s = e.sin
+    const rotated = Math.abs(s) > 1e-12 && Math.abs(c) > 1e-12
+    const hx = st.halfExtents.x
+    // Half the extent of a cell projected onto the strip's local x axis.
+    const reach = (size / 2) * (Math.abs(c) + Math.abs(s)) + REG_EPS
+    for (let j = j0; j <= j1; j++) {
+      for (let i = i0; i <= i1; i++) {
+        const cellBox = { minX: x0 + i * size, minZ: z0 + j * size, maxX: x0 + (i + 1) * size, maxZ: z0 + (j + 1) * size }
+        if (rotated && !orientedRectOverlapsAABB2(st.center, hx, st.halfExtents.z, st.yaw, cellBox, -REG_EPS)) continue
+        const mid = c * (x0 + (i + 0.5) * size - st.center.x) - s * (z0 + (j + 0.5) * size - st.center.z)
+        const lo = Math.max(-hx, mid - reach)
+        const hi = Math.min(hx, mid + reach)
+        this.addToCell(j * nx + i, e, st.bottom, lo <= hi ? stripMaxTop(st, lo, hi) : e.bounds.maxY)
       }
     }
   }

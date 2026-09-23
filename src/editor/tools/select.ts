@@ -10,7 +10,7 @@ import type { ToolPreview } from "@/render/contracts"
 
 import { itemLevelId } from "../store"
 import { alignDelta, applyMove, planMove, snapDragDelta, type MovePlan } from "../transform"
-import { createPreviewCache, MARQUEE_COLOR, pointerSnapMode, rectFromCorners, type ToolDeps } from "./shared"
+import { createPreviewCache, isKeyAction, MARQUEE_COLOR, pointerSnapMode, rectFromCorners, rotateTurns, type ToolDeps } from "./shared"
 import type { Tool, ToolPointerEvent } from "./types"
 
 /** Pointer travel (CSS px) before a press on an item turns into a drag. */
@@ -216,8 +216,7 @@ export function createSelectTool(deps: ToolDeps): SelectTool {
     },
 
     onKeyDown(e) {
-      const key = e.key.toLowerCase()
-      if (key === "escape") {
+      if (isKeyAction(e, "escape")) {
         if (gesture) {
           tool.cancel?.()
           return true
@@ -228,9 +227,10 @@ export function createSelectTool(deps: ToolDeps): SelectTool {
         }
         return false
       }
-      if (key === "r" && !e.ctrl && !e.alt && !gesture) {
+      const turns = rotateTurns(e)
+      if (turns !== 0 && !gesture) {
         if (store.getState().selection.length === 0) return false
-        store.getState().rotateSelection(e.shift ? -1 : 1)
+        store.getState().rotateSelection(turns)
         return true
       }
       return false

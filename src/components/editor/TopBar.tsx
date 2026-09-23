@@ -31,6 +31,7 @@ import { useEditorActions, useEditorContext, useEditorShallow, useEditorState } 
 import { Segmented } from "./fields"
 import { clockTime, formatElevation, relativeTime } from "./lib/format"
 import { levelsTopDown } from "./lib/levelOps"
+import { activeLevelShapes, runEditorCommand, selectionCount } from "./lib/terrainMode"
 import type { SceneDocument } from "./useSceneDocument"
 
 function SceneName({ disabled }: { disabled: boolean }) {
@@ -173,7 +174,10 @@ function EditorMenus({ doc, previewing }: { doc: SceneDocument; previewing: bool
     canRedo: st.history.canRedo,
     undoLabel: st.history.undoLabel,
     redoLabel: st.history.redoLabel,
-    selection: st.selection.length,
+    // Terrain mode: the terrain tool's shapes are the selection (the object selection is hidden).
+    terrain: st.tool === "terrain",
+    selection: selectionCount(st),
+    shapes: Object.keys(activeLevelShapes(st)).length,
     hasClipboard: st.clipboard !== null,
     showGrid: st.view.showGrid,
     showHelpers: st.view.showHelpers,
@@ -190,6 +194,9 @@ function EditorMenus({ doc, previewing }: { doc: SceneDocument; previewing: bool
     controller.cancelGesture()
     fn()
   }
+  // Selection commands in the terrain mode go to the terrain tool (its shapes), like their shortcuts.
+  const command = (action: Parameters<typeof runEditorCommand>[1], objects: () => void) =>
+    run(() => (s.terrain ? void runEditorCommand(controller, action) : objects()))
   const trigger = "h-7 px-2 text-xs font-normal text-muted-foreground aria-expanded:text-foreground hover:text-foreground"
 
   return (
@@ -246,16 +253,17 @@ function EditorMenus({ doc, previewing }: { doc: SceneDocument; previewing: bool
             <CommandShortcut id="redo" />
           </MenubarItem>
           <MenubarSeparator />
-          <MenubarItem disabled={!editable || s.selection === 0} onClick={run(() => store.getState().cutSelection())}>
+          {/* Terrain shapes are not on the clipboard. */}
+          <MenubarItem disabled={!editable || s.terrain || s.selection === 0} onClick={run(() => store.getState().cutSelection())}>
             Cut
             <CommandShortcut id="cut" />
           </MenubarItem>
-          <MenubarItem disabled={s.selection === 0} onClick={() => store.getState().copySelection()}>
+          <MenubarItem disabled={s.terrain || s.selection === 0} onClick={() => store.getState().copySelection()}>
             Copy
             <CommandShortcut id="copy" />
           </MenubarItem>
           <MenubarItem
-            disabled={!editable}
+            disabled={!editable || s.terrain}
             onClick={run(() => {
               void store.getState().pasteFromSystem(controller.pasteTarget())
             })}
@@ -263,7 +271,7 @@ function EditorMenus({ doc, previewing }: { doc: SceneDocument; previewing: bool
             Paste
             <CommandShortcut id="paste" />
           </MenubarItem>
-          <MenubarItem disabled={!editable || s.selection === 0} onClick={run(() => store.getState().duplicateSelection())}>
+          <MenubarItem disabled={!editable || s.selection === 0} onClick={command({ type: "duplicate" }, () => store.getState().duplicateSelection())}>
             Duplicate
             <CommandShortcut id="duplicate" />
           </MenubarItem>
@@ -272,15 +280,18 @@ function EditorMenus({ doc, previewing }: { doc: SceneDocument; previewing: bool
             <CommandShortcut id="delete" />
           </MenubarItem>
           <MenubarSeparator />
-          <MenubarItem disabled={previewing} onClick={() => store.getState().selectAll()}>
-            Select all on level
+          <MenubarItem disabled={previewing || (s.terrain && s.shapes === 0)} onClick={command({ type: "select-all" }, () => store.getState().selectAll())}>
+            {s.terrain ? "Select all shapes on level" : "Select all on level"}
             <CommandShortcut id="select-all" />
           </MenubarItem>
-          <MenubarItem disabled={s.selection === 0} onClick={() => store.getState().clearSelection()}>
+          <MenubarItem
+            disabled={s.selection === 0}
+            onClick={() => (s.terrain ? store.getState().setTerrainSelection(null) : store.getState().clearSelection())}
+          >
             Deselect
             <CommandShortcut id="escape" />
           </MenubarItem>
-          <MenubarItem disabled={!editable || s.selection === 0} onClick={run(() => store.getState().rotateSelection(1))}>
+          <MenubarItem disabled={!editable || s.selection === 0} onClick={command({ type: "rotate", turns: 1 }, () => store.getState().rotateSelection(1))}>
             Rotate 90°
             <CommandShortcut id="rotate.cw" />
           </MenubarItem>

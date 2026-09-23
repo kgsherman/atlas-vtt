@@ -1,7 +1,10 @@
 // Editor smoke test (local mode): new scene → the start-up quality probe ran (Auto) → every menubar
-// menu opens without crashing → floor, walls, door, light, token through the real tools → undo / redo →
-// shortcuts still work after a Select popup was used → save → reload → the document is unchanged → it is
-// listed in the library.
+// menu opens without crashing → every tool's options fit a 1280 px window (each terrain sub-tool too) →
+// floor, walls, door, light, token through the real tools → undo / redo → shortcuts still work after a
+// Select popup was used → a terrain block drawn Blender-style (drag the base, move up, click), invisible
+// and unselectable outside the terrain tool, selectable with its Select sub-tool → a wall's Follow
+// terrain switch in the Inspector → save → reload → the document is unchanged → it is listed in the
+// library.
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/editor-smoke.mjs
 import {
@@ -10,6 +13,7 @@ import {
   clickWorld,
   dragWorld,
   editorSummary,
+  editorToClient,
   GPU,
   jsonDiff,
   openBrowser,
@@ -50,6 +54,73 @@ async function pressTool(page, key) {
   await page.keyboard.press(key)
   await sleep(80)
 }
+
+/** Controls of the tool options bar that are clipped, outside it, squeezed or overlapping (none = fits). */
+const optionsBarProblems = (page) =>
+  page.evaluate(() => {
+    // The bar: the first ancestor of the snap control wider than half the window.
+    let bar = document.querySelector('[aria-label="Snap mode"]')
+    while (bar && bar.getBoundingClientRect().width < innerWidth / 2)
+      bar = bar.parentElement
+    if (!bar) return ["no options bar"]
+    const sel =
+      "button, input:not([type=hidden]), [role=combobox], [role=switch], [data-slot=toggle-group], [data-slot=slider]"
+    // Real controls only: not the visually hidden form inputs Base UI renders for selects / switches.
+    const all = [...bar.querySelectorAll(sel)].filter(
+      (el) =>
+        el.getBoundingClientRect().width > 1 &&
+        !el.closest("[aria-hidden=true]") &&
+        getComputedStyle(el).opacity !== "0"
+    )
+    const top = all.filter((el) => !all.some((o) => o !== el && o.contains(el)))
+    const name = (el) =>
+      el.getAttribute("aria-label") ||
+      el.textContent.trim().slice(0, 20) ||
+      el.tagName
+    const out = []
+    const b = bar.getBoundingClientRect()
+    for (const el of top) {
+      const r = el.getBoundingClientRect()
+      if (r.left < b.left - 0.5 || r.right > b.right + 0.5)
+        out.push(`${name(el)} outside the bar`)
+      // Clipped by a scrolling / hidden-overflow ancestor inside the bar?
+      for (let a = el.parentElement; a && a !== bar; a = a.parentElement) {
+        if (getComputedStyle(a).overflowX === "visible") continue
+        const ar = a.getBoundingClientRect()
+        if (r.left < ar.left - 0.5 || r.right > ar.right + 0.5)
+          out.push(`${name(el)} clipped`)
+      }
+      if (
+        el.dataset.slot === "toggle-group" &&
+        el.scrollWidth > el.clientWidth + 1
+      )
+        out.push(`${name(el)} squeezed`)
+    }
+    for (let i = 0; i < top.length; i++)
+      for (let j = i + 1; j < top.length; j++) {
+        const p = top[i].getBoundingClientRect()
+        const q = top[j].getBoundingClientRect()
+        const w = Math.min(p.right, q.right) - Math.max(p.left, q.left)
+        const h = Math.min(p.bottom, q.bottom) - Math.max(p.top, q.top)
+        if (w > 1 && h > 1) out.push(`${name(top[i])} overlaps ${name(top[j])}`)
+      }
+    return out
+  })
+
+/** The active level's terrain: its shapes, a fingerprint of its heightmap, the terrain selection. */
+const terrainState = (page) =>
+  page.evaluate(() => {
+    const s = window.__atlasEditor.store.getState()
+    const level = s.scene.levels[s.activeLevelId]
+    return {
+      elevation: level.elevation,
+      shapes: Object.values(level.terrainEdits?.shapes ?? {}),
+      heightmap: JSON.stringify(level.heightmap),
+      selected: s.terrainSelection?.shapeIds ?? [],
+      tool: s.tool,
+      sub: s.toolSettings.terrain.sub,
+    }
+  })
 
 try {
   const context = await browser.newContext({
@@ -174,69 +245,41 @@ try {
   checks.step("Tool options fit a 1280 px window")
   // The options bar used to scroll sideways with a hidden scrollbar: controls past its right edge were
   // invisible (door "Starts", light "Shadows"), and the terrain brush's segmented control overlapped
-  // the Radius slider.
+  // the Radius slider. The terrain tool's options change with its sub-tool: check each one.
   await page.setViewportSize({ width: 1280, height: 900 })
   await sleep(300)
-  for (const tool of ["door", "light", "terrain", "connector", "token"]) {
+  const optionCases = [
+    ["door"],
+    ["light"],
+    ["wall"],
+    ["connector"],
+    ["token"],
+    ...["select", "brush", "block", "ramp", "cylinder"].map((sub) => [
+      "terrain",
+      sub,
+    ]),
+  ]
+  for (const [tool, sub = null] of optionCases) {
     await page.evaluate(
-      (tool) => window.__atlasEditor.store.getState().setTool(tool),
-      tool
+      ([tool, sub]) => {
+        const s = window.__atlasEditor.store.getState()
+        s.setTool(tool)
+        if (sub) s.setToolSettings("terrain", { sub })
+      },
+      [tool, sub]
     )
     await sleep(250)
-    const problems = await page.evaluate(() => {
-      // The bar: the first ancestor of the snap control wider than half the window.
-      let bar = document.querySelector('[aria-label="Snap mode"]')
-      while (bar && bar.getBoundingClientRect().width < innerWidth / 2)
-        bar = bar.parentElement
-      if (!bar) return ["no options bar"]
-      const sel =
-        "button, input:not([type=hidden]), [role=combobox], [role=switch], [data-slot=toggle-group], [data-slot=slider]"
-      // Real controls only: not the visually hidden form inputs Base UI renders for selects / switches.
-      const all = [...bar.querySelectorAll(sel)].filter(
-        (el) =>
-          el.getBoundingClientRect().width > 1 &&
-          !el.closest("[aria-hidden=true]") &&
-          getComputedStyle(el).opacity !== "0"
-      )
-      const top = all.filter(
-        (el) => !all.some((o) => o !== el && o.contains(el))
-      )
-      const name = (el) =>
-        el.getAttribute("aria-label") ||
-        el.textContent.trim().slice(0, 20) ||
-        el.tagName
-      const out = []
-      const b = bar.getBoundingClientRect()
-      for (const el of top) {
-        const r = el.getBoundingClientRect()
-        if (r.left < b.left - 0.5 || r.right > b.right + 0.5)
-          out.push(`${name(el)} outside the bar`)
-        // Clipped by a scrolling / hidden-overflow ancestor inside the bar?
-        for (let a = el.parentElement; a && a !== bar; a = a.parentElement) {
-          if (getComputedStyle(a).overflowX === "visible") continue
-          const ar = a.getBoundingClientRect()
-          if (r.left < ar.left - 0.5 || r.right > ar.right + 0.5)
-            out.push(`${name(el)} clipped`)
-        }
-        if (
-          el.dataset.slot === "toggle-group" &&
-          el.scrollWidth > el.clientWidth + 1
-        )
-          out.push(`${name(el)} squeezed`)
-      }
-      for (let i = 0; i < top.length; i++)
-        for (let j = i + 1; j < top.length; j++) {
-          const p = top[i].getBoundingClientRect()
-          const q = top[j].getBoundingClientRect()
-          const w = Math.min(p.right, q.right) - Math.max(p.left, q.left)
-          const h = Math.min(p.bottom, q.bottom) - Math.max(p.top, q.top)
-          if (w > 1 && h > 1)
-            out.push(`${name(top[i])} overlaps ${name(top[j])}`)
-        }
-      return out
-    })
-    checks.eq(problems, [], `${tool} tool: every option is visible`)
+    checks.eq(
+      await optionsBarProblems(page),
+      [],
+      `${sub ? `terrain ${sub}` : tool} tool: every option is visible`
+    )
   }
+  await page.evaluate(() =>
+    window.__atlasEditor.store
+      .getState()
+      .setToolSettings("terrain", { sub: "brush" })
+  )
   await page.setViewportSize({ width: 1600, height: 1000 })
   await pressTool(page, "v")
   await sleep(300)
@@ -350,6 +393,165 @@ try {
     "redo restores the document"
   )
 
+  checks.step("Terrain: a block, drawn like in Blender")
+  const t0 = await terrainState(page)
+  await pressTool(page, "t")
+  await pressTool(page, "e")
+  let t = await terrainState(page)
+  checks.eq([t.tool, t.sub], ["terrain", "block"], "T then E picks the block")
+  // Base: drag over 2 × 2 cells inside the room; release; move up (the height follows the cursor); click.
+  const bx0 = x0 + 5
+  const bz0 = z0 + 5
+  const bx1 = x0 + 15
+  const bz1 = z0 + 15
+  const pa = await editorToClient(page, bx0, bz0)
+  const pb = await editorToClient(page, bx1, bz1)
+  await page.mouse.move(pa.x, pa.y, { steps: 2 })
+  await sleep(40)
+  await page.mouse.down()
+  await page.mouse.move((pa.x + pb.x) / 2, (pa.y + pb.y) / 2, { steps: 4 })
+  await page.mouse.move(pb.x, pb.y, { steps: 4 })
+  await sleep(60)
+  await page.mouse.up()
+  await sleep(80)
+  await page.mouse.move(pb.x, pb.y - 12, { steps: 4 })
+  await sleep(120)
+  const phaseHint = await page.evaluate(() =>
+    window.__atlasEditor.controller.toolHint()
+  )
+  checks.ok(
+    /click to confirm/.test(phaseHint ?? ""),
+    "after the base drag the height follows the cursor (options-bar hint)",
+    phaseHint
+  )
+  await page.mouse.down()
+  await sleep(40)
+  await page.mouse.up()
+  await sleep(200)
+  t = await terrainState(page)
+  const block = t.shapes[0] ?? null
+  checks.eq(t.shapes.length, 1, "the click commits one terrain shape")
+  const xs = block ? block.points.map((p) => p.x) : []
+  const zs = block ? block.points.map((p) => p.z) : []
+  checks.ok(
+    block?.kind === "block" &&
+      block.op === "add" &&
+      block.points.every((p) => p.y > 0) &&
+      Math.min(...xs) === bx0 &&
+      Math.max(...xs) === bx1 &&
+      Math.min(...zs) === bz0 &&
+      Math.max(...zs) === bz1,
+    "a raised block over the dragged cells",
+    block
+  )
+  checks.ok(
+    t.heightmap !== t0.heightmap,
+    "the block is baked into the heightmap"
+  )
+  checks.eq(t.selected, block ? [block.id] : [], "the new block is selected")
+  await shot(page, OUT, "02-terrain-block")
+  const top = block ? Math.max(...block.points.map((p) => p.y)) : 0
+  const blockTop = t.elevation + top
+
+  checks.step("Terrain shapes are baked outside the terrain tool")
+  await pressTool(page, "v")
+  await page.keyboard.press("Escape")
+  await clickWorld(page, (bx0 + bx1) / 2, (bz0 + bz1) / 2, { y: blockTop })
+  const outside = await page.evaluate(() => {
+    const { store, controller } = window.__atlasEditor
+    const s = store.getState()
+    return {
+      selection: s.selection.map((id) => s.scene.objects[id]?.type ?? "?"),
+      terrainSelection: s.terrainSelection,
+      preview: controller.overlays().preview?.kind ?? null,
+    }
+  })
+  checks.ok(
+    outside.terrainSelection === null &&
+      outside.selection.every((type) => type === "floor"),
+    "select tool: a click on the block selects no shape (only the floor under it)",
+    outside
+  )
+  checks.ok(
+    outside.preview !== "terrain",
+    "select tool: the shapes are not drawn",
+    outside
+  )
+  await page.keyboard.press("Escape")
+  await pressTool(page, "t")
+  await pressTool(page, "q")
+  await clickWorld(page, (bx0 + bx1) / 2, (bz0 + bz1) / 2, { y: blockTop })
+  t = await terrainState(page)
+  checks.eq(
+    [t.sub, t.selected],
+    ["select", block ? [block.id] : []],
+    "terrain Select (Q): a click on the block selects it"
+  )
+  const applyVisible = await page
+    .getByRole("button", { name: "Apply to terrain" })
+    .isVisible()
+  checks.ok(applyVisible, "the Inspector shows the shape (Apply to terrain)")
+  // Advanced mode: Tab shows the vertex / edge / face picker, which must fit a 1280 px window too.
+  await page.keyboard.press("Tab")
+  await sleep(150)
+  const advanced = await page.evaluate(
+    () => window.__atlasEditor.store.getState().toolSettings.terrain.advanced
+  )
+  checks.ok(advanced, "Tab turns on the advanced (vertex / edge / face) mode")
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await sleep(300)
+  checks.eq(
+    await optionsBarProblems(page),
+    [],
+    "terrain select, advanced: every option is visible"
+  )
+  await page.setViewportSize({ width: 1600, height: 1000 })
+  await sleep(300)
+  await shot(page, OUT, "03-terrain-advanced")
+  await page.keyboard.press("Escape")
+  await page.keyboard.press("Escape")
+  await page.keyboard.press("Escape")
+  await sleep(100)
+
+  checks.step("A wall's Follow terrain switch")
+  await pressTool(page, "v")
+  const wallTop = await page.evaluate(() => {
+    const s = window.__atlasEditor.store.getState()
+    const wall = Object.values(s.scene.objects).find((o) => o.type === "wall")
+    return s.scene.levels[s.activeLevelId].elevation + wall.height
+  })
+  // The north wall, away from the door and the block; aim at its top.
+  await clickWorld(page, x0 + 25, z0, { y: wallTop })
+  const picked = await page.evaluate(() => {
+    const s = window.__atlasEditor.store.getState()
+    const id = s.selection[0]
+    const o = id ? s.scene.objects[id] : null
+    return o ? { id, type: o.type, followTerrain: o.followTerrain } : null
+  })
+  checks.ok(
+    picked?.type === "wall" && picked.followTerrain === true,
+    "a click selects a wall, which follows the terrain by default",
+    picked
+  )
+  const follow = page.getByRole("switch", { name: "Follow terrain" })
+  await follow.click()
+  await sleep(150)
+  const wallFollow = () =>
+    page.evaluate(
+      (id) =>
+        window.__atlasEditor.store.getState().scene.objects[id]?.followTerrain,
+      picked?.id ?? ""
+    )
+  checks.eq(
+    await wallFollow(),
+    false,
+    "the Inspector's Follow terrain switch turns it off"
+  )
+  await follow.click()
+  await sleep(150)
+  checks.eq(await wallFollow(), true, "…and back on")
+  await page.keyboard.press("Escape")
+
   checks.step("Save and reload")
   const name = `E2E smoke ${new Date().toISOString().slice(11, 19)}`
   await page.getByRole("textbox", { name: "Scene name" }).fill(name)
@@ -389,12 +591,18 @@ try {
     "reloaded scene keeps name, walls, door, light, token",
     s
   )
+  t = await terrainState(page)
+  checks.eq(
+    t.shapes.map((sh) => sh.id),
+    block ? [block.id] : [],
+    "reloaded scene keeps the terrain block"
+  )
   checks.ok(
     !s.dirty && s.undo === null,
     "a freshly opened scene is clean with an empty history",
     s
   )
-  await shot(page, OUT, "02-reloaded")
+  await shot(page, OUT, "04-reloaded")
 
   checks.step("Library lists the scene")
   await page.getByRole("button", { name: "Back to library" }).click()
@@ -403,7 +611,7 @@ try {
   })
   await page.getByText(name).first().waitFor({ timeout: 10000 })
   checks.ok(true, "the saved scene appears in My scenes")
-  await shot(page, OUT, "03-library")
+  await shot(page, OUT, "05-library")
 } catch (err) {
   checks.fail("editor-smoke crashed", err)
 } finally {

@@ -36,12 +36,14 @@ export function useEditorHotkeys(controller: EditorController | null, { enabled,
   const saveKeys: AppHotkey[] = []
   const keymap: AppHotkey[] = []
   if (controller) {
-    for (const { hotkey, action } of bindings) {
+    // `repeat: false` commands (toggles: Tab, 1/2/3, X/Y/Z, E) fire once per press, not on auto-repeat.
+    for (const { hotkey, action, repeat } of bindings) {
       if (action.type === "save") saveKeys.push({ hotkey, anywhere: true, run: () => save() })
-      else if (action.type === "help") keymap.push({ hotkey, run: () => (help ? help() : false) })
+      else if (action.type === "help") keymap.push({ hotkey, repeat, run: () => (help ? help() : false) })
       else
         keymap.push({
           hotkey,
+          repeat,
           run: (e) => {
             const used = controller.keyDown({ key: e.key, shift: e.shiftKey, alt: e.altKey, ctrl: e.ctrlKey || e.metaKey }, action)
             if (used || action.type !== "escape" || !escape) return used

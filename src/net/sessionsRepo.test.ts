@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest"
 
 import { createScene } from "@/core/scene/factory"
+import { SCENE_SCHEMA_VERSION } from "@/core/scene/types"
 import type { GameState, PlayerView } from "@/core/session/types"
 
 import { createMemoryStore, type LocalStore } from "./localStore"
@@ -97,7 +98,7 @@ describe("local sessions repo (dev mode, mirrors the SQL rules)", () => {
     expect(roomCode).toMatch(ROOM_CODE_RE)
     const row = await repo.loadSessionState(sessionId)
     expect(row?.epoch).toBe(0)
-    expect(row?.content).toMatchObject({ kind: "seed", sceneId, sceneVersion: 2, schemaVersion: 2, freeAssets: [] })
+    expect(row?.content).toMatchObject({ kind: "seed", sceneId, sceneVersion: 2, schemaVersion: SCENE_SCHEMA_VERSION, freeAssets: [] })
     expect(row?.content.kind === "seed" && (row.content.scene as { name: string }).name).toBe("Keep v2")
     expect(await repo.listMySessions()).toEqual([expect.objectContaining({ id: sessionId, status: "active", hostEpoch: 0 })])
   })

@@ -118,6 +118,28 @@ describe("resolveLights", () => {
     expect(byId.get(carried.id)!.position.y).toBeGreaterThan(4 + 1)
     check(scene)
   })
+
+  it("stands the lights of a previewed level on the previewed ground, except on stairs / ramp runs", () => {
+    const { scene, ground, upper } = twoLevelScene()
+    const stairs = createConnector(ground, upper, { x: 20, z: 20, w: 10, d: 20 }, 0)
+    const token = createToken(ground, { x: 60, z: 60 })
+    scene.tokens[token.id] = token
+    const plain = createLight(ground, "torch", { x: 80, z: 80 })
+    const onRun = createLight(ground, "torch", { x: 22, z: 35 })
+    const carried = createLight(ground, "lantern", { x: 0, z: 0 }, { attachedTokenId: token.id, position: { x: 0.5, y: 4, z: 0 } })
+    const above = createLight(upper, "candle", { x: 5, z: 5 })
+    for (const o of [stairs, plain, onRun, carried, above]) scene.objects[o.id] = o
+    const world = buildOcclusionWorld(scene)
+    const doc = new Map(resolveLights(scene, world, { includeHidden: true }).map((l) => [l.id, l.position]))
+    // The ground level previewed 3 ft higher everywhere (x + z / 1000 so the sample point shows).
+    const preview = new Map([[ground, { heightAt: (x: number, z: number) => 3 + (x + z) / 1000 }]])
+    const byId = new Map(resolveLights(scene, world, { includeHidden: true }, preview).map((l) => [l.id, l.position]))
+    expect(byId.get(plain.id)).toEqual({ ...doc.get(plain.id)!, y: 3.16 + plain.position.y })
+    // A carried light stands on its carrier's ground (at the token, not at its offset).
+    expect(byId.get(carried.id)!.y).toBeCloseTo(3.12 + 4, 9)
+    expect(byId.get(onRun.id)).toEqual(doc.get(onRun.id))
+    expect(byId.get(above.id)).toEqual(doc.get(above.id))
+  })
 })
 
 describe("cullAndRankLights", () => {

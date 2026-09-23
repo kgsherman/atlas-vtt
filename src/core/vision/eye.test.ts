@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest"
 
 import { buildOcclusionWorld } from "../occlusion"
 import { createConnector, createProp, createWall } from "../scene/factory"
-import { resolveViewerEye, tokenPointColumns, tokenTestPoints } from "."
+import { createHeightmap, sampleCounts, writeHeights } from "../scene/heightmap"
+import { levelGround } from "../scene/queries"
+import { resolveLightOrigin, resolveViewerEye, tokenPointColumns, tokenTestPoints } from "."
+import { insideInfoAt, TOP_PROBE_HEIGHT } from "./layout"
 import { add, addLevel, addToken, flat } from "./test-scenes"
 
 describe("resolveViewerEye", () => {
@@ -79,5 +82,39 @@ describe("tokenTestPoints", () => {
     const pts = tokenTestPoints(buildOcclusionWorld(scene), scene, t)
     expect(pts.every((p) => p.x > 20)).toBe(true)
     expect(pts.length).toBeLessThan(15)
+  })
+})
+
+describe("follow-terrain walls (strips)", () => {
+  /** An 80 ft, 1 ft thick, 8 ft follow wall along z = 25 on ground rising 1 ft per 10 ft along x. */
+  function slope() {
+    const { scene, ground } = flat(20, 10, "dark")
+    const hm = createHeightmap(2)
+    const { samplesX, samplesZ } = sampleCounts(scene.grid, 2)
+    const dense = new Float32Array(samplesX * samplesZ)
+    for (let j = 0; j < samplesZ; j++) for (let i = 0; i < samplesX; i++) dense[j * samplesX + i] = (i * 2.5) / 10
+    scene.levels[ground] = { ...scene.levels[ground], heightmap: writeHeights(hm, scene.grid, dense) }
+    add(scene, createWall(ground, { x: 10, z: 25 }, { x: 90, z: 25 }, { height: 8, thickness: 1, followTerrain: true }))
+    const world = buildOcclusionWorld(scene)
+    const top = (x: number) => levelGround(scene, ground, x, 25) + 8
+    return { scene, ground, world, top }
+  }
+
+  it("light origins inside the wall are pushed out through its side or above its local top", () => {
+    const { world, top } = slope()
+    const side = resolveLightOrigin(world, { x: 50, y: top(50) - 3, z: 25.2 }, 0)
+    expect(world.containing(side, "light")).toEqual([])
+    expect(side.z).toBeCloseTo(25.8, 9)
+    const up = resolveLightOrigin(world, { x: 70, y: top(70) - 0.1, z: 25 }, 0)
+    expect(world.containing(up, "light")).toEqual([])
+    expect(up.y).toBeCloseTo(top(70) + 0.3, 9)
+  })
+
+  it("a buried point's top probe sits on the wall's top line at that point", () => {
+    const { world, top } = slope()
+    for (const x of [20, 55, 85]) {
+      const info = insideInfoAt(world, x, top(x) - 2, 25)
+      expect(info?.top?.y).toBeCloseTo(top(x) + TOP_PROBE_HEIGHT, 9)
+    }
   })
 })

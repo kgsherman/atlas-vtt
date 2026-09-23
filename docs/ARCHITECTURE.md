@@ -13,10 +13,13 @@ Performance techniques and budgets: `docs/PERFORMANCE.md`.
 ```
 src/
   core/                 Pure TypeScript. No DOM, no three.js, no React. Runs in the main thread, a Worker, or vitest.
-    scene/              Scene types, zod schema, migrations, factories, queries, heightmap, integrity (refs/paste)
+    scene/              Scene types, zod schema, migrations, factories, queries, heightmap, integrity (refs/paste),
+                        terrainShapes (terrain shapes: bake + the single terrain writer), wallProfile (walls on
+                        terrain, shared by render / occlusion / filter), polygon (signed area shared with the schema)
     grid/               Cell math, snapping, distance rules, supercover rasterisation
-    geometry/           Vector / box / segment / ray / polygon-clip math shared by occlusion, movement, filter
-    occlusion/          CPU occluder model (boxes, cylinders, heightfields) + ray queries  ← single source of blocking truth
+    geometry/           Vector / box / segment / ray / polygon-clip math shared by occlusion, movement, filter;
+                        gizmo (translate-gizmo handles and height-follow math shared by the terrain tool and overlay)
+    occlusion/          CPU occluder model (boxes, cylinders, heightfields, wall strips) + ray queries  ← single source of blocking truth
     vision/             Authoritative visibility: light field, per-viewer LOS, perception masks, observation
     movement/           Move validation (walls/doors/windows/props, connectors), ruler measurement
     history/            Undo/redo over immer patches with transactions
@@ -27,13 +30,14 @@ src/
     occluders/          OcclusionWorld.primitives → occluder proxy meshes (LIGHT / SIGHT layers)
     shadows/            Octahedral distance atlases (light shadows; viewer line-of-sight maps), sun shadow map
     lighting/           Light manager: culling, flicker, slot + tile assignment, update scheduling
-    materials/          World material (custom GLSL: lighting + perception + fog in one pass), token material
+    materials/          World material (custom GLSL: lighting + perception + fog in one pass), token material,
+                        screen-space AA overlay materials (lines, points `aaPointMaterial`, gizmo arrows)
     fog/                Host-mask textures (perception / explored / sunlit) as DataArrayTexture layers
     post/               Medium / high / ultra post (MSAA scene target; high/ultra: HDR, AO, bloom, tone mapping, grain)
     cameras/            Editor orbit camera, player 2.5D camera
-    overlays/           Grid, selection, tool previews, ruler, pending paths, ghost levels, gizmos
+    overlays/           Grid, selection, tool previews, ruler, pending paths, ghost levels, gizmos, terrainOverlay (§4.6)
     picking/            Ground/object/token picking
-  editor/               DM editor state (zustand) + tools
+  editor/               DM editor state (zustand) + tools (the terrain mode: tools/terrain.ts + tools/terrain/, terrainMath)
   play/                 Play-mode controllers (token selection, drag-to-move, ruler, level switching)
   net/                  Supabase client, auth, repositories, transports, host runner (+ vision worker), player client,
                         free asset catalog (freeAssets.ts)
@@ -79,23 +83,62 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
   (the "Terrain rule"). Here "ground" is the **terrain** ground `levelGround` = elevation + heightmap
   (NOT `groundHeightAt`'s stairs interpolation, or a wall along a stair run would float):
   - Floor slab: top = ground surface (displaced by the heightmap), bottom = top − thickness.
-  - Wall: base = ground at the wall midpoint; wall top, opening heights, sills and lintels measure from
-    that base. The box bottom extends down to the minimum ground along its joint-extended footprint − 0.05 ft
-    (exact minimum over the terrain triangles).
+  - Walls, their openings and closed doors: **Walls on terrain** below.
   - Pillars/props resting on the ground (`y = 0`): top = ground(centre) + y + height; bottom = min ground
     over the footprint. Stairs/ramp occluder bottoms: min lower-level ground over the rect − 0.05 ft.
   - Lights and tokens follow `groundHeightAt` (so a torch or token on a stair run rises with it).
-  `render/builders` (walls.ts, ground.ts, floors.ts) and `core/occlusion` (build.ts, terrain.ts) implement
-  these rules separately. Shared quantities come from `core/scene`: slab thickness is
+  `render/builders` (ground.ts, floors.ts) and `core/occlusion` (build.ts, terrain.ts) implement
+  these rules separately; walls are the exception: both take their base line, tops and opening heights
+  from `core/scene/wallProfile`. Shared quantities come from `core/scene`: slab thickness is
   `floorThickness(scene, floor)` (the floor's own thickness, else its level's; no visual minimum, so a
   0.01 ft slab is drawn and blocks at 0.01 ft). `src/integration/crossModule.test.ts` checks that both sides
-  agree on walls (frames, volumes, proxy ↔ primitive mapping), floor / terrain slabs (incl. mask floors;
+  agree on walls (profiles, joints, volumes, proxy ↔ primitive mapping), floor / terrain slabs (incl. mask floors;
   terrain top cells = heightfield solid cells), stairs / ramp bottoms and tops, pillars and blocking props,
-  on the sample scenes plus a test-only mask-floor fixture (flat and heightmap levels with irregular masks,
-  stairs cutting them, every prop kind rotated, a 0.01 ft slab). Door leaves are not compared.
+  on the sample scenes plus test-only fixtures: mask floors (flat and heightmap levels with irregular masks,
+  stairs cutting them, every prop kind rotated, a 0.01 ft slab) and terrain walls (a slope with a joint
+  chain, follow walls crossing both lattice edges, a buried follow-off wall, doors and windows on follow
+  walls, and a level with shapes baked in). Door leaves are not compared.
 - **Walls** are segments centred on a→b; at shared endpoints (within 1e-3 ft) both ends extend by
   thickness/2 so corners have no notch (in both render and occlusion). Only endpoint–endpoint contacts form
   joints (a T-junction stem is not extended; it already reaches the other wall's centreline).
+- **Walls on terrain** (`core/scene/wallProfile`, ONE implementation shared by the render builders, the tool
+  previews, `core/occlusion`, the light tool's wall mounts and the session filter). u = feet from a along a→b.
+  - `WallObject.followTerrain` true (new walls, `toolSettings.wall.followTerrain`; v1 walls migrate to true,
+    §3): the **base line** is the terrain ground `levelGround` on the centreline for u ∈ [0, len], flat
+    beyond the ends (the joint extensions take the end's base, so walls meeting at a node have identical
+    corner tops). The ground is piecewise linear along the centreline between its crossings of the lattice
+    lines x = i·s, z = j·s and the triangle diagonals (`lineLatticeKnots`), so the profile samples it
+    exactly there (`wallBaseKnots`: 0, the crossings, len) and drops knots collinear with their original
+    neighbours (within 1e-9 ft; the function is unchanged). false, or a level without a heightmap: base =
+    the level elevation everywhere (terrain above it buries the wall).
+  - Top = base + height. The **bottom** is flat: follow on, min(ground over the joint-extended footprint,
+    lowest base) − `WALL_BOTTOM_MARGIN` (0.05 ft); follow off, min(elevation, that ground) − 0.05.
+  - **Openings** (`openingFrame`; span clamped to the wall, H = wall height, minTop = lowest top over the
+    span): base b_o = base line at the span's centre; door head = max(bottom, min(b_o + clamp(h, 0, H),
+    minTop)); window sill top = min(b_o + clamp(sill, 0, H), minTop), head = max(sill top, min(b_o +
+    clamp(sill + h, 0, H), minTop)); a window with a raw sill > 0 always has a sill piece (unless thinner
+    than 1e-6 ft). The world-Y clamps against minTop keep lintels and sills uninverted on slopes.
+  - **Pieces** (keys unchanged, §5.1; `throughDoorway` relies on them): full height [bottom, top(u)] between
+    openings, lintels [head, top(u)], window sill [bottom, sill top], closed door box [bottom, head],
+    window movement box [bottom, max top over its span]. A piece whose top is constant over its span
+    (varies by ≤ 1e-9 ft) is an `OrientedBox` (follow-off walls always; on levels without terrain the
+    output is identical to the former midpoint rule's); otherwise it is a `WallStrip` (§5.1) over the
+    profile knots inside it (`pieceKnots`). Pieces thinner than 1e-6 ft are dropped. The render draws a
+    strip as one closed prism per knot interval without internal faces (`builders/shapes.ts` `writeFrameStrip`).
+  - Render-only door rules: a leaf pivots at b_o and spans from the lowest ground under the opening's
+    footprint − 0.05 ft up to the head (no huge buried leaf on a slope; a leaf less than 0.05 ft above that
+    ground is not drawn: the door is buried); the portcullis lift is 0.9·(head − b_o); the top-down marker
+    sits on the highest wall top over the leaf's span. The wall's hole and occlusion's closed-door box
+    still reach the wall bottom, so the gap under a leaf shows only from below the terrain slab. Window
+    frames use the sill top and head.
+  - Known limit: the ground outside the lattice (x < 0 or z < 0) is the elevation, so a follow wall
+    crossing the lattice's low edge ramps instead of stepping, wholly outside the lattice (from the wall's
+    outside end to the edge crossing). The knot on the edge always samples the lattice: interior knots that
+    round to at most 1e-9·max(1, len) ft below 0 are snapped onto the edge.
+  Because both sides share the profile, their agreement proves nothing about the rule itself: crossModule
+  (and the profile, occlusion and builder unit tests) also check tops at random u against an independent
+  oracle built on `levelGround` (+ H for follow walls; elevation + H otherwise), bottoms against the ground
+  under the footprint, and door heads and sill tops against the raw formula.
 - **Cell rasterisation** (`core/grid`: `supercoverCells`, `segmentCellIntervals`, `cellsInCircle`,
   `cellsInConvexPolygon`) treats cells as CLOSED with an eps tolerance: a segment on a grid line reports the
   cells on both sides, and `t0 === t1` intervals are touch-only contacts. Anything that must not dilate
@@ -152,8 +195,9 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
 
 ## 3. Scene document & versioning
 
-- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 2` (v2 added the
-  optional `Token.model`; the v1 → v2 migration is the identity).
+- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 3` (v2 added the
+  optional `Token.model`, the v1 → v2 migration is the identity; v3: terrain shapes, `Level.terrainEdits`,
+  `WallObject.followTerrain`).
 - `Token.model` (optional): the 3D figure the token is drawn with, a reference `free:<assetId>` into the
   free asset catalog (category `token-models`, §6.4; `core/scene/tokenModel.ts`). The schema accepts only
   that form (`^free:[a-z0-9][a-z0-9-]{0,63}$`), never a URL, so a document cannot make clients fetch an
@@ -169,22 +213,86 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
   - points and rects within the grid extent ± 50 ft (`coordMargin`); connector rects cell-aligned, ladders
     exactly 1×1 cell; attached-light offsets ≤ 50 ft;
   - heightmap resolution ∈ {1,2,4}; chunk keys canonical `^(0|[1-9]\d*),(0|[1-9]\d*)$` and inside the grid's
-    chunk range; exact base64 / byte length; finite samples within ±500 ft.
+    chunk range; exact base64 / byte length; finite samples within ±500 ft;
+  - walls require `followTerrain: boolean`; `terrainProfile` (player scenes only, §6.2) is rejected;
+  - terrain edits (below): ≤ 1000 shapes per level, 3..64 points per shape, ≤ 16000 points per level
+    (`maxTerrainShapesPerLevel`, `maxTerrainShapePoints`, `maxTerrainPointsPerLevel`, counted on the raw input
+    by `terrainSizeIssue`); strict shapes (kind / op enums, integer `order` 0..1e6, `name` ≤ 2k, points and
+    `base` y within ±500 ft, canonical signed area > 1e-6 ft²); record key == shape id (`validateReferences`;
+    ids are level-scoped, not claimed scene-wide); `baseChunks` keys and payloads like heightmap chunks at
+    the level's resolution, plus `""`; `terrainEdits` requires a heightmap; shape points within the extent
+    ± 50 ft. The schema checks shape and range only, not the bake invariant.
 - `core/scene/migrations.ts`: migrations (`MIGRATIONS[v]`: vN → vN+1) operate on unknown JSON (deep-copied
   first). `parseScene(json)` → `{ok:true, scene, migratedFrom}` | `{ok:false, error:'too-new'|'invalid', issues}`
   (≤ 50 issues); `too-new` opens read-only. `parseScene` also runs `validateReferences` (integrity);
-  `parseSceneJson(text)` wraps JSON syntax errors as `invalid`.
+  `parseSceneJson(text)` wraps JSON syntax errors as `invalid`. `MIGRATIONS[2]` (v2 → v3): every wall whose
+  `followTerrain` is not a boolean gets `true` (the closest v3 equivalent of the old midpoint base; identical
+  on flat levels). Duck-typed, idempotent, never throws on garbage (the schema reports it); levels untouched.
+- Editor autosave drafts are stored as saved, so a recovered draft goes through `parseScene` too
+  (`components/editor/useSceneDocument.ts` `draftScene`): an older draft is migrated, an invalid or too-new
+  one is not offered (logged, kept).
 - The editor never commits a revision `parseScene` would refuse (`editor/validate.ts`, see §7), so every
   saved version can be reopened.
 - Heightmaps are chunked (8×8 cells per chunk, base64 Float32) so edits, undo patches and network diffs touch
   only dirty chunks. Samples beyond the grid's lattice read as 0 everywhere (`sampleHeight` with the grid,
-  like the occlusion terrain sampler), and a grid resize in the editor crops each heightmap to the new
-  lattice (`cropHeightmapToGrid`: chunks beyond it dropped, the padding of boundary chunks zeroed), so old
-  heights cannot come back if the grid grows again.
+  like the occlusion terrain sampler), and a grid resize (width or depth) in the editor crops each level's
+  terrain to the new lattice (`cropTerrainToGrid`: the painted base is cropped, samples beyond the lattice
+  dropped, then everything is rebaked), so old painted heights cannot come back if the grid grows again,
+  while shapes reappear where a grown grid re-exposes them.
 - Storage: `scenes` + immutable `scene_versions` in Supabase; `.atlas.json` export/import; import regenerates `Scene.id`.
 - Sharing: `visibility: 'private' | 'link'`. Link shares are read only through the `get_shared_scene(slug)` RPC and
   publish the FULL DM document (the UI warns). Scene ids are never capabilities; session membership never grants
   scene access.
+
+### Terrain edits (`core/scene/terrainShapes`)
+
+`Level.heightmap` stays THE terrain for every consumer (render, occlusion, vision, movement, players).
+`Level.terrainEdits` (DM-only editing data, never sent to players or to the vision worker) holds what it is
+baked from: `shapes` (`TerrainShape`: `kind` block / ramp / cylinder is a label; `op` add / carve; integer
+`order`; `points` = simple polygon footprint in canonical orientation, each with its top height y relative
+to the elevation; `base`, the other end of the prism's sides in the editor, not baked) and `baseChunks`
+(the painted terrain, "base", where it differs from the baked heightmap).
+- Invariant, per heightmap chunk K: base_K = decode(`baseChunks[K]`) if present (`""` = all zero), else
+  decode(`heightmap.chunks[K]`) (zeros if absent); `heightmap.chunks[K]` = encode(bake(base_K, shapes))
+  (absent when all zero), and K ∈ `baseChunks` ⇔ base_K ≠ baked_K, both in canonical form (−0 → +0,
+  samples beyond the grid lattice zeroed). `terrainEdits` exists ⇔ the level has ≥ 1 shape (then it has a
+  heightmap). The schema does not check this; a document that breaks it only "jumps" the next time an
+  affected chunk is written.
+- Bake (`bakeRegion`; deterministic: + − × ÷, sqrt for edge lengths and `Math.fround` only, so a
+  whole-level rebake reproduces an incrementally written heightmap bit for bit): shapes apply in ascending
+  (order, id) (plain string compare), add → max(terrain, top), carve → min(terrain, top). A shape's top is
+  its footprint triangulated by `triangulateFootprint` (own ear clipping, robust for 3..64 vertices
+  including collinear and repeated points; zero-area ears dropped; an ear whose diagonal passes within
+  `VERTEX_EPS` (1e-6 ft) of another remaining vertex, away from its ends, is clipped only when no other ear
+  is left, so simple footprints are covered whole; a stalled clipping returns the triangles found so far,
+  never area outside the polygon) with the vertices' heights. Per triangle (doubled area
+  > 1e-9) the lattice samples of its XZ bounding box are visited; a sample is inside iff every edge function
+  eᵢ ≥ −1e-6·|edgeᵢ|, its value Σλᵢ·yᵢ with λᵢ = max(0, eᵢ)/Σmax(0, eⱼ); a sample inside several triangles
+  of one shape takes their max (add) / min (carve). Non-finite values are skipped; results are float32,
+  clamped to ±500 ft. "Inside a shape" means inside one of its triangles (`shapeTopAt` uses the same
+  arithmetic). Samples beyond the grid lattice are never written.
+- `writeTerrain(level, grid, edit)` is THE single writer of `heightmap` + `terrainEdits` (delta form:
+  `upsert`, `remove`, `base: {lattice, rects}` authoritative only inside `rects`, `rebake`). It recomputes
+  the chunks overlapping the old ∪ new bounds of the changed shapes (grown by 1e-3 ft), the base rects and
+  the rebake rects, assigns only chunk strings and shape entries that change (so immer patches, undo and
+  network diffs stay per chunk / per shape), creates the heightmap at `DEFAULT_TERRAIN_RESOLUTION` (2) when
+  something is written to a level without one, writes the base back into the heightmap and removes
+  `terrainEdits` when the last shape goes, and refuses (returns false, writes nothing) a base lattice that
+  does not match the level's lattice or an invalid shape (`isValidTerrainShape`: the schema's shape rules
+  plus a simple footprint). Shape objects are immutable (geometry caches key on identity).
+- Level operations (`resampleTerrain`: the base is resampled, the shapes rebaked sharp at the new resolution,
+  `baseChunks` rewritten in the same edit; `cropTerrainToGrid`; `flattenTerrain`: base 0, shapes kept;
+  `clearTerrainShapes`: the base becomes the heightmap; `applyShapesEdit` / `applyShapesToBase`: "Apply to
+  terrain" on the downward closure `applyShapesClosure(level, ids)`, i.e. the named shapes plus, transitively,
+  every shape earlier in bake order whose bounds (grown by 1e-3 ft) overlap one already taken: base :=
+  bake(base, closure in bake order) inside its bounds, then the closure is deleted, so the heightmap never
+  changes) and the element edits (`translateVertices`, `translateShape`, `rotateShapeQuarter`,
+  `dissolveVertices`, `collapseEdge`: null instead of an invalid shape) are pure; every document write of
+  terrain goes through the editor store's terrain actions (§7). `hasPaintedBase(level)`: the base is non-zero
+  somewhere (reads chunk keys only, by the invariant; nothing is decoded).
+- Factories: `blockShape`, `rampShape` (dir 0 = +Z, 1 = +X, 2 = −Z, 3 = −X ascending; low edge y0, high
+  edge y0 + height), `cylinderShape` (a 3..64-gon inscribed in the circle); base y0, op carve when the
+  height is negative. `nextShapeOrder` = max order + 1.
 
 ---
 
@@ -282,11 +390,13 @@ direction D"), stored as octahedral linear-distance maps:
   along every wall top under a lit storey.
 - Each tile stores its **capture origin**; the shader measures from it (a moving source lags until refreshed).
 - Update priority: (a) sources that moved (the locally controlled/selected token's tile always, even over
-  budget), (b) dirty viewer tiles, (c) on-screen lights by coverage, (d) rest. Budget: `SHADOW_UPDATES_PER_FRAME`
-  = 4 tiles AND ~2 ms CPU (`shadowUpdateMs`). Invalidation: a tile is dirty when its source moved/changed radius,
-  or an `OcclusionWorld.update` dirty region intersects its sphere. Occluder proxies follow authoritative door
-  state instantly (only the visual leaf animates). Lights beyond the tile budget are **not drawn** (never unshadowed).
-- Sun/moon: static cached `DepthTexture` (2048², ortho over the scene bounds), re-rendered on occluder or sun change.
+  budget), (b) dirty viewer tiles, (c) on-screen lights by coverage, (d) rest. Budget:
+  `SHADOW_UPDATES_PER_FRAME` = 4 tiles AND ~2 ms CPU (`shadowUpdateMs`). Invalidation: a tile is dirty when
+  its source moved/changed radius, or an `OcclusionWorld.update` dirty region (or a terrain preview's, §4.6)
+  intersects its sphere. Occluder proxies follow authoritative door state instantly (only the visual leaf
+  animates). Lights beyond the tile budget are **not drawn** (never unshadowed).
+- Sun/moon: static cached `DepthTexture` (2048², ortho over the scene bounds), re-rendered on occluder or sun
+  change (terrain previews included).
   A second vertical map (1024², looking down) gives sky exposure for the `skyLevel`/`ambientLevel` split. It
   drives the visual fill only outside player fog mode (the player's scene lacks unexplored roofs); in fog mode
   the GPU perception refinement reads it only as an upper bound, which can never remove perception wrongly.
@@ -296,7 +406,10 @@ direction D"), stored as octahedral linear-distance maps:
 - Each level: a Group of merged visual meshes (per material, with `aSurf`), InstancedMeshes (props, pillars),
   door/window meshes (animated), terrain mesh, token meshes, editor gizmos. Occluder proxies live in a separate
   `occluderScene` built from `OcclusionWorld.primitives` (instanced unit boxes / 16-sided prisms per
-  (level, channel mask) + closed heightfield meshes; layers LIGHT=1, SIGHT=2), `matrixWorldAutoUpdate=false`.
+  (level, channel mask, 100 ft bucket) + closed heightfield meshes + wall strips merged into one closed,
+  outward-wound world-space mesh per (level, channel mask, 100 ft bucket) with a per-vertex `aKey`, named
+  `occluders:${level}|${mask}|strip|bx,bz` and rebuilt whole when a member changes (same shader);
+  layers LIGHT=1, SIGHT=2), `matrixWorldAutoUpdate=false`.
 - **DM modes** use the full scene. **Player mode** has only the scene rebuilt from its PlayerView
   (`viewToScene`); unexplored geometry is absent, which is why fog and sun are clamped by host masks, and why
   the clear colour is black (not `environment.backgroundColor`) whenever vision is "fog".
@@ -349,6 +462,13 @@ Per level, the engine expands `HostLevelMasks` into R8 layers of `DataArrayTextu
   (the ground point under the cursor would shift and the drag would run away).
 - Player: orthographic, tilt 0–35° (default 15°), pan/zoom, rotate by 90°. Only the player and dm-play views
   glide to the selected token's confirmed position (`checkFollow`).
+- Camera bounds (`cameras/fit.ts` `sceneBounds`: the grid extent, each level's slab..ceiling over its
+  terrain) use the terrain as drawn, terrain previews included, and are refreshed on every terrain change
+  and whenever a preview leaves them. The top-down camera stands `orthoCameraDistance` from its target:
+  (above + 30)/cos(tilt) + (viewHeight/2)·tan(tilt), so geometry up to the bounds' top stays in front of the
+  near plane anywhere on screen (a tilted, zoomed-out view's bottom row is (viewHeight/2)·tan(tilt) closer;
+  without that term, and with bounds stale after a terrain commit, high terrain was clipped into a black
+  trapezoid).
 - Pixel budget: cap physical pixels at ~2.1 MP (medium) / ~1.3 MP (low) instead of raw DPR; high / ultra render
   natively up to 2× DPR (§10). The WebGL context never has MSAA; medium and above get MSAA from the post
   pipeline's scene target (§10).
@@ -380,6 +500,131 @@ Per level, the engine expands `HostLevelMasks` into R8 layers of `DataArrayTextu
   once: a deliberate recompile, with the reallocated atlases recaptured in its first frame (up to
   `TIER_SWITCH_CAPTURE_MS` = 12 ms of CPU). Adaptive steps never resize map images.
 
+### 4.6 Picking, tool previews and terrain previews
+
+- **Picking** (`render/picking/picker.ts`): `ground` is the active level's terrain where a floor covers the
+  hit, else the plane y = elevation. With `PickOptions.terrain` (editor picks, §7) the terrain counts
+  wherever it lies inside the grid extent, floors or not (the march stops where the ray leaves the extent;
+  the plane remains the fallback outside it and on levels without a heightmap); the floor-object hit is
+  unchanged. `PickResult.ray` is the pointer ray from the raycaster (unit direction; orthographic cameras
+  give parallel rays with per-pixel origins, so it is never derived from the camera position), present
+  whenever the canvas has a size. `Engine.project` maps a world point to canvas CSS px, the frame of
+  `ToolPointerEvent.canvasX/Y` and `ToolDeps.project`.
+- **Tool previews** (`overlays/previews.ts`): each owns its geometry and materials (`disposePreview`), except
+  geometry flagged `userData.shared` / `userData.cached` and materials flagged `userData.shared`; they get
+  `renderOrder` 12 only where theirs is 0. A `segment` is drawn as the wall `wallProfile` would build
+  (follow on unless `followTerrain === false`, no joint extensions): one closed prism per `pieceKnots`
+  interval from its bottom to top(u), plus the base line. An `opening` measures from the ground at its
+  centre, or the elevation when its host wall does not follow the terrain (without the host wall's
+  `openingFrame` clamps).
+- **Terrain overlay** (`overlays/terrainOverlay.ts`; the `TerrainOverlay` tool preview, drawn only while
+  the terrain tool is active): the level's shapes as translucent prisms (top = the bake's triangulation at
+  the vertex heights, sides down or up to `base`, no base cap), add green, carve orange, hovered lighter,
+  selected brighter, an invalid draft red; AA edge lines (top outline, vertical edges, base outline) and
+  vertex dots (`materials/aaPointMaterial`: screen-space quads with a `fwidth` edge, viewport / pixel-ratio
+  handling copied from `aaLineMaterial`). Faces are drawn twice: depth-tested with a polygon offset and a
+  dim x-ray pass without depth test, so buried shapes and carved pits stay visible. A planar top coincides
+  with the baked terrain; a non-planar one does not (the bake samples it on the lattice and interpolates
+  across each lattice triangle, which rises above a valley crease), so its depth-tested fill uses the top
+  lifted by `topLift` = spacing·(√2/2)·R (R: the largest distance of a top triangle's slope from the
+  midpoint of the two most different slopes, at most their distance/√3), capped at the top's height range
+  (`ShapePrism.liftedTop`; spacing from the preview ground, `buildTerrainOverlay(p, elevation, spacing,
+  res)`); the x-ray fill and all edges stay on the true top, planar tops are not lifted. Vertex dots and
+  element highlights draw without depth test (they are picked in screen space). Draw order inside the
+  overlay: `TERRAIN_OVERLAY_ORDER` (12.1–12.99: x-ray before depth-tested passes, fills before edges,
+  elements, brush, gizmo, marquee last).
+  - Caching (≤ 1000 shapes / 16000 points per level must stay interactive during drags and live-host
+    re-syncs): per-shape prism arrays live in a WeakMap keyed by shape identity (and elevation and lattice
+    spacing); shapes are merged into two layers, unselected and selected, whose GPU geometry (`LayerCache`,
+    flagged `userData.cached`; lifted faces cached and freed with it) is kept while the layer's list of
+    shape identities, the elevation and the spacing are unchanged, so dragging the
+    selection re-merges only the selected layer. The shared materials, both layer caches and the
+    persistent `decor` (gizmo, label) are `TerrainOverlayResources`, created by the `OverlayManager` with
+    the first terrain preview and released when the preview stops being terrain. Hover, draft and element
+    highlights are small and rebuilt per overlay. Tools never mutate shapes and keep unchanged shape
+    objects identical (the tool also keeps the draft's identity while its snapped value is unchanged).
+  - Gizmo: translate arrows (X red, Y green, Z blue; hover / active lighter) drawn in screen space
+    (`materials/gizmoMaterial`) from `core/geometry/gizmo` `gizmoHandles(project, at)`, the handles the tool
+    hit-tests (`hitGizmo`): shaft from 14 to 70 px along the projected axis, hit radius 7 px, an axis hidden
+    when its projected foot is shorter than min(2 px, 0.1 × the longest axis's), e.g. Y at tilt 0, and of two
+    visible axes within 8° of each other on screen (`GIZMO_MIN_SEPARATION_COS`; opposite directions do not
+    count) the one with the shorter projected foot hidden, so the arrow drawn is the arrow hit (the hidden
+    axis stays reachable with X / Y / Z). `OverlayManager.update` re-aims them every frame through
+    `OverlayHost.project` (the engine passes `picker.project`; without it no gizmo is drawn), so they keep a
+    constant screen size and match the hit test exactly. The value label ("+7.5 ft · Add") keeps a constant
+    pixel size (placement: §7). The brush ring is the brush preview's. The select sub-tool's marquee
+    (`TerrainOverlay.marquee`, canvas CSS px, the frame the tool tests vertices and shapes in) is a
+    screen-space rect drawn by its own small shader over everything else.
+- **Terrain previews** (`Engine.previewTerrain(levelId, heights, dirty)`, the brush and every terrain-shape
+  gesture): the level's ground reads the dense lattice `heights` until the preview is cleared (`null`) or a
+  committed terrain change replaces it (`updateScene` drops it, so a tool must not clear after a commit that
+  changed the heightmap: the old terrain would flash). Contract: between calls the lattice changes only
+  inside `dirty`; the engine keeps the union of every `dirty` since the preview began (`previewDirty`, null =
+  everywhere). The terrain mesh moves in place (`builders/floors.ts` `updateTerrainGeometry`): a per
+  lattice-row triangle table built with the mesh (`MergedBuild.terrainRows`: (row, first, end) triangles
+  per floor and cell row) limits the work to the rows and cells around `dirty`, heights are read straight
+  from the lattice, each attribute gets ONE upload range per call (first to last touched triangle, merged
+  with any range not uploaded yet: several updates can run before a render; per-row `bufferSubData` calls
+  into a buffer of tens of MB cost a whole-buffer copy each on some drivers) and the bounds grow by union;
+  the floors bucket is rebuilt only when the level has no terrain mesh yet or it was built on another
+  lattice spacing. The draped grid overlay follows the same way (`GridOverlay.refreshHeights`: the rows
+  around `dirty`, one upload range per call from the first row's start to the last row's end, merged with
+  pending ones, bounds grown by union). The preview's height range (scanned once, then grown by each dirty
+  rect) feeds the camera bounds (§4.5).
+  - Throttled work (`render/engine/previewThrottle.ts` `PreviewThrottle`, per level): the first update runs
+    at once; later ones accumulate their dirty rects and run only once max(interval, `PREVIEW_COST_FACTOR`
+    (8) × the last run's cost) has passed since that run ENDED (so a slow run takes at most ~1/9 of the main
+    thread), plus a trailing run from the frame loop after the last update.
+  - Walls: when `dirty` reaches a follow-terrain wall of the level (its bounds grown by the wall's
+    thickness, within one lattice spacing), the level's whole walls and doors buckets are rebuilt on the
+    preview (throttled, `WALL_PREVIEW_INTERVAL_MS` = 100 ms); the overlays (`sceneChanged`) are rebuilt
+    only when outlines hang on that level's walls, doors or windows (selected, hovered or hidden).
+    Clearing the preview rebuilds them from the document.
+  - Lighting: `LightingSystem.previewTerrain(levelId, ground, dirty)` (throttled, `LIGHT_PREVIEW_INTERVAL_MS`
+    = 100 ms; `dirty` = the union since the last call) keeps the level's LIGHT / SIGHT occluder proxies on
+    the preview (`render/occluders` `OccluderProxies.previewTerrain`): heightfield chunk meshes holding a
+    changed sample (`dirty` grown by one spacing) are rewritten in place (`heightfieldChunkTriangles` into
+    an `ArrayTriangleSink`; a chunk's triangle order depends only on the lattice size and solid mask), and
+    a flat level's floor boxes (no heightmap yet) are left out of their instance groups and replaced by
+    stand-in heightfields on the preview's lattice (`standInHeightfield`, core/occlusion's floor rule).
+    Heightfields rebuilt by `update()` meanwhile get the preview again. The level's light origins and viewer
+    eyes stand on the preview ground too, except on stairs / ramp runs (`previewGround`; `resolveLights(…,
+    preview)` → `lightOrigin`, attached lights by their carrier's level and position; `viewerEye(…, ground)`
+    → core/vision `eyeAtGround`, which keeps the ceiling clamp and blocker push-out), re-resolved on each
+    call. Tiles whose sphere meets the old ∪ new bounds, and those of sources that moved, are recaptured,
+    the sun and sky maps re-render, and the lighting bounds are recomputed when the preview leaves them.
+    `ground` null (a cleared preview) restores the document proxies, lights and eyes, invalidated the same
+    way (bounds recomputed); a committed terrain change ends it in `applyChange` (each level of
+    `change.terrain`, passed to `proxies.update(world, change.terrain)`; the engine drops the pending
+    throttled call) and `setScene` (`proxies.rebuild`) ends every preview.
+  - Commits and cleared previews move in place: `updateScene` takes, per level of `ch.terrain`, U = the
+    changed chunks' rect (`heightmapDiffRect`) ∪ `previewDirty`, passes U to `world.updateTerrain` and moves
+    the terrain mesh and the grid (`OverlayManager.terrainChanged(levelId, U)`: `refreshHeights`, else a grid
+    rebuild) back onto the document over U. Then walls and doors are rebuilt only when a wall of the level
+    stands near U (any wall: follow-off bottoms follow the lowest ground too); connectors, pillars, props and
+    fixtures always (`diff.ts` `invalidateTerrain(inv, scene, levelId, kinds)`, which also marks the
+    connectors climbing to the level and the tokens). Every bucket is rebuilt as before when the mesh cannot
+    move (no terrain mesh, another lattice spacing, no heightmap any more) or changed objects rebuild the
+    floors anyway. Clearing a preview moves the mesh and grid back over `previewDirty` the same way (the
+    floors bucket is rebuilt only when that fails).
+  - The heightfield occluder proxies move in place on commit too (`OccluderProxies.update`,
+    `moveHeightfield`): a heightfield whose heights changed on the same lattice (origin, spacing, size,
+    solid mask, thickness, channels, level) rewrites only the 16-cell chunk meshes holding a sample that
+    differs from what the proxy shows (a level whose preview ends with this commit: the previewed heights,
+    so a drag release whose commit equals its last preview rewrites nothing), and its dirty regions are
+    those chunks' old ∪ new bounds, one per run of adjacent chunks in a chunk row. Any other change, or a
+    level still under preview, rebuilds the heightfield; a settle pass restores ended previews the commit
+    left unchanged.
+  - Cached floor outline edges (`overlays/highlight.ts`, per mesh geometry and object: hovered, selected or
+    a hidden floor's helper outline) follow the mesh: `moveTerrain` records the moved rect grown by one
+    spacing (`moveCachedEdges`; the rects of several commits add up), and the next use recomputes only the
+    edges whose midpoint lies within a lattice diagonal of it, from the object's triangles near it
+    (`patchRangeEdges`), keeping the rest. `updateScene` always rebuilds the overlays; clearing a preview
+    rebuilds them (`sceneChanged`) when a floor of the level is outlined, or a wall, door or window when
+    the preview had rebuilt them (`outlinedOn`).
+  - Follow-off wall bottoms, props, pillars, fixture and token meshes and floor outlines update on commit
+    (or clear) only; light origins and viewer eyes follow the preview (Lighting, above).
+
 ---
 
 ## 5. Simulation (authoritative, CPU, `core/`)
@@ -387,27 +632,55 @@ Per level, the engine expands `HostLevelMasks` into R8 layers of `DataArrayTextu
 ### 5.1 Occlusion world (`core/occlusion`)
 
 `buildOcclusionWorld(scene: SceneLike)` emits primitives per the blocking table and Terrain rule:
-walls split around openings (window sill + lintel pieces; closed-door leaves per style), wall ends extended at
+walls split around openings (window sill + lintel pieces; closed-door leaves per style; each piece a box, or a
+`WallStrip` under a sloping top line, §2 Walls on terrain), wall ends extended at
 joints, floors as boxes (flat levels) or one `Heightfield` per floor (levels with a heightmap), stepped boxes
 under stairs/ramps, pillars (box/cylinder), prop parts (box/cylinder, scaled, rotated). A 2D uniform grid
 (5 ft) over XZ accelerates queries (DDA + mailboxing). `update(scene, changedIds)` and
 `updateTerrain(scene, levelId, rect)` rebuild incrementally (a wall brings its openings and the neighbours
 whose joints change, an opening its host wall only if its span changed, a connector the floors it cuts) and
 return dirty regions only for primitives whose value changed; a change of levels/grid rebuilds everything.
+The engine and the host runner pass `updateTerrain` the rect of the heightmap chunks that differ, grown by
+one lattice spacing (`heightmapDiffRect`, `core/occlusion/terrain.ts`), not the whole grid; the engine adds
+the area its terrain preview of the level drew (§4.6). Wall frames
+(`WallFrame`: length, direction, yaw, joint extensions, `profile`) are cached per build context; an
+opening's primitives need only its host wall's profile over [0, len], which does not depend on the joint
+extensions, so a door toggle builds no joint index.
 
 - `raycast` reports the nearest entry; exact ties (coplanar faces entered at the same t) go to the smallest
   primitive key, so the reported primitive does not depend on grid registration order (edit history).
-- Conventions shared with the GPU proxies (`render/occluders`): `OrientedBox.yaw` is three.js `rotation.y`
-  (`Matrix4.makeRotationY`): local +X maps to world `(cos yaw, 0, −sin yaw)`. Heightfield arrays are row-major
-  by z then x: `heights[sz·samplesX + sx]` (world Y), `solid[cz·(samplesX−1) + cx]`, same triangle split as
-  `core/scene/heightmap`.
-- Primitive keys (stable across rebuilds; `sourceType` in brackets): walls `${wallId}` (first full-height piece),
+- Conventions shared with the GPU proxies (`render/occluders`): `OrientedBox.yaw` (and `WallStrip.yaw`) is
+  three.js `rotation.y` (`Matrix4.makeRotationY`): local +X maps to world `(cos yaw, 0, −sin yaw)`.
+  Heightfield arrays are row-major by z then x: `heights[sz·samplesX + sx]` (world Y),
+  `solid[cz·(samplesX−1) + cx]`, same triangle split as `core/scene/heightmap`.
+- Primitive keys (stable across rebuilds, whether a wall piece is a box or a strip; `sourceType` in
+  brackets): walls `${wallId}` (first full-height piece),
   `${wallId}#after:${openingId}`, `${wallId}#lintel:${openingId}`, `${wallId}#sill:${openingId}` [wall]; closed door
   leaf `${doorId}` [door]; window movement box `${windowId}` [window]; flat-level floor boxes `${floorId}`,
   `${floorId}#k` [floor]; heightmap-level floor heightfield `${floorId}` [terrain]; stairs/ramp rows
   `${connectorId}` / `${connectorId}#k` (row k from the bottom edge) [connector]; pillar `${pillarId}`; prop parts
   `${propId}`, `${propId}#i` [prop]. On heightmap levels a lattice cell is solid when its centre lies in an
   effective floor rect (exact for grid-aligned floors).
+- **`WallStrip`** (`shape: "strip"`, `core/occlusion/types.ts`): a wall piece whose top follows a
+  piecewise-linear profile. Footprint = the rect `center` ± `halfExtents` (x along the wall) rotated by
+  `yaw` exactly like an `OrientedBox`; solid = `bottom` ≤ y ≤ top(lx), lx the local x, top linear between
+  `knots` (local x, strictly increasing by ≥ 1e-6 ft, from −halfExtents.x to +halfExtents.x) with world-Y
+  `top` values (≥ bottom). It is the union of one convex solid per knot interval (grazing along a knot has
+  the heightfields' caveat). Entry test (`stripEntry`): clip the segment to the local box, binary-search the
+  knot range it spans, visit those intervals in ray order with an early exit, each tested with
+  `core/geometry` `lineConvex`; "contains the start" comes from the same per-interval classification, and
+  entries are reported for t ∈ (0, 1) like boxes, so a strip with a constant profile answers exactly as the
+  equivalent box. `primitiveTopAt` / `stripTopAt` / `stripMaxTop` binary-search the knots; bounds,
+  containment, footprints, `footprintPolygon` and `pushOutOfPrimitive` (nearest of the four sides, the local
+  top, the bottom) handle strips like boxes. The world registers a strip only in the cells its footprint
+  overlaps, each with the Y range [bottom, highest top over the part of the strip that cell spans]
+  (`registerStrip`), and `primitivesEqual` compares knots and tops, so a terrain update marks only strips
+  whose values changed. Movement (§5.3): a strip's vertical extent for a swept disc is [bottom, highest top
+  over the sweep's local-x span ± the disc radius], so a low wall on a slope is judged by its height where
+  it is crossed; the start-overlap exemption uses the span under the start disc only (a rising wall cannot
+  be walked through). Rotated strips count as off-grid architecture like rotated boxes. Viewer eyes and
+  light origins are pushed out of strips through a side or above the local top, and top probes (§5.2) use
+  the local top.
 
 ### 5.2 Vision (`core/vision`)
 
@@ -476,7 +749,8 @@ entered and left on their level per the connector-edge rules of §2, incl. `MAX_
 body, shrunk by a 0.6 ft clearance per side (`MOVE_CLEARANCE`), is swept as a **disc** (a medium token sweeps a
 3.8 ft disc, so it fits the default 4 ft door and passes 0.5 ft walls on its cell edges; a large token does not
 fit a 4 ft door) along the step against movement blockers on the relevant level (plus the upper level near a
-stair top) whose vertical extent overlaps [ground + 0.5 ft step-up, ground + body height]. A disc, not the
+stair top) whose vertical extent (a wall strip's: under the sweep, §5.1) overlaps [ground + 0.5 ft step-up,
+ground + body height]. A disc, not the
 body's square, so collisions do not depend on wall direction: battlemap buildings are often rotated, and a
 square's corners reach 1.4× further into a 45° wall. Diagonals may not cut corners: both L-shaped routes
 through the orthogonal neighbours must be free, counting grid-aligned architecture and other blockers only
@@ -559,14 +833,21 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
     cells with no dilation: walls → parametric runs whose inflated footprint overlaps explored cells or
     explored sub-cells, widened to contain any sent opening; floors → per-row runs of explored cells (whole
     cells, even partly explored ones) merged to rects; piece ids
-    `${id}@${x},${z}`; openings re-parented (`wallId` = piece, `offset` rebased). On heightmap levels a
-    wall's base is the ground at *its own* midpoint (Terrain rule, §2), and the client computes it at the
-    piece's midpoint, so pieces are sent with `height` (and their doors' `height`, windows' `sillHeight` /
-    `height`) rebased by `hostBase − clientGround(piece midpoint)`: the client then reproduces the host's
-    absolute wall top, door heads, sills and lintels (`src/integration/crossModule.test.ts` runs vision →
-    knowledge → filter → `viewToScene` on a sloped heightmap and checks that the render builders draw the
-    player's clipped pieces at the host's heights). A piece whose rebased height would be ≤ 0 (buried) is
-    omitted. Connectors, pillars, props: whole or nothing. Secret doors are omitted unless `revealed[uid]`
+    `${id}@${x},${z}`; openings re-parented (`wallId` = piece, `offset` rebased). Pieces keep the wall's
+    `height` and `followTerrain` (memory written before v2 has none: true). A follow-terrain piece on a
+    heightmap level also carries `terrainProfile`: the host's base line (world Y) at the piece's
+    `wallBaseKnots` (the host `wallProfile` of the remembered wall on the live host terrain, read at
+    t0 + u; cached per (heightmap, remembered wall) and shared by all players, and per piece span, so an
+    idle refresh sends no patch). The client's `wallProfile` uses it in place of its clipped terrain (§2),
+    so its tops and opening heights (door heads, sills, lintels) equal the host's even where it lacks the
+    terrain; bottoms may differ (appendix, Known gaps). `src/integration/crossModule.test.ts` runs vision →
+    knowledge → filter → `viewToScene` on a bumpy slope and checks that the renderer and occlusion stand
+    the player's clipped pieces on the host's tops, door head, sill and lintel (and that without the
+    profile they would not). It reveals only the ground along the piece's centreline, which the piece's
+    own top already shows. A profile longer than `MAX_TERRAIN_PROFILE`
+    (4096 entries: tiny cells and walls far past the grid) is left out, and the client stands that piece
+    on its own clipped terrain. Nothing is rebased, and a buried (follow-off) piece is sent like any other.
+    Connectors, pillars, props: whole or nothing. Secret doors are omitted unless `revealed[uid]`
     contains them (auto-revealed when observed open, or by `reveal-object`) and then sent as style "wood";
     the host wall renders solid without them.
     Props never carry `blocksMovement` (DM-only); `viewToScene` assumes the `PROP_LIBRARY` default, so a
@@ -577,8 +858,14 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
     players' tokens get `label` only; `name/eyeHeight/vision/speed` only for controlled/vision tokens.
     `model` (a `free:<id>` reference, §3) is sent with every token sent: it is what the token looks like.
   - **levels**: known levels (any explored cell) + stubs (`known:false`, `name:null`) for levels referenced by a
-    sent connector or own token. **terrain**: chunks overlapping explored cells, samples touching no explored cell
+    sent connector or own token, copied field by field (`playerLevel`), so `terrainEdits` never reaches a
+    player (tests check that the serialised view contains neither `terrainEdits` nor `baseChunks`, and that
+    a shape edit in a live session reaches players as heightmap chunk diffs only).
+    **terrain**: the baked heightmap's chunks overlapping explored cells, samples touching no explored cell
     zeroed. **masks**: perception (current), explored (persistent), sunlit (current ∧ perceived).
+  - Wire schema (`playerViewSchema.ts`): walls' `followTerrain` defaults to true (views and saved games from
+    before v2), `terrainProfile` is optional, ≤ 4096 finite numbers; remembered walls (`memoryObjectSchema`)
+    never hold a profile. `viewToScene` copies both (missing `followTerrain` → true).
 - Vision worker contract (`VisionClient`, `net/host/types.ts`): `setScene` / `update(scene, change, stateSeq)`
   advance the worker's revision; `compute(viewerTokenIds, stateSeq)` answers for that revision;
   `probe(scene, change, viewerSets)` evaluates each viewer set on the current revision with `change` taken
@@ -597,6 +884,14 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
 - DM edits during a live session: the editor applies immer patches to `GameState.scene`
   (`apply-scene-patches`); play actions (token moves, door/light toggles) are DmCommands and never enter undo.
   Grid resizes remap explored masks; deleting a level drops its masks/memory.
+  `levels/<id>/terrainEdits/**` patches are DM-only bookkeeping with no visual effect (the baked result
+  arrives as heightmap patches): `deltaFromPatches`, `editor/sceneChange` and `play/host.ts`
+  `sceneChangeBetween` ignore them (another level field changed → structure; else the heightmap → terrain;
+  else nothing), and an edit made only of them (`onlyTerrainEdits`: a shape renamed, painting under a
+  shape) marks no player dirty, does not bump `knowledgeRev` and asks for no early save; nor does it make
+  the host drop a move's in-flight step results (`applyKnowledge` compares levels with `sameVisionLevels`,
+  which ignores `terrainEdits`). The vision worker never receives `terrainEdits`
+  (`net/host/visionProtocol.ts` `visionLevels`).
   `GameState.origin = {sceneId, version, dirty}` records the library scene row the session was started from
   and the version the live map is based on; `apply-scene-patches` sets `dirty` (play actions never do), and
   `set-origin` records a save. `HostRunner.saveMapToLibrary({force?})` saves the live map (edits, token
@@ -777,13 +1072,152 @@ script checks that it is off.
 ## 7. Editor
 
 - Zustand store `editor/store.ts`: working `Scene` (or, during a live session, a proxy onto `GameState.scene`),
-  selection, active level, tool, snap mode, view options. Mutations: `editor.apply(recipe, label)` →
-  `produceWithPatches`; `core/history` records `{patches, inversePatches, label}`, supports transactions
+  selection, terrain selection, active level, tool, snap mode, view options. Mutations:
+  `editor.apply(recipe, label)` → `produceWithPatches`; `core/history` records `{patches, inversePatches, label}`, supports transactions
   (`begin`/`commit` squash to net patches), caps depth (200).
 - Tools implement `editor/tools/types.ts` `Tool`. The canvas builds `ToolPointerEvent`s (engine pick on the active
   level + snapping via core/grid; Alt = free placement) and draws `tool.preview()` via engine overlays.
-- Heightmap brush: decode dense heights on pointerdown, paint into a scratch array, preview via
-  `engine.previewTerrain`, commit once on pointerup writing only dirty chunks (one undo step).
+  Editor picks (the editor viewport and the host's live editor) pass `terrain: true`, the **editor ground
+  cast**: wall nodes, shapes and hover markers land where the cursor ray meets the heightmap, floors or not
+  (§4.6). Events also carry the pick's `ray`, the canvas-relative position (`canvasX/Y`) and the DOM
+  `buttons`; `controller.setProjector(engine.project)` gives tools `ToolDeps.project` (null until an engine
+  exists), and the canvas cursor and the options-bar hint come from the active tool when it provides them
+  (`Tool.cursor()` / `Tool.hint()`, read through `controller.toolCursor()` / `toolHint()`).
+- **Terrain tools** (ToolId `"terrain"`, "Terrain", key T; `editor/tools/terrain.ts` routes to the sub-tools
+  in `editor/tools/terrain/` by `toolSettings.terrain.sub`: `select` | `brush` (default) | `block` | `ramp` |
+  `cylinder`; pure hit-test / snapping helpers in `editor/terrainMath.ts`). The renderer shows the BAKED
+  document terrain; the tool's preview is always a `TerrainOverlay` of the active level's shapes (§4.6), so
+  shapes are visible and selectable only in this mode (they are not scene objects: no `selection`, no
+  object pick). In this mode the controller shows no object selection or hover, and keys acting on the
+  object selection (copy, cut, paste, duplicate, delete, select all, nudge, rotate, Escape) never reach
+  `runShortcut`: the tool applies them to its shapes or they do nothing (Escape then returns false, so the
+  host can leave edit mode).
+  - Gestures are local until release / confirm: the overlay shows the draft or moved shapes, and
+    `previewTerrain` gets the lattice re-baked over the previous ∪ current footprint grown by one sample
+    spacing, only when the gesture's quantised state changes and not while the footprint touches no floor
+    (hint "No floor here: terrain is drawn only under floors"; a null footprint, "nothing changed" as in a
+    shape dragged back to its start, only restores what was shown and is not off the floor,
+    `ShapePreview.offFloor()`). Each gesture commits ONE `store.applyTerrainEdit` (a `writeTerrain` delta
+    built from the current document). After a commit that
+    changed the heightmap the preview is left for `updateScene` to replace; a refused or empty commit and a
+    cancel clear it. Drags never use `pick.ground` (the preview holds the moving shape): they intersect
+    `pick.ray` with the horizontal plane at the grab height (creation: the baked ground under the first
+    corner), and events without a ray are ignored. While `buttons & 6` (camera orbit / pan) the height phase
+    freezes and re-anchors afterwards. Alt (read from the store's `altHeld`, so a press or release without
+    a move counts), snap-mode and terrain-setting changes recompute the gesture from the last event; a click
+    that confirms uses that press's Alt.
+  - Gesture invalidation: a store subscription cancels a gesture when the active level, the tool or
+    sub-tool, `readOnly`, the grid, or the gesture level's `heightmap` / `terrainEdits` / `elevation`
+    identity changes (not on other scene changes: the live host re-syncs on every player step). Undo / redo
+    during a gesture only cancel it. Read-only: shapes can be selected, nothing else.
+  - Brush: paints the BASE (`baseLattice`); the preview shows the baked result of each dirty rect (the bake is
+    skipped on levels without shapes); pointerup commits `{base: {lattice, rects: [dirty]}}`. Flatten
+    targets the baked height under the stroke start. Hint: "The brush paints the ground under shapes; use
+    Apply to terrain to sculpt a shape".
+  - Block / ramp / cylinder (Blender-style creation): press and drag the base on the plane through y0, the
+    baked ground under the snapped first corner (block / ramp corners snap like floor edges, the cylinder's
+    centre with the snap mode and its radius to half cells, min 0.25 ft; Alt = free; a click makes a
+    one-cell base or a half-cell radius; rects are clamped to the extent, cylinders kept inside the extent
+    ± 50 ft). Release starts the height phase: the height follows the cursor relatively, 0 at the release
+    (`core/geometry/gizmo` `heightFromPointer`: h = h_ref + dot(c − c_ref, u)/k with u the on-screen
+    direction of world up at the anchor and k = max(|up axis|, 0.25 × px per foot sideways) px per foot,
+    re-anchored when zoom, pan or orbit change the projection; with `screenUpWhenFloored`, used by creation,
+    u is screen up whenever k is at that 0.25 floor, since world up then projects short and, in a
+    straight-down perspective view, radially from the screen centre), snapped to `heightStep` (default
+    0.5 ft; Alt or free snapping: 0.01) with a label ("+7.5 ft · Add" / "−3 ft · Carve") at the draft's
+    corner, or, while the floor is active (`HeightFollowState.upPx` < k: the corner lags the cursor), on the
+    last pointer ray at the draft's height (redrawn on every move there, sideways too). A left click or
+    Enter confirms (the sign picks add / carve; 0 cancels), right-click or Escape cancel. A ramp rises along
+    the dominant drag axis (with hysteresis), fixed at the release; R / Shift+R turn it ±90° during the
+    height phase.
+    Cylinders have `cylinderSides` (6..64, default 24). The new shape (order = max + 1) is selected and the
+    sub-tool stays.
+  - Select, object mode: click selects (Shift / Ctrl toggles; shapes are hit by ray, nearest first), a
+    click on nothing clears, a drag on nothing marquee-selects in screen space, a press on a shape selects
+    and drags it. A press without Shift / Ctrl on an already selected shape keeps it when it is, in this
+    order, the front candidate under the cursor, a pit whose floor is under the cursor (`ShapeHit.onGround`:
+    a carve hit within 0.5 ft of the terrain pick, though the top of the shape it carves is hit first), level
+    with the front candidate (same side of the terrain, same ray parameter: coplanar tops, which the hit
+    order only breaks by id) or the one the click cycle reached at that spot (`heldCandidate`, `terrainMath`
+    `cycleCurrent`; a buried one cycled to, never a selected one merely somewhere under a visible
+    unselected shape, which the press takes), so a press-drag moves the selection; only a click (released
+    without a drag) cycles on to the next overlapping shape at that spot (which also narrows a
+    multi-selection), and a drag starts a new cycle. Hover shows what a press would take (that held
+    candidate, else the nearest). The selection moves on the plane at the grab
+    height, snapped by an anchor (the grabbed shape's first vertex, edge snapping; a grabbed cylinder's
+    centre (mean of its points) with the plain snap mode, as at creation; Alt free); offset components
+    below 1e-9 ft are 0, so a drag that stays in (or returns to) the anchor's cell commits nothing. The
+    gizmo (hit first) and X / Y / Z (toggled during a drag) constrain to an axis; Y moves tops and base
+    together, snapped to the height step, following the cursor like the height phase (`heightFromPointer`
+    from the press): on the drawn Y handle u is the handle's direction, toggled by key it is screen up
+    while k is at the floor. Delete; Mod+D duplicates
+    one cell away (new orders); Mod+A selects the level's shapes; arrows nudge one cell (Shift: 1 ft),
+    coalesced in history like object nudges; R / Shift+R rotate ±90° about the selection's `boundsPivot`
+    (the `rotationPivot` rule; a lone cylinder about its own centre).
+  - Select, advanced (edit) mode (`toolSettings.terrain.advanced`; effective, `editMode` in
+    `tools/terrain/context.ts`, only in the select sub-tool with shapes of the active level selected, so in
+    the other sub-tools delete, nudge, rotate, duplicate, select all and Escape act on whole shapes; Tab
+    toggles the effective mode, and from another sub-tool always switches to Select in advanced mode; 1 / 2 /
+    3 pick vertex / edge / face, switching to the select sub-tool; a Tab key without a shape selection is left
+    to the browser's focus navigation, while the options bar's Advanced switch then shows a hint): the
+    selected shapes show their elements; vertices and edges are hit in screen space within 8 px
+    (`ToolDeps.project`), faces by ray; Shift toggles; a press keeps a selected element and a click cycles,
+    by the same rule as shapes (level: coincident vertices / edges at the same distance); another shape
+    counts only as the front shape under the cursor (`otherShapeInFront`; a pit whose floor is under the
+    cursor is in front of the shape it carves, and none counts when an edited shape is level with it or is
+    such a pit): Shift / Ctrl+click on it adds it to the edit session (the element selection
+    stays), a plain click selects it alone, while a plain click on an edited shape away from its elements
+    clears the element selection even with another shape under it (hover shows no shape there); a marquee
+    selects elements and Mod+A all of the current kind; a drag on a selected element moves the selection
+    (one vertex: absolute edge snapping; else by anchor), Y moves top heights only; a move that would make a
+    shape invalid (not simple, flipped) is refused and the drag keeps its last valid state. Delete dissolves
+    vertices or collapses edges (a shape keeps ≥ 3 vertices); face mode deletes nothing (hint). The gizmo
+    appears only with elements selected (at their centroid) and never when read-only.
+  - Escape order in Select: gesture → elements → advanced mode → shape selection → false. In the other
+    sub-tools one Escape (after the gesture) clears the shape selection, and with it the advanced flag.
+  - Store: `terrainSelection: {levelId, shapeIds, elements} | null` lives beside `selection`. Missing ids are
+    dropped on every commit and `syncScene` (never cleared wholesale; identity kept when nothing is missing);
+    it is cleared on an active-level change, a new / loaded / restored document and when the terrain tool
+    is left, and `toolSettings.terrain.advanced` resets when it empties. Terrain actions, each one undo
+    step, false when refused (read-only, unknown level, `writeTerrain`, `validateEdit`) or when nothing
+    changed: `applyTerrainEdit(levelId, edit, label, {coalesceKey?})`, `enableTerrain`, `clearTerrain`
+    (heightmap null, `terrainEdits` removed), `flattenTerrain` (base 0 over the extent, shapes kept; false
+    when `hasPaintedBase` is false, even where shapes raise the terrain), `clearTerrainShapes`,
+    `setTerrainResolution` (`resampleTerrain`, written key by key), `applyTerrainShapes` ("Apply to
+    terrain": `applyShapesEdit`, so the older shapes under the selection are applied too; the undo label
+    counts every applied shape, "Apply 2 shapes to terrain"). `updateGrid` crops with `cropTerrainToGrid`
+    only when the width or depth changes, key by key (a shape left beyond the new extent ± 50 ft makes the
+    guard refuse the edit). `LevelUpdate`
+    excludes `heightmap` and `terrainEdits` (`updateLevel` also strips them at runtime), so every terrain
+    write goes through these actions and `writeTerrain`.
+  - UI: the options bar holds the sub-tool picker, the brush settings, the height step and cylinder sides, and
+    in the select sub-tool the Advanced switch and element picker (both run the same actions as Tab and 1 / 2
+    / 3), plus the tool's phase-aware hint. The Levels panel enables / removes terrain, sets the resolution,
+    flattens the painted ground (shapes stay; enabled only when `hasPaintedBase`, else the tooltip, on a
+    span around the disabled button, says it is already flat; the height-range hint adds "(shapes only)"
+    when only shapes raise the terrain) and deletes a level's shapes, all through the store actions. In
+    the terrain mode the Inspector shows the shape selection (`panels/TerrainInspector`: name, add / carve,
+    top (moves every top vertex), base, bake order (bring forward / send backward), vertex count, a warning
+    for shapes with fewer than 4 lattice samples inside, the selected-elements hint ("2 vertices selected:
+    drag them in the viewport; Delete dissolves vertices") only while the advanced mode is effective
+    (`terrainMode.ts` `editedTerrainElements`, the tool's `editMode` test), Apply to terrain, Delete; several
+    shapes: count, add / carve, Apply, Delete; Apply names the older shapes it also bakes, before as a hint
+    and after as a toast, `terrainInspect.ts` `alsoAppliedShapes`), each edit one `applyTerrainEdit`
+    (`applyInspectorTerrainEdit`: its own "Can't …" toast only when an upserted shape is invalid; an edit that
+    changes nothing, like a rename to the same name, is silent), and "the selection" of menus, page handlers
+    and the status bar is the shape selection (`components/editor/lib/terrainMode.ts`): Edit-menu commands and
+    Delete run through `controller.keyDown` (the tool's key path), focusing frames the selected shapes, and
+    cut / copy / paste are off (shapes are not on the clipboard).
+- Walls on terrain (§2): `toolSettings.wall.followTerrain` (default true; the wall tool's "Follow terrain"
+  switch) sets new walls' `followTerrain`; the Inspector has the switch per wall and for a selection of
+  walls, and warns (`components/editor/lib/terrainInspect.ts` `wallTerrainWarning`) when a follow-off wall
+  is buried where the terrain rises above its base, or the terrain lifts a follow wall's top through the
+  level above: max top − max(top of that level's floor (`above.elevation`), elevation + height) ≥ 0.05 ft
+  (a storey-high wall on flat ground does not warn; for a wall no taller than the storey, lowering it by the
+  reported amount clears the warning). The segment preview draws the conforming wall and the opening
+  preview uses its host wall's option; the wall tool's hover marker sits on the picked ground. The light
+  tool mounts a light `presetHeight` above the wall's base line at the mount point (`wallMountHeight`), at
+  least 0.5 ft above that base and the ground there and 0.5 ft below the top.
 - Integrity (`core/scene/integrity.ts`): `deleteWithDependents`, `copySelection` / `pasteClipboard` (fresh ids via
   idMap, remap level by relative order (`AtlasClipboard.levelOffsets`), drop orphan openings or re-host them on
   the wall under the pointer (`opts.hostWallId`, placed via `openingCenters`), connector target = level above,
@@ -791,10 +1225,15 @@ script checks that it is off.
   `validateReferences`. `deleteWithDependents` allows deleting the last level; `removeLevel` in the store keeps
   at least one.
 - Document guard (`editor/validate.ts`): `apply()` validates what each edit's patches touched (touched objects /
-  tokens plus their host walls, openings and carriers, all levels without terrain; everything after a grid
-  change) with the strict schema and `validateReferences`, and refuses the edit (`[]` / `false`, reason in
-  `lastRejected`) if the document would no longer load: e.g. content dragged, nudged or pasted beyond the extent
-  ± 50 ft, a grid shrunk under objects, out-of-range numbers or strings.
+  tokens plus their host walls, openings and carriers, all levels with their terrain only where touched;
+  everything after a grid change) with the strict schema and `validateReferences`, and refuses the edit
+  (`[]` / `false`, reason in `lastRejected`) if the document would no longer load: e.g. content dragged, nudged or pasted beyond the extent
+  ± 50 ft, a grid shrunk under objects or terrain shapes, out-of-range numbers or strings. Terrain is
+  checked where the patches touched it: touched heightmap chunks (NaN / range guard; every chunk when the
+  heightmap or the level is replaced wholesale), touched shapes and base chunks with the level's shape /
+  point counts (every one when `terrainEdits`, the level, the root or the grid is replaced; every base
+  chunk when the heightmap is replaced, since base chunks use its resolution); untouched terrain is left
+  out of the probe. The paste probe (`editor/clipboard.ts`) likewise drops terrain.
 - Snapping: cell centre / vertex / half / free, plus wall endpoints and wall centrelines for the wall tool.
   Pasting at the pointer (Ctrl+V) snaps the paste translation with the current snap mode, anchored on a
   reference item (the first token, else a structural item, else a point item) with the same rules as a drag,
@@ -811,11 +1250,18 @@ script checks that it is off.
   saved in localStorage (`atlas-vtt:keymap`, versioned), and a key belongs to at most one command per
   keymap (`lib/keymap.ts`). Pages register the effective bindings through `useAppHotkeys` (`lib/hotkeys.ts`),
   which adds the app's rules to the manager's matching. Shortcuts don't fire in text fields or under
-  dialogs or menus. Navigation keys stay with a focused widget (`editorMayHandleKey`). The default is
-  prevented only when the handler used the key. Propagation is never stopped. `useEditorHotkeys` (editor
+  dialogs or menus. Navigation keys stay with a focused widget (`editorMayHandleKey`; Tab too, so the
+  terrain tool's Tab never steals focus navigation from a focused control, and the tool also leaves Tab
+  to the browser when no shape is selected). The default is prevented only
+  when the handler used the key. Propagation is never stopped. `useEditorHotkeys` (editor
   page and the host's live editor) hands the matched action to `controller.keyDown(e, action)`: the
-  active tool sees the key first (Escape, Enter, R), then `runShortcut`. Alt for free placement comes from
-  the library's key-state tracker. Map views turn off the theme provider's "D" hotkey
+  active tool sees the key first, with the action as `ToolKeyEvent.action` (tools match actions, so
+  remapped keys work), then `runShortcut`. Tool-only actions (`confirm`, `terrain-advanced`,
+  `terrain-element`, `axis`) do nothing in `runShortcut`, so an unused key keeps its browser default.
+  Commands may declare `repeat: false` (fire once per press). The "Terrain" group: Q select, Shift+B brush (B toggles dark vision),
+  E block → ramp → cylinder (from another tool it re-enters the last creation sub-tool), Tab advanced mode,
+  1 / 2 / 3 element kind, X / Y / Z axis constraint (all but Q and Shift+B without auto-repeat); Enter confirms a
+  shape's height (`confirm`). Alt for free placement comes from the library's key-state tracker. Map views turn off the theme provider's "D" hotkey
   (`useSuppressThemeHotkey`), because D is a tool and a pan key there. Menus, tooltips and hints show the
   current keys (`useCommandLabel`, `CommandKbd`).
 
@@ -984,7 +1430,8 @@ parallel compilation are untested.
 ## Appendix: Implementation status (2026-09-23)
 
 Everything above is implemented, except for the known gaps and deliberate limits listed at the end of
-this appendix. Final verification of the current tree (after the wave-4 fixes): `tsc -b --force` (0 errors),
+this appendix. Final verification of the tree after the wave-4 fixes (before the terrain tools and walls on
+terrain, whose note follows the review-fix lists): `tsc -b --force` (0 errors),
 `npx vitest run` three times in a row (each: 115 test files and 1367 tests pass; the 3 opt-in live Supabase
 files are skipped), `npx eslint .` (clean) and `npm run build` all pass. The end-to-end scripts in `e2e/` were
 run against a Vite dev server (Chromium, NVIDIA through WSL d3d12 unless noted; 2026-09-23, final pass):
@@ -1041,7 +1488,7 @@ Security advisors report only the intentional warnings:
   inside a wall no longer lights through it.
 - Vision: history-independent sun bounds, sub-cell light invalidation on environment and occluder changes,
   tie-independent buried-sample probes and smallest-key raycast ties (§5.1, §5.2); wall pieces rebased on
-  terrain (§6.2); `groundIndex` for per-point ground queries (§2).
+  terrain (since replaced by the host's `terrainProfile`, §6.2); `groundIndex` for per-point ground queries (§2).
 - Quality: the start-up probe runs for "Auto" on every route, with a quality selector on the host console
   and the player page too; the step-up rule no longer oscillates (§4.5); no context MSAA, medium gets a
   lite post pass (§10); engines release their WebGL context (`e2e/engine-leak.mjs`).
@@ -1087,6 +1534,59 @@ Security advisors report only the intentional warnings:
   Vineyard run logged `removing session tiles failed … Too many connections`); the quality probe reads
   `RENDERER` before the deprecated debug extension (§10), which Firefox warned about; Tailwind scans only
   `src/`; and `e2e/firefox-smoke.mjs` is new.
+
+**Terrain tools and walls on terrain (2026-09-24)**. The terrain brush became the terrain editing mode with
+block, ramp and cylinder shapes created Blender-style, a select sub-tool with an advanced vertex / edge /
+face mode and a translate gizmo; shapes are editing data baked into the heightmap (scene schema v3, §3
+"Terrain edits", §4.6, §7). Walls got `followTerrain` and a shared base-line profile that replaces the
+midpoint rule (§2 "Walls on terrain"), with the `WallStrip` primitive for sloped pieces (§5.1); the filter's
+piece rebase became the host's `terrainProfile` (§6.2); the editor casts the pointer onto the terrain; the
+top-down camera no longer clips high terrain (§4.5). What the implementation reports state was verified:
+the unit tests of each area (the pure `core` modules with property tests of the bake invariant against a
+from-scratch rebuild, profile tops against `levelGround` + H, strip entries against boxes and brute-force
+marches, host → player tops and openings on bumpy terrain, a v1/v2 → v3 migration from a JSON literal, the
+serialised player view free of terrain edits); the occlusion and vision perf variants with terrain and
+follow walls (PERFORMANCE §11 and "Measurement"); a render check against a dev server in headless Chromium
+(walls following ridges, valleys and slopes, a wall chain with one continuous top, doors seated on the
+ground, the top-down black trapezoid gone); and the terrain overlay's shaders compiling without console
+errors in the editor's post pipeline. `src/integration/crossModule.test.ts` gained the walls-on-terrain
+oracle, a terrain-walls fixture, the host → player profile check and a live terrain-shape edit, and
+`e2e/editor-smoke.mjs` steps for a block drawn Blender-style, shapes baked outside the tool, the
+Inspector, Tab and a wall's Follow terrain switch. Three review rounds (code by area, a real-browser pass,
+each finding verified independently) found and fixed 35 issues, among them the in-place terrain commit
+path, preview lighting and the Apply-to-terrain closure. Final verification of the merged tree
+(2026-09-24): `tsc -b` 0 errors, `eslint .` clean, `npx vitest run` 142 files / 1819 tests pass (the 4
+live Supabase files skipped); on a Vite dev server in headless Chromium (NVIDIA through WSL d3d12):
+`editor-smoke` 55/55, `keybindings` 30/30, `host-save-map` 12/12, `multiplayer-local` 54/54 on the
+Crooked Lantern, on a freshly built v3 Vineyard and on a v1 Vineyard export (migrated on load),
+`vineyard-build` 23/23; a walls-on-terrain script (follow walls 10.000 ft above the ground at every
+drawn vertex; a wall aimed on floorless terrain from a low camera lands where aimed); a real-mouse pass
+of block, ramp and cylinder creation, move, vertex editing with the gizmo and baking outside the tool,
+without console errors. The perf-script table above was not re-run for this feature.
+
+**Terrain review fixes (2026-09-23)**, each with a regression test that fails on the previous code:
+- Document: "Apply to terrain" bakes the downward closure, so the terrain no longer changes (§3, §7);
+  footprints with a vertex on an ear's diagonal are triangulated whole (§3); follow walls no longer sink
+  just inside the lattice's low edge (§2).
+- Editor: press-drag keeps a selected shape or element and only clicks cycle; the advanced mode is effective
+  only in Select; Tab without a selection is left to focus navigation; cylinders snap and turn about their
+  centre; height follows screen up where world up is foreshortened, with the label at the cursor; a gesture
+  follows Alt pressed or released without a move; the hint comes back after a commit; a drag back to its start
+  no longer says "No floor here" (§7). Flatten is gated on the painted base, the "pokes through" warning
+  ignores storey-high walls on flat ground, and the Inspector's "Can't …" toast fires only for invalid shapes
+  (§7).
+- Rendering (§4.6, PERFORMANCE §11): one upload range per attribute and call; terrain commits and
+  cleared previews move the mesh and grid in place; preview wall rebuilds wait by their own cost; terrain
+  previews reach the occluder proxies (shadows, sky, GPU sight); overlapping gizmo arrows are hidden;
+  non-planar top fills are lifted above the baked terrain.
+- Second round: a press keeps a selected shape or element only when it is in front or cycled to, and an
+  advanced-mode click takes another shape only when it is in front; the height label on the pointer ray
+  follows sideways moves; a drag inside a cylinder's cell commits nothing; the "pokes through" warning
+  measures from the top of the floor above; the disabled Flatten button shows its tooltip; the Inspector's
+  element hint shows only where elements are edited (§7). Terrain commits move the heightfield occluder
+  proxies in place (`applyChange` per resolution-4 nudge: ≈ 0.1–0.3 s before, 2–7 ms now, PERFORMANCE
+  §11); cached floor outlines follow commits and cleared previews; lights and viewer eyes stand on a
+  terrain preview (§4.6).
 
 Known gaps and deliberate limits:
 
@@ -1134,9 +1634,59 @@ Known gaps and deliberate limits:
   measured headless, because headless Chromium reports hidden pages as visible.
 - Anonymous users created by the live tests and `e2e/multiplayer-supabase.mjs` cannot be deleted with the
   publishable key. They accumulate in the project.
-- On heightmap levels a clipped wall piece is rebased so its top, door heads, sills and lintels match the
-  host (§6.2), but its below-ground bottom can differ: the host's depends on the terrain under the whole
-  wall, which the player is not sent. Nothing above ground is affected.
+- On heightmap levels a clipped follow-terrain wall piece takes its base line from the host's
+  `terrainProfile`, so its top, door heads, sills and lintels match the host (§6.2), but its below-ground
+  bottom can differ: the host's depends on the terrain under the whole wall, which the player is not sent.
+  Nothing above ground is affected. A piece whose profile would exceed 4096 entries (0.5 ft cells, walls
+  reaching far past the grid) is sent without one and stands on the client's clipped terrain.
+- `terrainProfile` is sent even where the client's clipped ground would reproduce it (173–475 bytes per
+  view, about 2%, on the Crooked Lantern); leaving redundant profiles out is a possible optimisation.
+
+**Terrain editing and walls on terrain**
+
+- The ground outside the lattice (x < 0 or z < 0) is the elevation, so a follow wall crossing the
+  lattice's low edge ramps instead of stepping; the ramp lies wholly outside the map, from the wall's
+  outside end to the edge crossing, and the knot on the edge always samples the terrain (§2).
+  `rangeOverPolygon` can still miss the lattice-side minimum where a footprint edge crosses x = 0 or z = 0
+  (a crossing rounded to −ε reads the elevation), which only affects wall bottoms there; the two terrain
+  samplers (`core/occlusion/terrain.ts`, `render/builders/ground.ts`) do not treat −ε as inside.
+- A follow wall can rise through the slab of the level above where the terrain climbs, and a follow-off
+  wall is buried where the terrain rises above its base; both are allowed (the DM chooses per wall) and
+  only flagged by the Inspector's warnings, not prevented.
+- The brush paints the base, i.e. the ground under shapes: under a shape a stroke shows only where the
+  painted ground passes the shape's top (above an add, below a carve); "Apply to terrain" makes a shape
+  paintable (the hint says so). The optional dimmed brush ring where the baked terrain differs from the
+  base is not drawn.
+- Terrain is drawn only under floors, so a shape over no floor changes nothing visible (the tool's hint
+  says so). A shape with fewer than ~2×2 lattice samples inside bakes to a spike or to nothing (the
+  Inspector warns; raising the level's resolution helps).
+- The schema checks shapes for shape and range, not simplicity, and not the bake invariant (§3): a
+  hand-edited document can hold a non-simple footprint, whose triangulation is conservative and may leave
+  holes (spikes, pinches and slits are tested not to cover outside area; other non-simple input is not
+  proven), and a broken invariant shows only as a jump when an affected chunk is next written.
+- A grid shrink that would leave a shape beyond the extent ± 50 ft is refused (like objects), not
+  clipped, and every resize fully rebakes each level with terrain (about 35 ms for a 200×200-cell level at
+  resolution 4 with 400 shapes).
+- During a terrain preview only the terrain, the draped grid, follow-terrain walls and doors and the level's
+  occluder proxies, light origins and viewer eyes (shadows, sky exposure, GPU line of sight; throttled)
+  follow it; follow-off wall bottoms, props, pillars, fixture and token meshes and floor outlines update on
+  commit. Previewed origins and eyes are still pushed out of the document's blockers, so over a preview
+  carve deeper than a light's height the origin can sit up to the slab thickness + 0.3 ft below its
+  preview position. Each throttled wall run rebuilds the level's whole walls and doors buckets (the
+  builders work per bucket); spatial wall buckets, like the occluder strip buckets, would limit it to the
+  walls touched. The segment preview's buried part draws through the terrain, like other
+  previews, and the opening preview does not apply the host wall's `openingFrame` clamps.
+- The terrain overlay re-merges the unselected layer on any selection change (cost ∝ the level's total
+  points: 5–13 ms with 1000 shapes); hover hit-tests every shape on each coalesced move (bounds
+  prefilter); while the gizmo shows, `picker.project` reads the canvas rect 4 times per frame; the GPU and
+  `picker.project` projections differ by less than a pixel. The lifted top fill (§4.6) leaves the
+  footprint-border lattice cells, where the fill meets the surrounding terrain, as before, and its bound
+  assumes the path from a point to its lattice corners stays inside the footprint (fuzzed on convex
+  footprints only; a deeply notched one could exceed it).
+- Vertex, edge and gizmo picking need the engine's projector (`controller.setProjector`); without it only
+  shapes and faces can be picked (by ray). The terrain tool's store subscription is never removed (tools
+  have no dispose).
+- An autosave draft that cannot be opened (invalid or too new) is only logged to the console and kept.
 
 **Rendering**
 

@@ -2,13 +2,14 @@ import { describe, expect, it } from "vitest"
 
 import { LIGHT_PRESETS } from "@/core/scene/defaults"
 import { createScene, createToken, createWall } from "@/core/scene/factory"
-import { objectsOfType } from "@/core/scene/queries"
+import { sampleCounts, sampleSpacing } from "@/core/scene/heightmap"
+import { levelGround, lightWorldPosition, objectsOfType } from "@/core/scene/queries"
 import type { ConnectorObject, DoorObject, FloorObject, LightObject, PillarObject, PropObject, Token, WallObject, WindowObject } from "@/core/scene/types"
 
 import { at, fixtureScene, key, makeStore, pointer } from "../test-utils"
 import { createConnectorTool, dragDirection } from "./connector"
 import { createFloorTool } from "./floor"
-import { createLightTool, WALL_MOUNT_OFFSET } from "./light"
+import { createLightTool, WALL_MOUNT_OFFSET, wallMountHeight } from "./light"
 import { createOpeningTool } from "./opening"
 import { createPillarTool } from "./pillar"
 import { createPropTool } from "./prop"
@@ -151,6 +152,34 @@ describe("wall tool", () => {
     expect(tool.chain()).toEqual([])
   })
 
+  it("new walls and the segment preview follow the terrain per the tool setting", () => {
+    const f = fixtureScene()
+    const store = makeStore(f.scene)
+    const tool = createWallTool({ store, now: () => 0 })
+    tool.onPointerDown!(at(50, 50, { clientX: 0 }))
+    tool.onPointerMove!(at(60, 50))
+    expect(tool.preview()).toMatchObject({ kind: "segment", followTerrain: true })
+    tool.onPointerDown!(at(60, 50, { clientX: 100 }))
+    store.getState().setToolSettings("wall", { followTerrain: false })
+    tool.onPointerMove!(at(60, 60))
+    expect(tool.preview()).toMatchObject({ kind: "segment", followTerrain: false })
+    tool.onPointerDown!(at(60, 60, { clientX: 200 }))
+    const walls = newObjects<WallObject>(f.scene.objects, store.getState().scene.objects)
+    expect(walls.map((w) => [w.b, w.followTerrain])).toEqual(
+      expect.arrayContaining([
+        [{ x: 60, z: 50 }, true],
+        [{ x: 60, z: 60 }, false],
+      ])
+    )
+  })
+
+  it("the hover marker sits on the picked ground (y relative to the level ground)", () => {
+    const store = makeStore()
+    const tool = createWallTool({ store, now: () => 0 })
+    tool.onPointerMove!(pointer({ ground: { x: 21, z: 19 } }))
+    expect(tool.preview()).toMatchObject({ kind: "point", position: { x: 20, y: 0, z: 20 } })
+  })
+
   it("Shift constrains to 45° from the previous point", () => {
     const store = makeStore()
     const tool = createWallTool({ store, now: () => 0 })
@@ -192,6 +221,18 @@ describe("door and window tools", () => {
     // Hovering the fixture door resolves to the fixture wall.
     tool.onPointerMove!(at(15, 10, { objectId: f.doorId }))
     expect(tool.preview()).toMatchObject({ kind: "opening", levelId: f.groundId })
+  })
+
+  it("the opening preview measures from the host wall's base (its followTerrain)", () => {
+    const f = fixtureScene()
+    const flat = createWall(f.groundId, { x: 50, z: 50 }, { x: 80, z: 50 }, { followTerrain: false })
+    f.scene.objects[flat.id] = flat
+    const store = makeStore(f.scene)
+    const tool = createOpeningTool({ store }, "window")
+    tool.onPointerMove!(at(62, 50, { objectId: flat.id, hitPoint: { x: 62, y: 3, z: 50.25 } }))
+    expect(tool.preview()).toMatchObject({ kind: "opening", followTerrain: false })
+    tool.onPointerMove!(at(18, 10, { objectId: f.wallId, hitPoint: { x: 18, y: 3, z: 10.25 } }))
+    expect(tool.preview()).toMatchObject({ kind: "opening", followTerrain: true })
   })
 
   it("finds the nearest wall without a pick, and shows nothing away from walls", () => {
@@ -338,6 +379,53 @@ describe("light tool", () => {
     tool.onPointerDown!(at(22, 4, { objectId: f.wallId, hitPoint: { x: 22, y: 10, z: 10.05 } }))
     const [l3] = newObjects<LightObject>(before2, store.getState().scene.objects)
     expect(l3.position.z).toBeCloseTo(10 - wall.thickness / 2 - WALL_MOUNT_OFFSET)
+  })
+
+  it("wall mounts on terrain measure from the wall's base line at the mount point", () => {
+    const f = fixtureScene()
+    const store = makeStore(f.scene)
+    // Ground rises along +Z: h = 0.4·z.
+    const grid = store.getState().scene.grid
+    const { samplesX, samplesZ } = sampleCounts(grid, 2)
+    const spacing = sampleSpacing(grid.cellSize, 2)
+    const heights = new Float32Array(samplesX * samplesZ)
+    for (let sz = 0; sz < samplesZ; sz++) heights.fill(0.4 * sz * spacing, sz * samplesX, (sz + 1) * samplesX)
+    const extent = { x: 0, z: 0, w: grid.width * grid.cellSize, d: grid.depth * grid.cellSize }
+    expect(store.getState().applyTerrainEdit(f.groundId, { base: { lattice: { samplesX, samplesZ, heights, spacing }, rects: [extent] } }, "Paint")).toBe(true)
+    const tool = createLightTool({ store })
+    const mount = (wallId: string, hit: { x: number; y: number; z: number }) => {
+      const before = store.getState().scene.objects
+      tool.onPointerDown!(at(hit.x, hit.z - 5, { objectId: wallId, hitPoint: hit }))
+      const [l] = newObjects<LightObject>(before, store.getState().scene.objects)
+      return lightWorldPosition(store.getState().scene, l)
+    }
+    const torch = LIGHT_PRESETS.torch.height
+    // The fixture wall (z = 10) follows the terrain: its base is the ground on its centreline (4 ft).
+    const wall = store.getState().scene.objects[f.wallId] as WallObject
+    expect(wall.followTerrain).toBe(true)
+    const onFollow = mount(f.wallId, { x: 20.2, y: 8, z: 9.75 })
+    expect(onFollow.z).toBeCloseTo(9.45)
+    expect(onFollow.y).toBeCloseTo(levelGround(store.getState().scene, f.groundId, 20.2, 10) + torch)
+    expect(onFollow.y).toBeCloseTo(4 + torch)
+
+    // A wall on the level elevation, buried 7.78 ft deep at the mount point: the light stays 0.5 ft above the ground.
+    const buried = createWall(f.groundId, { x: 50, z: 20 }, { x: 70, z: 20 }, { followTerrain: false })
+    store.getState().addObject(buried)
+    const onBuried = mount(buried.id, { x: 60, y: 9, z: 19.75 })
+    expect(0.4 * 19.45 + 0.5).toBeGreaterThan(torch)
+    expect(onBuried.y).toBeCloseTo(0.4 * 19.45 + 0.5)
+    // Low wall: kept 0.5 ft under its top.
+    const low = createWall(f.groundId, { x: 50, z: 80 }, { x: 70, z: 80 }, { height: 3 })
+    store.getState().addObject(low)
+    expect(mount(low.id, { x: 60, y: 33, z: 79.75 }).y).toBeCloseTo(0.4 * 80 + 2.5)
+  })
+
+  it("wallMountHeight on flat ground clamps the preset height into the wall", () => {
+    const f = fixtureScene()
+    const wall = f.scene.objects[f.wallId] as WallObject
+    expect(wallMountHeight(f.scene, wall, { x: 20, z: 9.45 }, 5)).toBe(5)
+    expect(wallMountHeight(f.scene, { ...wall, height: 4 }, { x: 20, z: 9.45 }, 5)).toBe(3.5)
+    expect(wallMountHeight(f.scene, { ...wall, height: 0.6 }, { x: 20, z: 9.45 }, 5)).toBe(0.5)
   })
 
   it("a click on a door mounts the light on the door's wall", () => {

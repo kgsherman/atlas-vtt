@@ -25,7 +25,7 @@ function randomScene(seed: number, cells: number, walls: number, pillars: number
     const len = 5 + r() * 25
     const ang = r() < 0.7 ? (Math.floor(r() * 4) * Math.PI) / 2 : r() * Math.PI * 2
     const b = { x: a.x + Math.cos(ang) * len, z: a.z + Math.sin(ang) * len }
-    const wall = add(scene, createWall(levelId, a, b, { height: r() < 0.2 ? 3 : 10 }))
+    const wall = add(scene, createWall(levelId, a, b, { height: r() < 0.2 ? 3 : 10, followTerrain: true }))
     const roll = r()
     if (len > 10 && roll < 0.3) add(scene, createDoor(wall, len / 2, { state: r() < 0.5 ? "open" : "closed" }))
     else if (len > 10 && roll < 0.5) add(scene, createWindow(wall, len / 2))
@@ -92,6 +92,30 @@ describe("accelerated queries match brute force", () => {
   }
 })
 
+/** 100k random sight queries of length ≤ maxLen over a 300 ft square. */
+function runQueries(world: OcclusionWorld, maxLen: number): { ms: number; blocked: number } {
+  const n = 100_000
+  const segs = randomSegments(5, n, 300, maxLen)
+  const a = { x: 0, y: 0, z: 0 }
+  const b = { x: 0, y: 0, z: 0 }
+  const opts = { channel: "sight" as const }
+  let blockedCount = 0
+  const start = performance.now()
+  for (let k = 0; k < n; k++) {
+    a.x = segs[k * 6]
+    a.y = segs[k * 6 + 1]
+    a.z = segs[k * 6 + 2]
+    b.x = segs[k * 6 + 3]
+    b.y = segs[k * 6 + 4]
+    b.z = segs[k * 6 + 5]
+    if (world.segmentBlocked(a, b, opts)) blockedCount++
+  }
+  return { ms: performance.now() - start, blocked: blockedCount }
+}
+
+/** Flat-scene budgets (ms) of the 100k-query benchmark; terrain with follow-terrain walls gets 1.5×. */
+const FLAT_BUDGET = { vision: 1000, fullMap: 2000 }
+
 describe("performance", () => {
   it("100k random segment queries on a 60×60 scene with ~300 primitives", () => {
     const scene = randomScene(42, 60, 85, 50, 70, false)
@@ -102,34 +126,37 @@ describe("performance", () => {
     expect(count).toBeGreaterThan(250)
     expect(count).toBeLessThan(400)
 
-    const run = (maxLen: number): { ms: number; blocked: number } => {
-      const n = 100_000
-      const segs = randomSegments(5, n, 300, maxLen)
-      const a = { x: 0, y: 0, z: 0 }
-      const b = { x: 0, y: 0, z: 0 }
-      const opts = { channel: "sight" as const }
-      let blockedCount = 0
-      const start = performance.now()
-      for (let k = 0; k < n; k++) {
-        a.x = segs[k * 6]
-        a.y = segs[k * 6 + 1]
-        a.z = segs[k * 6 + 2]
-        b.x = segs[k * 6 + 3]
-        b.y = segs[k * 6 + 4]
-        b.z = segs[k * 6 + 5]
-        if (world.segmentBlocked(a, b, opts)) blockedCount++
-      }
-      return { ms: performance.now() - start, blocked: blockedCount }
-    }
-    run(60) // warm-up (JIT)
-    const vision = run(60)
-    const fullMap = run(425)
+    runQueries(world, 60) // warm-up (JIT)
+    const vision = runQueries(world, 60)
+    const fullMap = runQueries(world, 425)
     console.log(
       `[occlusion perf] ${count} primitives, build ${buildMs.toFixed(1)} ms; 100k segments ≤ 60 ft: ${vision.ms.toFixed(0)} ms ` +
         `(${vision.blocked} blocked); 100k segments ≤ 425 ft: ${fullMap.ms.toFixed(0)} ms (${fullMap.blocked} blocked)`
     )
-    expect(vision.ms).toBeLessThan(1000)
-    expect(fullMap.ms).toBeLessThan(2000)
+    expect(vision.ms).toBeLessThan(FLAT_BUDGET.vision)
+    expect(fullMap.ms).toBeLessThan(FLAT_BUDGET.fullMap)
+  })
+
+  it("the same scene on terrain with follow-terrain walls (strips) stays within 1.5× the flat budgets", () => {
+    const flatWorld = buildOcclusionWorld(randomScene(42, 60, 85, 50, 70, false))
+    const scene = randomScene(42, 60, 85, 50, 70, true)
+    const t0 = performance.now()
+    const world = buildOcclusionWorld(scene)
+    const buildMs = performance.now() - t0
+    const strips = world.primitives.filter((p) => p.shape === "strip").length
+    expect(strips).toBeGreaterThan(60)
+
+    runQueries(world, 60) // warm-up (JIT)
+    runQueries(flatWorld, 60)
+    const flat = runQueries(flatWorld, 60)
+    const vision = runQueries(world, 60)
+    const fullMap = runQueries(world, 425)
+    console.log(
+      `[occlusion perf] terrain + follow walls: ${world.primitives.length} primitives (${strips} strips), build ${buildMs.toFixed(1)} ms; ` +
+        `100k segments ≤ 60 ft: ${vision.ms.toFixed(0)} ms (flat scene ${flat.ms.toFixed(0)} ms); ≤ 425 ft: ${fullMap.ms.toFixed(0)} ms`
+    )
+    expect(vision.ms).toBeLessThan(1.5 * FLAT_BUDGET.vision)
+    expect(fullMap.ms).toBeLessThan(1.5 * FLAT_BUDGET.fullMap)
   })
 
   it("large scene: 200×200 cells, resolution-4 terrain, ~5k objects", () => {

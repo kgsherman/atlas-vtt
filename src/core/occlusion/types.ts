@@ -61,7 +61,29 @@ export interface Heightfield extends PrimitiveBase {
   thickness: number
 }
 
-export type OccluderPrimitive = OrientedBox | VerticalCylinder | Heightfield
+/**
+ * A wall piece whose top follows a piecewise-linear profile along its length (follow-terrain walls on
+ * slopes, ARCHITECTURE §2). Footprint: the rect `center` ± `halfExtents` (x along the wall, z across),
+ * rotated about +Y by `yaw` exactly like OrientedBox. Solid: `bottom` ≤ y ≤ top(lx), where lx is the local
+ * x coordinate and top is linear between knots. Pieces whose top is constant are OrientedBoxes instead.
+ * Invariants: knots strictly increase (by at least MIN_EXTENT), knots[0] = −halfExtents.x,
+ * knots[last] = +halfExtents.x, knots.length === top.length ≥ 2, top[i] ≥ bottom.
+ */
+export interface WallStrip extends PrimitiveBase {
+  shape: "strip"
+  center: Vec2
+  halfExtents: { x: number; z: number }
+  /** Same convention as OrientedBox.yaw. */
+  yaw: number
+  /** Local x of the profile knots, ascending. */
+  knots: number[]
+  /** World Y of the top at each knot. */
+  top: number[]
+  /** World Y of the (flat) bottom. */
+  bottom: number
+}
+
+export type OccluderPrimitive = OrientedBox | VerticalCylinder | Heightfield | WallStrip
 
 export interface RayHit {
   /** Parametric distance along the segment in [0, 1] where the segment ENTERS the primitive. */

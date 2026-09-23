@@ -11,6 +11,7 @@ import { cn } from "@/lib/utils"
 
 import { useEditorState } from "./context"
 import { formatElevation, trimNumber } from "./lib/format"
+import { selectionCount } from "./lib/terrainMode"
 import type { ViewportInfoStore } from "./lib/viewportInfo"
 
 export type { QualityChoice }
@@ -83,7 +84,8 @@ export function StatusBar({
 }) {
   const level = useEditorState((s) => (Object.hasOwn(s.scene.levels, s.activeLevelId) ? s.scene.levels[s.activeLevelId] : null))
   const snap = useEditorState((s) => (s.altHeld ? "free" : s.snapMode))
-  const selected = useEditorState((s) => s.selection.length)
+  const selected = useEditorState(selectionCount)
+  const terrain = useEditorState((s) => s.tool === "terrain")
   const stats = useStore(info, (s) => s.stats)
 
   return (
@@ -99,7 +101,9 @@ export function StatusBar({
       {selected > 0 ? (
         <>
           <Separator orientation="vertical" className="h-3.5 self-center" />
-          <Item icon={<MousePointerClick className="size-3" />}>{selected} selected</Item>
+          <Item icon={<MousePointerClick className="size-3" />}>
+            {terrain ? `${selected} shape${selected === 1 ? "" : "s"} selected` : `${selected} selected`}
+          </Item>
         </>
       ) : null}
       <div className="flex-1" />

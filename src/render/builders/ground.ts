@@ -1,7 +1,7 @@
 /**
  * Terrain sampling for the visual builders. Same lattice and triangle split as core/scene/heightmap
  * (each lattice quad is split along (sx, sz)→(sx+1, sz+1); 0 outside the lattice), read from a
- * decoded dense lattice. A sampler can also be built from a dense preview lattice (heightmap brush).
+ * decoded dense lattice. A sampler can also be built from a dense preview lattice (terrain preview).
  */
 import { denseHeights, sampleSpacing } from "@/core/scene/heightmap"
 import type { GridSettings, Heightmap, Level, Vec2 } from "@/core/scene/types"
@@ -86,11 +86,20 @@ export class GroundSampler {
     return new GroundSampler(level.elevation, sampleSpacing(grid.cellSize, hm.resolution), d.samplesX, d.samplesZ, d.heights, d)
   }
 
-  /** Sampler over a dense preview lattice (see core/scene/heightmap denseHeights); null if the length fits no resolution. */
-  static fromDense(level: Pick<Level, "elevation">, grid: Pick<GridSettings, "width" | "depth" | "cellSize">, heights: Float32Array): GroundSampler | null {
+  /**
+   * Sampler over a dense preview lattice (see core/scene/heightmap denseHeights); null if the length fits
+   * no resolution. `range` (relative heights, including 0) skips the scan of the lattice: a range wider than
+   * the lattice's is fine (it only bounds ray marches and camera bounds).
+   */
+  static fromDense(
+    level: Pick<Level, "elevation">,
+    grid: Pick<GridSettings, "width" | "depth" | "cellSize">,
+    heights: Float32Array,
+    range?: HeightRange
+  ): GroundSampler | null {
     const res = resolutionForDense(grid, heights.length)
     if (res === null) return null
-    return new GroundSampler(level.elevation, sampleSpacing(grid.cellSize, res), grid.width * res + 1, grid.depth * res + 1, heights)
+    return new GroundSampler(level.elevation, sampleSpacing(grid.cellSize, res), grid.width * res + 1, grid.depth * res + 1, heights, range)
   }
 
   get flat(): boolean {
@@ -187,6 +196,34 @@ export class GroundSampler {
     if (min === Infinity) return { min: this.elevation, max: this.elevation }
     return { min, max }
   }
+}
+
+/**
+ * Range of the relative heights of a dense lattice (samplesX per row, `spacing` feet apart) over the
+ * samples inside `rect` grown by one spacing (null = all), merged into `into` (default {0, 0}).
+ */
+export function latticeRange(
+  heights: Float32Array,
+  samplesX: number,
+  spacing: number,
+  rect: { x: number; z: number; w: number; d: number } | null,
+  into: HeightRange = { min: 0, max: 0 }
+): HeightRange {
+  const samplesZ = Math.floor(heights.length / samplesX)
+  const i0 = rect ? Math.max(0, Math.floor(rect.x / spacing) - 1) : 0
+  const j0 = rect ? Math.max(0, Math.floor(rect.z / spacing) - 1) : 0
+  const i1 = rect ? Math.min(samplesX - 1, Math.ceil((rect.x + rect.w) / spacing) + 1) : samplesX - 1
+  const j1 = rect ? Math.min(samplesZ - 1, Math.ceil((rect.z + rect.d) / spacing) + 1) : samplesZ - 1
+  let min = into.min
+  let max = into.max
+  for (let j = j0; j <= j1; j++) {
+    for (let k = j * samplesX + i0, end = j * samplesX + i1; k <= end; k++) {
+      const v = heights[k]
+      if (v < min) min = v
+      if (v > max) max = v
+    }
+  }
+  return { min, max }
 }
 
 /** Point in a convex polygon of either winding (boundary counts as inside). */

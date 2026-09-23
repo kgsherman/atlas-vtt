@@ -7,11 +7,11 @@ import { describe, expect, it } from "vitest"
 
 import { createDoor, createLight, createProp, createWall } from "../scene/factory"
 import { chunkKey } from "../scene/heightmap"
-import type { Scene } from "../scene/types"
+import type { Scene, TerrainShape } from "../scene/types"
 import { createCellMask, createGradeMask, decodeMask, encodeMask, setCell } from "../vision/mask"
 import type { VisibilityResult } from "../vision/types"
 import { updateKnowledge } from "./memory"
-import { deltaFromPatches, reduceDm } from "./reduceDm"
+import { deltaFromPatches, onlyTerrainEdits, reduceDm } from "./reduceDm"
 import { controlledTokenIds, createGameState, viewerTokenIds } from "./state"
 import { add, addLevel, addToken, flatScene } from "./test-utils"
 import type { DmCommand, GameState } from "./types"
@@ -192,6 +192,44 @@ describe("apply-scene-patches", () => {
     const whole = deltaFromPatches(state.scene, state.scene, [{ op: "replace", path: [], value: state.scene }])
     expect(whole.structure).toBe(true)
     expect(whole.objects).toEqual(Object.keys(state.scene.objects).sort())
+  })
+
+  it("ignores terrain edits (DM-only): no delta, no dirty players when nothing else changed", () => {
+    const { state, ground } = setup()
+    const withHm = patchesFor(state.scene, (d) => void (d.levels[ground].heightmap = { resolution: 2, chunks: {} }))
+    const s1 = reduceDm(state, { t: "apply-scene-patches", patches: withHm }).state
+    const points = [
+      { x: 0, y: 2, z: 0 },
+      { x: 5, y: 2, z: 0 },
+      { x: 5, y: 2, z: 5 },
+    ]
+    const shape: TerrainShape = { id: "s1", kind: "block", op: "add", order: 0, base: 0, points }
+    const chunk = "A".repeat(4 * Math.ceil((16 * 16 * 4) / 3))
+    // A shape commit: terrain edits plus the baked chunk → a terrain delta for everyone.
+    const commit = patchesFor(s1.scene, (d) => {
+      d.levels[ground].terrainEdits = { shapes: { s1: shape }, baseChunks: { "0,0": "" } }
+      d.levels[ground].heightmap!.chunks[chunkKey(0, 0)] = chunk
+    })
+    const r2 = reduceDm(s1, { t: "apply-scene-patches", patches: commit })
+    expect(r2.delta).toEqual({ objects: [], tokens: [], terrain: [ground], structure: false })
+    expect(r2.dirtyPlayers).toBe("all")
+    // Renaming the shape (or painting under it) changes only terrain edits.
+    const rename = patchesFor(r2.state.scene, (d) => {
+      d.levels[ground].terrainEdits!.shapes.s1.name = "Mound"
+      d.levels[ground].terrainEdits!.baseChunks["0,0"] = chunk
+    })
+    const r3 = reduceDm(r2.state, { t: "apply-scene-patches", patches: rename })
+    expect(r3.state.scene.levels[ground].terrainEdits?.shapes.s1.name).toBe("Mound")
+    expect(r3.state.seq).toBe(r2.state.seq + 1)
+    expect(r3.delta).toEqual({ objects: [], tokens: [], terrain: [], structure: false })
+    expect(r3.dirtyPlayers).toEqual([])
+    const remove = patchesFor(r3.state.scene, (d) => void delete d.levels[ground].terrainEdits)
+    expect(deltaFromPatches(r3.state.scene, r3.state.scene, remove)).toEqual({ objects: [], tokens: [], terrain: [], structure: false })
+    expect(reduceDm(r3.state, { t: "apply-scene-patches", patches: remove }).dirtyPlayers).toEqual([])
+    expect(onlyTerrainEdits(rename)).toBe(true)
+    expect(onlyTerrainEdits(commit)).toBe(false)
+    expect(onlyTerrainEdits([])).toBe(false)
+    expect(onlyTerrainEdits([{ op: "replace", path: ["levels", ground], value: {} }])).toBe(false)
   })
 
   it("returns an error and leaves the state untouched when patches do not apply", () => {

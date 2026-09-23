@@ -1,12 +1,16 @@
 /**
  * Contextual options for the active tool (a compact horizontal bar above the viewport), plus the
- * snap mode, which applies to every tool.
+ * snap mode, which applies to every tool. Tools with a phase-aware hint (Tool.hint through
+ * controller.toolHint, e.g. the terrain tool's "Move to set the height, click to confirm") show it here.
  */
 import * as React from "react"
-import { Magnet, RotateCcw, RotateCw, Undo2 } from "lucide-react"
+import { Box, Cylinder, Magnet, MousePointer2, Paintbrush, RotateCcw, RotateCw, TriangleRight, Undo2 } from "lucide-react"
 
+import { CommandKbd } from "@/components/keybindings/CommandKbd"
+import { useCommandLabel } from "@/components/keybindings/keymapStore"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { Kbd } from "@/components/ui/kbd"
 import { Separator } from "@/components/ui/separator"
 import { Switch } from "@/components/ui/switch"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
@@ -15,13 +19,22 @@ import { DOOR_STYLES, LIGHT_PRESETS, SIZE_FOOTPRINT } from "@/core/scene/default
 import { adjacentLevels } from "@/core/scene/queries"
 import type { CreatureSize, DoorStyle, LightPreset, TokenKind } from "@/core/scene/types"
 import type { BrushFalloff, BrushMode } from "@/core/scene/heightmapBrush"
-import { BRUSH_RADIUS_MAX, BRUSH_RADIUS_MIN, type ToolSettings } from "@/editor/settings"
+import type { TerrainElementMode } from "@/core/scene/terrainShapes"
+import {
+  BRUSH_RADIUS_MAX,
+  BRUSH_RADIUS_MIN,
+  TERRAIN_CYLINDER_SIDES_MAX,
+  TERRAIN_CYLINDER_SIDES_MIN,
+  type TerrainSubTool,
+  type ToolSettings,
+} from "@/editor/settings"
 import { normalizeAngle } from "@/editor/transform"
 import { cn } from "@/lib/utils"
 
 import { useEditorContext, useEditorState, useToolExtras } from "./context"
 import { ColorInput, NumberInput, Segmented, SelectInput, SliderInput, type Option } from "./fields"
 import { degrees, formatFeet, LIGHT_PRESET_LABELS, trimNumber } from "./lib/format"
+import { activeTerrainSelection, runEditorCommand } from "./lib/terrainMode"
 import { effectiveLightOverrides, type LightOverrides } from "./lib/toolExtras"
 import { DirectionPicker, MaterialSelect, PropPicker } from "./pickers"
 import { toolMeta } from "./toolMeta"
@@ -36,6 +49,31 @@ function Opt({ label, children, className }: { label: string; children: React.Re
 }
 
 const Sep = () => <Separator orientation="vertical" className="mx-1 h-5 self-center" />
+
+/** The active tool's phase-aware hint (Tool.hint), re-read whenever the controller redraws. */
+function useToolHint(): string | null {
+  const { controller } = useEditorContext()
+  return React.useSyncExternalStore(controller.subscribe, controller.toolHint)
+}
+
+const BAR_HINT = "min-w-24 flex-1 shrink! basis-0 cursor-default truncate text-[0.6875rem] text-muted-foreground"
+
+/**
+ * A usage hint at the end of the bar: it takes the room left on the row and truncates (full text in a
+ * tooltip). It keeps its place while empty, so a hint that changes or disappears while the pointer moves
+ * never re-wraps the bar (that would resize the viewport mid-gesture).
+ */
+function BarHint({ children }: { children: string | null }) {
+  if (!children) return <span aria-hidden className={BAR_HINT} />
+  return (
+    <Tooltip>
+      <TooltipTrigger render={<span className={BAR_HINT} />}>{children}</TooltipTrigger>
+      <TooltipContent side="bottom" className="max-w-96">
+        {children}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
 
 function useSettings<K extends keyof ToolSettings>(tool: K): [ToolSettings[K], (partial: Partial<ToolSettings[K]>) => void] {
   const { store } = useEditorContext()
@@ -86,6 +124,15 @@ function WallOptions() {
       <Opt label="Material">
         <MaterialSelect className="w-32" value={s.material} onValueChange={(material) => set({ material })} />
       </Opt>
+      <Tooltip>
+        <TooltipTrigger render={<div className="flex shrink-0 items-center gap-1.5" />}>
+          <span className="text-[0.6875rem] whitespace-nowrap text-muted-foreground">Follow terrain</span>
+          <Switch size="sm" checked={s.followTerrain} onCheckedChange={(followTerrain) => set({ followTerrain })} aria-label="Follow terrain" />
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-72">
+          On: the wall's base sits on the terrain along its length. Off: it stands at the level's elevation.
+        </TooltipContent>
+      </Tooltip>
     </>
   )
 }
@@ -316,9 +363,8 @@ function LightOptions() {
   )
 }
 
-function TerrainOptions() {
+function BrushOptions() {
   const [s, set] = useSettings("brush")
-  const hasTerrain = useEditorState((st) => Boolean(st.scene.levels[st.activeLevelId]?.heightmap))
   return (
     <>
       <Segmented className="shrink-0" value={s.mode} onValueChange={(mode) => set({ mode })} options={BRUSH_OPTIONS} aria-label="Brush mode" />
@@ -329,7 +375,125 @@ function TerrainOptions() {
         <SliderInput className="w-32" value={s.strength} min={0.05} max={s.mode === "raise" || s.mode === "lower" ? 5 : 1} step={0.05} onChange={(strength) => set({ strength })} />
       </Opt>
       <SelectInput className="w-32 shrink-0" value={s.falloff} options={FALLOFF_OPTIONS} onValueChange={(falloff) => set({ falloff })} aria-label="Brush falloff" />
-      {!hasTerrain ? <span className="text-[0.6875rem] whitespace-nowrap text-muted-foreground">Painting enables terrain on this level</span> : null}
+    </>
+  )
+}
+
+/** Sub-tool picker option: an icon with a "Label  key" tooltip (the key follows the user's remaps). */
+function subOption(value: TerrainSubTool, label: string, icon: React.ReactNode, key: string): Option<TerrainSubTool> {
+  return {
+    value,
+    label: null,
+    icon,
+    ariaLabel: label,
+    tooltip: (
+      <>
+        {label}
+        {key ? <Kbd>{key}</Kbd> : null}
+      </>
+    ),
+  }
+}
+
+const ELEMENT_OPTIONS: { value: TerrainElementMode; label: string; command: string }[] = [
+  { value: "vertex", label: "Vertex", command: "terrain.element.vertex" },
+  { value: "edge", label: "Edge", command: "terrain.element.edge" },
+  { value: "face", label: "Face", command: "terrain.element.face" },
+]
+
+function TerrainOptions() {
+  const { controller } = useEditorContext()
+  const [t, set] = useSettings("terrain")
+  const hasTerrain = useEditorState((st) => Boolean(st.scene.levels[st.activeLevelId]?.heightmap))
+  const selected = useEditorState((st) => activeTerrainSelection(st) !== null)
+  const hint = useToolHint()
+  const selectKey = useCommandLabel("editor", "terrain.select")
+  const brushKey = useCommandLabel("editor", "terrain.brush")
+  const createKey = useCommandLabel("editor", "terrain.create")
+  const elementKeys = [
+    useCommandLabel("editor", "terrain.element.vertex"),
+    useCommandLabel("editor", "terrain.element.edge"),
+    useCommandLabel("editor", "terrain.element.face"),
+  ]
+  const subs = [
+    subOption("select", "Select shapes", <MousePointer2 />, selectKey),
+    subOption("brush", "Brush", <Paintbrush />, brushKey),
+    subOption("block", "Block", <Box />, createKey),
+    subOption("ramp", "Ramp", <TriangleRight />, createKey),
+    subOption("cylinder", "Cylinder", <Cylinder />, createKey),
+  ]
+  // The advanced (vertex / edge / face) mode is effective only with shapes selected. The switch and the
+  // element picker go through the tool (like Tab and 1 / 2 / 3), which explains when nothing is selected.
+  const advanced = t.advanced && selected
+  const staticHint = t.sub === "brush" ? (hasTerrain ? "[ and ] change the brush size" : "Painting enables terrain on this level") : null
+  const text = hint ?? staticHint
+  return (
+    <>
+      <Segmented className="shrink-0" value={t.sub} onValueChange={(sub) => set({ sub })} options={subs} aria-label="Terrain tool" />
+      <Sep />
+      {t.sub === "brush" ? <BrushOptions /> : null}
+      {t.sub === "block" || t.sub === "ramp" || t.sub === "cylinder" ? (
+        <Opt label="Height step">
+          <NumberInput
+            className="w-18"
+            value={t.heightStep}
+            min={0}
+            max={50}
+            step={0.5}
+            unit="ft"
+            placeholder="Free"
+            onCommit={(heightStep) => set({ heightStep })}
+            aria-label="Height step (0 = free)"
+          />
+        </Opt>
+      ) : null}
+      {t.sub === "cylinder" ? (
+        <Opt label="Sides">
+          <NumberInput
+            className="w-16"
+            value={t.cylinderSides}
+            min={TERRAIN_CYLINDER_SIDES_MIN}
+            max={TERRAIN_CYLINDER_SIDES_MAX}
+            step={1}
+            precision={0}
+            onCommit={(n) => set({ cylinderSides: Math.round(n) })}
+            aria-label="Cylinder sides"
+          />
+        </Opt>
+      ) : null}
+      {t.sub === "select" ? (
+        <>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <span className="text-[0.6875rem] whitespace-nowrap text-muted-foreground">Advanced</span>
+            <Switch
+              size="sm"
+              checked={advanced}
+              onCheckedChange={() => void runEditorCommand(controller, { type: "terrain-advanced" })}
+              aria-label="Advanced: edit vertices, edges and faces"
+            />
+            <CommandKbd scope="editor" command="terrain.advanced" />
+          </div>
+          {advanced ? (
+            <Segmented
+              className="shrink-0"
+              value={t.element}
+              onValueChange={(element) => void runEditorCommand(controller, { type: "terrain-element", element })}
+              options={ELEMENT_OPTIONS.map((o, k) => ({
+                value: o.value,
+                label: o.label,
+                tooltip: (
+                  <>
+                    Select {o.value === "vertex" ? "vertices" : `${o.value}s`}
+                    {elementKeys[k] ? <Kbd>{elementKeys[k]}</Kbd> : null}
+                  </>
+                ),
+              }))}
+              aria-label="Element"
+            />
+          ) : null}
+        </>
+      ) : null}
+      <BarHint>{text}</BarHint>
     </>
   )
 }
@@ -402,6 +566,7 @@ export function ToolOptionsBar() {
   const tool = useEditorState((s) => s.tool)
   const snapMode = useEditorState((s) => s.snapMode)
   const altHeld = useEditorState((s) => s.altHeld)
+  const hint = useToolHint()
   const meta = toolMeta(tool)
   const Body = OPTIONS[tool]
   const Icon = meta.icon
@@ -415,7 +580,7 @@ export function ToolOptionsBar() {
       <Sep />
       {/* Wraps onto a second row when narrow (a hidden-scrollbar overflow hid controls with no hint). */}
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-x-3 gap-y-1 *:shrink-0">
-        {Body ? <Body /> : <span className="min-w-0 shrink! truncate text-[0.6875rem] text-muted-foreground">{meta.hint}</span>}
+        {Body ? <Body /> : <span className="min-w-0 shrink! truncate text-[0.6875rem] text-muted-foreground">{hint ?? meta.hint}</span>}
       </div>
       <Tooltip>
         <TooltipTrigger render={<div className="flex shrink-0 items-center gap-1.5" />}>

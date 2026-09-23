@@ -5,7 +5,7 @@ import { createConnector, createDoor, createFloor, createLevel, createLight, cre
 import { copySelection, deleteWithDependents, objectBounds, pasteClipboard, reprojectOpenings, selectionBounds, splitWall, validateReferences } from "./integrity"
 import { groundHeightAt, lightLevelId, lightWorldPosition, wallOpenings } from "./queries"
 import { parseScene } from "./schema"
-import type { ConnectorObject, LightObject, Scene, SceneObject, WallObject } from "./types"
+import type { ConnectorObject, LightObject, Scene, SceneObject, TerrainShape, WallObject } from "./types"
 
 /** Ground (0) / upper (10) / attic (20) with a stair from ground to upper, a walled room with openings, tokens and lights. */
 function fixture() {
@@ -82,6 +82,24 @@ describe("validateReferences", () => {
     const issues = validateReferences(f.scene).join("\n")
     expect(issues).toMatch(/does not fit on wall/)
     expect(issues).toMatch(/is a pillar, not a wall/)
+  })
+
+  it("checks terrain shape keys against their ids, scoped to the level", () => {
+    const f = fixture()
+    const points = [
+      { x: 0, y: 1, z: 0 },
+      { x: 5, y: 1, z: 0 },
+      { x: 5, y: 1, z: 5 },
+    ]
+    const shape = (id: string): TerrainShape => ({ id, kind: "block", op: "add", order: 0, base: 0, points: structuredClone(points) })
+    f.ground.heightmap = { resolution: 1, chunks: {} }
+    // The same shape id on two levels, and a shape id equal to an object id, are fine.
+    f.ground.terrainEdits = { shapes: { s1: shape("s1"), [f.wall.id]: shape(f.wall.id) }, baseChunks: {} }
+    f.upper.heightmap = { resolution: 1, chunks: {} }
+    f.upper.terrainEdits = { shapes: { s1: shape("s1") }, baseChunks: {} }
+    expect(validateReferences(f.scene)).toEqual([])
+    f.upper.terrainEdits.shapes.s1.id = "s2"
+    expect(validateReferences(f.scene)).toEqual([`level "upper": terrain shape ["s1"]: id "s2" does not match its key`])
   })
 })
 

@@ -1,13 +1,16 @@
 /**
  * "Edit map" during a live session: canvas pointer events → the editor controller, on the host's own
  * engine (no second WebGL context). Mirrors the editor viewport's input handling (components/editor
- * EditorViewport): picks on the editor's active level + snapping (Alt = free), floors as background
- * for the select tool, right-click-without-drag as a tool click, tool extras applied in one undo step.
+ * EditorViewport): picks on the editor's active level, marching its terrain, + snapping (Alt = free),
+ * canvas-relative positions and pressed buttons, floors as background for the select tool,
+ * right-click-without-drag as a tool click, tool extras applied in one undo step, the active tool's
+ * CSS cursor (Tool.cursor).
  */
 import * as React from "react"
 
 import type { EditorContextValue } from "@/components/editor/context"
 import {
+  editorCursor,
   stripBackgroundFloor,
   toToolPointerEvent,
   type DomPointerLike,
@@ -42,12 +45,13 @@ export function useHostEditInput(
         levelId: s.activeLevelId,
         objects: true,
         tokens: true,
+        terrain: true,
       })
       return toToolPointerEvent(
         e,
         pick,
         { grid: s.scene.grid, snapMode: s.snapMode, altHeld: s.altHeld },
-        { button }
+        { button, origin: canvas.getBoundingClientRect() }
       )
     }
     const background = <E extends ReturnType<typeof build>>(ev: E) => {
@@ -59,18 +63,7 @@ export function useHostEditInput(
     const setCursor = (css: string) => {
       if (canvas.style.cursor !== css) canvas.style.cursor = css
     }
-    const updateCursor = () => {
-      const s = store.getState()
-      setCursor(
-        s.tool === "select"
-          ? controller.tools.select.hoveredId()
-            ? leftDown
-              ? "grabbing"
-              : "pointer"
-            : "default"
-          : "crosshair"
-      )
-    }
+    const updateCursor = () => setCursor(editorCursor(controller, leftDown))
     const processMove = (e: PointerEvent) => {
       controller.pointerMove(background(build(e)).event)
       updateCursor()
@@ -183,7 +176,8 @@ export function useHostEditInput(
         toToolPointerEvent(
           e,
           { ground: null, objectId: null, tokenId: null, hitPoint: null },
-          { grid: s.scene.grid, snapMode: s.snapMode, altHeld: false }
+          { grid: s.scene.grid, snapMode: s.snapMode, altHeld: false },
+          { origin: canvas.getBoundingClientRect() }
         )
       )
     }
@@ -196,13 +190,12 @@ export function useHostEditInput(
     canvas.addEventListener("lostpointercapture", onPointerCancel)
     canvas.addEventListener("pointerleave", onPointerLeave)
     canvas.addEventListener("contextmenu", onContextMenu)
-    const unsubTool = store.subscribe((s, prev) => {
-      if (s.tool !== prev.tool)
-        setCursor(s.tool === "select" ? "default" : "crosshair")
-    })
+    // Tool switches, sub-tool switches and the tool's own state (terrain phases, hovers) move the cursor.
+    updateCursor()
+    const unsubCursor = controller.subscribe(updateCursor)
     return () => {
       if (raf) cancelAnimationFrame(raf)
-      unsubTool()
+      unsubCursor()
       canvas.removeEventListener("pointerdown", onPointerDown)
       canvas.removeEventListener("pointermove", onPointerMove)
       canvas.removeEventListener("pointerup", onPointerUp)

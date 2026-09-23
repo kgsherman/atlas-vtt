@@ -11,6 +11,7 @@ import { importedName } from "@/app/library"
 import { paths } from "@/app/routes"
 import type { AppServices } from "@/app/services"
 import { createScene } from "@/core/scene/factory"
+import { parseScene } from "@/core/scene/schema"
 import type { Scene } from "@/core/scene/types"
 import type { DocumentStash, EditorStore } from "@/editor/store"
 import { deleteDraft, getLocalStore, listDrafts, loadDraft, saveDraft } from "@/net/localStore"
@@ -26,6 +27,7 @@ import { retainLevelImages } from "./lib/levelImages"
 export type DocStatus = "loading" | "ready" | "error" | "too-new"
 
 export interface DraftData {
+  /** As saved: possibly an older schema version (recovered through draftScene). */
   scene: Scene
   libraryId: string | null
   baseVersion: number | null
@@ -96,6 +98,18 @@ const UNSAVED_PREFIX = "editor:unsaved:"
 
 export function draftKey(libraryId: string | null, sceneId: string): string {
   return libraryId ? `editor:${libraryId}` : `${UNSAVED_PREFIX}${sceneId}`
+}
+
+/**
+ * A recovered autosave draft as a current document, or null when it cannot be opened. Drafts are stored
+ * as they were saved, possibly by an older app version (or damaged), so they go through the migrations and
+ * the strict validation like any stored document (parseScene; a current draft passes through unchanged).
+ */
+export function draftScene(raw: unknown): Scene | null {
+  const parsed = parseScene(raw)
+  if (parsed.ok) return parsed.scene
+  console.warn(`[atlas] ignoring an autosave draft that cannot be opened (${parsed.error})`, parsed.issues)
+  return null
 }
 
 export function errorText(err: unknown): string {
@@ -177,7 +191,9 @@ export function useSceneDocument({ store, services, routeId, wantsImport, naviga
         return
       }
       if (draft.data.scene.id === current.id && JSON.stringify(draft.data.scene) === JSON.stringify(current)) return
-      setRecoverable({ key: draftKeyToUse, savedAt: draft.savedAt, scene: draft.data.scene })
+      const scene = draftScene(draft.data.scene)
+      if (!scene) return
+      setRecoverable({ key: draftKeyToUse, savedAt: draft.savedAt, scene })
     } catch (err) {
       console.warn("[atlas] could not read autosave drafts", err)
     }

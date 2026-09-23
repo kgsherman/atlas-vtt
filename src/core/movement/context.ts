@@ -4,7 +4,7 @@
  * (size + height) over one scene/world snapshot; validateMove and findPath each create their own, and
  * findPath relies on its caches (every directed step is swept at most once per search).
  */
-import { footprintOverlapsCapsule, footprintOverlapsCircle, primitiveBounds } from "../occlusion/primitives"
+import { footprintOverlapsCapsule, footprintOverlapsCircle, primitiveBounds, stripMaxTop } from "../occlusion/primitives"
 import type { OccluderPrimitive, OcclusionWorld } from "../occlusion/types"
 import { connectorGround, effectiveFloorRects, levelGround, rectContains } from "../scene/queries"
 import type { Cell, ConnectorObject, GridSettings, Id, Rect, SceneLike, Token, Vec2, WallObject } from "../scene/types"
@@ -127,7 +127,11 @@ interface Doorway {
 
 /** A wall, door or window piece that is not aligned with the grid (a rotated building's architecture). */
 function offGridArchitecture(p: OccluderPrimitive): boolean {
-  return p.shape === "box" && (p.sourceType === "wall" || p.sourceType === "door" || p.sourceType === "window") && Math.abs(Math.sin(2 * p.yaw)) > 1e-3
+  return (
+    (p.shape === "box" || p.shape === "strip") &&
+    (p.sourceType === "wall" || p.sourceType === "door" || p.sourceType === "window") &&
+    Math.abs(Math.sin(2 * p.yaw)) > 1e-3
+  )
 }
 
 /**
@@ -235,16 +239,30 @@ export function topEdgePoint(sp: ConnectorSpan, p: Vec2, cellSize: number): Vec2
 // Context
 // ---------------------------------------------------------------------------
 
-/** Vertical extent of a primitive (world Y). */
-function verticalRange(p: OccluderPrimitive): [number, number] {
+/**
+ * Vertical extent (world Y) of a primitive where a disc of radius `h` swept from a to b can touch it.
+ * Strips (wall pieces following the terrain) take their highest top over the sweep's local-x span, so a
+ * low wall on a slope is judged by its height where the token crosses it, not by its highest point.
+ */
+function verticalRange(p: OccluderPrimitive, a: Vec2, b: Vec2, h: number): [number, number] {
   switch (p.shape) {
     case "box":
       return [p.center.y - p.halfExtents.y, p.center.y + p.halfExtents.y]
     case "cylinder":
       return [p.base.y, p.base.y + p.height]
     case "heightfield": {
-      const b = primitiveBounds(p)
-      return [b.minY, b.maxY]
+      const bb = primitiveBounds(p)
+      return [bb.minY, bb.maxY]
+    }
+    case "strip": {
+      const c = Math.cos(p.yaw)
+      const s = Math.sin(p.yaw)
+      const la = c * (a.x - p.center.x) - s * (a.z - p.center.z)
+      const lb = c * (b.x - p.center.x) - s * (b.z - p.center.z)
+      const hx = p.halfExtents.x
+      const lo = Math.min(hx, Math.max(-hx, Math.min(la, lb) - h))
+      const hi = Math.min(hx, Math.max(-hx, Math.max(la, lb) + h))
+      return [p.bottom, stripMaxTop(p, lo, hi)]
     }
   }
 }
@@ -500,10 +518,12 @@ export class MoveContext {
     for (const levelId of levels) {
       for (const p of this.world.queryRect(levelId, bbox)) {
         if (!p.blocks.movement) continue
-        const [y0, y1] = verticalRange(p)
+        const [y0, y1] = verticalRange(p, from, to, h)
         if (!(y0 < yHi && y1 > yLo)) continue
         if (!footprintOverlapsCapsule(p, from, to, h)) continue
-        if (y0 < startHi && y1 > startLo && footprintOverlapsCircle(p, from, h)) continue
+        // Overlapping the token at its start: ignored (a strip by its extent under the start disc).
+        const s1 = p.shape === "strip" ? verticalRange(p, from, from, h)[1] : y1
+        if (y0 < startHi && s1 > startLo && footprintOverlapsCircle(p, from, h)) continue
         // Jambs of an open doorway the step goes through (lintels and sills still block).
         if (p.sourceType === "wall" && this.throughDoorway(p, from, to)) continue
         if (legOf !== null && (offGridArchitecture(p) || (p.sourceType === "wall" && this.throughDoorway(p, legOf.a, legOf.b)))) continue

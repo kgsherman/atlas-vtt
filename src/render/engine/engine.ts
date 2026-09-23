@@ -27,6 +27,8 @@ import * as THREE from "three"
 
 import { buildOcclusionWorld } from "@/core/occlusion"
 import type { DirtyRegion, OcclusionWorld } from "@/core/occlusion/types"
+import { sampleSpacing } from "@/core/scene/heightmap"
+import { unionRect } from "@/core/scene/heightmapBrush"
 import { effectiveFloorRects, lightLevelId, sortedLevels, tokenGroundY, type EffectiveFloor } from "@/core/scene/queries"
 import type { Id, Rect, SceneLike, Vec3 } from "@/core/scene/types"
 
@@ -34,8 +36,9 @@ import { BuildContext, buildBucket, buildLevel, BUCKETS } from "../builders"
 import { DOOR_ANIMATION_SECONDS } from "../builders/doors"
 import { flameFlicker } from "../builders/fixtures"
 import { updateTerrainGeometry } from "../builders/floors"
-import { GroundSampler } from "../builders/ground"
+import { GroundSampler, latticeRange, resolutionForDense, type HeightRange } from "../builders/ground"
 import { tokenBaseGeometry } from "../builders/tokens"
+import type { BucketKind } from "../builders/types"
 import { sceneBounds, type Bounds3 } from "../cameras/fit"
 import { OrbitCameraController } from "../cameras/orbit"
 import { TopDownCameraController } from "../cameras/topdown"
@@ -46,15 +49,16 @@ import { createLightingSystem } from "../lighting/system"
 import { precompileScene, TIER_DEFINE } from "../materials/util"
 import { TOKEN_MODEL_RIM } from "../materials/tokenMaterial"
 import { DIRECT_EMISSIVE, POST_SETTINGS, PostPipeline, type PostSettings } from "../post/pipeline"
-import { disposeCachedEdges, type ObjectMeshRef } from "../overlays/highlight"
+import { disposeCachedEdges, moveCachedEdges, type ObjectMeshRef } from "../overlays/highlight"
 import { OverlayManager } from "../overlays/manager"
 import { Picker } from "../picking/picker"
 import { DEFAULT_VIEW, MAX_TILT } from "./defaults"
-import { classifyStructure, diffScenes, gridRect, heightmapDiffRect, invalidation, occlusionClosure } from "./diff"
+import { classifyStructure, diffScenes, gridRect, heightmapDiffRect, invalidateTerrain, invalidation, occlusionClosure } from "./diff"
 import { GpuTimer } from "./gpuTimer"
 import { computeLevelPlan, effectiveActiveLevelId, type LevelPlanEntry } from "./levelPlan"
 import { LevelView, type LevelMaterials, type SharedMaterials } from "./levels"
 import { pickInitialQuality } from "./autoQuality"
+import { PreviewThrottle } from "./previewThrottle"
 import { BackdropManager, type BackdropOptions } from "./backdrops"
 import { guardStaleDeletes } from "./contextGuard"
 import { releaseSharedGpuResources, sharedGpuGeometries } from "./sharedResources"
@@ -63,6 +67,19 @@ import { TokenLayer } from "./tokens"
 
 /** Longest wait for a background tier compile before switching anyway (compiling synchronously then). */
 export const TIER_COMPILE_DEADLINE_MS = 1500
+
+/**
+ * Terrain previews rebuild the walls and doors of their level (follow-terrain walls stand on the
+ * previewed ground) at most this often, and once more after the last preview update.
+ */
+export const WALL_PREVIEW_INTERVAL_MS = 100
+/** Terrain previews reach the lighting system (its terrain occluders) at most this often, plus once after the last update. */
+export const LIGHT_PREVIEW_INTERVAL_MS = 100
+/**
+ * A throttled preview rebuild also waits this many times its own cost after it ends, so a slow one (many
+ * walls on a large level) takes at most about 1/9 of the main thread instead of running back to back.
+ */
+export const PREVIEW_COST_FACTOR = 8
 
 /** Held time before the first serial compile (serialCompile), so the loading card is on screen. */
 const SERIAL_START_DELAY_MS = 250
@@ -119,6 +136,11 @@ const LAYERS_ALL = (1 << LAYER.VISUAL) | (1 << LAYER.OVERLAY)
 const LAYERS_WORLD = 1 << LAYER.VISUAL
 const LAYERS_OVERLAY = 1 << LAYER.OVERLAY
 
+/** Objects drawn by a level's walls / doors buckets, and by its terrain mesh (outlinedOn). */
+const WALL_TYPES: ReadonlySet<string> = new Set(["wall", "door", "window"])
+const FLOOR_TYPES: ReadonlySet<string> = new Set(["floor"])
+const FLOOR_AND_WALL_TYPES: ReadonlySet<string> = new Set([...WALL_TYPES, ...FLOOR_TYPES])
+
 export class AtlasEngine implements Engine {
   private readonly canvas: HTMLCanvasElement
   private readonly opts: EngineOptions
@@ -171,8 +193,22 @@ export class AtlasEngine implements Engine {
   private settleSince: number | null = null
   private readonly loadListeners = new Set<(s: EngineLoadState) => void>()
 
-  /** Heightmap-brush previews: dense lattices per level. */
+  /** Terrain previews (heightmap brush, terrain shapes): dense lattices per level. */
   private readonly previews = new Map<Id, Float32Array>()
+  /** Relative height range of each preview lattice, grown by the dirty rects (never shrinks). */
+  private readonly previewRanges = new Map<Id, HeightRange>()
+  /**
+   * Union of the dirty rects previewed on a level since the preview began (null: everywhere): where the
+   * drawn terrain may differ from the document, so a commit or a cleared preview moves the terrain mesh
+   * and the grid back over it (plus the committed change) in place.
+   */
+  private readonly previewDirty = new Map<Id, Rect | null>()
+  /** Wall / door rebuilds on terrain previews (a level is known once its walls followed its preview). */
+  private readonly wallPreviews = new PreviewThrottle(WALL_PREVIEW_INTERVAL_MS, PREVIEW_COST_FACTOR)
+  /** Terrain previews passed on to the lighting system (LightingSystem.previewTerrain). */
+  private readonly lightPreviews = new PreviewThrottle(LIGHT_PREVIEW_INTERVAL_MS, PREVIEW_COST_FACTOR)
+  /** Joint-extended XZ bounds of the walls per level, for the scene objects they were taken from. */
+  private wallRects: { objects: SceneLike["objects"]; rects: Map<Id, { rect: Rect; follow: boolean }[]> } | null = null
   private readonly samplers = new Map<Id, GroundSampler>()
   private readonly floorCache = new Map<Id, EffectiveFloor[]>()
   /** Door leaf open fraction per door id, and the frame it was last advanced. */
@@ -253,6 +289,7 @@ export class AtlasEngine implements Engine {
       activeLevelId: () => this.activeLevelId(),
       worldPerPixel: () => this.controller.worldPerPixel(),
       worldPerPixelAt: (p) => this.worldPerPixelAt(p),
+      project: (p) => this.picker.project(p),
       fade: () => {
         const t = this.controller.getTarget()
         return { x: t.x, z: t.z, radius: this.controller.viewRadius() }
@@ -316,6 +353,10 @@ export class AtlasEngine implements Engine {
   setScene(scene: SceneLike): void {
     this.scene = scene
     this.previews.clear()
+    this.previewRanges.clear()
+    this.previewDirty.clear()
+    this.wallPreviews.clear()
+    this.lightPreviews.clear()
     this.clearCaches()
     this.doorT.clear()
     this.world = buildOcclusionWorld(scene)
@@ -352,23 +393,41 @@ export class AtlasEngine implements Engine {
     }
     const dirty: DirtyRegion[] = []
     if (ch.objects && ch.objects.length > 0) dirty.push(...this.world.update(scene, occlusionClosure(prev, scene, ch.objects)))
+    // Committed terrain, per level: the chunks that changed, plus what a preview drew since it began (a
+    // gesture's net change need not reach every area it previewed, e.g. a shape dragged away and back).
+    const terrain = new Map<Id, Rect>()
     for (const levelId of ch.terrain ?? []) {
       if (!Object.hasOwn(scene.levels, levelId)) continue
       const before = Object.hasOwn(prev.levels, levelId) ? prev.levels[levelId].heightmap : null
-      const rect = heightmapDiffRect(before, scene.levels[levelId].heightmap, scene.grid) ?? gridRect(scene.grid)
+      const full = gridRect(scene.grid)
+      let rect = heightmapDiffRect(before, scene.levels[levelId].heightmap, scene.grid) ?? full
+      if (this.previewDirty.has(levelId)) rect = unionRect(rect, this.previewDirty.get(levelId) ?? full)!
+      terrain.set(levelId, rect)
       dirty.push(...this.world.updateTerrain(scene, levelId, rect))
-      // A committed brush stroke replaces its preview.
-      this.previews.delete(levelId)
-      this.samplers.delete(levelId)
+      // A committed stroke / shape edit replaces its preview (the lighting system follows applyChange).
+      this.dropPreview(levelId)
     }
-    const inv = invalidation(prev, scene, ch)
-    const ctx = new BuildContext(scene, this.previews)
+    const inv = invalidation(prev, scene, ch.terrain ? { ...ch, terrain: undefined } : ch)
+    // The terrain mesh moves in place over the rect (as a preview does) unless changed objects rebuild the
+    // floors anyway; then only what stands on the changed ground is rebuilt (rebuilding a large terrain mesh
+    // costs about a third of a second on a 100×100-cell level at resolution 4, on every nudge).
+    const inPlace = new Set<Id>()
+    for (const [levelId, rect] of terrain) {
+      const lv = this.levels.get(levelId)
+      if (lv && !inv.has(levelId, "floors") && this.moveTerrain(lv, rect)) {
+        inPlace.add(levelId)
+        invalidateTerrain(inv, scene, levelId, this.bucketsOnGround(levelId, rect))
+      } else invalidateTerrain(inv, scene, levelId)
+    }
+    const ctx = this.buildContext(scene)
     for (const [levelId, kinds] of inv.buckets) {
       const lv = this.levels.get(levelId)
       if (!lv) continue
       for (const kind of kinds) lv.setBucket(kind, buildBucket(ctx, levelId, kind))
     }
-    for (const levelId of ch.terrain ?? []) this.overlays.terrainChanged(levelId)
+    for (const [levelId, rect] of terrain) this.overlays.terrainChanged(levelId, inPlace.has(levelId) ? rect : undefined)
+    // Camera depth ranges follow the terrain (a raised hill must not reach the top-down camera's near plane).
+    if (ch.terrain && ch.terrain.length > 0) this.refreshBounds()
     if ((ch.tokens && ch.tokens.length > 0) || inv.tokens) this.tokens.syncScene(scene, performance.now(), true)
     this.lighting.applyChange(scene, this.world, ch, dirty)
     this.tokens.invalidate()
@@ -381,6 +440,13 @@ export class AtlasEngine implements Engine {
     this.floorCache.clear()
   }
 
+  /** Build context of a scene revision with the terrain previews (their samplers reused, see ground()). */
+  private buildContext(scene: SceneLike): BuildContext {
+    const samplers = new Map<Id, GroundSampler>()
+    for (const id of this.previews.keys()) if (Object.hasOwn(scene.levels, id)) samplers.set(id, this.ground(id))
+    return new BuildContext(scene, this.previews, samplers)
+  }
+
   private rebuildAllLevels(scene: SceneLike): void {
     for (const [id, lv] of this.levels) {
       if (!Object.hasOwn(scene.levels, id)) {
@@ -388,7 +454,7 @@ export class AtlasEngine implements Engine {
         this.levels.delete(id)
       }
     }
-    const ctx = new BuildContext(scene, this.previews)
+    const ctx = this.buildContext(scene)
     for (const level of sortedLevels(scene)) {
       let lv = this.levels.get(level.id)
       if (!lv) {
@@ -423,9 +489,7 @@ export class AtlasEngine implements Engine {
   /** Shared work after a full (re)build. */
   private afterStructure(scene: SceneLike): void {
     this.applyBackground(scene)
-    this.bounds = sceneBounds(scene)
-    this.orbit.setBounds(this.bounds)
-    this.topdown.setBounds(this.bounds)
+    this.refreshBounds()
     this.replan()
     this.tokens.invalidate()
     this.overlays.sceneChanged()
@@ -443,6 +507,21 @@ export class AtlasEngine implements Engine {
     }
     this.precompile()
     this.checkFollow()
+  }
+
+  /**
+   * Camera bounds: the grid extent and every level's slab..ceiling over its terrain as drawn (terrain
+   * previews included), so the cameras' depth ranges and the top-down camera's height cover it.
+   */
+  private refreshBounds(): void {
+    const scene = this.scene
+    if (!scene) return
+    this.bounds = sceneBounds(scene, (level) => {
+      const g = this.ground(level.id)
+      return { min: g.relMin, max: g.relMax }
+    })
+    this.orbit.setBounds(this.bounds)
+    this.topdown.setBounds(this.bounds)
   }
 
   /**
@@ -466,29 +545,178 @@ export class AtlasEngine implements Engine {
     this.backdrops.update(levelId, dirty)
   }
 
+  /**
+   * Terrain preview (heightmap brush, terrain shapes): the level's ground reads `heights` until the preview
+   * is cleared or a committed terrain change replaces it (updateScene). The terrain mesh moves in place
+   * over `dirty` (it is rebuilt only when the level has none yet, or it was built on another lattice), the
+   * draped grid follows, the camera bounds grow with the preview, the lighting system gets the previewed
+   * ground (LightingSystem.previewTerrain; throttled, LIGHT_PREVIEW_INTERVAL_MS) and the level's walls and
+   * doors are rebuilt on it (throttled, WALL_PREVIEW_INTERVAL_MS) when `dirty` reaches a follow-terrain
+   * wall. Both throttles run the first update at once, then wait max(interval, PREVIEW_COST_FACTOR × the
+   * last run's cost) after the last run ends, and the frame loop runs the last update of a gesture.
+   * Clearing moves the mesh and the grid back in place over what the preview drew.
+   */
   previewTerrain(levelId: Id, heights: Float32Array | null, dirty: { x: number; z: number; w: number; d: number } | null): void {
     const scene = this.scene
     const lv = this.levels.get(levelId)
     if (!scene || !lv || !Object.hasOwn(scene.levels, levelId)) return
-    this.samplers.delete(levelId)
     if (heights === null) {
-      if (!this.previews.delete(levelId)) return
-      lv.setBucket("floors", buildBucket(new BuildContext(scene, this.previews), levelId, "floors"))
-      this.overlays.terrainChanged(levelId)
+      if (!this.previews.has(levelId)) return
+      const drawn = this.previewDirty.get(levelId) ?? null
+      const walls = this.dropPreview(levelId)
+      // Back to the document terrain, in place over what the preview drew when the mesh allows it.
+      const inPlace = this.moveTerrain(lv, drawn)
+      const ctx = this.buildContext(scene)
+      if (!inPlace) lv.setBucket("floors", buildBucket(ctx, levelId, "floors"))
+      if (walls) {
+        lv.setBucket("walls", buildBucket(ctx, levelId, "walls"))
+        lv.setBucket("doors", buildBucket(ctx, levelId, "doors"))
+      }
+      // The floors moved (or were rebuilt), the walls and doors too if the preview had rebuilt them.
+      if (this.outlinedOn(levelId, walls ? FLOOR_AND_WALL_TYPES : FLOOR_TYPES)) this.overlays.sceneChanged()
+      this.lighting.previewTerrain(levelId, null, null)
+      this.overlays.terrainChanged(levelId, inPlace ? drawn : undefined)
+      this.refreshBounds()
       return
     }
-    const hadPreview = this.previews.has(levelId)
+    const level = scene.levels[levelId]
+    // The lattice's height range: scanned once, then grown by each dirty rect (the rest of the lattice is
+    // unchanged, per the contract).
+    const known = this.previews.get(levelId)?.length === heights.length ? this.previewRanges.get(levelId) : undefined
+    const res = resolutionForDense(scene.grid, heights.length)
+    if (res === null) return
+    const range = latticeRange(heights, scene.grid.width * res + 1, sampleSpacing(scene.grid.cellSize, res), known ? dirty : null, known)
+    const sampler = GroundSampler.fromDense(level, scene.grid, heights, range)!
     this.previews.set(levelId, heights)
-    const sampler = this.ground(levelId)
+    this.previewRanges.set(levelId, range)
+    this.samplers.set(levelId, sampler)
+    const drawn = this.previewDirty.get(levelId)
+    this.previewDirty.set(levelId, drawn === undefined ? dirty : drawn && dirty && unionRect(drawn, dirty))
     const terrain = lv.terrain()
-    if (!terrain || !hadPreview) {
-      // First preview frame (or a flat level): build the terrain mesh once, then move it in place.
-      lv.setBucket("floors", buildBucket(new BuildContext(scene, this.previews), levelId, "floors"))
+    if (!terrain || updateTerrainGeometry(terrain.mesh.geometry, terrain.offsets, sampler, dirty, terrain.rows) < 0) {
+      // No terrain mesh yet (a flat level, or no floor under the terrain) or another lattice: build it once.
+      lv.setBucket("floors", buildBucket(this.buildContext(scene), levelId, "floors"))
       this.overlays.terrainChanged(levelId)
     } else {
-      updateTerrainGeometry(terrain.mesh.geometry, terrain.offsets, sampler, dirty)
       this.overlays.terrainPreviewed(levelId, dirty)
     }
+    const b = this.bounds
+    if (level.elevation + range.max + level.height > b.max.y || level.elevation + range.min - level.floorThickness < b.min.y) this.refreshBounds()
+    if (this.wallsNear(levelId, dirty, sampler.spacing, true)) this.wallPreviews.push(levelId, dirty, () => this.rebuildPreviewWalls(levelId))
+    this.lightPreviews.push(levelId, dirty, (d) => this.previewLighting(levelId, d))
+  }
+
+  /** Forget a level's terrain preview (cleared or committed). True if its walls and doors were rebuilt on it. */
+  private dropPreview(levelId: Id): boolean {
+    this.previews.delete(levelId)
+    this.previewRanges.delete(levelId)
+    this.previewDirty.delete(levelId)
+    this.samplers.delete(levelId)
+    this.lightPreviews.delete(levelId)
+    return this.wallPreviews.delete(levelId)
+  }
+
+  /**
+   * Move a level's terrain mesh in place onto its current ground (ground(): the preview lattice, else the
+   * document) over `rect` (null: everywhere). False when it cannot (no terrain mesh, a mesh built on
+   * another lattice spacing, a ground without heightmap): the floors bucket must be rebuilt then. The
+   * outline edges cached against the mesh (its floors hovered, selected or hidden) follow it over the
+   * triangles that moved (those with a vertex within one spacing of `rect`); the caller rebuilds the
+   * outlines (overlays.sceneChanged) when floors of the level are outlined.
+   */
+  private moveTerrain(lv: LevelView, rect: Rect | null): boolean {
+    const terrain = lv.terrain()
+    if (!terrain) return false
+    const ground = this.ground(lv.id)
+    const moved = updateTerrainGeometry(terrain.mesh.geometry, terrain.offsets, ground, rect, terrain.rows)
+    if (moved > 0) {
+      const s = ground.spacing
+      const touched = rect && { x: rect.x - s, z: rect.z - s, w: rect.w + 2 * s, d: rect.d + 2 * s }
+      // A terrain triangle spans at most one lattice diagonal (+ float slack).
+      moveCachedEdges(terrain.mesh.geometry, touched, s * Math.SQRT2 + 1e-3)
+    }
+    return moved >= 0
+  }
+
+  /**
+   * Buckets of a level to rebuild when its committed terrain changed over `rect` and the terrain mesh
+   * moved in place: walls and doors (the costly ones: per-knot strips, frames and leaves) only when a wall
+   * stands near `rect` (any wall: follow-off walls' bottoms follow the lowest ground under them too);
+   * connectors, pillars, props and fixtures always (cheap).
+   */
+  private bucketsOnGround(levelId: Id, rect: Rect): BucketKind[] {
+    const kinds: BucketKind[] = ["connectors", "pillars", "props", "fixtures"]
+    if (this.wallsNear(levelId, rect, this.ground(levelId).spacing, false)) kinds.push("walls", "doors")
+    return kinds
+  }
+
+  /**
+   * True if a wall of the level (a follow-terrain one with `followOnly`) stands within one lattice spacing
+   * of `dirty` (null: anywhere). A wall's bounds are grown by its thickness: half of it across, plus a
+   * joint extension (≤ half the thickness) along.
+   */
+  private wallsNear(levelId: Id, dirty: Rect | null, spacing: number, followOnly: boolean): boolean {
+    const scene = this.scene
+    if (!scene) return false
+    if (!this.wallRects || this.wallRects.objects !== scene.objects) {
+      const rects = new Map<Id, { rect: Rect; follow: boolean }[]>()
+      for (const o of Object.values(scene.objects)) {
+        if (o.type !== "wall") continue
+        const m = o.thickness
+        const x = Math.min(o.a.x, o.b.x) - m
+        const z = Math.min(o.a.z, o.b.z) - m
+        let list = rects.get(o.levelId)
+        if (!list) rects.set(o.levelId, (list = []))
+        list.push({ rect: { x, z, w: Math.max(o.a.x, o.b.x) + m - x, d: Math.max(o.a.z, o.b.z) + m - z }, follow: o.followTerrain })
+      }
+      this.wallRects = { objects: scene.objects, rects }
+    }
+    const s = spacing
+    return (this.wallRects.rects.get(levelId) ?? []).some(
+      ({ rect: r, follow }) =>
+        (follow || !followOnly) && (!dirty || (r.x <= dirty.x + dirty.w + s && r.x + r.w >= dirty.x - s && r.z <= dirty.z + dirty.d + s && r.z + r.d >= dirty.z - s))
+    )
+  }
+
+  /** Rebuild a level's walls and doors on its terrain preview (run by wallPreviews). */
+  private rebuildPreviewWalls(levelId: Id): void {
+    const scene = this.scene
+    const lv = this.levels.get(levelId)
+    if (!scene || !lv) return
+    const ctx = this.buildContext(scene)
+    lv.setBucket("walls", buildBucket(ctx, levelId, "walls"))
+    lv.setBucket("doors", buildBucket(ctx, levelId, "doors"))
+    if (this.outlinedOn(levelId, WALL_TYPES)) this.overlays.sceneChanged()
+  }
+
+  /**
+   * Outlines hang on a level's meshes of objects of these types (selected, hovered, or a hidden object's
+   * helper outline): replacing or moving those meshes must rebuild them. Otherwise the overlays are left
+   * alone (rebuilding every outline and light ring on each throttled wall rebuild costs a frame for nothing).
+   */
+  private outlinedOn(levelId: Id, types: ReadonlySet<string>): boolean {
+    const scene = this.scene
+    if (!scene) return false
+    const onLevel = (id: Id | null) => {
+      if (id === null || !Object.hasOwn(scene.objects, id)) return false
+      const o = scene.objects[id]
+      return types.has(o.type) && o.levelId === levelId
+    }
+    const o = this.overlays.current
+    if (o.selectedIds.some(onLevel) || onLevel(o.hoveredId)) return true
+    for (const obj of Object.values(scene.objects)) if (obj.hidden && onLevel(obj.id)) return true
+    return false
+  }
+
+  /** Pass a level's previewed ground to the lighting system over `dirty` (run by lightPreviews). */
+  private previewLighting(levelId: Id, dirty: Rect | null): void {
+    if (this.previews.has(levelId)) this.lighting.previewTerrain(levelId, this.ground(levelId), dirty)
+  }
+
+  /** The trailing runs of throttled terrain-preview work (per frame). */
+  private flushPreviews(): void {
+    this.wallPreviews.flush((levelId) => this.rebuildPreviewWalls(levelId))
+    this.lightPreviews.flush((levelId, dirty) => this.previewLighting(levelId, dirty))
   }
 
   // -------------------------------------------------------------------------
@@ -731,6 +959,7 @@ export class AtlasEngine implements Engine {
     const cpu0 = performance.now()
 
     this.controller.update(dt)
+    this.flushPreviews()
     this.animateDoors(dt)
     this.tokens.update(
       {
@@ -1409,7 +1638,7 @@ export class AtlasEngine implements Engine {
   // Helpers shared with overlays and picking
   // -------------------------------------------------------------------------
 
-  /** Ground sampler of a level (the brush preview lattice while one is active). */
+  /** Ground sampler of a level (the terrain preview lattice while one is active). */
   private ground(levelId: Id): GroundSampler {
     let s = this.samplers.get(levelId)
     if (!s) {
@@ -1417,7 +1646,7 @@ export class AtlasEngine implements Engine {
       const level = scene && Object.hasOwn(scene.levels, levelId) ? scene.levels[levelId] : null
       if (!scene || !level) return new GroundSampler(0, 5, 2, 2, null)
       const preview = this.previews.get(levelId)
-      s = (preview && GroundSampler.fromDense(level, scene.grid, preview)) || GroundSampler.forLevel(level, scene.grid)
+      s = (preview && GroundSampler.fromDense(level, scene.grid, preview, this.previewRanges.get(levelId))) || GroundSampler.forLevel(level, scene.grid)
       this.samplers.set(levelId, s)
     }
     return s

@@ -11,6 +11,11 @@ export interface Command {
   label: string
   /** Default keys (alternatives). */
   keys: readonly Hotkey[]
+  /**
+   * Whether the command fires on auto-repeat while its key is held. Absent: the keymap's default (editor
+   * commands repeat, play commands fire once per press); editor toggles set false.
+   */
+  repeat?: boolean
 }
 
 /** Keys per command id, replacing that command's defaults. */
@@ -24,7 +29,7 @@ export function keysOf(command: Command, overrides: KeyOverrides): readonly Hotk
   return Object.hasOwn(overrides, command.id) ? overrides[command.id] : command.keys
 }
 
-/** Every key of every command, after overrides. */
+/** Every key of every command, after overrides (a command's `repeat` applies to each of its keys, remapped or not). */
 export function bindingsOf<C extends Command>(commands: readonly C[], overrides: KeyOverrides): { hotkey: Hotkey; command: C }[] {
   return commands.flatMap((command) => keysOf(command, overrides).map((hotkey) => ({ hotkey, command })))
 }

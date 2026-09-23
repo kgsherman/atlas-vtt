@@ -23,14 +23,14 @@ export {
   type SceneDelta,
 } from "./state"
 export { clientMessageSchema, parseClientMessage, PROTOCOL_LIMITS } from "./protocol"
-export { deltaFromPatches, reduceDm } from "./reduceDm"
+export { deltaFromPatches, onlyTerrainEdits, reduceDm } from "./reduceDm"
 export { reduceRequest, segmentRectDistance, type RequestContext } from "./reduceRequest"
 export { updateKnowledge } from "./memory"
 export { filterForPlayer } from "./filter"
 export { BACKDROP_CELL_EPS, backdropCellRange, backdropTilePx, MAX_BACKDROP_TILE_PX, playerBackdrop, type BackdropCellRange } from "./backdrop"
 export { applyPatchOps, diffViews } from "./diff"
 export { backdropFromPlayer, levelFromPlayer, objectFromPlayer, playerBackdropAssetId, tokenFromPlayer, viewToScene } from "./viewToScene"
-export { memoryObjectSchema, parsePlayerView, playerObjectSchema, playerTokenSchema, playerViewSchema } from "./playerViewSchema"
+export { MAX_TERRAIN_PROFILE, memoryObjectSchema, parsePlayerView, playerObjectSchema, playerTokenSchema, playerViewSchema } from "./playerViewSchema"
 export { memorable, sanitizeObject, type MemoryFloor } from "./sanitize"
 export {
   FREE_ASSET_CATEGORIES,

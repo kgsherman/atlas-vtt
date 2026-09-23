@@ -5,7 +5,7 @@
  */
 import { pointInConvexPolygon } from "../geometry/polygon"
 import { chunkSamples, decodeChunk, denseHeights, parseChunkKey, sampleSpacing } from "../scene/heightmap"
-import type { GridSettings, Heightmap, Level, Vec2 } from "../scene/types"
+import type { GridSettings, Heightmap, Level, Rect, Vec2 } from "../scene/types"
 
 interface DenseEntry {
   width: number
@@ -213,4 +213,35 @@ export class TerrainSampler {
     if (min === Infinity) return { min: this.elevation, max: this.elevation }
     return { min, max }
   }
+}
+
+/**
+ * World rect covering every heightmap chunk that differs between two revisions of a level's heightmap
+ * (grown by one lattice spacing, since triangles span neighbouring samples), for OcclusionWorld.updateTerrain;
+ * the whole grid when one side is missing or the resolution changed; null when identical. Same rule as the
+ * render engine's heightmapDiffRect.
+ */
+export function heightmapDiffRect(prev: Heightmap | null, next: Heightmap | null, grid: Pick<GridSettings, "width" | "depth" | "cellSize">): Rect | null {
+  if (prev === next) return null
+  const full = { x: 0, z: 0, w: grid.width * grid.cellSize, d: grid.depth * grid.cellSize }
+  if (!prev || !next || prev.resolution !== next.resolution) return full
+  const n = chunkSamples(next.resolution)
+  const s = sampleSpacing(grid.cellSize, next.resolution)
+  let x0 = Infinity
+  let z0 = Infinity
+  let x1 = -Infinity
+  let z1 = -Infinity
+  for (const key of new Set([...Object.keys(prev.chunks), ...Object.keys(next.chunks)])) {
+    const a = Object.hasOwn(prev.chunks, key) ? prev.chunks[key] : undefined
+    const b = Object.hasOwn(next.chunks, key) ? next.chunks[key] : undefined
+    if (a === b) continue
+    const { ci, cj } = parseChunkKey(key)
+    if (!Number.isInteger(ci) || !Number.isInteger(cj)) return full
+    x0 = Math.min(x0, (ci * n - 1) * s)
+    z0 = Math.min(z0, (cj * n - 1) * s)
+    x1 = Math.max(x1, (ci + 1) * n * s)
+    z1 = Math.max(z1, (cj + 1) * n * s)
+  }
+  if (x0 === Infinity) return null
+  return { x: x0, z: z0, w: x1 - x0, d: z1 - z0 }
 }

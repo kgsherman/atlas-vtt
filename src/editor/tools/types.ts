@@ -6,6 +6,8 @@
 import type { Id, Vec2 } from "@/core/scene/types"
 import type { PickResult, ToolPreview } from "@/render/contracts"
 
+import type { ShortcutAction } from "../shortcuts"
+
 export type ToolId =
   | "select"
   | "floor"
@@ -33,6 +35,11 @@ export interface ToolPointerEvent {
   ctrl: boolean
   clientX: number
   clientY: number
+  /** Pointer position relative to the canvas, CSS px (the frame of ToolDeps.project). */
+  canvasX?: number
+  canvasY?: number
+  /** DOM `buttons` bitmask (1 left, 2 right, 4 middle): lets tools ignore moves while the camera is dragged. */
+  buttons?: number
   /** Click count from the DOM event (2 = double click). */
   detail?: number
 }
@@ -42,6 +49,8 @@ export interface ToolKeyEvent {
   shift: boolean
   alt: boolean
   ctrl: boolean
+  /** The keymap action bound to the key (tools should match actions, so remapped keys work). */
+  action?: ShortcutAction
 }
 
 export interface ToolContext {
@@ -60,4 +69,8 @@ export interface Tool {
   cancel?(): void
   /** Current preview to draw (read by the canvas each frame / on change). */
   preview(): ToolPreview | null
+  /** CSS cursor while this tool is active (null or absent: the canvas default). */
+  cursor?(): string | null
+  /** Phase-aware hint for the options bar (null or absent: the tool's static hint). */
+  hint?(): string | null
 }

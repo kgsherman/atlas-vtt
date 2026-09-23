@@ -5,6 +5,9 @@
  */
 import { HEIGHTMAP_CHUNK_CELLS, type GridSettings, type Heightmap, type Rect } from "./types"
 
+/** Heightmap resolution given to levels that get terrain for the first time (samples per cell). */
+export const DEFAULT_TERRAIN_RESOLUTION: Heightmap["resolution"] = 2
+
 export function bytesToBase64(bytes: Uint8Array): string {
   let binary = ""
   const chunk = 0x8000

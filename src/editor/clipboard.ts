@@ -60,7 +60,8 @@ export function parseClipboardText(text: string): AtlasClipboard | null {
 /**
  * Validate freshly pasted items against the strict scene schema and reference rules, using a probe
  * scene made of the pasted items plus whatever they reference (host walls, carrier tokens) and the
- * scene's levels without terrain (keeps the check cheap). Returns problems; empty = valid.
+ * scene's levels without terrain (no heightmap, no terrain edits: keeps the check cheap). Returns
+ * problems; empty = valid.
  */
 export function validatePastedItems(scene: Scene, ids: readonly Id[]): string[] {
   const objects: Record<Id, SceneObject> = {}
@@ -75,7 +76,10 @@ export function validatePastedItems(scene: Scene, ids: readonly Id[]): string[] 
     if (o.type === "light" && o.attachedTokenId) include(o.attachedTokenId)
   }
   const levels: Record<Id, Level> = {}
-  for (const [id, level] of Object.entries(scene.levels)) levels[id] = { ...level, heightmap: null }
+  for (const [id, level] of Object.entries(scene.levels)) {
+    const { terrainEdits: _edits, ...rest } = level
+    levels[id] = { ...rest, heightmap: null }
+  }
   const probe = { ...scene, levels, objects, tokens }
   const parsed = sceneSchema.safeParse(probe)
   if (!parsed.success) {

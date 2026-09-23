@@ -13,9 +13,10 @@ import {
 import { nominalTokenEye } from "../scene/queries"
 import type { Scene, SceneObject, Vec3 } from "../scene/types"
 import { buildOcclusionWorld } from "./index"
-import { primitiveBounds } from "./primitives"
-import { add, addLevel, flatScene, paintHeightmap } from "./test-utils"
-import type { BlockChannel, DirtyRegion, OcclusionWorld } from "./types"
+import { primitiveBounds, segmentEntry } from "./primitives"
+import { add, addLevel, flatScene, paintHeightmap, rng } from "./test-utils"
+import type { BlockChannel, DirtyRegion, OcclusionWorld, WallStrip } from "./types"
+import { primitivesEqual } from "./world"
 
 const v = (x: number, y: number, z: number): Vec3 => ({ x, y, z })
 const blocked = (w: OcclusionWorld, a: Vec3, b: Vec3, channel: BlockChannel = "sight") => w.segmentBlocked(a, b, { channel })
@@ -349,5 +350,100 @@ describe("nearest-hit ties", () => {
     const after = w.raycast(eye, p, { channel: "sight" })
     expect(after?.t).toBe(fresh?.t)
     expect(after?.primitive.key).toBe("P")
+  })
+})
+
+describe("follow-terrain walls (strips)", () => {
+  /** A 60 ft follow wall along z = 50 on ground rising 0.5 ft per ft along x (x ∈ [20, 80]). */
+  function slopeScene() {
+    const { scene, levelId } = flatScene(24, 20)
+    paintHeightmap(scene, levelId, (x) => Math.max(0, Math.min(30, (x - 20) / 2)))
+    const wall = add(scene, createWall(levelId, { x: 20, z: 50 }, { x: 80, z: 50 }, { height: 8, followTerrain: true }))
+    return { scene, levelId, wall }
+  }
+
+  it("per-cell Y ranges: rays over the low end pass, the same height at the high end is blocked", () => {
+    const { scene } = slopeScene()
+    const world = buildOcclusionWorld(scene)
+    expect(world.primitives.some((p) => p.shape === "strip")).toBe(true)
+    expect(blocked(world, v(25, 12, 45), v(25, 12, 55))).toBe(false)
+    expect(blocked(world, v(75, 12, 45), v(75, 12, 55))).toBe(true)
+    // Along the wall, above its top line near the low end, then diving into it.
+    expect(blocked(world, v(22, 10, 50), v(30, 13, 50))).toBe(false)
+    const hit = world.raycast(v(22, 10, 50), v(60, 20, 50), { channel: "sight" })
+    expect(hit?.primitive.shape).toBe("strip")
+  })
+
+  it("raycasts match a brute-force loop over the primitives", () => {
+    const r = rng(8)
+    const { scene, levelId } = flatScene(30, 30)
+    paintHeightmap(scene, levelId, (x, z) => 4 * Math.sin(x / 11) * Math.cos(z / 17) + 0.05 * x, 4)
+    for (let k = 0; k < 30; k++) {
+      const a = { x: r() * 150, z: r() * 150 }
+      const ang = k % 2 ? (Math.floor(r() * 4) * Math.PI) / 2 : r() * Math.PI * 2
+      const L = 5 + r() * 30
+      const w = add(scene, createWall(levelId, a, { x: a.x + Math.cos(ang) * L, z: a.z + Math.sin(ang) * L }, { height: 3 + r() * 8 }))
+      if (k % 3 === 0) add(scene, createDoor(w, 3, { width: 2, state: "closed" }))
+      if (k % 3 === 1) add(scene, createWindow(w, 3, { width: 2, sillHeight: 1 }))
+    }
+    const world = buildOcclusionWorld(scene)
+    expect(world.primitives.filter((p) => p.shape === "strip").length).toBeGreaterThan(20)
+    for (let q = 0; q < 3000; q++) {
+      const a = v(r() * 150, r() * 14 - 2, r() * 150)
+      const b = v(a.x + (r() - 0.5) * 80, r() * 14 - 2, a.z + (r() - 0.5) * 80)
+      const channel = (["sight", "light", "movement"] as const)[q % 3]
+      let best: number | null = null
+      for (const p of world.primitives) {
+        if (!p.blocks[channel]) continue
+        const t = segmentEntry(p, a, b)
+        if (t !== null && (best === null || t < best)) best = t
+      }
+      const hit = world.raycast(a, b, { channel })
+      if (best === null) expect(hit).toBeNull()
+      else expect(hit?.t).toBeCloseTo(best, 9)
+      expect(world.segmentBlocked(a, b, { channel })).toBe(best !== null)
+    }
+  })
+
+  it("updateTerrain rebuilds the strips over the edit only; followTerrain toggles rebuild the wall and its openings", () => {
+    const { scene, levelId, wall } = slopeScene()
+    const door = add(scene, createDoor(wall, 30, { width: 4, height: 7 }))
+    const far = add(scene, createWall(levelId, { x: 20, z: 10 }, { x: 80, z: 10 }, { height: 8, followTerrain: true }))
+    const world = buildOcclusionWorld(scene)
+    const farBefore = world.primitives.find((p) => p.key === far.id)
+    expect(farBefore?.shape).toBe("strip")
+    const doorTop = primitiveBounds(world.primitives.find((p) => p.key === door.id)!).maxY
+
+    // Raise a 10 ft mound under the wall's high end.
+    const edited = { ...scene, levels: { ...scene.levels } }
+    paintHeightmap(edited, levelId, (x, z) => Math.max(0, Math.min(30, (x - 20) / 2)) + (x >= 65 && z >= 45 && z <= 55 ? 10 : 0))
+    const dirty = world.updateTerrain(edited, levelId, { x: 62.5, z: 42.5, w: 25, d: 15 })
+    expect(dirty.length).toBeGreaterThan(0)
+    const moved = world.primitives.find((p) => p.key === `${wall.id}#after:${door.id}`) as WallStrip
+    expect(Math.max(...moved.top)).toBeCloseTo(30 + 10 + 8, 6)
+    expect(dirty.some((d) => regionContains(d, v(75, 47, 50)))).toBe(true)
+    expect(world.primitives.find((p) => p.key === far.id)).toBe(farBefore)
+    const fresh = buildOcclusionWorld(edited)
+    expect(world.primitives.length).toBe(fresh.primitives.length)
+    world.primitives.forEach((p, k) => expect(primitivesEqual(p, fresh.primitives[k])).toBe(true))
+
+    // Off: boxes on the elevation; the closed door is rebuilt with its host.
+    const off = withObject(edited, { ...wall, followTerrain: false })
+    world.update(off, [wall.id])
+    expect(world.primitives.filter((p) => p.sourceId === wall.id).every((p) => p.shape === "box")).toBe(true)
+    expect(primitiveBounds(world.primitives.find((p) => p.key === door.id)!).maxY).toBe(7)
+    expect(doorTop).toBeGreaterThan(7)
+  })
+
+  it("primitivesEqual compares strip profiles by value", () => {
+    const { scene, wall } = slopeScene()
+    const a = buildOcclusionWorld(scene).primitives.find((p) => p.key === wall.id) as WallStrip
+    const b: WallStrip = { ...a, knots: [...a.knots], top: [...a.top], center: { ...a.center }, halfExtents: { ...a.halfExtents } }
+    expect(primitivesEqual(a, b)).toBe(true)
+    expect(primitivesEqual(a, { ...b, top: b.top.map((t, k) => (k === 1 ? t + 1e-9 : t)) })).toBe(false)
+    expect(primitivesEqual(a, { ...b, knots: b.knots.map((t, k) => (k === 1 ? t + 1e-9 : t)) })).toBe(false)
+    expect(primitivesEqual(a, { ...b, knots: b.knots.slice(0, -1), top: b.top.slice(0, -1) })).toBe(false)
+    expect(primitivesEqual(a, { ...b, bottom: b.bottom - 1 })).toBe(false)
+    expect(primitivesEqual(a, { ...b, yaw: 0.1 })).toBe(false)
   })
 })

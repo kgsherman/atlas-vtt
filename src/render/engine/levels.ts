@@ -49,6 +49,13 @@ export interface DoorLeafState {
   markerState: DoorState | ""
 }
 
+/** The terrain mesh of a level's floors bucket and its in-place update data (builders/floors.ts updateTerrainGeometry). */
+export interface TerrainMesh {
+  mesh: THREE.Mesh
+  offsets: Float32Array
+  rows: Int32Array | null
+}
+
 /** userData.slot of door markers (drawn with the world material, shown only in top-down views). */
 export const DOOR_MARKER_SLOT = "doorMarker"
 
@@ -68,7 +75,7 @@ interface BucketState {
   meshes: THREE.Mesh[]
   doors: DoorLeafState[]
   flames: FlameState[]
-  terrain: { mesh: THREE.Mesh; offsets: Float32Array } | null
+  terrain: TerrainMesh | null
   index: Map<Id, ObjectMeshRef[]> | null
 }
 
@@ -164,7 +171,7 @@ export class LevelView {
         this.applyEmissiveLayer(mesh)
         b.root.add(mesh)
         b.meshes.push(mesh)
-        if (m.terrainOffsets) b.terrain = { mesh, offsets: m.terrainOffsets }
+        if (m.terrainOffsets) b.terrain = { mesh, offsets: m.terrainOffsets, rows: m.terrainRows ?? null }
         break
       }
       case "instanced": {
@@ -357,8 +364,8 @@ export class LevelView {
     return out
   }
 
-  /** Terrain mesh of the floors bucket (levels with a heightmap or a brush preview). */
-  terrain(): { mesh: THREE.Mesh; offsets: Float32Array } | null {
+  /** Terrain mesh of the floors bucket (levels with a heightmap or a terrain preview). */
+  terrain(): TerrainMesh | null {
     return this.buckets.get("floors")!.terrain
   }
 

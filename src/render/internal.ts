@@ -8,6 +8,7 @@ import type * as THREE from "three"
 
 import type { DirtyRegion, OcclusionWorld } from "@/core/occlusion/types"
 import type { Id, Rect, SceneLike } from "@/core/scene/types"
+import type { GroundSampler } from "./builders/ground"
 import type { Quality, SceneChange, ViewState } from "./contracts"
 
 /**
@@ -63,6 +64,12 @@ export interface LightingSystem {
   setScene(scene: SceneLike, world: OcclusionWorld): void
   /** Incremental update after the engine called world.update()/updateTerrain(). */
   applyChange(scene: SceneLike, world: OcclusionWorld, change: SceneChange, dirty: DirtyRegion[]): void
+  /**
+   * Terrain preview of a level (Engine.previewTerrain, throttled): its terrain occluder proxies follow the
+   * preview lattice over `dirty` (null = everywhere) so shadows and sky exposure match what is drawn;
+   * `ground` null ends the preview and restores the proxies from the world.
+   */
+  previewTerrain(levelId: Id, ground: GroundSampler | null, dirty: Rect | null): void
   /** View state: vision mode, viewer tokens, host masks, active level (culling), dimmed tokens. */
   setView(view: ViewState): void
   /**

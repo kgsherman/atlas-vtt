@@ -8,7 +8,7 @@ import type { ToolPreview } from "@/render/contracts"
 
 import { insideExtent } from "../snapping"
 import { normalizeAngle } from "../transform"
-import { createPreviewCache, samePoint, snappedGround, type ToolDeps } from "./shared"
+import { createPreviewCache, rotateTurns, samePoint, snappedGround, type ToolDeps } from "./shared"
 import type { Tool } from "./types"
 
 /** Fixed id of the ghost prop (never inserted into a document). */
@@ -71,11 +71,10 @@ export function createPropTool(deps: ToolDeps): Tool {
     },
 
     onKeyDown(e) {
-      if (e.key.toLowerCase() === "r" && !e.ctrl && !e.alt) {
-        rotate(e.shift ? -1 : 1)
-        return true
-      }
-      return false
+      const turns = rotateTurns(e)
+      if (turns === 0) return false
+      rotate(turns)
+      return true
     },
 
     cancel() {

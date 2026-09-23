@@ -31,8 +31,21 @@ function randomObject(r: Rand, oid: string, levels: string[]): PlayerObject {
   switch (int(r, 5)) {
     case 0:
       return { id: oid, type: "floor", levelId, rect: { x: num(r), z: num(r), w: 5, d: 5 }, material: "wood", ...(r() < 0.5 ? { thickness: 1 } : {}) }
-    case 1:
-      return { id: oid, type: "wall", levelId, a: { x: num(r), z: num(r) }, b: { x: num(r), z: num(r) }, height: 10, thickness: 0.5, material: "stone" }
+    case 1: {
+      const follow = r() < 0.7
+      return {
+        id: oid,
+        type: "wall",
+        levelId,
+        a: { x: num(r), z: num(r) },
+        b: { x: num(r), z: num(r) },
+        height: 10,
+        thickness: 0.5,
+        material: "stone",
+        followTerrain: follow,
+        ...(follow && r() < 0.6 ? { terrainProfile: Array.from({ length: 2 + int(r, 6) }, () => num(r)) } : {}),
+      }
+    }
     case 2:
       return {
         id: oid,

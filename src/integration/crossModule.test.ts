@@ -3,6 +3,11 @@
  * builders vs core/occlusion, vision vs movement ground rules) or hand data to each other (vision →
  * session → player client → occlusion/movement, editor patches → live session), they must agree.
  * Runs on the sample scenes so every feature (terrain, stairs, ladders, openings, props) is covered.
+ *
+ * Walls on terrain: render and occlusion share core/scene/wallProfile, so comparing their tops with each
+ * other would compare one function with itself. Wall tops, door heads and sill tops are therefore also
+ * checked against an independent oracle built from levelGround (core/scene/heightmap sampleHeight) and
+ * the raw opening formula of ARCHITECTURE §2 "Walls on terrain".
  */
 import * as THREE from "three"
 import { applyPatches, type Patch } from "immer"
@@ -11,8 +16,16 @@ import { describe, expect, it } from "vitest"
 import { findPath, validateMove } from "@/core/movement"
 import { MoveContext } from "@/core/movement/context"
 import type { PathStep } from "@/core/movement/types"
-import { BuildContext as OcclusionContext, buildOcclusionWorld, footprintPolygon, primitiveBounds, wallFrame as occlusionWallFrame } from "@/core/occlusion"
-import type { OccluderPrimitive } from "@/core/occlusion/types"
+import {
+  BuildContext as OcclusionContext,
+  buildOcclusionWorld,
+  footprintPolygon,
+  primitiveBounds,
+  primitiveTopAt,
+  TerrainSampler,
+  wallFrame as occlusionWallFrame,
+} from "@/core/occlusion"
+import type { OccluderPrimitive, WallStrip } from "@/core/occlusion/types"
 import { LIGHT_PRESETS, PROP_LIBRARY, SIZE_FOOTPRINT } from "@/core/scene/defaults"
 import {
   createConnector,
@@ -27,14 +40,30 @@ import {
   createWall,
   createWindow,
 } from "@/core/scene/factory"
-import { bytesToBase64, denseHeights, writeHeights } from "@/core/scene/heightmap"
+import { bytesToBase64, createHeightmap, denseHeights, writeHeights } from "@/core/scene/heightmap"
 import { parseScene } from "@/core/scene/schema"
 import { validateReferences } from "@/core/scene/integrity"
-import { effectiveFloorRects, floorRects, groundHeightAt, hasGroundAt, sortedLevels } from "@/core/scene/queries"
+import { effectiveFloorRects, floorRects, groundHeightAt, hasGroundAt, levelGround, sortedLevels, type Opening } from "@/core/scene/queries"
 import { SAMPLE_SCENES, sampleById } from "@/core/scene/samples"
-import type { CreatureSize, FloorObject, Id, LightPreset, PropKind, Scene, SceneObject } from "@/core/scene/types"
+import { bakeRegion, baseLattice, blockShape, cylinderShape, rampShape, translateShape, writeTerrain } from "@/core/scene/terrainShapes"
+import type {
+  CreatureSize,
+  DoorObject,
+  FloorObject,
+  Heightmap,
+  Id,
+  LightPreset,
+  PropKind,
+  Scene,
+  SceneLike,
+  SceneObject,
+  WallObject,
+  WindowObject,
+} from "@/core/scene/types"
+import { openingFrame, wallBaseKnots, wallProfile, WALL_BOTTOM_MARGIN, type WallProfile } from "@/core/scene/wallProfile"
 import { applyPatchOps, createGameState, deltaFromPatches, diffViews, parsePlayerView, reduceDm, viewToScene } from "@/core/session"
-import { TestHost } from "@/core/session/test-utils"
+import { prng, TestHost } from "@/core/session/test-utils"
+import type { PatchOp, PlayerWall } from "@/core/session/types"
 import { encodeGrades, encodeMask, VisionEngineImpl } from "@/core/vision"
 import { SceneIndex } from "@/core/vision/sceneIndex"
 import type { VisibilityResult } from "@/core/vision/types"
@@ -43,7 +72,7 @@ import { createEditorStore } from "@/editor/store"
 import { buildLevel } from "@/render/builders"
 import { BuildContext as RenderContext } from "@/render/builders/context"
 import { pillarExtent, propPlacement } from "@/render/builders/props"
-import { wallFrame as renderWallFrame, wallPieces } from "@/render/builders/walls"
+import { openingHole, wallFrame as renderWallFrame, wallPieceArea, wallPieces, wallPieceTopAt, type WallPiece } from "@/render/builders/walls"
 import { boxInstanceMatrix } from "@/render/occluders/geometry"
 import { OccluderProxies } from "@/render/occluders/proxies"
 import { SURF } from "@/render/internal"
@@ -103,20 +132,129 @@ function maskFloorFixture(): Scene {
   return scene
 }
 
-const SCENES = [...SAMPLE_SCENES.map((s) => [s.id, s.build()] as const), ["mask-floors", maskFloorFixture()] as const]
+/** A heightmap at `res` whose samples are h(x, z) (feet above the level elevation). */
+function latticeOf(scene: Pick<Scene, "grid">, res: Heightmap["resolution"], h: (x: number, z: number) => number): Heightmap {
+  const s = scene.grid.cellSize / res
+  const samplesX = scene.grid.width * res + 1
+  const samplesZ = scene.grid.depth * res + 1
+  const dense = new Float32Array(samplesX * samplesZ)
+  for (let j = 0; j < samplesZ; j++) for (let i = 0; i < samplesX; i++) dense[j * samplesX + i] = h(i * s, j * s)
+  return writeHeights(createHeightmap(res), scene.grid, dense)
+}
+
+/** Bumpy slope of the terrain-walls fixture (feet above the elevation). */
+const bumpySlope = (x: number, z: number) => 0.1 * x + 0.05 * z + 1.5 * Math.sin(x / 3) * Math.cos(z / 4)
+
+/**
+ * Test-only fixture (not a user-facing sample): walls on terrain. "Slope" (elevation 0, resolution 2): a
+ * bumpy slope with follow-terrain walls carrying doors (closed and open) and windows (one tall enough that
+ * the lowest top over it clamps its head), a diagonal wall, a joint chain, walls crossing the lattice's low
+ * and high edges, and a follow-off wall with a door, buried where the slope rises above its top. "Shaped"
+ * (elevation 30, resolution 4): painted terrain with terrain shapes baked in (a block, a ramp, a carved
+ * cylinder and a block standing in the pit), crossed by follow and follow-off walls with openings.
+ */
+function terrainWallsFixture(): Scene {
+  const scene = createScene({ name: "Terrain walls", width: 16, depth: 12 })
+  const put = <T extends SceneObject>(o: T): T => {
+    scene.objects[o.id] = o
+    return o
+  }
+  const slope = Object.values(scene.levels)[0]
+  scene.levels[slope.id] = { ...slope, name: "Slope", heightmap: latticeOf(scene, 2, bumpySlope) }
+  const w1 = put(createWall(slope.id, { x: 5, z: 20 }, { x: 70, z: 20 }, { name: "W1" }))
+  put(createDoor(w1, 12, { state: "closed", height: 7 }))
+  put(createWindow(w1, 30, { sillHeight: 3, height: 4 }))
+  put(createWindow(w1, 45, { sillHeight: 2, height: 7.5, width: 3 }))
+  put(createDoor(w1, 58, { state: "open", height: 8 }))
+  const w2 = put(createWall(slope.id, { x: 5, z: 26 }, { x: 45, z: 56 }, { name: "W2 diagonal", height: 8 }))
+  put(createWindow(w2, 20, { sillHeight: 2.5, height: 3 }))
+  put(createWall(slope.id, { x: 50, z: 30 }, { x: 75, z: 32 }, { name: "W3 chain" }))
+  put(createWall(slope.id, { x: 75, z: 32 }, { x: 72, z: 57 }, { name: "W4 chain", thickness: 1 }))
+  put(createWall(slope.id, { x: -10, z: 45 }, { x: 30, z: 40 }, { name: "low edge" }))
+  put(createWall(slope.id, { x: 62, z: 58 }, { x: 95, z: 59 }, { name: "high edge", height: 6 }))
+  const off = put(createWall(slope.id, { x: 0, z: 8 }, { x: 78, z: 8 }, { name: "OFF", height: 3, followTerrain: false }))
+  put(createDoor(off, 40, { height: 2.5, width: 3 }))
+
+  const shaped = createLevel({ name: "Shaped", elevation: 30 })
+  put(createFloor(shaped.id, { x: 0, z: 0, w: 80, d: 60 }))
+  // The painted base (what the brush edits) tilts gently; the shapes are baked over it.
+  const level = { ...shaped, heightmap: latticeOf(scene, 4, (x, z) => 0.04 * x - 0.02 * z) }
+  const baked = writeTerrain(level, scene.grid, {
+    upsert: [
+      blockShape("block", { x: 10, z: 10, w: 15, d: 10 }, 0, 4, 0),
+      rampShape("ramp", { x: 30, z: 5, w: 10, d: 20 }, 1, 0, 6, 1),
+      cylinderShape("pit", { x: 55, z: 35 }, 9, 16, 0.5, -3, 2),
+      blockShape("plinth", { x: 52, z: 32, w: 4, d: 4 }, -2.5, 3.5, 3),
+    ],
+  })
+  if (!baked) throw new Error("terrain shapes refused")
+  scene.levels[shaped.id] = level
+  const s1 = put(createWall(shaped.id, { x: 5, z: 15 }, { x: 75, z: 15 }, { name: "S1" }))
+  put(createWindow(s1, 12, { sillHeight: 2, height: 3 }))
+  put(createDoor(s1, 30, { height: 7 }))
+  const s2 = put(createWall(shaped.id, { x: 40, z: 35 }, { x: 75, z: 35 }, { name: "S2 over the pit", height: 6 }))
+  put(createWindow(s2, 15, { sillHeight: 1, height: 3 }))
+  const s3 = put(createWall(shaped.id, { x: 5, z: 22 }, { x: 70, z: 22 }, { name: "S3 off", height: 5, followTerrain: false }))
+  put(createDoor(s3, 30, { height: 4 }))
+
+  for (const [levelId, x, z] of [
+    [slope.id, 12.5, 12.5],
+    [shaped.id, 67.5, 52.5],
+  ] as const) {
+    const t = createToken(levelId, { x, z })
+    scene.tokens[t.id] = t
+  }
+  return scene
+}
+
+const SCENES = [
+  ...SAMPLE_SCENES.map((s) => [s.id, s.build()] as const),
+  ["mask-floors", maskFloorFixture()] as const,
+  ["terrain-walls", terrainWallsFixture()] as const,
+]
 
 const baseId = (id: Id): Id => id.split("@")[0]
 
+/** Volume of an occluder primitive of a wall (boxes; strips: Σ trapezoids along the knots × thickness). */
+function wallPrimitiveVolume(p: OccluderPrimitive): number {
+  if (p.shape === "box") return 8 * p.halfExtents.x * p.halfExtents.y * p.halfExtents.z
+  if (p.shape !== "strip") throw new Error(`wall primitive ${p.key} is a ${p.shape}`)
+  let area = 0
+  for (let i = 0; i + 1 < p.knots.length; i++) area += ((p.knots[i + 1] - p.knots[i]) * (p.top[i] - p.bottom + p.top[i + 1] - p.bottom)) / 2
+  return area * 2 * p.halfExtents.z
+}
+
+/**
+ * Signed volume enclosed by triangles [first, first + count) of a soup (divergence theorem, about `o` to
+ * keep float32 world positions accurate): positive when the surface is closed and wound outward.
+ */
+function meshVolume(pos: ArrayLike<number>, first: number, count: number, o: { x: number; y: number; z: number }): number {
+  let v = 0
+  for (let k = first * 9; k < (first + count) * 9; k += 9) {
+    const ax = pos[k] - o.x
+    const ay = pos[k + 1] - o.y
+    const az = pos[k + 2] - o.z
+    const bx = pos[k + 3] - o.x
+    const by = pos[k + 4] - o.y
+    const bz = pos[k + 5] - o.z
+    const cx = pos[k + 6] - o.x
+    const cy = pos[k + 7] - o.y
+    const cz = pos[k + 8] - o.z
+    v += ax * (by * cz - bz * cy) - ay * (bx * cz - bz * cx) + az * (bx * cy - by * cx)
+  }
+  return v / 6
+}
+
 describe("render builders agree with core/occlusion", () => {
   for (const [name, scene] of SCENES) {
-    it(`${name}: walls have the same frame, joints and solid volume`, () => {
+    it(`${name}: walls have the same profile, joints and solid volume`, () => {
       const octx = new OcclusionContext(scene)
       const rctx = new RenderContext(scene)
       const world = buildOcclusionWorld(scene)
       const occVolume = new Map<Id, number>()
       for (const p of world.primitives) {
-        if (p.sourceType !== "wall" || p.shape !== "box") continue
-        occVolume.set(p.sourceId, (occVolume.get(p.sourceId) ?? 0) + 8 * p.halfExtents.x * p.halfExtents.y * p.halfExtents.z)
+        if (p.sourceType !== "wall") continue
+        occVolume.set(p.sourceId, (occVolume.get(p.sourceId) ?? 0) + wallPrimitiveVolume(p))
       }
       for (const wall of Object.values(scene.objects)) {
         if (wall.type !== "wall") continue
@@ -124,12 +262,14 @@ describe("render builders agree with core/occlusion", () => {
         const r = renderWallFrame(rctx, wall)
         expect(r === null, wall.id).toBe(o === null)
         if (!o || !r) continue
-        expect(r.baseY).toBeCloseTo(o.baseY, 9)
-        expect(r.topY).toBeCloseTo(o.topY, 9)
-        expect(r.bottomY).toBeCloseTo(o.bottomY, 9)
+        expect(r.profile.follow, wall.id).toBe(o.profile.follow)
+        expect(r.profile.bottomY, wall.id).toBeCloseTo(o.profile.bottomY, 9)
+        expect(r.profile.knots, wall.id).toEqual(o.profile.knots.map((u) => expect.closeTo(u, 9)))
+        for (const u of o.profile.knots) expect(r.profile.topAt(u), wall.id).toBeCloseTo(o.profile.topAt(u), 9)
         expect(r.extA > 0).toBe(octx.wallsWithEndpointAt(wall.levelId, wall.a, wall.id).length > 0)
         expect(r.extB > 0).toBe(octx.wallsWithEndpointAt(wall.levelId, wall.b, wall.id).length > 0)
-        const renderVolume = wallPieces(rctx, r).reduce((v, p) => v + (p.u1 - p.u0) * (p.y1 - p.y0) * wall.thickness, 0)
+        // Solid volume: render pieces (boxes and strip prisms, wallPieceArea × thickness) vs occlusion boxes and strips.
+        const renderVolume = wallPieces(rctx, r).reduce((v, p) => v + wallPieceArea(p) * wall.thickness, 0)
         expect(renderVolume, wall.id).toBeCloseTo(occVolume.get(wall.id) ?? 0, 6)
       }
     })
@@ -158,10 +298,284 @@ describe("render builders agree with core/occlusion", () => {
           expect(d, p.key).toBeLessThan(1e-6)
         }
       }
+      // Strips are merged meshes with per-vertex keys: each strip's triangles enclose its volume and lie
+      // inside its bounds.
+      const strips = blocking.filter((p): p is WallStrip => p.shape === "strip")
+      const byKey = new Map<number, { pos: ArrayLike<number>; first: number; count: number }[]>()
+      proxies.scene.traverse((o) => {
+        const mesh = o as THREE.Mesh
+        if (!mesh.isMesh || !mesh.name.includes("|strip|")) return
+        const pos = mesh.geometry.getAttribute("position").array
+        const keys = mesh.geometry.getAttribute("aKey")
+        for (let t = 0; t < keys.count / 3; t++) {
+          const key = keys.getX(t * 3)
+          expect(keys.getX(t * 3 + 1)).toBe(key)
+          expect(keys.getX(t * 3 + 2)).toBe(key)
+          const list = byKey.get(key) ?? []
+          const last = list[list.length - 1]
+          if (last && last.pos === pos && last.first + last.count === t) last.count++
+          else list.push({ pos, first: t, count: 1 })
+          byKey.set(key, list)
+        }
+      })
+      expect(byKey.size).toBe(strips.length)
+      for (const p of strips) {
+        const parts = byKey.get(proxies.keyId(p.key))
+        expect(parts, p.key).toBeDefined()
+        const origin = { x: p.center.x, y: p.bottom, z: p.center.z }
+        const volume = parts!.reduce((a, q) => a + meshVolume(q.pos, q.first, q.count, origin), 0)
+        expect(Math.abs(volume - wallPrimitiveVolume(p)), p.key).toBeLessThan(1e-5 * wallPrimitiveVolume(p) + 1e-4)
+        const b = primitiveBounds(p)
+        for (const q of parts!) {
+          for (let k = q.first * 9; k < (q.first + q.count) * 9; k += 3) {
+            expect(q.pos[k], p.key).toBeGreaterThanOrEqual(b.minX - 1e-4)
+            expect(q.pos[k], p.key).toBeLessThanOrEqual(b.maxX + 1e-4)
+            expect(q.pos[k + 1], p.key).toBeGreaterThanOrEqual(b.minY - 1e-4)
+            expect(q.pos[k + 1], p.key).toBeLessThanOrEqual(b.maxY + 1e-4)
+            expect(q.pos[k + 2], p.key).toBeGreaterThanOrEqual(b.minZ - 1e-4)
+            expect(q.pos[k + 2], p.key).toBeLessThanOrEqual(b.maxZ + 1e-4)
+          }
+        }
+      }
       proxies.dispose()
+    })
+
+    it(`${name}: render and occlusion sample the same (baked) terrain as levelGround`, () => {
+      const octx = new OcclusionContext(scene)
+      const rctx = new RenderContext(scene)
+      const r = prng(7)
+      const W = scene.grid.width * scene.grid.cellSize
+      const D = scene.grid.depth * scene.grid.cellSize
+      for (const level of sortedLevels(scene)) {
+        const render = rctx.sampler(level.id)
+        const occ = octx.terrain(level.id)
+        expect(render.flat, level.id).toBe(level.heightmap === null)
+        expect(occ.flat, level.id).toBe(level.heightmap === null)
+        for (let k = 0; k < 400; k++) {
+          const x = r() * W
+          const z = r() * D
+          const g = levelGround(scene, level.id, x, z)
+          expect(render.heightAt(x, z), `${level.name} (${x}, ${z})`).toBeCloseTo(g, 6)
+          expect(occ.heightAt(x, z), `${level.name} (${x}, ${z})`).toBeCloseTo(g, 6)
+        }
+      }
     })
   }
 })
+
+const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v))
+
+/**
+ * Independent oracle of ARCHITECTURE §2 "Walls on terrain", built on levelGround (core/scene/heightmap
+ * sampleHeight, not the samplers the shared wall profile uses): the base at u (feet from a along a→b) is
+ * the ground on the centreline at u clamped to [0, len] for follow-terrain walls on heightmap levels,
+ * the level elevation otherwise; the top is base + height.
+ */
+function wallOracle(scene: SceneLike, wall: WallObject) {
+  const level = scene.levels[wall.levelId]
+  const follow = wall.followTerrain && level.heightmap !== null
+  const len = Math.hypot(wall.b.x - wall.a.x, wall.b.z - wall.a.z)
+  const dir = { x: (wall.b.x - wall.a.x) / len, z: (wall.b.z - wall.a.z) / len }
+  const point = (u: number) => ({ x: wall.a.x + dir.x * u, z: wall.a.z + dir.z * u })
+  const base = (u: number) => {
+    if (!follow) return level.elevation
+    const p = point(clamp(u, 0, len))
+    return levelGround(scene, wall.levelId, p.x, p.z)
+  }
+  const top = (u: number) => base(u) + wall.height
+  /**
+   * u in (u0, u1) where the centreline crosses a lattice line x = i·s, z = j·s or a triangle diagonal
+   * x − z = k·s: the ground along the wall is linear between them (brute force over the lines).
+   */
+  const breaks = (u0: number, u1: number): number[] => {
+    if (!follow) return []
+    const sp = scene.grid.cellSize / level.heightmap!.resolution
+    const out: number[] = []
+    const family = (f0: number, df: number) => {
+      if (Math.abs(df) < 1e-12) return
+      const fa = (f0 + df * u0) / sp
+      const fb = (f0 + df * u1) / sp
+      for (let k = Math.floor(Math.min(fa, fb)); k <= Math.ceil(Math.max(fa, fb)); k++) {
+        const u = (k * sp - f0) / df
+        if (u > u0 && u < u1) out.push(u)
+      }
+    }
+    family(wall.a.x, dir.x)
+    family(wall.a.z, dir.z)
+    family(wall.a.x - wall.a.z, dir.x - dir.z)
+    return out
+  }
+  const extreme = (u0: number, u1: number, pick: (a: number, b: number) => number) => [u0, u1, ...breaks(u0, u1)].map(top).reduce(pick)
+  return {
+    follow,
+    len,
+    point,
+    base,
+    top,
+    minTop: (u0: number, u1: number) => extreme(u0, u1, (a, b) => Math.min(a, b)),
+    maxTop: (u0: number, u1: number) => extreme(u0, u1, (a, b) => Math.max(a, b)),
+    /** Known limit: ground is the elevation below x = 0 / z = 0 (a step the profile ramps over one knot): exact elsewhere. */
+    exact: (u: number) => {
+      if (!follow) return true
+      const p = point(clamp(u, 0, len))
+      return p.x >= 0 && p.z >= 0
+    },
+    /** An opening's span along the wall (openingSegment's clamp). */
+    span: (o: Pick<Opening, "offset" | "width">): [number, number] => [clamp(o.offset - o.width / 2, 0, len), clamp(o.offset + o.width / 2, 0, len)],
+  }
+}
+
+/** Full-height piece of a wall (not a lintel or a sill): keys `${wallId}` and `${wallId}#after:…`. */
+const fullHeightPiece = (p: OccluderPrimitive, wallId: Id) => p.key === wallId || p.key.startsWith(`${wallId}#after:`)
+
+describe("walls on terrain: tops, door heads and sill tops match the levelGround oracle", () => {
+  for (const [name, scene] of SCENES) {
+    it(`${name}: render pieces and occluders stand on the oracle's base line`, () => {
+      const rctx = new RenderContext(scene)
+      const world = buildOcclusionWorld(scene)
+      const bySource = new Map<Id, OccluderPrimitive[]>()
+      for (const p of world.primitives) bySource.set(p.sourceId, [...(bySource.get(p.sourceId) ?? []), p])
+      const r = prng(11)
+      let tops = 0
+      let followTops = 0
+      let openings = 0
+      let clamped = 0
+      const highest = (values: number[]) => values.reduce((a, b) => Math.max(a, b), -Infinity)
+      for (const wall of Object.values(scene.objects)) {
+        if (wall.type !== "wall") continue
+        const f = renderWallFrame(rctx, wall)
+        if (!f) continue
+        const oracle = wallOracle(scene, wall)
+        expect(f.profile.follow, wall.id).toBe(oracle.follow)
+        const pieces = wallPieces(rctx, f)
+        const own = bySource.get(wall.id) ?? []
+        const hosted = rctx.openingsOf(wall.id).filter((o) => o.levelId === wall.levelId)
+        const spans = hosted.map((o) => oracle.span(o))
+        const bottom = f.profile.bottomY
+
+        // Full-height pieces: the top line at the ends, the knots and random u outside the openings.
+        const us = [-f.extA, 0, f.len, f.len + f.extB, ...f.profile.knots, ...Array.from({ length: 40 }, () => -f.extA + r() * (f.len + f.extA + f.extB))]
+        for (const u of us) {
+          if (!oracle.exact(u) || spans.some(([t0, t1]) => u > t0 - 1e-3 && u < t1 + 1e-3)) continue
+          const expected = oracle.top(u)
+          const drawn = highest(pieces.filter((p) => p.u0 - 1e-9 <= u && u <= p.u1 + 1e-9).map((p) => wallPieceTopAt(p, u)))
+          expect(drawn, `${wall.id} render top at u = ${u}`).toBeCloseTo(expected, 6)
+          const at = oracle.point(u)
+          const blocking = highest(own.filter((p) => fullHeightPiece(p, wall.id)).map((p) => primitiveTopAt(p, at.x, at.z) ?? -Infinity))
+          expect(blocking, `${wall.id} occluder top at u = ${u}`).toBeCloseTo(expected, 6)
+          // The flat bottom lies below the base line.
+          expect(bottom).toBeLessThanOrEqual(oracle.base(u) - WALL_BOTTOM_MARGIN + 1e-9)
+          tops++
+          if (oracle.follow && scene.levels[wall.levelId].heightmap) followTops++
+        }
+
+        // The bottom lies below every ground under the footprint (no light leaks under the wall), and no
+        // lower than the lowest lattice sample around it extended by thickness / 2 past both ends (the
+        // joint-extended footprint the profile's bottom is taken over, whether or not there is a joint).
+        const half = wall.thickness / 2
+        const n = { x: -(wall.b.z - wall.a.z) / oracle.len, z: (wall.b.x - wall.a.x) / oracle.len }
+        let groundMin = Infinity
+        for (let i = 0; i <= 40; i++) {
+          const c = oracle.point(-f.extA + ((f.len + f.extA + f.extB) * i) / 40)
+          for (const side of [-1, -0.5, 0, 0.5, 1]) {
+            const x = c.x + n.x * half * side
+            const z = c.z + n.z * half * side
+            if (x >= 0 && z >= 0) groundMin = Math.min(groundMin, levelGround(scene, wall.levelId, x, z))
+          }
+        }
+        expect(bottom, `${wall.id} bottom`).toBeLessThanOrEqual(groundMin - WALL_BOTTOM_MARGIN + 1e-9)
+        const level = scene.levels[wall.levelId]
+        if (level.heightmap) {
+          const sp = scene.grid.cellSize / level.heightmap.resolution
+          const corners = footprintOf(wall, half, half)
+          let lowest = level.elevation
+          const [x0, x1] = [Math.min(...corners.map((c) => c.x)), Math.max(...corners.map((c) => c.x))]
+          const [z0, z1] = [Math.min(...corners.map((c) => c.z)), Math.max(...corners.map((c) => c.z))]
+          for (let j = Math.floor(z0 / sp); j <= Math.ceil(z1 / sp); j++) {
+            for (let i = Math.floor(x0 / sp); i <= Math.ceil(x1 / sp); i++) lowest = Math.min(lowest, levelGround(scene, wall.levelId, i * sp, j * sp))
+          }
+          expect(bottom, `${wall.id} bottom`).toBeGreaterThanOrEqual(Math.min(lowest, oracle.base(0), oracle.base(oracle.len)) - WALL_BOTTOM_MARGIN - 1e-6)
+        } else expect(bottom).toBeCloseTo(level.elevation - WALL_BOTTOM_MARGIN, 9)
+
+        // Openings: the raw formula (§2) with the oracle's base at the span's centre and lowest top over it.
+        for (const o of hosted) {
+          const [t0, t1] = oracle.span(o)
+          if (t1 - t0 < 1e-6 || !oracle.exact(t0) || !oracle.exact(t1)) continue
+          const H = wall.height
+          const b = oracle.base((t0 + t1) / 2)
+          const minTop = oracle.minTop(t0, t1)
+          const maxTop = oracle.maxTop(t0, t1)
+          const hole = openingHole(f, o)!
+          const prims = bySource.get(o.id) ?? []
+          const lintel = own.find((p) => p.key === `${wall.id}#lintel:${o.id}`)
+          const sill = own.find((p) => p.key === `${wall.id}#sill:${o.id}`)
+          let head: number
+          if (o.type === "door") {
+            head = Math.max(bottom, Math.min(b + clamp(o.height, 0, H), minTop))
+            if (b + clamp(o.height, 0, H) > minTop) clamped++
+            // Closed doors block from the bottom to the head; open ones not at all.
+            if (o.state === "open") expect(prims).toEqual([])
+            else {
+              expect(prims, o.id).toHaveLength(1)
+              expect(primitiveBounds(prims[0]).maxY, `${o.id} closed door top`).toBeCloseTo(head, 6)
+              expect(primitiveBounds(prims[0]).minY, `${o.id} closed door bottom`).toBeCloseTo(bottom, 6)
+            }
+            expect(hole.y0).toBe(-Infinity)
+            expect(sill).toBeUndefined()
+          } else {
+            const sillTop = Math.min(b + clamp(o.sillHeight, 0, H), minTop)
+            head = Math.max(sillTop, Math.min(b + clamp(o.sillHeight + o.height, 0, H), minTop))
+            if (b + clamp(o.sillHeight + o.height, 0, H) > minTop) clamped++
+            const hasSill = o.sillHeight > 0 && sillTop - bottom >= 1e-6
+            expect(sill !== undefined, `${o.id} sill`).toBe(hasSill)
+            if (sill) expect(primitiveBounds(sill).maxY, `${o.id} sill top`).toBeCloseTo(sillTop, 6)
+            if (hasSill) expect(hole.y0, `${o.id} render sill top`).toBeCloseTo(sillTop, 6)
+            else expect(hole.y0).toBe(-Infinity)
+            // Windows block movement through the whole opening, up to its highest top.
+            expect(prims, o.id).toHaveLength(1)
+            expect(primitiveBounds(prims[0]).maxY, `${o.id} movement box`).toBeCloseTo(maxTop, 6)
+          }
+          expect(hole.y1, `${o.id} render head`).toBeCloseTo(head, 6)
+          // The lintel spans [head, top line] (dropped only when the head reaches the highest top).
+          if (maxTop - head < 1e-6) expect(lintel).toBeUndefined()
+          else {
+            expect(lintel, `${o.id} lintel`).toBeDefined()
+            expect(primitiveBounds(lintel!).minY, `${o.id} lintel bottom`).toBeCloseTo(head, 6)
+            for (const u of [t0 + 1e-3, (t0 + t1) / 2, t1 - 1e-3]) {
+              const at = oracle.point(u)
+              expect(primitiveTopAt(lintel!, at.x, at.z), `${o.id} lintel top at ${u}`).toBeCloseTo(oracle.top(u), 6)
+              const over = pieces.filter((p) => p.u0 <= u && u <= p.u1 && p.y0 >= head - 1e-6)
+              expect(highest(over.map((p) => wallPieceTopAt(p, u))), `${o.id} render lintel top at ${u}`).toBeCloseTo(oracle.top(u), 6)
+            }
+          }
+          openings++
+        }
+      }
+      if (Object.values(scene.objects).some((o) => o.type === "wall")) expect(tops).toBeGreaterThan(0)
+      if (name === "terrain-walls") {
+        expect(followTops).toBeGreaterThan(100)
+        expect(openings).toBeGreaterThanOrEqual(9)
+        // The raw formula's clamp to the lowest top over the span is exercised.
+        expect(clamped).toBeGreaterThan(0)
+      }
+    })
+  }
+})
+
+/** Corners of a wall's joint-extended footprint. */
+function footprintOf(wall: WallObject, extA: number, extB: number): { x: number; z: number }[] {
+  const len = Math.hypot(wall.b.x - wall.a.x, wall.b.z - wall.a.z)
+  const d = { x: (wall.b.x - wall.a.x) / len, z: (wall.b.z - wall.a.z) / len }
+  const n = { x: -d.z * (wall.thickness / 2), z: d.x * (wall.thickness / 2) }
+  const a = { x: wall.a.x - d.x * extA, z: wall.a.z - d.z * extA }
+  const b = { x: wall.b.x + d.x * extB, z: wall.b.z + d.z * extB }
+  return [
+    { x: a.x + n.x, z: a.z + n.z },
+    { x: b.x + n.x, z: b.z + n.z },
+    { x: b.x - n.x, z: b.z - n.z },
+    { x: a.x - n.x, z: a.z - n.z },
+  ]
+}
 
 interface Extent {
   minX: number
@@ -290,6 +704,53 @@ describe("render builders agree with core/occlusion: floors, connectors, pillars
     expect(world.primitives.some((p) => p.shape === "heightfield")).toBe(true)
     expect(world.primitives.filter((p) => p.sourceType === "prop").length).toBeGreaterThan(2 * Object.keys(PROP_LIBRARY).length - 4)
   })
+
+  it("the terrain-walls fixture exercises what it claims", () => {
+    const scene = SCENES.find(([n]) => n === "terrain-walls")![1]
+    const parsed = parseScene(JSON.parse(JSON.stringify(scene)))
+    expect(parsed.ok, parsed.ok ? "" : parsed.issues.join("\n")).toBe(true)
+    expect(validateReferences(scene)).toEqual([])
+    const world = buildOcclusionWorld(scene)
+    const octx = new OcclusionContext(scene)
+    const W = scene.grid.width * scene.grid.cellSize
+    const [slope, shaped] = sortedLevels(scene)
+    for (const level of [slope, shaped]) {
+      expect(level.heightmap, level.name).not.toBeNull()
+      // Sloped tops: strips on both levels, among the walls and the lintels.
+      const lintels = world.primitives.filter((p) => p.shape === "strip" && p.levelId === level.id && p.key.includes("#lintel:"))
+      expect(lintels.length, level.name).toBeGreaterThan(0)
+      const walls = Object.values(scene.objects).filter((o): o is WallObject => o.type === "wall" && o.levelId === level.id)
+      expect(walls.filter((w) => !w.followTerrain).length, level.name).toBeGreaterThan(0)
+      const hosts = new Set(walls.filter((w) => w.followTerrain).map((w) => w.id))
+      for (const type of ["door", "window"] as const) {
+        const hosted = Object.values(scene.objects).filter((o) => o.type === type && hosts.has(o.wallId))
+        expect(hosted.length, `${level.name} ${type} on a follow wall`).toBeGreaterThan(0)
+      }
+    }
+    const slopeWalls = Object.values(scene.objects).filter((o): o is WallObject => o.type === "wall" && o.levelId === slope.id)
+    // A joint chain, and walls crossing the lattice's low and high edges.
+    expect(slopeWalls.some((w) => (occlusionWallFrame(octx, w)?.extA ?? 0) > 0)).toBe(true)
+    expect(slopeWalls.some((w) => Math.min(w.a.x, w.b.x) < 0 && w.followTerrain)).toBe(true)
+    expect(slopeWalls.some((w) => Math.max(w.a.x, w.b.x) > W && w.followTerrain)).toBe(true)
+    // The buried follow-off wall: the slope rises above its top somewhere along it.
+    const off = slopeWalls.find((w) => !w.followTerrain)!
+    expect(levelGround(scene, slope.id, off.b.x - 1, off.b.z)).toBeGreaterThan(slope.elevation + off.height)
+
+    // "Shaped": the heightmap is exactly its painted base with the shapes baked in (what every consumer
+    // reads), and the shapes show in it.
+    expect(Object.keys(shaped.terrainEdits!.shapes).sort()).toEqual(["block", "pit", "plinth", "ramp"])
+    const lattice = baseLattice(shaped, scene.grid)
+    const painted = Array.from(lattice.heights)
+    bakeRegion(lattice, Object.values(shaped.terrainEdits!.shapes), null)
+    expect(Array.from(denseHeights(shaped.heightmap!, scene.grid).heights)).toEqual(Array.from(lattice.heights))
+    expect(Array.from(lattice.heights)).not.toEqual(painted)
+    const E = shaped.elevation
+    expect(levelGround(scene, shaped.id, 17.5, 15)).toBeCloseTo(E + 4, 5)
+    expect(levelGround(scene, shaped.id, 35, 20)).toBeCloseTo(E + 3, 5)
+    expect(levelGround(scene, shaped.id, 60, 35)).toBeCloseTo(E - 2.5, 5)
+    expect(levelGround(scene, shaped.id, 54, 34)).toBeCloseTo(E + 1, 5)
+    expect(levelGround(scene, shaped.id, 70, 55)).toBeCloseTo(E + 0.04 * 70 - 0.02 * 55, 5)
+  })
 })
 
 describe("vision and movement share the ground and connector rules", () => {
@@ -381,19 +842,15 @@ describe("host → player pipeline", () => {
   })
 
   it("on terrain, the renderer draws the player's clipped wall pieces at the host's heights", () => {
-    // A slope h = 0.3·x; wall W runs past both grid edges with a closed door and a window. The PC sees
-    // by darkvision only, so W is explored in part and sent as pieces whose midpoints (where the
-    // client puts their base, Terrain rule) differ from W's.
+    // A bumpy slope; wall W (2 ft thick, follow-terrain) runs past both grid edges along z = 20.5 with a
+    // closed door and a window. The PC south of it sees by darkvision only, so W is explored in part and
+    // sent as pieces; the lattice row z = 22.5 behind W is never sent, so the client's own clipped ground
+    // under W's centreline is wrong: the pieces carry the host's base line (terrainProfile) instead.
     const scene = createScene({ width: 16, depth: 8 })
     const ground = Object.keys(scene.levels)[0]
     scene.environment = { ...scene.environment, skyLevel: "dark", ambientLevel: "dark", directional: { ...scene.environment.directional, enabled: false } }
-    const res = 2
-    const samplesX = scene.grid.width * res + 1
-    const samplesZ = scene.grid.depth * res + 1
-    const dense = new Float32Array(samplesX * samplesZ)
-    for (let j = 0; j < samplesZ; j++) for (let i = 0; i < samplesX; i++) dense[j * samplesX + i] = 0.3 * i * (scene.grid.cellSize / res)
-    scene.levels[ground] = { ...scene.levels[ground], heightmap: writeHeights({ resolution: res, chunks: {} }, scene.grid, dense) }
-    const wall = createWall(ground, { x: -20, z: 20 }, { x: 100, z: 20 }, { height: 12, thickness: 0.5 })
+    scene.levels[ground] = { ...scene.levels[ground], heightmap: latticeOf(scene, 2, (x, z) => 0.3 * x + 0.2 * z + Math.sin(x / 4)) }
+    const wall = createWall(ground, { x: -20, z: 20.5 }, { x: 100, z: 20.5 }, { height: 12, thickness: 2 })
     scene.objects[wall.id] = wall
     const door = createDoor(wall, 40, { state: "closed", height: 7 })
     scene.objects[door.id] = door
@@ -407,43 +864,82 @@ describe("host → player pipeline", () => {
     const { view } = host.refresh("p1")
     const playerScene = viewToScene(view)
 
+    /** A wall's base line computed on a scene's own terrain (the client's clipped one, or the host's). */
+    const profileIn = (sc: SceneLike, w: WallObject): WallProfile => {
+      const level = sc.levels[w.levelId]
+      const t = new TerrainSampler(level, sc.grid)
+      return wallProfile(w, t.flat ? null : t, level.elevation, { a: 0, b: 0 })
+    }
     /** Solid Y spans of a wall's render pieces at wall-frame position u, clipped to y ≥ from. */
-    const spansAt = (pieces: ReturnType<typeof wallPieces>, u: number, from: number) =>
+    const spansAt = (pieces: WallPiece[], u: number, from: number) =>
       pieces
-        .filter((p) => p.u0 < u && u < p.u1 && p.y1 > from)
-        .map((p) => [Math.max(p.y0, from), p.y1])
+        .filter((p) => p.u0 < u && u < p.u1 && wallPieceTopAt(p, u) > from)
+        .map((p) => [Math.max(p.y0, from), wallPieceTopAt(p, u)])
         .sort((a, b) => a[0] - b[0])
     const hostCtx = new RenderContext(host.scene)
     const hostFrame = renderWallFrame(hostCtx, wall)!
     const hostPieces = wallPieces(hostCtx, hostFrame)
+    const hostProfile = profileIn(host.scene, wall)
     const playerCtx = new RenderContext(playerScene)
-    const pieces = Object.values(playerScene.objects).filter((o) => o.type === "wall" && baseId(o.id) === wall.id)
-    expect(pieces.length).toBeGreaterThan(0)
+    const sent = Object.values(view.objects).filter((o): o is PlayerWall => o.type === "wall" && baseId(o.id) === wall.id)
+    expect(sent.length).toBeGreaterThan(0)
+    const r = prng(5)
     let compared = 0
-    let rebased = 0
-    for (const piece of pieces) {
-      if (piece.type !== "wall") continue
+    let ownGroundWrong = 0
+    for (const wire of sent) {
+      const piece = playerScene.objects[wire.id] as WallObject
+      expect(piece.followTerrain).toBe(true)
+      // The host's base line at the piece's own base knots (its centreline), nothing else.
+      expect(wire.terrainProfile).toHaveLength(wallBaseKnots(wire, 2.5).length)
+      // The piece lies on W's line: its frame's u = 0 is W's u = t0.
+      const t0 = Math.hypot(piece.a.x - wall.a.x, piece.a.z - wall.a.z)
       const frame = renderWallFrame(playerCtx, piece)!
-      const own = wallPieces(playerCtx, frame)
-      // The piece lies on W's line: its frame's u = 0 is W's u = offset.
-      const offset = Math.hypot(piece.a.x - wall.a.x, piece.a.z - wall.a.z)
-      if (Math.abs(frame.baseY - hostFrame.baseY) > 0.5) rebased++
-      expect(frame.topY, piece.id).toBeCloseTo(hostFrame.topY, 6)
+      const client = profileIn(playerScene, piece)
+      const bare = profileIn(playerScene, { ...piece, terrainProfile: undefined })
+      let worst = 0
+      for (let k = 0; k <= 30; k++) {
+        const u = k === 0 ? 0 : k === 30 ? frame.len : r() * frame.len
+        // Render and occlusion both stand the piece on the host's tops (world Y).
+        expect(frame.profile.topAt(u), `${piece.id} render top at ${u}`).toBeCloseTo(hostProfile.topAt(t0 + u), 9)
+        expect(client.topAt(u), `${piece.id} occlusion top at ${u}`).toBeCloseTo(hostProfile.topAt(t0 + u), 9)
+        worst = Math.max(worst, Math.abs(bare.topAt(u) - hostProfile.topAt(t0 + u)))
+      }
+      if (worst > 0.1) ownGroundWrong++
       // Above both bottoms (the host's depends on terrain the player is not sent), every solid span
       // matches: the wall top, the door head and the window's sill and lintel keep their world Y.
-      const from = Math.max(frame.bottomY, hostFrame.bottomY)
+      const from = Math.max(frame.profile.bottomY, hostFrame.profile.bottomY)
+      const own = wallPieces(playerCtx, frame)
       for (let u = 0.07; u < frame.len; u += 0.25) {
         expect(spansAt(own, u, from), `${piece.id} at u = ${u}`).toEqual(
-          spansAt(hostPieces, u + offset, from).map(([a, b]) => [expect.closeTo(a, 6), expect.closeTo(b, 6)])
+          spansAt(hostPieces, u + t0, from).map(([lo, hi]) => [expect.closeTo(lo, 6), expect.closeTo(hi, 6)])
         )
         compared++
       }
     }
     expect(compared).toBeGreaterThan(20)
-    // The case this guards: at least one piece stands on ground other than W's base.
-    expect(rebased).toBeGreaterThan(0)
+    // The case this guards: without the host's profile some piece would stand on the client's own
+    // (clipped) ground, at other heights.
+    expect(ownGroundWrong).toBeGreaterThan(0)
+
+    // Openings sent on a piece: base, head and sill top (world Y) and span as on the host.
+    let openings = 0
+    for (const o of [door, win]) {
+      if (!Object.hasOwn(playerScene.objects, o.id)) continue
+      const po = playerScene.objects[o.id] as DoorObject | WindowObject
+      const piece = playerScene.objects[po.wallId] as WallObject
+      const t0 = Math.hypot(piece.a.x - wall.a.x, piece.a.z - wall.a.z)
+      const hf = openingFrame(hostProfile, wall, o)!
+      const cf = openingFrame(profileIn(playerScene, piece), piece, po)!
+      expect(cf.u0 + t0).toBeCloseTo(hf.u0, 9)
+      expect(cf.u1 + t0).toBeCloseTo(hf.u1, 9)
+      expect(cf.base, o.id).toBeCloseTo(hf.base, 9)
+      expect(cf.head, o.id).toBeCloseTo(hf.head, 9)
+      expect(cf.sillTop, o.id).toBeCloseTo(hf.sillTop, 9)
+      expect(cf.hasSill).toBe(hf.hasSill)
+      openings++
+    }
     // The door and the window were sent (on a piece).
-    expect(Object.hasOwn(playerScene.objects, door.id) || Object.hasOwn(playerScene.objects, win.id)).toBe(true)
+    expect(openings).toBeGreaterThan(0)
   })
 
   it("paths the host finds through perceived cells also validate on the player's rebuilt scene", () => {
@@ -524,6 +1020,110 @@ describe("editor ↔ integrity ↔ schema ↔ live session", () => {
     // The patches the host received replay onto the original document to the same result.
     expect(sent.length).toBeGreaterThan(0)
     expect(sent.reduce((doc, p) => applyPatches(doc, p), original)).toEqual(original)
+  })
+})
+
+describe("editor → live session: terrain shapes", () => {
+  it("a shape edit reaches players as heightmap chunk diffs only, never terrainEdits", () => {
+    // A bright, open level with terrain shapes baked in; the PC sees the whole of it.
+    const scene = createScene({ width: 16, depth: 12 })
+    scene.environment = { ...scene.environment, skyLevel: "bright", ambientLevel: "bright" }
+    const levelId = Object.keys(scene.levels)[0]
+    const level = { ...scene.levels[levelId], heightmap: latticeOf(scene, 2, (x, z) => 0.05 * x + 0.02 * z) }
+    const shapes = [blockShape("hill", { x: 20, z: 20, w: 10, d: 10 }, 0, 3, 0), rampShape("ramp", { x: 50, z: 30, w: 10, d: 15 }, 0, 0, 4, 1)]
+    expect(writeTerrain(level, scene.grid, { upsert: shapes })).toBe(true)
+    scene.levels[levelId] = level
+    const pc = createToken(levelId, { x: 42.5, z: 12.5 }, { kind: "pc" })
+    scene.tokens[pc.id] = pc
+    expect(parseScene(JSON.parse(JSON.stringify(scene))).ok).toBe(true)
+    const host = new TestHost(scene, ["p1"])
+    host.assign(pc.id, "p1")
+    // The PC walks the level first, so every cell is explored (and the floor is sent whole): what an
+    // edit changes for the player is then the terrain itself, plus what the PC sees over it now.
+    const wire: unknown[] = []
+    for (const [x, z] of [
+      [7.5, 7.5],
+      [72.5, 7.5],
+      [72.5, 52.5],
+      [7.5, 52.5],
+      [42.5, 12.5],
+    ]) {
+      host.dm({ t: "move-token", tokenId: pc.id, levelId, x, z })
+      wire.push(host.refresh("p1").view)
+    }
+    const floors = Object.values(host.sent.get("p1")!.objects).filter((o) => o.type === "floor")
+    expect(floors.map((f) => f.type === "floor" && f.rect)).toEqual([{ x: 0, z: 0, w: 80, d: 60 }])
+    expect(Object.keys(host.sent.get("p1")!.terrain[levelId] ?? {}).length).toBeGreaterThan(0)
+
+    const store = createEditorStore({ systemClipboard: null, scene: host.scene })
+    const sent: { patches: Patch[]; dirty: string[] | "all" }[] = []
+    store.getState().setPatchSink((patches) => {
+      const before = host.scene
+      const r = host.dm({ t: "apply-scene-patches", patches })
+      expect(r.error).toBeUndefined()
+      sent.push({ patches, dirty: r.dirtyPlayers })
+      // Shapes are not scene objects: the editor's SceneChange and the host's delta see terrain at most.
+      const change = sceneChangeFromPatches(patches)
+      const delta = deltaFromPatches(before, host.scene, patches)
+      expect(change.objects ?? []).toEqual([])
+      expect(delta.objects).toEqual([])
+      expect(delta.structure).toBe(false)
+      expect(delta.terrain).toEqual(patches.some((p) => p.path[2] === "heightmap") ? [levelId] : [])
+    })
+    const refresh = (): PatchOp[] => {
+      const { ops } = host.refresh("p1")
+      wire.push(ops)
+      return ops
+    }
+    const hill = () => store.getState().scene.levels[levelId].terrainEdits!.shapes.hill
+    const groundOf = (sc: SceneLike, x: number, z: number) => levelGround(sc, levelId, x, z)
+
+    // A rename touches DM-only editing data only: no player is dirty and nothing is sent.
+    expect(store.getState().applyTerrainEdit(levelId, { upsert: [{ ...hill(), name: "SECRET_HILL" }] }, "Rename shape")).toBe(true)
+    expect(sent.at(-1)!.patches.every((p) => p.path[0] === "levels" && p.path[2] === "terrainEdits")).toBe(true)
+    expect(sent.at(-1)!.dirty).toEqual([])
+    expect(refresh()).toEqual([])
+
+    // Moving (and raising) the hill changes the baked heightmap: the player gets chunk diffs, nothing else.
+    const moved = translateShape(hill(), { x: 15, y: 1, z: 5 })!
+    expect(store.getState().applyTerrainEdit(levelId, { upsert: [moved] }, "Move shape")).toBe(true)
+    const patches = sent.at(-1)!.patches
+    expect(patches.some((p) => p.path[2] === "heightmap")).toBe(true)
+    expect(patches.some((p) => p.path[2] === "terrainEdits")).toBe(true)
+    const check = (label: string) => {
+      const ops = refresh()
+      // Heightmap chunks (whole chunks, by key), plus what the PC now sees over the new terrain (masks).
+      const terrain = ops.filter((op) => op.path[0] === "terrain")
+      expect(terrain.length, label).toBeGreaterThan(0)
+      for (const op of terrain) {
+        expect(op.path, label).toHaveLength(3)
+        expect(op.path[1], label).toBe(levelId)
+      }
+      const other = ops.filter((op) => op.path[0] !== "terrain" && op.path[0] !== "masks")
+      expect(other, label).toEqual([])
+      // The client's rebuilt terrain is the host's baked one (the PC sees the whole level).
+      const client = viewToScene(host.sent.get("p1")!)
+      for (const [x, z] of [
+        [37.5, 27.5],
+        [25, 25],
+        [55, 37.5],
+        [12.5, 50],
+      ])
+        expect(groundOf(client, x, z), `${label} (${x}, ${z})`).toBeCloseTo(groundOf(host.scene, x, z), 6)
+    }
+    check("moved")
+    // The hill's top is baked where it now stands (1 ft higher), the ground where it stood is back.
+    expect(groundOf(host.scene, 40, 30)).toBeCloseTo(4, 6)
+    expect(groundOf(host.scene, 22.5, 22.5)).toBeCloseTo(0.05 * 22.5 + 0.02 * 22.5, 5)
+
+    // Undo restores the hill where it was, again as chunk diffs only.
+    expect(store.getState().undo()).toBe(true)
+    check("undone")
+    expect(groundOf(host.scene, 25, 25)).toBeCloseTo(3, 6)
+
+    // Nothing DM-only ever reached the player (views and patches).
+    const json = JSON.stringify(wire)
+    for (const secret of ["terrainEdits", "baseChunks", "SECRET_HILL", '"shapes"', '"hill"']) expect(json).not.toContain(secret)
   })
 })
 
@@ -631,6 +1231,18 @@ describe("live editing: editor patches → session delta → incremental occlusi
       lvl.heightmap = writeHeights(lvl.heightmap!, d.grid, dense.heights)
     }, "Raise terrain")
     check("terrain raised")
+
+    // A terrain shape added, then moved, on that level: the heightmap chunks it touches are rebaked, and
+    // the follow-terrain walls there stand on the new ground (strips rebuilt incrementally).
+    {
+      const W = scene().grid.width * scene().grid.cellSize
+      const D = scene().grid.depth * scene().grid.cellSize
+      const mound = blockShape("mound", { x: W / 2 - 10, z: D / 2 - 10, w: 20, d: 15 }, 0, 3, 0)
+      expect(store.getState().applyTerrainEdit(hilly.id, { upsert: [mound] }, "Add shape")).toBe(true)
+      check("terrain shape added")
+      expect(store.getState().applyTerrainEdit(hilly.id, { upsert: [translateShape(mound, { x: 7, y: 1, z: -4 })!] }, "Move shape")).toBe(true)
+      check("terrain shape moved")
+    }
 
     // Objects deleted (a wall takes its openings; a connector re-opens the floors it cut).
     store.getState().deleteIds([wall.id, objectsOf("connector")[0].id])

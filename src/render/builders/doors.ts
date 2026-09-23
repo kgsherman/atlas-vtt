@@ -1,25 +1,30 @@
 /**
  * Door leaves: separate meshes that animate between closed (t = 0) and open (t = 1) per
  * DOOR_STYLES[style].motion. Geometry is built in the leaf's pivot frame: +x runs from the hinge to
- * the free edge, +y up from the wall base, z across the wall. Secret doors use the host wall's
- * material and full thickness so a closed secret door reads as plain wall.
+ * the free edge, +y up from the opening's base (core/scene/wallProfile openingFrame: the host wall's
+ * base line at the middle of the opening), z across the wall. A leaf spans from just below the lowest
+ * ground under the opening up to the door head, so doors on slopes neither float nor bury a huge leaf.
+ * Secret doors use the host wall's material and full thickness so a closed secret door reads as plain
+ * wall.
  *
  * Only the visual leaf animates; occluders follow the authoritative state instantly (§4.2).
  *
- * Top-down views also get a door marker per leaf: a flat bar just above the wall top, wider than the
- * wall, so doors in walls that run up / down the screen (a 2–3 px line from above) are visible and
- * pickable. It lives in the same pivot frame, so it follows the leaf's swing / slide.
+ * Top-down views also get a door marker per leaf: a flat bar just above the highest wall top over the
+ * leaf, wider than the wall, so doors in walls that run up / down the screen (a 2–3 px line from above)
+ * are visible and pickable. It lives in the same pivot frame, so it follows the leaf's swing / slide.
  */
 import type * as THREE from "three"
 
 import { DOOR_STYLES, MATERIAL_COLORS } from "@/core/scene/defaults"
 import type { DoorObject, Id, MaterialId, Vec3 } from "@/core/scene/types"
+import { openingFrame, WALL_BOTTOM_MARGIN } from "@/core/scene/wallProfile"
 
 import type { BuildContext } from "./context"
 import { hexToLinear, materialColor, scaleRgb, tint, type RGB } from "./color"
+import { orientedCorners } from "./ground"
 import { writeBox } from "./shapes"
 import type { BucketBuild, DoorLeafBuild } from "./types"
-import { openingSpan, wallFrame, type WallFrame } from "./walls"
+import { wallFrame, type WallFrame } from "./walls"
 import { MeshWriter } from "./writer"
 import { doorSurface } from "../materials/surface"
 
@@ -28,7 +33,7 @@ export interface DoorLeaf {
   /** 0 for single doors; 0 (hinged at the opening start) and 1 (at its end) for double doors. */
   index: number
   motion: "swing" | "lift" | "slide"
-  /** Hinge point on the wall centreline at the wall base (world). */
+  /** Hinge point on the wall centreline at the opening's base (world). */
   pivot: Vec3
   /** Yaw (rotation about +Y, three.js convention) mapping pivot-local +x onto hinge → free edge. */
   yaw: number
@@ -37,7 +42,15 @@ export interface DoorLeaf {
   width: number
   /** Lift: vertical travel at t = 1. */
   lift: number
+  /** Leaf bottom and top above the pivot (feet): the lowest ground under the opening − margin, the door head. */
+  bottom: number
+  top: number
+  /** Highest wall top over the leaf's span above the pivot (the top-down marker sits on it). */
+  wallTop: number
 }
+
+/** Leaves shorter than this (feet, above the ground under them) are not drawn: the door is buried. */
+const MIN_LEAF_HEIGHT = 0.05
 
 export interface LeafPose {
   x: number
@@ -78,10 +91,18 @@ export const yawFromDir = (dx: number, dz: number): number => Math.atan2(-dz, dx
  * `door.swing` (+1 = the wall's left normal, wallNormal()).
  */
 export function doorLeaves(f: WallFrame, door: DoorObject): DoorLeaf[] {
-  const [u0, u1] = openingSpan(f, door)
+  const fr = openingFrame(f.profile, f.wall, door)
+  if (!fr) return []
+  const { u0, u1, base } = fr
   if (u1 - u0 < 1e-3) return []
   const motion = (DOOR_STYLES[door.style] ?? DOOR_STYLES.wood).motion
-  const height = Math.min(Math.max(door.height, 0), f.wall.height)
+  const top = fr.head - base
+  // The ground under the opening's footprint (the host wall's bottom is lower on slopes).
+  const t = f.wall.thickness / 2
+  const um = (u0 + u1) / 2
+  const centre = { x: f.wall.a.x + f.dir.x * um, z: f.wall.a.z + f.dir.z * um }
+  const bottom = f.ground.rangeOverPolygon(orientedCorners(centre, (u1 - u0) / 2, t, f.dir)).min - WALL_BOTTOM_MARGIN - base
+  if (top - Math.max(bottom, 0) < MIN_LEAF_HEIGHT) return []
   const hinges: { u: number; sign: 1 | -1 }[] =
     door.leaves === "double"
       ? [
@@ -91,6 +112,7 @@ export function doorLeaves(f: WallFrame, door: DoorObject): DoorLeaf[] {
       : [door.hinge === "end" ? { u: u1, sign: -1 } : { u: u0, sign: 1 }]
   const width = (u1 - u0) / hinges.length
   return hinges.map((h, index) => {
+    const reach = h.u + h.sign * width
     // Hinge → free-edge direction along the wall.
     const ux = f.dir.x * h.sign
     const uz = f.dir.z * h.sign
@@ -100,12 +122,15 @@ export function doorLeaves(f: WallFrame, door: DoorObject): DoorLeaf[] {
       doorId: door.id,
       index,
       motion,
-      pivot: { x: f.wall.a.x + f.dir.x * h.u, y: f.baseY, z: f.wall.a.z + f.dir.z * h.u },
+      pivot: { x: f.wall.a.x + f.dir.x * h.u, y: base, z: f.wall.a.z + f.dir.z * h.u },
       yaw: yawFromDir(ux, uz),
       // rotation.y = −π/2 maps local +x onto local +z, so swinging toward +z needs a negative angle.
       openSign: swingLocal > 0 ? -1 : 1,
       width,
-      lift: height * 0.9,
+      lift: top * 0.9,
+      bottom,
+      top,
+      wallTop: f.profile.maxTop(Math.min(h.u, reach), Math.max(h.u, reach)) - base,
     }
   })
 }
@@ -117,8 +142,11 @@ const WOOD: RGB = hexToLinear(MATERIAL_COLORS.wood)
 export function doorLeafGeometry(f: WallFrame, door: DoorObject, leaf: DoorLeaf): MeshWriter {
   const w = new MeshWriter()
   const W = leaf.width
-  const y0 = f.bottomY - f.baseY
-  const y1 = Math.min(Math.max(door.height, 0), f.wall.height)
+  const y0 = leaf.bottom
+  const y1 = leaf.top
+  // Fittings (braces, straps, bars, the handle) are placed from the ground or the pivot, whichever is higher.
+  const g = Math.max(y0, 0)
+  const span = y1 - g
   const wallT = f.wall.thickness
   const key = `${door.id}:${leaf.index}`
   w.begin(door.id)
@@ -136,7 +164,7 @@ export function doorLeafGeometry(f: WallFrame, door: DoorObject, leaf: DoorLeaf)
       writeBox(w, 0.02, y0, -t, W - 0.02, y1 - 0.02, t, (face) => tint(METAL, `${key}:${face}`, 0.03))
       const strap = scaleRgb(METAL, 0.6)
       for (const fy of [0.2, 0.5, 0.8]) {
-        const y = fy * y1
+        const y = g + fy * span
         writeBox(w, 0.05, y - 0.15, -t - 0.03, W - 0.05, y + 0.15, t + 0.03, strap)
       }
       break
@@ -149,7 +177,7 @@ export function doorLeafGeometry(f: WallFrame, door: DoorObject, leaf: DoorLeaf)
         const x = 0.06 + ((W - 0.12) * k) / n
         writeBox(w, x - 0.06, y0, -t, x + 0.06, y1 - 0.02, t, iron)
       }
-      for (let y = 0.8; y < y1 - 0.2; y += 1.1) writeBox(w, 0, y - 0.06, -t * 0.7, W, y + 0.06, t * 0.7, iron)
+      for (let y = g + 0.8; y < y1 - 0.2; y += 1.1) writeBox(w, 0, y - 0.06, -t * 0.7, W, y + 0.06, t * 0.7, iron)
       break
     }
     case "bars": {
@@ -158,9 +186,9 @@ export function doorLeafGeometry(f: WallFrame, door: DoorObject, leaf: DoorLeaf)
       const n = Math.max(2, Math.round(W / 0.4))
       for (let k = 0; k <= n; k++) {
         const x = 0.05 + ((W - 0.1) * k) / n
-        writeBox(w, x - 0.05, Math.max(y0, 0), -t, x + 0.05, y1 - 0.05, t, iron)
+        writeBox(w, x - 0.05, g, -t, x + 0.05, y1 - 0.05, t, iron)
       }
-      for (const y of [0.3, y1 / 2, y1 - 0.3]) writeBox(w, 0, y - 0.07, -t, W, y + 0.07, t, iron)
+      for (const y of [g + 0.3, g + span / 2, y1 - 0.3]) writeBox(w, 0, y - 0.07, -t, W, y + 0.07, t, iron)
       break
     }
     default: {
@@ -174,10 +202,10 @@ export function doorLeafGeometry(f: WallFrame, door: DoorObject, leaf: DoorLeaf)
       }
       const brace = scaleRgb(WOOD, 0.7)
       for (const fy of [0.22, 0.78]) {
-        const y = fy * y1
+        const y = g + fy * span
         writeBox(w, 0.08, y - 0.2, -t - 0.04, W - 0.08, y + 0.2, t + 0.04, brace)
       }
-      writeBox(w, W - 0.45, 3.1, -t - 0.12, W - 0.3, 3.3, t + 0.12, METAL)
+      writeBox(w, W - 0.45, g + 3.1, -t - 0.12, W - 0.3, g + 3.3, t + 0.12, METAL)
     }
   }
   w.end()
@@ -216,7 +244,7 @@ export const DOOR_MARKER_ACCENT = "accentStart"
 export function doorMarkerGeometry(f: WallFrame, door: DoorObject, leaf: DoorLeaf): THREE.BufferGeometry | null {
   const w = new MeshWriter()
   const W = leaf.width
-  const y0 = f.wall.height + DOOR_MARKER_LIFT
+  const y0 = leaf.wallTop + DOOR_MARKER_LIFT
   const y1 = y0 + DOOR_MARKER_THICKNESS
   const t = f.wall.thickness / 2 + DOOR_MARKER_OVERHANG
   const color = doorMarkerColor(door, f.wall.material)

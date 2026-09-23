@@ -14,6 +14,7 @@ import {
   boundsDiagonal,
   damp,
   groundAxes,
+  orthoCameraDistance,
   orthoFitViewHeight,
   playerCameraOffset,
   wheelPixels,
@@ -152,9 +153,8 @@ export class TopDownCameraController implements CameraController {
     cam.right = h * aspect
     cam.top = h
     cam.bottom = -h
-    // Stand well above the highest geometry; depth range covers the whole scene.
-    const above = Math.max(20, this.bounds.max.y - this.target.y + 30)
-    const distance = above / Math.max(0.2, Math.cos(this.tilt))
+    // Stand well above the highest geometry, anywhere on screen (orthoCameraDistance); depth range covers the whole scene.
+    const distance = orthoCameraDistance(this.bounds.max.y - this.target.y, this.viewHeight, this.tilt)
     const off = playerCameraOffset(this.yaw, this.tilt, distance)
     cam.position.set(this.target.x + off.x, this.target.y + off.y, this.target.z + off.z)
     const { up } = groundAxes(this.yaw)

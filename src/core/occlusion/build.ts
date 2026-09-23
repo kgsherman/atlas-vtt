@@ -1,6 +1,7 @@
 /**
  * Scene → occluder primitives, per source object, following the blocking table and the Terrain rule
- * of docs/ARCHITECTURE.md §2 and §5.1.
+ * of docs/ARCHITECTURE.md §2 and §5.1. Walls and openings take their heights from core/scene/wallProfile:
+ * a piece whose top is constant is an OrientedBox, one under a sloping top line a WallStrip.
  *
  * Every primitive's sourceId is the object that owns it:
  *  - wall id: the full-height pieces between openings, plus door lintels and window sills/lintels
@@ -18,7 +19,6 @@ import {
   effectiveFloorRects,
   floorThickness,
   levelCeilingY,
-  openingSegment,
   type EffectiveFloor,
   type Opening,
 } from "../scene/queries"
@@ -37,17 +37,17 @@ import type {
   WallObject,
   WindowObject,
 } from "../scene/types"
+import { MIN_EXTENT, openingFrame, pieceKnots, WALL_BOTTOM_MARGIN, wallProfile, type WallProfile } from "../scene/wallProfile"
 import { TerrainSampler } from "./terrain"
-import type { BlockFlags, Heightfield, OccluderPrimitive, OrientedBox, VerticalCylinder } from "./types"
+import type { BlockFlags, Heightfield, OccluderPrimitive, OrientedBox, VerticalCylinder, WallStrip } from "./types"
 
-/** Wall boxes extend this far below the minimum ground along their footprint (Terrain rule). */
-export const WALL_BOTTOM_MARGIN = 0.05
+/** Wall bottoms extend this far below the minimum ground along their footprint (see core/scene/wallProfile). */
+export { WALL_BOTTOM_MARGIN }
+
 /** Stepped stair/ramp boxes stop this far below the walking surface at each row's low edge. */
 export const STAIR_TOP_GAP = 0.05
 /** Wall endpoints closer than this (feet) form a joint. */
 export const JOINT_TOLERANCE = 1e-3
-/** Pieces thinner than this (feet) are dropped. */
-const MIN_EXTENT = 1e-6
 
 const BLOCK_ALL: BlockFlags = { movement: true, sight: true, light: true }
 const BLOCK_VIEW: BlockFlags = { movement: false, sight: true, light: true }
@@ -69,6 +69,8 @@ export class BuildContext {
   private readonly terrains = new Map<Id, TerrainSampler>()
   private readonly floors = new Map<Id, EffectiveFloor[]>()
   private readonly joints = new Map<Id, Map<string, Endpoint[]>>()
+  private readonly frames = new WeakMap<WallObject, WallFrame | null>()
+  private readonly hostFrames = new WeakMap<WallObject, WallFrame | null>()
   private openings: Map<Id, Opening[]> | null = null
   private byLevel: Map<Id, SceneObject[]> | null = null
   readonly scene: SceneLike
@@ -99,6 +101,21 @@ export class BuildContext {
     if (!f) {
       f = effectiveFloorRects(this.scene, levelId)
       this.floors.set(levelId, f)
+    }
+    return f
+  }
+
+  /**
+   * A wall's frame, computed once per context. `joints` false (openings): any cached frame will do,
+   * since the profile over [0, len] does not depend on the joint extensions; otherwise one without them
+   * (no joint index is built for a door toggle).
+   */
+  frame(wall: WallObject, joints: boolean): WallFrame | null {
+    let f = this.frames.get(wall)
+    if (f === undefined && !joints) f = this.hostFrames.get(wall)
+    if (f === undefined) {
+      f = makeWallFrame(this, wall, joints)
+      ;(joints ? this.frames : this.hostFrames).set(wall, f)
     }
     return f
   }
@@ -224,31 +241,29 @@ export interface WallFrame {
   /** Unit direction a→b. */
   dir: Vec2
   yaw: number
-  /** Base Y: ground at the wall midpoint. Top = base + height. */
-  baseY: number
-  topY: number
-  /** Box bottom: minimum ground along the footprint (extended by thickness/2 at both ends) − margin. */
-  bottomY: number
+  /** Joint extensions past a / b (thickness/2 where another wall of the level ends there, else 0). */
+  extA: number
+  extB: number
+  /** Base line, top and bottom (core/scene/wallProfile). */
+  profile: WallProfile
 }
 
+/** A wall's frame with its joint extensions (null for degenerate walls). */
 export function wallFrame(ctx: BuildContext, wall: WallObject): WallFrame | null {
+  return ctx.frame(wall, true)
+}
+
+function makeWallFrame(ctx: BuildContext, wall: WallObject, joints: boolean): WallFrame | null {
   const len = wallLen(wall)
   if (len < MIN_EXTENT || !(wall.thickness > 0) || !(wall.height > 0)) return null
   const dir = { x: (wall.b.x - wall.a.x) / len, z: (wall.b.z - wall.a.z) / len }
   const yaw = yawFromDirection(dir.x, dir.z)
   const terrain = ctx.terrain(wall.levelId)
-  const baseY = terrain.heightAt((wall.a.x + wall.b.x) / 2, (wall.a.z + wall.b.z) / 2)
-  // The footprint used for the bottom always includes the joint extensions, so the bottom does not
-  // depend on neighbouring walls (an opening's primitives only need its host wall).
   const half = wall.thickness / 2
-  const footprint = orientedRectCorners(
-    { x: (wall.a.x + wall.b.x) / 2, z: (wall.a.z + wall.b.z) / 2 },
-    len / 2 + half,
-    half,
-    yaw
-  )
-  const bottomY = terrain.rangeOverPolygon(footprint).min - WALL_BOTTOM_MARGIN
-  return { wall, len, dir, yaw, baseY, topY: baseY + wall.height, bottomY }
+  const extA = joints && ctx.wallsWithEndpointAt(wall.levelId, wall.a, wall.id).length > 0 ? half : 0
+  const extB = joints && ctx.wallsWithEndpointAt(wall.levelId, wall.b, wall.id).length > 0 ? half : 0
+  const profile = wallProfile(wall, terrain.flat ? null : terrain, terrain.elevation, { a: extA, b: extB })
+  return { wall, len, dir, yaw, extA, extB, profile }
 }
 
 /** Box spanning [u0, u1] along the wall (feet from a) and [y0, y1] vertically, full wall thickness. */
@@ -278,61 +293,83 @@ function wallBox(
   }
 }
 
-/** Opening span along its host wall, clamped to the wall (same as core/scene openingSegment). */
-function openingSpan(f: WallFrame, o: Pick<Opening, "offset" | "width">): [number, number] {
-  const seg = openingSegment(f.wall, o)
-  const u0 = (seg.a.x - f.wall.a.x) * f.dir.x + (seg.a.z - f.wall.a.z) * f.dir.z
-  const u1 = (seg.b.x - f.wall.a.x) * f.dir.x + (seg.b.z - f.wall.a.z) * f.dir.z
-  return [Math.max(0, Math.min(u0, u1)), Math.min(f.len, Math.max(u0, u1))]
+/**
+ * Wall piece spanning [u0, u1] from its flat bottom y0 up to the wall's top line (topAt(u)): a box
+ * where the top is constant over the span, else a WallStrip over the profile knots inside it.
+ */
+function profilePiece(
+  f: WallFrame,
+  key: string,
+  sourceId: Id,
+  sourceType: SceneObjectType,
+  blocks: BlockFlags,
+  u0: number,
+  u1: number,
+  y0: number
+): OrientedBox | WallStrip | null {
+  if (u1 - u0 < MIN_EXTENT) return null
+  const p = f.profile
+  if (p.topConstant(u0, u1)) return wallBox(f, key, sourceId, sourceType, blocks, u0, u1, y0, p.maxTop(u0, u1))
+  const us = pieceKnots(p, u0, u1)
+  const top = us.map((u) => p.topAt(u))
+  let maxTop = -Infinity
+  for (const t of top) if (t > maxTop) maxTop = t
+  if (maxTop - y0 < MIN_EXTENT) return null
+  const um = (u0 + u1) / 2
+  const hx = (u1 - u0) / 2
+  const last = us.length - 1
+  return {
+    key,
+    sourceId,
+    sourceType,
+    levelId: f.wall.levelId,
+    blocks: { ...blocks },
+    shape: "strip",
+    center: { x: f.wall.a.x + f.dir.x * um, z: f.wall.a.z + f.dir.z * um },
+    halfExtents: { x: hx, z: f.wall.thickness / 2 },
+    yaw: f.yaw,
+    knots: us.map((u, k) => (k === 0 ? -hx : k === last ? hx : u - um)),
+    top,
+    bottom: y0,
+  }
 }
-
-const clampRange = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v)
 
 function buildWall(ctx: BuildContext, wall: WallObject): OccluderPrimitive[] {
   const f = wallFrame(ctx, wall)
   if (!f) return []
-  const half = wall.thickness / 2
-  const extA = ctx.wallsWithEndpointAt(wall.levelId, wall.a, wall.id).length > 0 ? half : 0
-  const extB = ctx.wallsWithEndpointAt(wall.levelId, wall.b, wall.id).length > 0 ? half : 0
+  const { profile } = f
   const out: OccluderPrimitive[] = []
-  const push = (p: OrientedBox | null) => {
+  const push = (p: OccluderPrimitive | null) => {
     if (p) out.push(p)
   }
 
-  // Openings on this wall (same level), with their clamped spans.
-  const spans: { o: Opening; u0: number; u1: number }[] = []
+  // Openings on this wall (same level), with their clamped spans and heights.
+  const spans: { o: Opening; u0: number; u1: number; head: number; sillTop: number; hasSill: boolean }[] = []
   for (const o of ctx.openingsOf(wall.id)) {
-    const [u0, u1] = openingSpan(f, o)
-    if (u1 - u0 >= MIN_EXTENT) spans.push({ o, u0, u1 })
+    const fr = openingFrame(profile, wall, o)
+    if (fr) spans.push({ o, ...fr })
   }
 
   // Full-height pieces: [−extA, len + extB] minus the union of the opening spans. The first piece
   // takes the plain wall key; later pieces are named after the opening they follow.
-  let cursor = -extA
+  let cursor = -f.extA
   let prevId: Id | null = null
   const sorted = [...spans].sort((p, q) => p.u0 - q.u0 || p.u1 - q.u1)
   for (const s of sorted) {
     if (s.u0 > cursor) {
-      push(wallBox(f, prevId === null ? wall.id : `${wall.id}#after:${prevId}`, wall.id, "wall", BLOCK_ALL, cursor, s.u0, f.bottomY, f.topY))
+      push(profilePiece(f, prevId === null ? wall.id : `${wall.id}#after:${prevId}`, wall.id, "wall", BLOCK_ALL, cursor, s.u0, profile.bottomY))
     }
     if (s.u1 >= cursor) {
       cursor = s.u1
       prevId = s.o.id
     }
   }
-  push(wallBox(f, prevId === null ? wall.id : `${wall.id}#after:${prevId}`, wall.id, "wall", BLOCK_ALL, cursor, f.len + extB, f.bottomY, f.topY))
+  push(profilePiece(f, prevId === null ? wall.id : `${wall.id}#after:${prevId}`, wall.id, "wall", BLOCK_ALL, cursor, f.len + f.extB, profile.bottomY))
 
-  // Lintels and sills (part of the wall, block everything).
-  for (const { o, u0, u1 } of spans) {
-    if (o.type === "door") {
-      const top = f.baseY + clampRange(o.height, 0, wall.height)
-      push(wallBox(f, `${wall.id}#lintel:${o.id}`, wall.id, "wall", BLOCK_ALL, u0, u1, top, f.topY))
-    } else {
-      const sill = clampRange(o.sillHeight, 0, wall.height)
-      const head = clampRange(o.sillHeight + o.height, sill, wall.height)
-      if (sill > 0) push(wallBox(f, `${wall.id}#sill:${o.id}`, wall.id, "wall", BLOCK_ALL, u0, u1, f.bottomY, f.baseY + sill))
-      push(wallBox(f, `${wall.id}#lintel:${o.id}`, wall.id, "wall", BLOCK_ALL, u0, u1, f.baseY + head, f.topY))
-    }
+  // Lintels [head, top line] and sills [bottom, sill top] (part of the wall, block everything).
+  for (const s of spans) {
+    if (s.o.type === "window" && s.hasSill) push(wallBox(f, `${wall.id}#sill:${s.o.id}`, wall.id, "wall", BLOCK_ALL, s.u0, s.u1, profile.bottomY, s.sillTop))
+    push(profilePiece(f, `${wall.id}#lintel:${s.o.id}`, wall.id, "wall", BLOCK_ALL, s.u0, s.u1, s.head))
   }
   return out
 }
@@ -340,19 +377,20 @@ function buildWall(ctx: BuildContext, wall: WallObject): OccluderPrimitive[] {
 function buildOpening(ctx: BuildContext, o: DoorObject | WindowObject): OccluderPrimitive[] {
   const host = ctx.object(o.wallId)
   if (!host || host.type !== "wall" || !ctx.hasLevel(host.levelId)) return []
-  const f = wallFrame(ctx, host)
+  // Openings only need the host's heights over [0, len]: any frame of it (joint extensions may be missing).
+  const f = ctx.frame(host, false)
   if (!f) return []
-  const [u0, u1] = openingSpan(f, o)
+  const fr = openingFrame(f.profile, host, o)
+  if (!fr) return []
   if (o.type === "window") {
-    // Windows block movement through the whole opening but neither sight nor light.
-    const p = wallBox(f, o.id, o.id, "window", BLOCK_MOVEMENT, u0, u1, f.bottomY, f.topY)
+    // Windows block movement through the whole opening (up to the highest top over it) but neither sight nor light.
+    const p = wallBox(f, o.id, o.id, "window", BLOCK_MOVEMENT, fr.u0, fr.u1, f.profile.bottomY, f.profile.maxTop(fr.u0, fr.u1))
     return p ? [p] : []
   }
   if (o.state === "open") return []
   const style = DOOR_STYLES[o.style] ?? DOOR_STYLES.wood
   const blocks: BlockFlags = { movement: true, sight: style.blocksSightClosed, light: style.blocksLightClosed }
-  const top = f.baseY + clampRange(o.height, 0, host.height)
-  const p = wallBox(f, o.id, o.id, "door", blocks, u0, u1, f.bottomY, top)
+  const p = wallBox(f, o.id, o.id, "door", blocks, fr.u0, fr.u1, f.profile.bottomY, fr.head)
   return p ? [p] : []
 }
 

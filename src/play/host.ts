@@ -31,18 +31,22 @@ function changedKeys<T>(
   return out.sort()
 }
 
-function levelOnlyTerrainChanged(a: Level, b: Level): boolean {
-  if (a.heightmap === b.heightmap) return false
+/**
+ * How a level changed between two revisions: "structure" when any field other than its heightmap and
+ * terrain edits did, else "terrain" when the heightmap did, else "none". terrainEdits is DM-only editing
+ * data without a visual effect of its own (its baked result is the heightmap).
+ */
+function levelChange(a: Level, b: Level): "structure" | "terrain" | "none" {
   const keys = new Set([...Object.keys(a), ...Object.keys(b)])
   for (const k of keys) {
-    if (k === "heightmap") continue
+    if (k === "heightmap" || k === "terrainEdits") continue
     if (
       (a as unknown as Record<string, unknown>)[k] !==
       (b as unknown as Record<string, unknown>)[k]
     )
-      return false
+      return "structure"
   }
-  return true
+  return a.heightmap !== b.heightmap ? "terrain" : "none"
 }
 
 /**
@@ -72,8 +76,9 @@ export function sceneChangeBetween(
     for (const id of changedKeys(prev.levels, next.levels)) {
       const a = Object.hasOwn(prev.levels, id) ? prev.levels[id] : undefined
       const b = Object.hasOwn(next.levels, id) ? next.levels[id] : undefined
-      if (a && b && levelOnlyTerrainChanged(a, b)) terrain.push(id)
-      else structure = true
+      const kind = a && b ? levelChange(a, b) : "structure"
+      if (kind === "terrain") terrain.push(id)
+      else if (kind === "structure") structure = true
     }
     if (terrain.length) change.terrain = terrain
   }

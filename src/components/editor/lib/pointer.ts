@@ -1,9 +1,11 @@
 /**
  * DOM pointer → ToolPointerEvent (editor/tools/types.ts): pick on the active level, ground point,
- * snapping with the editor's snap mode (Alt = free placement), modifier keys and click count.
+ * snapping with the editor's snap mode (Alt = free placement), modifier keys, click count, the pointer
+ * position on the canvas (the frame of Engine.project) and the pressed buttons.
  */
 import type { SnapMode } from "@/core/grid/grid"
 import type { GridSettings, Vec2 } from "@/core/scene/types"
+import type { EditorController } from "@/editor/controller"
 import { snapGround } from "@/editor/snapping"
 import type { ToolPointerEvent } from "@/editor/tools/types"
 import type { PickResult } from "@/render/contracts"
@@ -12,6 +14,8 @@ export interface DomPointerLike {
   clientX: number
   clientY: number
   button: number
+  /** Pressed buttons bitmask (1 left, 2 right, 4 middle). */
+  buttons?: number
   shiftKey: boolean
   altKey: boolean
   ctrlKey: boolean
@@ -23,7 +27,11 @@ export function toToolPointerEvent(
   e: DomPointerLike,
   pick: PickResult,
   ctx: { grid: GridSettings; snapMode: SnapMode; altHeld: boolean },
-  opts: { button?: number } = {}
+  opts: {
+    button?: number
+    /** Top-left of the canvas in client px (its bounding rect): fills canvasX / canvasY. */
+    origin?: { left: number; top: number }
+  } = {}
 ): ToolPointerEvent {
   const ground: Vec2 | null = pick.ground ? { x: pick.ground.x, z: pick.ground.z } : null
   const alt = e.altKey || ctx.altHeld
@@ -38,8 +46,25 @@ export function toToolPointerEvent(
     ctrl: e.ctrlKey || e.metaKey,
     clientX: e.clientX,
     clientY: e.clientY,
+    canvasX: opts.origin ? e.clientX - opts.origin.left : undefined,
+    canvasY: opts.origin ? e.clientY - opts.origin.top : undefined,
+    buttons: e.buttons,
     detail: e.detail,
   }
+}
+
+/**
+ * The canvas cursor in edit mode: the active tool's own (Tool.cursor: the terrain tool's phases and hovers),
+ * else the select tool's hover state (`pressed`: a drag is in progress), else a crosshair for placing tools.
+ * Shared by the editor viewport and the host's live editor (components/play/host/editInput).
+ */
+export function editorCursor(controller: Pick<EditorController, "store" | "tools" | "toolCursor">, pressed: boolean): string {
+  const own = controller.toolCursor()
+  if (own) return own
+  const s = controller.store.getState()
+  if (s.tool === "select") return controller.tools.select.hoveredId() ? (pressed ? "grabbing" : "pointer") : "default"
+  if (s.tool === "terrain" && s.toolSettings.terrain.sub === "select") return "default"
+  return "crosshair"
 }
 
 /** Grid cell and world point under the cursor, for the status bar. */
@@ -80,12 +105,13 @@ export function stripBackgroundFloor<E extends { pick: PickResult; shift: boolea
   return { event: { ...e, pick: { ...e.pick, objectId: null, hitPoint: null, hitNormal: null } }, floorId: id }
 }
 
-const NAVIGATION_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End", "Enter", " "])
+const NAVIGATION_KEYS = new Set(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End", "Enter", " ", "Tab"])
 
 /**
  * Whether an editor shortcut may use this key given where keyboard focus is: navigation keys (arrows,
- * page keys, Enter, Space) belong to a focused widget (slider, toggle group, button, menu…) and only
- * reach the canvas when nothing interactive is focused; other keys work anywhere but text fields.
+ * page keys, Enter, Space, Tab) belong to a focused widget (slider, toggle group, button, menu…) and only
+ * reach the canvas when nothing interactive is focused; other keys work anywhere but text fields. Tab
+ * (the terrain tool's advanced mode) therefore still moves focus between the page's controls.
  */
 export function editorMayHandleKey(key: string, target: EventTarget | null): boolean {
   if (isTextEntryTarget(target)) return false

@@ -102,6 +102,34 @@ describe("useEditorHotkeys", () => {
     expect(controller.store.getState().altHeld).toBe(false)
   })
 
+  it("fires toggle keys once per press, repeating keys on auto-repeat", () => {
+    render()
+    const keyDown = vi.spyOn(controller, "keyDown")
+    const axis = () => keyDown.mock.calls.filter(([, a]) => a.type === "axis").length
+    press("x")
+    press("x", { repeat: true })
+    press("x", { repeat: true })
+    expect(axis()).toBe(1)
+    press("x", {}, document.body, "keyup")
+    press("x")
+    expect(axis()).toBe(2)
+    const nudges = () => keyDown.mock.calls.filter(([, a]) => a.type === "nudge").length
+    press("ArrowUp")
+    press("ArrowUp", { repeat: true })
+    expect(nudges()).toBe(2)
+  })
+
+  it("leaves Tab to a focused widget", () => {
+    render()
+    const keyDown = vi.spyOn(controller, "keyDown")
+    const button = document.body.appendChild(document.createElement("button"))
+    expect(press("Tab", {}, button).defaultPrevented).toBe(false)
+    expect(keyDown).not.toHaveBeenCalled()
+    press("Tab", {}, document.body, "keyup")
+    press("Tab")
+    expect(keyDown.mock.calls.map(([, a]) => a.type)).toEqual(["terrain-advanced"])
+  })
+
   it("follows remaps live", () => {
     render()
     act(() => setKeyOverrides("editor", { "tool.wall": ["Shift+W"] }))

@@ -39,5 +39,7 @@ export {
   primitiveTopAt,
   pushOutOfPrimitive,
   segmentEntry,
+  stripMaxTop,
+  stripTopAt,
 } from "./primitives"
-export { TerrainSampler } from "./terrain"
+export { heightmapDiffRect, TerrainSampler } from "./terrain"

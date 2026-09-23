@@ -5,8 +5,9 @@
  * the floor's effective rects (same cells as the core/occlusion heightfield), top displaced by the
  * terrain with the heightmap's triangle split, bottom = top − thickness, skirts on the boundary.
  *
- * Terrain meshes carry a per-vertex Y offset from the ground so the heightmap brush preview can
- * move vertices in place (updateTerrainGeometry) without rebuilding.
+ * Terrain meshes carry a per-vertex Y offset from the ground and a per-lattice-row triangle table so
+ * the terrain preview (heightmap brush, terrain shapes) can move the vertices of a dirty rect in place
+ * (updateTerrainGeometry) without rebuilding or scanning the whole mesh.
  */
 import * as THREE from "three"
 
@@ -117,6 +118,8 @@ export function latticeSpan(rect: { x: number; z: number; w: number; d: number }
 class TerrainWriter {
   readonly w: MeshWriter
   readonly offsets = new F32(4096)
+  /** (sz, first triangle, end triangle) per floor and lattice cell row, see MergedBuild.terrainRows. */
+  readonly rows: number[] = []
   constructor(w: MeshWriter) {
     this.w = w
   }
@@ -161,6 +164,7 @@ function writeTerrainSlab(tw: TerrainWriter, ctx: BuildContext, floor: FloorObje
   const cs = ctx.scene.grid.cellSize
   const p = (sx: number, sz: number, off: number): V3 => [sx * s, ground.elevation + ground.sample(sx, sz) + off, sz * s]
   for (let j = 0; j < cellsZ; j++) {
+    const rowStart = tw.w.triangleCount
     for (let i = 0; i < cellsX; i++) {
       if (!isSolid(i, j)) continue
       const sx = span.i0 + i
@@ -189,6 +193,7 @@ function writeTerrainSlab(tw: TerrainWriter, ctx: BuildContext, floor: FloorObje
       if (!isSolid(i - 1, j)) skirt(t00, t01, b00, b01, [-1, 0, 0])
       if (!isSolid(i + 1, j)) skirt(t10, t11, b10, b11, [1, 0, 0])
     }
+    if (tw.w.triangleCount > rowStart) tw.rows.push(span.j0 + j, rowStart, tw.w.triangleCount)
   }
 }
 
@@ -228,57 +233,140 @@ export function buildFloorsBucket(ctx: BuildContext, levelId: Id): BucketBuild {
   const g = w.build()
   if (g) {
     g.userData.terrainLevelId = levelId
-    meshes.push({ kind: "merged", name: "terrain", slot: "world", geometry: g, terrainOffsets: tw.offsets.toArray() })
+    g.userData.terrainSpacing = ground.spacing
+    meshes.push({ kind: "merged", name: "terrain", slot: "world", geometry: g, terrainOffsets: tw.offsets.toArray(), terrainRows: Int32Array.from(tw.rows) })
   }
   return { meshes }
 }
 
+const _box = new THREE.Box3()
+const _sphere = new THREE.Sphere()
+
 /**
- * Move terrain vertices in place to follow `ground` (brush preview). Only triangles with a vertex
- * inside `dirty` (expanded by one lattice spacing) are touched; their flat normals are recomputed.
- * Returns the number of triangles updated.
+ * Move terrain vertices in place to follow `ground` (terrain preview): only triangles with a vertex
+ * inside `dirty` (grown by one lattice spacing; null = everywhere) are touched, their flat normals
+ * recomputed. Every vertex of a terrain mesh sits on a lattice sample, so heights are read from the
+ * lattice directly. With `rows` (MergedBuild.terrainRows) only the lattice rows around `dirty` are
+ * visited, and in each row only the cells around it (triangles of a row are in ascending x of their
+ * first vertex), so the cost follows the dirty rect, not the mesh. Each attribute gets ONE upload range:
+ * the span from the first to the last touched triangle, merged with any range not uploaded yet (several
+ * updates can run before a render, and dropping theirs would leave stale vertices on the GPU). Per-row
+ * ranges would each be a bufferSubData into a buffer of tens of MB the GPU may still be reading, which
+ * some drivers pay for with a copy of the whole buffer per call (≈ 1 s frames on a 100×100-cell level at
+ * resolution 4). The bounds grow by union (they never shrink during a preview). Returns the number of
+ * triangles updated, or −1 when the mesh was not built on `ground`'s lattice spacing (rebuild it instead).
  */
-export function updateTerrainGeometry(geometry: THREE.BufferGeometry, offsets: Float32Array, ground: GroundSampler, dirty: { x: number; z: number; w: number; d: number } | null): number {
+export function updateTerrainGeometry(
+  geometry: THREE.BufferGeometry,
+  offsets: Float32Array,
+  ground: GroundSampler,
+  dirty: { x: number; z: number; w: number; d: number } | null,
+  rows?: Int32Array | null
+): number {
+  const s = ground.spacing
+  const built = geometry.userData.terrainSpacing as number | undefined
+  const H = ground.heights
+  if (!H || (built !== undefined && Math.abs(built - s) > 1e-9)) return -1
   const pos = geometry.getAttribute("position") as THREE.BufferAttribute
   const nrm = geometry.getAttribute("normal") as THREE.BufferAttribute
   const P = pos.array as Float32Array
   const N = nrm.array as Float32Array
-  const m = ground.spacing
-  const x0 = dirty ? dirty.x - m : -Infinity
-  const z0 = dirty ? dirty.z - m : -Infinity
-  const x1 = dirty ? dirty.x + dirty.w + m : Infinity
-  const z1 = dirty ? dirty.z + dirty.d + m : Infinity
-  const tris = P.length / 9
-  let first = -1
-  let last = -1
+  const x0 = dirty ? dirty.x - s : -Infinity
+  const z0 = dirty ? dirty.z - s : -Infinity
+  const x1 = dirty ? dirty.x + dirty.w + s : Infinity
+  const z1 = dirty ? dirty.z + dirty.d + s : Infinity
+  const inv = 1 / s
+  const SX = ground.samplesX
+  const SZ = ground.samplesZ
+  const E = ground.elevation
   let count = 0
+  let minX = Infinity
+  let minY = Infinity
+  let minZ = Infinity
+  let maxX = -Infinity
+  let maxY = -Infinity
+  let maxZ = -Infinity
   const inside = (k: number) => P[k] >= x0 && P[k] <= x1 && P[k + 2] >= z0 && P[k + 2] <= z1
-  for (let t = 0; t < tris; t++) {
-    const k = t * 9
-    if (!inside(k) && !inside(k + 3) && !inside(k + 6)) continue
-    for (let v = 0; v < 3; v++) {
-      const q = k + v * 3
-      P[q + 1] = ground.heightAt(P[q], P[q + 2]) + offsets[t * 3 + v]
+  // Span of the touched triangles (floats), uploaded as one range per attribute below.
+  let upFirst = Infinity
+  let upLast = -1
+  // Triangles [t0, t1): update those with a vertex inside.
+  const visit = (t0: number, t1: number) => {
+    for (let t = t0; t < t1; t++) {
+      const k = t * 9
+      if (!inside(k) && !inside(k + 3) && !inside(k + 6)) continue
+      for (let v = 0; v < 3; v++) {
+        const q = k + v * 3
+        const sx = Math.round(P[q] * inv)
+        const sz = Math.round(P[q + 2] * inv)
+        const h = sx >= 0 && sz >= 0 && sx < SX && sz < SZ ? H[sz * SX + sx] : 0
+        const y = (P[q + 1] = E + h + offsets[t * 3 + v])
+        if (P[q] < minX) minX = P[q]
+        if (P[q] > maxX) maxX = P[q]
+        if (y < minY) minY = y
+        if (y > maxY) maxY = y
+        if (P[q + 2] < minZ) minZ = P[q + 2]
+        if (P[q + 2] > maxZ) maxZ = P[q + 2]
+      }
+      const ux = P[k + 3] - P[k]
+      const uy = P[k + 4] - P[k + 1]
+      const uz = P[k + 5] - P[k + 2]
+      const vx = P[k + 6] - P[k]
+      const vy = P[k + 7] - P[k + 1]
+      const vz = P[k + 8] - P[k + 2]
+      const nx = uy * vz - uz * vy
+      const ny = uz * vx - ux * vz
+      const nz = ux * vy - uy * vx
+      const len = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1
+      for (let v = 0; v < 9; v += 3) {
+        N[k + v] = nx / len
+        N[k + v + 1] = ny / len
+        N[k + v + 2] = nz / len
+      }
+      if (k < upFirst) upFirst = k
+      if (k + 9 > upLast) upLast = k + 9
+      count++
     }
-    const n = faceNormal([P[k], P[k + 1], P[k + 2]], [P[k + 3], P[k + 4], P[k + 5]], [P[k + 6], P[k + 7], P[k + 8]])
-    for (let v = 0; v < 3; v++) {
-      N[k + v * 3] = n[0]
-      N[k + v * 3 + 1] = n[1]
-      N[k + v * 3 + 2] = n[2]
-    }
-    if (first < 0) first = k
-    last = k + 9
-    count++
   }
+  if (rows && dirty) {
+    const r0 = Math.floor(z0 * inv) - 1
+    const r1 = Math.ceil(z1 * inv)
+    const xMin = x0 - s
+    for (let e = 0; e + 2 < rows.length; e += 3) {
+      const sz = rows[e]
+      if (sz < r0 || sz > r1) continue
+      // First triangle of a cell that can reach x0 (its first vertex at x ≥ x0 − spacing) ...
+      let lo = rows[e + 1]
+      let hi = rows[e + 2]
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1
+        if (P[mid * 9] < xMin) lo = mid + 1
+        else hi = mid
+      }
+      // ... up to the last one starting at or before x1.
+      let end = lo
+      while (end < rows[e + 2] && P[end * 9] <= x1) end++
+      visit(lo, end)
+    }
+  } else visit(0, P.length / 9)
   if (count > 0) {
-    pos.clearUpdateRanges()
-    nrm.clearUpdateRanges()
-    pos.addUpdateRange(first, last - first)
-    nrm.addUpdateRange(first, last - first)
-    pos.needsUpdate = true
-    nrm.needsUpdate = true
-    geometry.computeBoundingSphere()
-    geometry.computeBoundingBox()
+    for (const a of [pos, nrm]) {
+      let lo = upFirst
+      let hi = upLast
+      for (const r of a.updateRanges) {
+        if (r.start < lo) lo = r.start
+        if (r.start + r.count > hi) hi = r.start + r.count
+      }
+      a.clearUpdateRanges()
+      a.addUpdateRange(lo, hi - lo)
+      a.needsUpdate = true
+    }
+    _box.min.set(minX, minY, minZ)
+    _box.max.set(maxX, maxY, maxZ)
+    if (geometry.boundingBox) geometry.boundingBox.union(_box)
+    else geometry.computeBoundingBox()
+    if (geometry.boundingSphere) geometry.boundingSphere.union(_box.getBoundingSphere(_sphere))
+    else geometry.computeBoundingSphere()
   }
   return count
 }

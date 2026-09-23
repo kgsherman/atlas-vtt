@@ -2,8 +2,11 @@
  * Public API of the render layer. React components, the editor and play controllers talk to the
  * renderer ONLY through this interface (see docs/ARCHITECTURE.md §4).
  */
+import type { GizmoAxis } from "@/core/geometry/gizmo"
 import type { PathStep } from "@/core/movement/types"
-import type { Id, Rect, SceneLike, Vec2, Vec3 } from "@/core/scene/types"
+import type { BrushMode } from "@/core/scene/heightmapBrush"
+import type { TerrainElementMode, TerrainElementRef } from "@/core/scene/terrainShapes"
+import type { Id, Rect, SceneLike, TerrainShape, Vec2, Vec3 } from "@/core/scene/types"
 import type { EncodedGrades, EncodedMask } from "@/core/vision/types"
 
 export type Quality = "low" | "medium" | "high" | "ultra"
@@ -85,13 +88,50 @@ export interface ViewState {
 // Overlays: transient visuals driven by tools / play controllers
 // ---------------------------------------------------------------------------
 
+/** Translate-gizmo axis (world X / Y / Z), shared with the tools' gizmo math. */
+export type { GizmoAxis }
+
+/**
+ * The terrain editing mode's overlay (ARCHITECTURE §7 "Terrain tools"): the active level's shapes as editable
+ * prisms over the baked terrain, the selection, the advanced mode's elements, a shape being created, the
+ * translate gizmo, the brush ring and a value label. Shape coordinates follow TerrainShape (x, z world feet;
+ * y relative to the level elevation); `gizmo.at` and `label.at` are world points. Arrays keep their identity
+ * while unchanged, so the renderer can cache per-shape geometry.
+ */
+export interface TerrainOverlay {
+  kind: "terrain"
+  levelId: Id
+  /** Shapes to draw (the tool substitutes drafts / dragged versions). */
+  shapes: readonly TerrainShape[]
+  selectedShapeIds: readonly Id[]
+  hoverShapeId: Id | null
+  /** Advanced (edit) mode: element display of the selected shapes. */
+  elements: { mode: TerrainElementMode; selected: readonly TerrainElementRef[]; hover: TerrainElementRef | null } | null
+  /** Shape being created (a zero-height prism during the base phase); `valid` false draws it red. */
+  draft: { shape: TerrainShape; valid: boolean } | null
+  /** Translate gizmo at the selection's pivot: the axis being dragged and the one under the pointer. */
+  gizmo: { at: Vec3; active: GizmoAxis | null; hover: GizmoAxis | null } | null
+  brush: { center: Vec2; radius: number; mode: BrushMode } | null
+  /** Live value next to the cursor (e.g. "+7.5 ft · Add"). */
+  label: { at: Vec3; text: string } | null
+  /**
+   * Screen-space selection box of the select sub-tool (canvas CSS px, y down: the frame of
+   * ToolPointerEvent.canvasX / canvasY and Engine.project), drawn as a rect outline with a faint fill.
+   * Absent or null: none.
+   */
+  marquee?: { from: { x: number; y: number }; to: { x: number; y: number } } | null
+}
+
 export type ToolPreview =
   | { kind: "rect"; levelId: Id; rect: Rect; color?: string }
-  | { kind: "segment"; levelId: Id; a: Vec2; b: Vec2; height: number; thickness: number; valid: boolean }
-  | { kind: "opening"; levelId: Id; a: Vec2; b: Vec2; height: number; sill: number; valid: boolean }
+  /** `followTerrain` false: the wall stands on the level elevation (default: it follows the terrain). */
+  | { kind: "segment"; levelId: Id; a: Vec2; b: Vec2; height: number; thickness: number; valid: boolean; followTerrain?: boolean }
+  /** `followTerrain`: the host wall's option (false: the opening measures from the level elevation). */
+  | { kind: "opening"; levelId: Id; a: Vec2; b: Vec2; height: number; sill: number; valid: boolean; followTerrain?: boolean }
   | { kind: "point"; levelId: Id; position: Vec3; radius?: number; color?: string }
-  | { kind: "brush"; levelId: Id; center: Vec2; radius: number; mode: "raise" | "lower" | "smooth" | "flatten" }
+  | { kind: "brush"; levelId: Id; center: Vec2; radius: number; mode: BrushMode }
   | { kind: "ghost-objects"; scene: Pick<SceneLike, "objects" | "levels" | "grid">; offset: Vec2 }
+  | TerrainOverlay
 
 export interface RulerOverlay {
   levelId: Id
@@ -120,6 +160,12 @@ export interface PickOptions {
   /** Also pick objects/tokens under the cursor. */
   objects?: boolean
   tokens?: boolean
+  /**
+   * Ground on a heightmap level: march the terrain wherever it lies inside the grid extent (as the grid
+   * overlay drapes it), not only under floors; the level plane remains the fallback. Editor picks set it
+   * (wall nodes land where the cursor ray meets the terrain). Affects `ground` only, not the floor-object hit.
+   */
+  terrain?: boolean
 }
 
 export interface PickResult {
@@ -131,6 +177,11 @@ export interface PickResult {
   hitPoint: Vec3 | null
   /** World-space surface normal at hitPoint, when any (the light tool mounts at hitPoint + 0.3·normal). */
   hitNormal?: Vec3 | null
+  /**
+   * The pointer ray in world space (unit direction). Orthographic cameras give parallel rays with a
+   * per-pixel origin, so never derive it from the camera position. Absent when the canvas has no size.
+   */
+  ray?: { origin: Vec3; direction: Vec3 } | null
 }
 
 // ---------------------------------------------------------------------------

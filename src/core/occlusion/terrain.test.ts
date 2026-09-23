@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest"
 
 import { orientedRectCorners } from "../geometry/box"
+import { chunkKey, createHeightmap, sampleCounts, writeHeights } from "../scene/heightmap"
 import { levelGround } from "../scene/queries"
-import { TerrainSampler } from "./terrain"
+import { heightmapDiffRect, TerrainSampler } from "./terrain"
 import { flatScene, paintHeightmap, rng } from "./test-utils"
 
 describe("TerrainSampler", () => {
@@ -86,5 +87,26 @@ describe("TerrainSampler", () => {
       expect(lo - range.min).toBeLessThan(0.5)
       expect(range.max - hi).toBeLessThan(0.5)
     }
+  })
+})
+
+describe("heightmapDiffRect", () => {
+  it("covers the changed chunks grown by one spacing; whole grid on resolution changes; null when identical", () => {
+    const grid = { width: 40, depth: 40, cellSize: 5 }
+    const { samplesX, samplesZ } = sampleCounts(grid, 2)
+    const hm = writeHeights(createHeightmap(2), grid, new Float32Array(samplesX * samplesZ).fill(1))
+    const dense = new Float32Array(samplesX * samplesZ).fill(1)
+    dense[40 * samplesX + 40] = 3 // sample (40, 40) = (100, 100) ft: chunk (2, 2) at res 2 (16 samples a chunk)
+    const next = writeHeights(hm, grid, dense, { x: 99, z: 99, w: 2, d: 2 })
+    expect(Object.keys(next.chunks).filter((k) => next.chunks[k] !== hm.chunks[k])).toEqual([chunkKey(2, 2)])
+    expect(heightmapDiffRect(hm, next, grid)).toEqual({ x: 77.5, z: 77.5, w: 42.5, d: 42.5 })
+    expect(heightmapDiffRect(next, next, grid)).toBeNull()
+    expect(heightmapDiffRect(hm, { ...hm }, grid)).toBeNull()
+    expect(heightmapDiffRect(null, next, grid)).toEqual({ x: 0, z: 0, w: 200, d: 200 })
+    expect(heightmapDiffRect(hm, { resolution: 4, chunks: {} }, grid)).toEqual({ x: 0, z: 0, w: 200, d: 200 })
+    // A dropped (all-zero) chunk counts as changed.
+    const dropped = { resolution: hm.resolution, chunks: { ...hm.chunks } }
+    delete dropped.chunks[chunkKey(0, 0)]
+    expect(heightmapDiffRect(hm, dropped, grid)).toEqual({ x: -2.5, z: -2.5, w: 42.5, d: 42.5 })
   })
 })

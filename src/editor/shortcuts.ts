@@ -3,7 +3,8 @@
  * on macOS, Ctrl elsewhere). Users can rebind commands (the keymap store saves per-command overrides by
  * id); the React layer registers the effective keys with the hotkey manager and hands the matched
  * action to the editor controller, which offers the key to the active tool first (Escape, Enter, R),
- * then runs the action with runShortcut().
+ * then runs the action with runShortcut(). Tool-only actions (confirm, the terrain tool's advanced
+ * mode / element / axis keys) do nothing in runShortcut, so an unused key keeps its browser default.
  *
  * Arrow nudges move one cell (or one foot) along world axes: ArrowUp = −Z, ArrowDown = +Z,
  * ArrowLeft = −X, ArrowRight = +X (screen directions in the default top-down orientation).
@@ -14,6 +15,7 @@ import type { SnapMode } from "@/core/grid/grid"
 import type { Id, Vec2 } from "@/core/scene/types"
 import { bindingsOf, type Command, type KeyOverrides } from "@/lib/keymap"
 
+import { TERRAIN_CREATE_SUB_TOOLS, type TerrainSubTool } from "./settings"
 import type { EditorStore } from "./store"
 import type { ToolId } from "./tools/types"
 
@@ -37,20 +39,33 @@ export type ShortcutAction =
   | { type: "brush-size"; factor: number }
   | { type: "level"; delta: 1 | -1 }
   | { type: "escape" }
-  /** Only tools use it (finish a wall chain or ruler). */
+  /** Only tools use it (finish a wall chain or ruler, confirm a terrain shape's height). */
   | { type: "confirm" }
+  /** Terrain tool + sub-tool; "cycle-create" steps block → ramp → cylinder. */
+  | { type: "terrain-sub"; sub: "select" | "brush" | "cycle-create" }
+  /** Only the terrain tool uses these: toggle the advanced (element) mode, pick the element kind, constrain a drag to an axis. */
+  | { type: "terrain-advanced" }
+  | { type: "terrain-element"; element: "vertex" | "edge" | "face" }
+  | { type: "axis"; axis: "x" | "y" | "z" }
   /** Handled by the page, not the controller. */
   | { type: "save" }
   | { type: "help" }
 
+export type EditorCommandGroup = "Tools" | "Editing" | "Terrain" | "View"
+
+/** Command groups in help / settings order. */
+export const EDITOR_COMMAND_GROUPS: readonly EditorCommandGroup[] = ["Tools", "Editing", "Terrain", "View"]
+
 export interface EditorCommand extends Command {
-  group: "Tools" | "Editing" | "View"
+  group: EditorCommandGroup
   action: ShortcutAction
 }
 
 export interface EditorBinding {
   hotkey: Hotkey
   action: ShortcutAction
+  /** false: fire once per press (register with AppHotkey `repeat: false`); absent: auto-repeat. */
+  repeat?: false
 }
 
 const TOOLS: [ToolId, string, Hotkey][] = [
@@ -63,7 +78,7 @@ const TOOLS: [ToolId, string, Hotkey][] = [
   ["pillar", "Pillar", "P"],
   ["prop", "Prop", "O"],
   ["light", "Light", "L"],
-  ["terrain", "Terrain brush", "T"],
+  ["terrain", "Terrain", "T"],
   ["token", "Token", "K"],
   ["measure", "Measure", "M"],
 ]
@@ -76,6 +91,18 @@ const NUDGES: [string, "ArrowUp" | "ArrowDown" | "ArrowLeft" | "ArrowRight", -1 
   ["down", "ArrowDown", 0, 1],
   ["left", "ArrowLeft", -1, 0],
   ["right", "ArrowRight", 1, 0],
+]
+
+const TERRAIN_ELEMENTS: ["vertex" | "edge" | "face", string, Hotkey][] = [
+  ["vertex", "Edit vertices", "1"],
+  ["edge", "Edit edges", "2"],
+  ["face", "Edit faces", "3"],
+]
+
+const AXES: ["x" | "y" | "z", Hotkey][] = [
+  ["x", "X"],
+  ["y", "Y"],
+  ["z", "Z"],
 ]
 
 /** Every editor command, in help / settings order. */
@@ -109,7 +136,41 @@ export const EDITOR_COMMANDS: EditorCommand[] = [
   { id: "brush.smaller", label: "Brush smaller", group: "Editing", keys: ["["], action: { type: "brush-size", factor: 1 / BRUSH_STEP } },
   { id: "brush.larger", label: "Brush larger", group: "Editing", keys: ["]"], action: { type: "brush-size", factor: BRUSH_STEP } },
   { id: "escape", label: "Cancel / clear selection", group: "Editing", keys: ["Escape"], action: { type: "escape" } },
-  { id: "confirm", label: "Finish a wall chain or ruler", group: "Editing", keys: ["Enter"], action: { type: "confirm" } },
+  { id: "confirm", label: "Finish a wall chain or ruler; confirm a terrain shape", group: "Editing", keys: ["Enter"], action: { type: "confirm" } },
+  { id: "terrain.select", label: "Select terrain shapes", group: "Terrain", keys: ["Q"], action: { type: "terrain-sub", sub: "select" } },
+  { id: "terrain.brush", label: "Terrain brush", group: "Terrain", keys: ["Shift+B"], action: { type: "terrain-sub", sub: "brush" } },
+  {
+    id: "terrain.create",
+    label: "Terrain block / ramp / cylinder (cycles)",
+    group: "Terrain",
+    keys: ["E"],
+    repeat: false,
+    action: { type: "terrain-sub", sub: "cycle-create" },
+  },
+  {
+    id: "terrain.advanced",
+    label: "Toggle vertex / edge / face editing",
+    group: "Terrain",
+    keys: ["Tab"],
+    repeat: false,
+    action: { type: "terrain-advanced" },
+  },
+  ...TERRAIN_ELEMENTS.map(([element, label, key]): EditorCommand => ({
+    id: `terrain.element.${element}`,
+    label,
+    group: "Terrain",
+    keys: [key],
+    repeat: false,
+    action: { type: "terrain-element", element },
+  })),
+  ...AXES.map(([axis, key]): EditorCommand => ({
+    id: `axis.${axis}`,
+    label: `Constrain a move to ${key}`,
+    group: "Terrain",
+    keys: [key],
+    repeat: false,
+    action: { type: "axis", axis },
+  })),
   { id: "toggle-grid", label: "Toggle grid", group: "View", keys: ["G"], action: { type: "toggle-grid" } },
   { id: "toggle-helpers", label: "Toggle helpers", group: "View", keys: ["H"], action: { type: "toggle-helpers" } },
   { id: "toggle-dark-vision", label: "Toggle dark vision", group: "View", keys: ["B"], action: { type: "toggle-dark-vision" } },
@@ -127,11 +188,31 @@ export const EDITOR_POINTER_HELP: { keys: string; label: string }[] = [
   { keys: "Middle-drag", label: "Pan" },
   { keys: "Wheel", label: "Zoom toward the cursor" },
   { keys: "Right-click / Double-click", label: "Finish walls / rulers" },
+  { keys: "Drag, then move and click (terrain)", label: "Block / ramp / cylinder: draw the base, then set the height" },
+  { keys: "Right-click (terrain)", label: "Cancel the shape being drawn" },
+  { keys: "Shift / Ctrl-click (terrain)", label: "Add to / toggle the shape or element selection" },
+  { keys: "Drag on empty ground (terrain, advanced)", label: "Select vertices / edges / faces in a box" },
+  { keys: "Drag an arrow (terrain)", label: "Move the selection along one axis" },
 ]
 
 /** The bindings to register: every key of every command, after the user's overrides. */
 export function editorBindings(overrides: KeyOverrides = {}): EditorBinding[] {
-  return bindingsOf(EDITOR_COMMANDS, overrides).map(({ hotkey, command }) => ({ hotkey, action: command.action }))
+  return bindingsOf(EDITOR_COMMANDS, overrides).map(({ hotkey, command }) =>
+    command.repeat === false ? { hotkey, action: command.action, repeat: false } : { hotkey, action: command.action }
+  )
+}
+
+/**
+ * The terrain sub-tool a "terrain-sub" action selects. "cycle-create" inside the terrain tool steps
+ * block → ramp → cylinder → block, starting at block when the current sub-tool is not a creation one;
+ * from another tool it re-enters the remembered creation sub-tool (block if none), so the first press
+ * only switches to the terrain tool.
+ */
+export function terrainSubFor(sub: "select" | "brush" | "cycle-create", current: TerrainSubTool, inTerrainTool: boolean): TerrainSubTool {
+  if (sub !== "cycle-create") return sub
+  const k = TERRAIN_CREATE_SUB_TOOLS.indexOf(current)
+  if (k < 0) return TERRAIN_CREATE_SUB_TOOLS[0]
+  return inTerrainTool ? TERRAIN_CREATE_SUB_TOOLS[(k + 1) % TERRAIN_CREATE_SUB_TOOLS.length] : current
 }
 
 export interface PasteTarget {
@@ -221,7 +302,16 @@ export function runShortcut(action: ShortcutAction, ctx: ShortcutContext): boole
       ctx.store.getState().clearSelection()
       return hadSelection
     }
+    case "terrain-sub": {
+      const next = terrainSubFor(action.sub, s.toolSettings.terrain.sub, s.tool === "terrain")
+      s.setTool("terrain")
+      if (ctx.store.getState().toolSettings.terrain.sub !== next) ctx.store.getState().setToolSettings("terrain", { sub: next })
+      return true
+    }
     case "confirm":
+    case "terrain-advanced":
+    case "terrain-element":
+    case "axis":
     case "save":
     case "help":
       return false

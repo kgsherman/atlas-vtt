@@ -2,13 +2,13 @@
  * Scene revision diffing for incremental rebuilds:
  *  - diffScenes: a SceneChange computed from two revisions (used when updateScene gets no change);
  *  - classifyStructure: whether a structural change needs a geometry rebuild or is environment-only;
- *  - invalidation: which level buckets must be rebuilt for changed objects/tokens/terrain;
+ *  - invalidation: which level buckets must be rebuilt for changed objects/tokens/terrain
+ *    (invalidateTerrain: the marks of one level's terrain change, for the engine's in-place commits);
  *  - occlusionClosure: changed ids plus the sources whose occluders depend on them;
  *  - heightmapDiffRect: world rect covering the heightmap chunks that differ.
  */
-import { chunkSamples, parseChunkKey, sampleSpacing } from "@/core/scene/heightmap"
 import { floorCutouts, lightLevelId } from "@/core/scene/queries"
-import type { GridSettings, Heightmap, Id, Level, Rect, SceneLike, SceneObject } from "@/core/scene/types"
+import type { GridSettings, Id, Level, Rect, SceneLike, SceneObject } from "@/core/scene/types"
 
 import type { BucketKind } from "../builders/types"
 import type { SceneChange } from "../contracts"
@@ -108,7 +108,7 @@ export class Invalidation {
   }
 }
 
-const ALL_BUCKETS: BucketKind[] = ["floors", "walls", "doors", "connectors", "pillars", "props", "fixtures"]
+export const ALL_BUCKETS: readonly BucketKind[] = ["floors", "walls", "doors", "connectors", "pillars", "props", "fixtures"]
 
 function cutoutsChanged(prev: SceneLike, next: SceneLike, levelId: Id): boolean {
   return !deepEqual(floorCutouts(prev, levelId), floorCutouts(next, levelId))
@@ -167,14 +167,21 @@ export function invalidation(prev: SceneLike, next: SceneLike, change: SceneChan
       }
     }
   }
-  for (const levelId of change.terrain ?? []) {
-    if (!Object.hasOwn(next.levels, levelId)) continue
-    inv.mark(levelId, ...ALL_BUCKETS)
-    // Stairs/ramps/ladders climbing to this level end on its ground.
-    for (const o of Object.values(next.objects)) if (o.type === "connector" && o.toLevelId === levelId) inv.mark(o.levelId, "connectors")
-    inv.tokens = true
-  }
+  for (const levelId of change.terrain ?? []) invalidateTerrain(inv, next, levelId)
   return inv
+}
+
+/**
+ * Marks of a terrain change of a level: its buckets `kinds` (everything stands on the ground; the engine
+ * passes fewer when it moved the terrain mesh in place and only some objects stand on the changed area),
+ * the connectors of other levels climbing to it, and the tokens.
+ */
+export function invalidateTerrain(inv: Invalidation, next: SceneLike, levelId: Id, kinds: readonly BucketKind[] = ALL_BUCKETS): void {
+  if (!Object.hasOwn(next.levels, levelId)) return
+  inv.mark(levelId, ...kinds)
+  // Stairs/ramps/ladders climbing to this level end on its ground.
+  for (const o of Object.values(next.objects)) if (o.type === "connector" && o.toLevelId === levelId) inv.mark(o.levelId, "connectors")
+  inv.tokens = true
 }
 
 // ---------------------------------------------------------------------------
@@ -224,28 +231,5 @@ export function gridRect(grid: Pick<GridSettings, "width" | "depth" | "cellSize"
   return { x: 0, z: 0, w: grid.width * grid.cellSize, d: grid.depth * grid.cellSize }
 }
 
-/**
- * World rect covering every heightmap chunk that differs between two revisions (expanded by one
- * lattice spacing, since triangles span neighbouring samples); null when identical.
- */
-export function heightmapDiffRect(prev: Heightmap | null, next: Heightmap | null, grid: Pick<GridSettings, "width" | "depth" | "cellSize">): Rect | null {
-  if (prev === next) return null
-  if (!prev || !next || prev.resolution !== next.resolution) return gridRect(grid)
-  const keys = new Set([...Object.keys(prev.chunks), ...Object.keys(next.chunks)])
-  const n = chunkSamples(next.resolution)
-  const s = sampleSpacing(grid.cellSize, next.resolution)
-  let x0 = Infinity
-  let z0 = Infinity
-  let x1 = -Infinity
-  let z1 = -Infinity
-  for (const key of keys) {
-    if (prev.chunks[key] === next.chunks[key]) continue
-    const { ci, cj } = parseChunkKey(key)
-    x0 = Math.min(x0, (ci * n - 1) * s)
-    z0 = Math.min(z0, (cj * n - 1) * s)
-    x1 = Math.max(x1, ((ci + 1) * n) * s)
-    z1 = Math.max(z1, ((cj + 1) * n) * s)
-  }
-  if (x0 === Infinity) return null
-  return { x: x0, z: z0, w: x1 - x0, d: z1 - z0 }
-}
+/** World rect covering the heightmap chunks that differ between two revisions (shared with core/occlusion). */
+export { heightmapDiffRect } from "@/core/occlusion"

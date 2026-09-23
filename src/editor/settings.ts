@@ -12,6 +12,7 @@ import {
   DEFAULT_WINDOW_WIDTH,
 } from "@/core/scene/defaults"
 import type { BrushFalloff, BrushMode } from "@/core/scene/heightmapBrush"
+import type { TerrainElementMode } from "@/core/scene/terrainShapes"
 import type {
   ConnectorObject,
   ConnectorStyle,
@@ -31,6 +32,8 @@ export interface WallToolSettings {
   height: number
   thickness: number
   material: MaterialId
+  /** New walls follow the terrain (WallObject.followTerrain). */
+  followTerrain: boolean
 }
 
 export interface FloorToolSettings {
@@ -84,6 +87,26 @@ export interface BrushToolSettings {
   falloff: BrushFalloff
 }
 
+/** Sub-tools of the terrain editing mode (ToolId "terrain"). */
+export type TerrainSubTool = "select" | "brush" | "block" | "ramp" | "cylinder"
+
+/** The shape-creating sub-tools, in the order the "cycle-create" key (E) steps through them. */
+export const TERRAIN_CREATE_SUB_TOOLS: readonly TerrainSubTool[] = ["block", "ramp", "cylinder"]
+
+export interface TerrainToolSettings {
+  sub: TerrainSubTool
+  /** Advanced (edit) mode: vertex / edge / face editing of the selected shapes (effective only with a selection). */
+  advanced: boolean
+  element: TerrainElementMode
+  /** Snapping step for heights (creation, vertical moves), feet; 0 = free. Alt / free snap mode = free. */
+  heightStep: number
+  /** Sides of new cylinders (6..64). */
+  cylinderSides: number
+}
+
+export const TERRAIN_CYLINDER_SIDES_MIN = 6
+export const TERRAIN_CYLINDER_SIDES_MAX = 64
+
 export interface TokenToolSettings {
   size: CreatureSize
   kind: TokenKind
@@ -99,6 +122,7 @@ export interface ToolSettings {
   prop: PropToolSettings
   light: LightToolSettings
   brush: BrushToolSettings
+  terrain: TerrainToolSettings
   token: TokenToolSettings
 }
 
@@ -107,7 +131,7 @@ export const BRUSH_RADIUS_MAX = 100
 
 export function defaultToolSettings(): ToolSettings {
   return {
-    wall: { height: DEFAULT_LEVEL_HEIGHT, thickness: DEFAULT_WALL_THICKNESS, material: "stone" },
+    wall: { height: DEFAULT_LEVEL_HEIGHT, thickness: DEFAULT_WALL_THICKNESS, material: "stone", followTerrain: true },
     floor: { material: "stone" },
     door: { style: "wood", width: DEFAULT_DOOR_WIDTH, height: DEFAULT_DOOR_HEIGHT, leaves: "single" },
     window: { width: DEFAULT_WINDOW_WIDTH, height: DEFAULT_WINDOW_HEIGHT, sillHeight: DEFAULT_WINDOW_SILL },
@@ -116,6 +140,7 @@ export function defaultToolSettings(): ToolSettings {
     prop: { kind: "crate", rotationY: 0 },
     light: { preset: "torch" },
     brush: { mode: "raise", radius: 10, strength: 0.5, falloff: "smooth" },
+    terrain: { sub: "brush", advanced: false, element: "vertex", heightStep: 0.5, cylinderSides: 24 },
     token: { size: "medium", kind: "pc" },
   }
 }

@@ -1,7 +1,9 @@
 /**
  * Picking (contracts.ts pick/project):
  *  - ground: the active level's terrain (analytic ray march over the heightmap lattice) where a floor
- *    covers the hit, else the plane y = level.elevation;
+ *    covers the hit, else the plane y = level.elevation; with PickOptions.terrain the terrain counts
+ *    wherever it lies inside the grid extent (as the grid overlay drapes it), floors or not;
+ *  - ray: the pointer ray itself (parallel rays with per-pixel origins for orthographic cameras);
  *  - objects: raycast against the visual meshes of solidly drawn levels (ids from userData: merged
  *    meshes map triangles → ids via `ranges`, instanced meshes via `instanceIds`, door leaves via
  *    `objectId`); floors are hit analytically (cheap even for big terrains);
@@ -151,6 +153,29 @@ export class Picker {
     return true
   }
 
+  /**
+   * Ground of a level's terrain wherever it lies inside the grid extent (PickOptions.terrain), null on a
+   * level without a heightmap or when the ray meets no terrain there.
+   */
+  private terrainHit(levelId: Id, grid: SceneLike["grid"]): { t: number; point: Vec3 } | null {
+    const ground = this.host.ground(levelId)
+    if (ground.flat) return null
+    const w = grid.width * grid.cellSize
+    const d = grid.depth * grid.cellSize
+    // March no further than where the ray leaves the extent (long grazing rays keep their step size).
+    const ray = this.raycaster.ray
+    let tExit = 1e5
+    for (const [o, dir, hi] of [
+      [ray.origin.x, ray.direction.x, w],
+      [ray.origin.z, ray.direction.z, d],
+    ]) {
+      if (dir > 1e-12) tExit = Math.min(tExit, (hi - o) / dir)
+      else if (dir < -1e-12) tExit = Math.min(tExit, -o / dir)
+    }
+    if (!(tExit >= 0)) return null
+    return marchTerrain(ray, ground, (x, z) => x >= 0 && x <= w && z >= 0 && z <= d, tExit + ground.spacing)
+  }
+
   /** Floor hit on a level: terrain march (heightmap) or the elevation plane, inside a floor rect. */
   private floorHit(levelId: Id): { t: number; point: Vec3; floorId: Id } | null {
     const ground = this.host.ground(levelId)
@@ -169,12 +194,14 @@ export class Picker {
 
   pick(clientX: number, clientY: number, opts: PickOptions): PickResultWithNormal {
     const result: PickResultWithNormal = { ground: null, objectId: null, tokenId: null, hitPoint: null, hitNormal: null }
-    const scene = this.host.scene()
-    if (!scene || !this.aim(clientX, clientY)) return result
+    if (!this.aim(clientX, clientY)) return result
     const ray = this.raycaster.ray
+    result.ray = { origin: { x: ray.origin.x, y: ray.origin.y, z: ray.origin.z }, direction: { x: ray.direction.x, y: ray.direction.y, z: ray.direction.z } }
+    const scene = this.host.scene()
+    if (!scene) return result
     if (Object.hasOwn(scene.levels, opts.levelId)) {
-      const fh = this.floorHit(opts.levelId)
-      result.ground = fh ? fh.point : (planeHit(ray, scene.levels[opts.levelId].elevation)?.point ?? null)
+      const gh = opts.terrain ? this.terrainHit(opts.levelId, scene.grid) : this.floorHit(opts.levelId)
+      result.ground = gh ? gh.point : (planeHit(ray, scene.levels[opts.levelId].elevation)?.point ?? null)
     }
     let best = Infinity
     if (opts.objects) {

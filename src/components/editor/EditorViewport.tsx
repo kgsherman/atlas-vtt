@@ -2,8 +2,11 @@
  * The editor's 3D viewport: an EngineCanvas wired to the editor store and controller.
  *  - document revisions → engine.updateScene(scene, lastChange) (full setScene after loads/syncs);
  *  - view options / active level → engine.setView(editorViewState(store));
- *  - controller overlays → engine.setOverlays; terrain brush preview → engine.previewTerrain;
- *  - canvas pointer events → ToolPointerEvents (engine.pick on the active level + snapping, Alt = free);
+ *  - controller overlays → engine.setOverlays; terrain previews → engine.previewTerrain; tools project
+ *    world points with engine.project (controller.setProjector);
+ *  - canvas pointer events → ToolPointerEvents (engine.pick on the active level, marching its terrain, +
+ *    snapping, Alt = free; canvas-relative position and pressed buttons); the CSS cursor is the active
+ *    tool's (Tool.cursor), else the default for the tool;
  *  - level backdrops → assets.getImage → createImageBitmap → engine.setLevelImage;
  *  - "Preview player view": player mode with host masks computed locally by core/vision.
  */
@@ -20,7 +23,7 @@ import type { Engine, Quality, ViewState } from "@/render/contracts"
 
 import { useEditorContext } from "./context"
 import { loadLevelImage } from "./lib/levelImages"
-import { cursorReadout, stripBackgroundFloor, toToolPointerEvent, type DomPointerLike } from "./lib/pointer"
+import { cursorReadout, editorCursor, stripBackgroundFloor, toToolPointerEvent, type DomPointerLike } from "./lib/pointer"
 import { createPreviewVision, type PreviewResult } from "./lib/preview"
 import { applyExtras, extrasApply, newItemIds } from "./lib/toolExtras"
 import { sameCursor, type ViewportInfoStore } from "./lib/viewportInfo"
@@ -126,10 +129,12 @@ function ViewportBridge({
     })
     const unsubController = controller.subscribe(() => engine.setOverlays(controller.overlays()))
     controller.setTerrainPreview((levelId, heights, dirty) => engine.previewTerrain(levelId, heights, dirty))
+    controller.setProjector((p) => engine.project(p))
     return () => {
       unsubStore()
       unsubController()
       controller.setTerrainPreview(null)
+      controller.setProjector(null)
       controller.cancelGesture()
     }
   }, [engine, store, controller, previewTokenId])
@@ -259,20 +264,22 @@ function ViewportBridge({
      */
     let floorPress: { id: string; x: number; y: number } | null = null
 
+    // Wall nodes, shapes and hover markers land where the cursor ray meets the terrain (terrain: true).
     const build = (e: DomPointerLike, button?: number) => {
       const s = store.getState()
-      const pick = engine.pick(e.clientX, e.clientY, { levelId: s.activeLevelId, objects: true, tokens: true })
-      return toToolPointerEvent(e, pick, { grid: s.scene.grid, snapMode: s.snapMode, altHeld: s.altHeld }, { button })
+      const pick = engine.pick(e.clientX, e.clientY, { levelId: s.activeLevelId, objects: true, tokens: true, terrain: true })
+      return toToolPointerEvent(e, pick, { grid: s.scene.grid, snapMode: s.snapMode, altHeld: s.altHeld }, { button, origin: canvas.getBoundingClientRect() })
     }
+
+    const refreshCursor = () => setCursor(canvas, previewRef.current ? "default" : editorCursor(controller, leftDown))
 
     const updateCursor = (ground: { x: number; z: number } | null) => {
       const next = cursorReadout(store.getState().scene.grid, ground)
       if (!sameCursor(next, info.getState().cursor)) info.setState({ cursor: next })
-      const s = store.getState()
-      let css = "crosshair"
-      if (s.tool === "select") css = controller.tools.select.hoveredId() ? (leftDown ? "grabbing" : "pointer") : "default"
-      setCursor(canvas, css)
+      refreshCursor()
     }
+    // The tool's cursor follows its own state (terrain phases, hovers) and its settings (sub-tool switches).
+    const unsubCursor = controller.subscribe(refreshCursor)
 
     /** Select tool: floors act as background (see stripBackgroundFloor). */
     const background = <E extends ReturnType<typeof build>>(ev: E) => {
@@ -386,7 +393,14 @@ function ViewportBridge({
       if (leftDown || previewRef.current) return
       pendingMove = null
       // Clear hover previews when the pointer leaves the canvas.
-      controller.pointerMove(toToolPointerEvent(e, { ground: null, objectId: null, tokenId: null, hitPoint: null }, { grid: store.getState().scene.grid, snapMode: store.getState().snapMode, altHeld: false }))
+      controller.pointerMove(
+        toToolPointerEvent(
+          e,
+          { ground: null, objectId: null, tokenId: null, hitPoint: null },
+          { grid: store.getState().scene.grid, snapMode: store.getState().snapMode, altHeld: false },
+          { origin: canvas.getBoundingClientRect() }
+        )
+      )
       if (info.getState().cursor) info.setState({ cursor: null })
     }
 
@@ -401,6 +415,7 @@ function ViewportBridge({
     canvas.addEventListener("contextmenu", onContextMenu)
     return () => {
       if (raf) cancelAnimationFrame(raf)
+      unsubCursor()
       canvas.removeEventListener("pointerdown", onPointerDown)
       canvas.removeEventListener("pointermove", onPointerMove)
       canvas.removeEventListener("pointerup", onPointerUp)
@@ -412,15 +427,15 @@ function ViewportBridge({
     }
   }, [engine, canvas, store, controller, extras, info])
 
-  // Tool switches while hovering: refresh the CSS cursor.
+  // Tool switches while hovering (and entering / leaving the player preview): refresh the CSS cursor.
   React.useEffect(() => {
     if (!canvas) return
-    const apply = (tool: string) => setCursor(canvas, previewRef.current ? "default" : tool === "select" ? "default" : "crosshair")
-    apply(store.getState().tool)
+    const apply = () => setCursor(canvas, previewRef.current ? "default" : editorCursor(controller, false))
+    apply()
     return store.subscribe((s, prev) => {
-      if (s.tool !== prev.tool) apply(s.tool)
+      if (s.tool !== prev.tool) apply()
     })
-  }, [canvas, store, previewTokenId])
+  }, [canvas, store, controller, previewTokenId])
 
   return null
 }

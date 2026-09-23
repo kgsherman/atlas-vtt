@@ -11,7 +11,7 @@ import { parseClipboardText, serializeClipboard, validatePastedItems } from "./c
 import { sceneChangeFromPatches } from "./sceneChange"
 import { closestOnSegment, constrainAngle, edgeSnapMode, effectiveSnapMode, placeOpening, snapTokenPosition, snapWallPoint } from "./snapping"
 import { fixtureScene } from "./test-utils"
-import { alignDelta, applyMove, applyRotation, normalizeAngle, planMove, rotateQuarter, rotationPivot, snapDragDelta } from "./transform"
+import { alignDelta, applyMove, applyRotation, boundsPivot, normalizeAngle, planMove, rotateQuarter, rotationPivot, snapDragDelta } from "./transform"
 
 const grid: GridSettings = { cellSize: 5, width: 20, depth: 20, diagonalRule: "5-5-5" }
 
@@ -212,6 +212,9 @@ describe("transform", () => {
     expect(rotationPivot(f.scene, planMove(f.scene, [wall.id]), "center")).toEqual({ x: 10, z: 0 })
     expect(rotationPivot(f.scene, planMove(f.scene, [wall.id]), "free")).toEqual({ x: 7.5, z: 0 })
     expect(rotationPivot(f.scene, planMove(f.scene, []), "free")).toBeNull()
+    // The same rule for bare bounds (terrain shapes).
+    expect(boundsPivot(grid, { x: 0, z: 0, w: 15, d: 3 }, "center")).toEqual({ x: 10, z: 0 })
+    expect(boundsPivot(grid, { x: 0, z: 0, w: 15, d: 3 }, "free")).toEqual({ x: 7.5, z: 1.5 })
   })
 
   it("drag deltas snap the grabbed item's anchor like placement does", () => {
