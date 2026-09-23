@@ -10,13 +10,7 @@
  * code and puts the return path back in the address bar, all before services start (so the callback
  * page never signs in a fresh guest first).
  */
-import {
-  exchangeAuthCode,
-  linkAccount,
-  parseAuthCallback,
-  signInWithProvider,
-  type AccountProvider,
-} from "@/net/auth"
+import { ACCOUNT_PROVIDERS, exchangeAuthCode, linkAccount, parseAuthCallback, signInWithProvider, type AccountProvider } from "@/net/auth"
 import { NetError, type AtlasClient } from "@/net/supabase"
 
 import type { KeyValueStorage } from "./mode"
@@ -75,7 +69,7 @@ function readPending(storage: KeyValueStorage | null): PendingAuth | null {
   if (!raw) return null
   try {
     const v = JSON.parse(raw) as Partial<PendingAuth>
-    if ((v.intent !== "link" && v.intent !== "sign_in") || v.provider !== "discord") return null
+    if ((v.intent !== "link" && v.intent !== "sign_in") || !isAccountProvider(v.provider)) return null
     return { intent: v.intent, provider: v.provider, returnTo: safeReturnPath(v.returnTo) }
   } catch {
     return null
@@ -170,8 +164,16 @@ export async function finishAuthRedirect(client: AtlasClient, env: FinishAuthRed
   return outcome
 }
 
+export function isAccountProvider(provider: unknown): provider is AccountProvider {
+  return (ACCOUNT_PROVIDERS as readonly unknown[]).includes(provider)
+}
+
+const PROVIDER_LABELS: Record<AccountProvider, string> = {
+  discord: "Discord",
+}
+
 /** Human name of a provider ("Discord"); unknown providers are capitalised. */
 export function providerLabel(provider: string): string {
-  if (provider === "discord") return "Discord"
+  if (isAccountProvider(provider)) return PROVIDER_LABELS[provider]
   return provider ? provider.charAt(0).toUpperCase() + provider.slice(1) : "your account"
 }

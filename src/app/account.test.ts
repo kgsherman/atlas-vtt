@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import type { AtlasClient } from "@/net/supabase"
 
-import { AUTH_CALLBACK_PATH, finishAuthRedirect, safeReturnPath, type FinishAuthRedirectEnv } from "./account"
+import { AUTH_CALLBACK_PATH, finishAuthRedirect, isAccountProvider, providerLabel, safeReturnPath, type FinishAuthRedirectEnv } from "./account"
 import type { KeyValueStorage } from "./mode"
 
 function memoryStorage(entries: Record<string, string> = {}): KeyValueStorage & { data: Map<string, string> } {
@@ -100,5 +100,19 @@ describe("finishAuthRedirect", () => {
     const e = env("?code=c", storage)
     await finishAuthRedirect(client, e)
     expect(e.replaced).toEqual(["/"])
+  })
+})
+
+describe("providers", () => {
+  it("recognises only the providers Atlas offers", () => {
+    expect(isAccountProvider("discord")).toBe(true)
+    expect(isAccountProvider("email")).toBe(false)
+    expect(isAccountProvider(undefined)).toBe(false)
+  })
+
+  it("labels known and unknown providers", () => {
+    expect(providerLabel("discord")).toBe("Discord")
+    expect(providerLabel("github")).toBe("Github")
+    expect(providerLabel("")).toBe("your account")
   })
 })

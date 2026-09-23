@@ -16,12 +16,12 @@ import { paths, preloadRoute } from "@/app/routes"
 import { useServices } from "@/app/services"
 import { useAsync, useOnFocus } from "@/app/useAsync"
 import { AppHeader } from "@/components/app/AppHeader"
-import { DiscordIcon } from "@/components/app/DiscordIcon"
 import { HomeHero } from "@/components/app/HomeHero"
 import { SampleSceneCard } from "@/components/app/SampleSceneCard"
 import { SceneCard, SceneCardSkeleton, type SceneAction } from "@/components/app/SceneCard"
 import { DeleteSceneDialog, RenameSceneDialog, ShareSceneDialog } from "@/components/app/SceneDialogs"
 import { SessionsPanel } from "@/components/app/SessionsPanel"
+import { SignInButtons } from "@/components/app/SignInButtons"
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
@@ -494,7 +494,6 @@ const GUEST_NOTICE_KEY = "atlas-vtt:guest-notice-dismissed"
 
 /** Cloud guests with scenes: nudge towards a permanent account (dismissible per browser). */
 function GuestAccountNotice() {
-  const services = useServices()
   const [dismissed, setDismissed] = React.useState(() => {
     try {
       return localStorage.getItem(GUEST_NOTICE_KEY) === "1"
@@ -502,7 +501,6 @@ function GuestAccountNotice() {
       return false
     }
   })
-  const [busy, setBusy] = React.useState(false)
   if (dismissed) return null
 
   const dismiss = () => {
@@ -511,16 +509,6 @@ function GuestAccountNotice() {
       localStorage.setItem(GUEST_NOTICE_KEY, "1")
     } catch {
       // Storage blocked: hidden for this page only.
-    }
-  }
-
-  const signIn = async () => {
-    setBusy(true)
-    try {
-      await services.signIn("discord")
-    } catch (err) {
-      setBusy(false)
-      toast.error("Couldn't reach Discord", { description: userMessage(err) })
     }
   }
 
@@ -533,10 +521,7 @@ function GuestAccountNotice() {
         <Button size="xs" variant="ghost" onClick={dismiss}>
           Not now
         </Button>
-        <Button size="xs" variant="outline" onClick={signIn} disabled={busy}>
-          {busy ? <Spinner data-icon="inline-start" /> : <DiscordIcon data-icon="inline-start" />}
-          Continue with Discord
-        </Button>
+        <SignInButtons orientation="horizontal" size="xs" />
       </AlertAction>
     </Alert>
   )

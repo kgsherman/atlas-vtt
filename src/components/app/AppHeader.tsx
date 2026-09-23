@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils"
 
 import { AppLogo } from "./AppLogo"
 import { IdentityChip } from "./IdentityChip"
+import { LogInButton } from "./LogInButton"
 import { ModeBadge } from "./ModeBadge"
 import { ThemeToggle } from "./ThemeToggle"
 
@@ -22,6 +23,7 @@ export function AppHeader({ children, className }: { children?: React.ReactNode;
         <div className="flex items-center gap-1 sm:gap-2">
           <ModeBadge />
           <ThemeToggle />
+          <LogInButton />
           <IdentityChip />
         </div>
       </div>

@@ -16,11 +16,11 @@ import { Spinner } from "@/components/ui/spinner"
 import { DISPLAY_NAME_MAX, normalizeDisplayName } from "@/net/auth"
 import { cn } from "@/lib/utils"
 
-import { DiscordIcon } from "./DiscordIcon"
+import { ProviderIcon, SignInButtons } from "./SignInButtons"
 
 /**
  * Avatar + display name; opens an inline editor for the name players see and, in Cloud mode, the
- * account: a guest can create a permanent account (Discord), a signed-in user can sign out.
+ * account: a guest can create a permanent account, a signed-in user can sign out.
  */
 export function IdentityChip({ className }: { className?: string }) {
   const { identity } = useServices()
@@ -119,31 +119,20 @@ function DisplayNameForm({ onDone }: { onDone: () => void }) {
 
 function AccountSection() {
   const services = useServices()
-  const [busy, setBusy] = React.useState<"sign-in" | "sign-out" | null>(null)
+  const [busy, setBusy] = React.useState(false)
   const { identity } = services
 
   if (services.mode !== "supabase") {
     return <p className="text-[0.7rem] text-muted-foreground">Local user · this tab. Accounts need Cloud mode.</p>
   }
 
-  const signIn = async () => {
-    setBusy("sign-in")
-    try {
-      await services.signIn("discord")
-      // The browser is leaving for Discord: keep the spinner.
-    } catch (err) {
-      setBusy(null)
-      toast.error("Couldn't reach Discord", { description: userMessage(err) })
-    }
-  }
-
   const signOut = async () => {
-    setBusy("sign-out")
+    setBusy(true)
     try {
       // The app restarts as a new guest (ServicesProvider watches the auth state).
       await services.signOut()
     } catch (err) {
-      setBusy(null)
+      setBusy(false)
       toast.error("Couldn't sign out", { description: userMessage(err) })
     }
   }
@@ -154,14 +143,11 @@ function AccountSection() {
         <div className="flex flex-col gap-1">
           <p className="text-xs font-medium">Guest in this browser</p>
           <p className="text-xs/relaxed text-muted-foreground">
-            Your scenes and games live in this browser only. Create an account to keep them and use them anywhere. Already have one? The same button signs you
-            in.
+            Your scenes and games live in this browser only. Create an account to keep them and use them anywhere. Already have one? Continue the same way to
+            sign in.
           </p>
         </div>
-        <Button variant="outline" className="w-full" onClick={signIn} disabled={busy !== null}>
-          {busy === "sign-in" ? <Spinner data-icon="inline-start" /> : <DiscordIcon data-icon="inline-start" />}
-          Continue with Discord
-        </Button>
+        <SignInButtons />
       </div>
     )
   }
@@ -172,12 +158,12 @@ function AccountSection() {
       <div className="flex min-w-0 flex-1 flex-col">
         <span className="text-[0.7rem] text-muted-foreground">Signed in with {provider}</span>
         <span className="flex min-w-0 items-center gap-1.5 text-xs font-medium">
-          {identity.account.provider === "discord" && <DiscordIcon className="size-3.5 shrink-0 text-muted-foreground" />}
+          <ProviderIcon provider={identity.account.provider} className="size-3.5 shrink-0 text-muted-foreground" />
           <span className="truncate">{identity.account.name ?? provider}</span>
         </span>
       </div>
-      <Button variant="ghost" size="sm" onClick={signOut} disabled={busy !== null}>
-        {busy === "sign-out" ? <Spinner data-icon="inline-start" /> : <LogOutIcon data-icon="inline-start" />}
+      <Button variant="ghost" size="sm" onClick={signOut} disabled={busy}>
+        {busy ? <Spinner data-icon="inline-start" /> : <LogOutIcon data-icon="inline-start" />}
         Sign out
       </Button>
     </div>
