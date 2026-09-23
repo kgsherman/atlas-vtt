@@ -106,6 +106,17 @@ begin
 end
 $$;
 
+grant execute on function pg_temp.as_service() to authenticated, anon;
+grant select, insert on atlas_results to service_role;
+grant usage on sequence atlas_results_n_seq to service_role;
+grant execute on function pg_temp.check(text, boolean, text) to service_role;
+grant execute on function pg_temp.eq(text, text, text) to service_role;
+grant execute on function pg_temp.try(text) to service_role;
+grant execute on function pg_temp.val(text) to service_role;
+grant execute on function pg_temp.login(uuid) to service_role;
+grant execute on function pg_temp.logout() to service_role;
+grant execute on function pg_temp.as_service() to service_role;
+
 do $$
 declare
   g uuid := gen_random_uuid();   -- the guest that made things

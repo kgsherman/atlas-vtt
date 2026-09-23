@@ -955,10 +955,13 @@ The SQL suites run on the linked project, each in a transaction that is rolled b
 | `tile_chunks_test.sql` | 22/22 |
 | `quotas_test.sql` | 27/27 |
 | `scene_asset_cleanup_test.sql` | passes |
+| `guest_merge_test.sql` | 28/28 |
 
 These were last run in wave 3 (`rls_test.sql` in its final verification, the others right after its
-migrations were applied). No migration or SQL test has changed since, so they were not re-run for wave 4;
-the applied migrations (`list_migrations`, 16) still match `supabase/migrations/` one to one.
+migrations were applied); `guest_merge_test.sql` ran right after `*_guest_merge.sql` was applied, and the
+guest merge was also checked end to end against the deployed `merge-guest` function
+(`src/net/guestMerge.live.supabase.test.ts`). The applied migrations (`list_migrations`, 17) match
+`supabase/migrations/` one to one.
 
 Security advisors report only the intentional warnings:
 - signed-in users can execute the `SECURITY DEFINER` RPCs;

@@ -219,7 +219,8 @@ ATLAS_LIVE_SUPABASE=1 npx vitest run src/net/live.supabase.test.ts   # opt-in, u
 
 The live Supabase tests (`src/net/live.supabase.test.ts`, `src/net/host/live.supabase.test.ts` and
 `src/net/assets/live.assets.supabase.test.ts`) create anonymous users that the publishable key cannot
-delete.
+delete. `src/net/guestMerge.live.supabase.test.ts` (needs the deployed `merge-guest` function) merges a
+guest into a new email sign-up and prints that permanent user's id for deletion.
 
 **SQL tests** (`supabase/tests/*.sql`: RLS, RPCs, Realtime authorisation, Storage policies, tile chunks,
 per-account quotas).
