@@ -75,6 +75,19 @@ interface WarmableProgram {
   program: WebGLProgram
   getUniforms(): unknown
   getAttributes(): unknown
+  name?: string
+  cacheKey?: string
+  vertexShader?: WebGLShader
+  fragmentShader?: WebGLShader
+}
+
+interface ShaderTiming {
+  program: string
+  ms: number
+  fragmentChars: number | null
+  vertexChars: number | null
+  /** ANGLE's HLSL / GLSL output, where WEBGL_debug_shaders is exposed. */
+  translatedFragmentChars: number | null
 }
 
 /** Share of the load progress for compiling; the rest is the first shadow captures (settle). */
@@ -150,6 +163,9 @@ export class AtlasEngine implements Engine {
   private serialTotal = 0
   /** Programs whose first-use work is done (warmPrograms). */
   private readonly warmed = new WeakSet<object>()
+  /** `?debugShaders=1` in the page URL: per-program timings of each hold, logged when it ends. */
+  private readonly shaderTimings: { rows: ShaderTiming[]; submitMs: number } | null =
+    typeof location !== "undefined" && new URLSearchParams(location.search).has("debugShaders") ? { rows: [], submitMs: 0 } : null
   private loadState: EngineLoadState = LOADED
   /** When the frames after a hold began, while the first captures fill (settle). */
   private settleSince: number | null = null
@@ -924,7 +940,12 @@ export class AtlasEngine implements Engine {
     const t0 = performance.now()
     do {
       const unit = this.serialQueue.shift()!
+      // Programs submitted earlier (the lighting system's capture programs) first, so each wait below is
+      // this unit's own compile.
+      this.warmPrograms(Infinity)
+      const t = performance.now()
       void this.compileHolderFor(unit.holder, unit.target)
+      if (this.shaderTimings) this.shaderTimings.submitMs += performance.now() - t
       for (const c of unit.holder.children) if ((c as THREE.InstancedMesh).isInstancedMesh) (c as THREE.InstancedMesh).dispose()
       this.warmPrograms(Infinity)
       this.serialDone++
@@ -1019,6 +1040,7 @@ export class AtlasEngine implements Engine {
       }
     }
     if (this.holdSince !== null) {
+      this.logShaderTimings(now - this.holdSince)
       this.holdSince = null
       // Past the deadline: whatever is left compiles when first drawn.
       this.serialQueue = []
@@ -1063,11 +1085,59 @@ export class AtlasEngine implements Engine {
         left = true
         break
       }
+      const t = performance.now()
       p.getUniforms()
       p.getAttributes()
+      if (this.shaderTimings) this.shaderTimings.rows.push(this.shaderTiming(p, performance.now() - t))
       this.warmed.add(p)
     }
     return left
+  }
+
+  /** `?debugShaders=1`: one row per program warmed during a hold (see logShaderTimings). */
+  private shaderTiming(p: WarmableProgram, ms: number): ShaderTiming {
+    const gl = this.renderer.getContext()
+    // Layer mask of three.js' program key (4th from the end): bit 0 = instancing.
+    const parts = (p.cacheKey ?? "").split(",")
+    const mask = Number(parts[parts.length - 4])
+    const debug = gl.getExtension("WEBGL_debug_shaders") as { getTranslatedShaderSource(s: WebGLShader): string } | null
+    const length = (sh: WebGLShader | undefined, translated: boolean) => {
+      if (!sh) return null
+      try {
+        return translated ? (debug ? debug.getTranslatedShaderSource(sh).length : null) : (gl.getShaderSource(sh)?.length ?? null)
+      } catch {
+        return null
+      }
+    }
+    return {
+      program: `${p.name || "(unnamed)"}${Number.isFinite(mask) && mask & 1 ? " [instanced]" : ""}`,
+      ms: Math.round(ms * 10) / 10,
+      fragmentChars: length(p.fragmentShader, false),
+      vertexChars: length(p.vertexShader, false),
+      translatedFragmentChars: length(p.fragmentShader, true),
+    }
+  }
+
+  /** `?debugShaders=1`: print the hold's per-program first-use times (the compile wait on Firefox), slowest first. */
+  private logShaderTimings(holdMs: number): void {
+    const t = this.shaderTimings
+    if (!t || t.rows.length === 0) return
+    const rows = t.rows.sort((a, b) => b.ms - a.ms)
+    const gl = this.renderer.getContext()
+    const dbg = gl.getExtension("WEBGL_debug_renderer_info")
+    const gpu = String(gl.getParameter(dbg ? dbg.UNMASKED_RENDERER_WEBGL : gl.RENDERER))
+    const mode = this.parallelCompile() ? "parallel (times are first-use only)" : "serial (times include the compile)"
+    const sum = rows.reduce((a, r) => a + r.ms, 0)
+    const lines = [
+      `Atlas shader timings — ${navigator.userAgent}`,
+      `GPU: ${gpu} | tier: ${this.quality} | mode: ${mode}`,
+      `hold ${Math.round(holdMs)} ms | ${rows.length} programs, ${Math.round(sum)} ms waiting | ${Math.round(t.submitMs)} ms submitting`,
+      "ms\tprogram\tfrag chars\tvert chars\ttranslated frag chars",
+      ...rows.map((r) => `${r.ms}\t${r.program}\t${r.fragmentChars ?? "?"}\t${r.vertexChars ?? "?"}\t${r.translatedFragmentChars ?? "n/a"}`),
+    ]
+    console.info(lines.join("\n"))
+    t.rows = []
+    t.submitMs = 0
   }
 
   /**
