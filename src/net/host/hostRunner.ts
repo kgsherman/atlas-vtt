@@ -626,7 +626,7 @@ export class HostRunnerImpl implements HostRunner {
       const parsed = parseScene(content.scene)
       if (!parsed.ok) throw new Error(`The session's map cannot be loaded (${parsed.error}${parsed.issues[0] ? `: ${parsed.issues[0]}` : ""}).`)
       const origin = content.sceneId ? { sceneId: content.sceneId, version: content.sceneVersion, dirty: false } : null
-      return { state: createGameState({ sessionId: sid, roomCode, scene: parsed.scene, origin }), seeded: true }
+      return { state: createGameState({ sessionId: sid, roomCode, scene: parsed.scene, origin, freeAssets: content.freeAssets ?? [] }), seeded: true }
     }
     const parsed = parseGameStateDetailed(content.state)
     if (!parsed.ok) throw new Error(`The saved game cannot be loaded (${parsed.issues[0] ?? "invalid"}).`)

@@ -6,6 +6,7 @@ import * as React from "react"
 
 import type { AccountProvider, AtlasIdentity } from "@/net/auth"
 import type { AssetStore, BackdropTileSource } from "@/net/assets/types"
+import type { FreeAssetsRepo } from "@/net/freeAssets"
 import type { GuestMergeResult } from "@/net/guestMerge"
 import type { ScenesRepo } from "@/net/scenesRepo"
 import type { SessionsRepo } from "@/net/sessionsRepo"
@@ -19,6 +20,8 @@ export interface AppServices {
   sessions: SessionsRepo
   transport: Transport
   assets: AssetStore
+  /** The free asset catalog (token models, …); unavailable in local mode. */
+  freeAssets: FreeAssetsRepo
   /** Player-side backdrop tile source for a session. */
   tilesFor(sessionId: string): BackdropTileSource
   /** Update the display name (profiles / local identity); returns the normalised name. */

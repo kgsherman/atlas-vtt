@@ -4,9 +4,16 @@ import { MIGRATIONS, migrateToCurrent, readSchemaVersion, type Migration } from 
 import { SCENE_SCHEMA_VERSION } from "./types"
 
 describe("migrateToCurrent", () => {
-  it("has no migrations while the schema is at v1", () => {
-    expect(SCENE_SCHEMA_VERSION).toBe(1)
-    expect(Object.keys(MIGRATIONS)).toEqual([])
+  it("has one migration per version step", () => {
+    expect(SCENE_SCHEMA_VERSION).toBe(2)
+    expect(Object.keys(MIGRATIONS)).toEqual(["1"])
+  })
+
+  it("migrates v1 documents (no token models) to v2 unchanged", () => {
+    const doc = { schemaVersion: 1, name: "x", tokens: { t: { id: "t" } } }
+    const res = migrateToCurrent(doc)
+    expect(res).toEqual({ ok: true, doc: { schemaVersion: 2, name: "x", tokens: { t: { id: "t" } } }, from: 1 })
+    expect(doc.schemaVersion).toBe(1)
   })
 
   it("passes current documents through untouched", () => {

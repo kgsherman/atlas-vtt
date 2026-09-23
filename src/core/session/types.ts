@@ -21,6 +21,7 @@ import type {
   WindowObject,
 } from "../scene/types"
 import type { EncodedGrades, EncodedMask } from "../vision/types"
+import type { FreeAssetCategory } from "./freeAssets"
 
 // ===========================================================================
 // Player-facing (wire) types — ALLOWLISTS. Build them field by field in filter.ts, never by spread.
@@ -57,7 +58,7 @@ export type PlayerObject =
   | PlayerProp
   | PlayerLight
 
-export type PlayerToken = Pick<Token, "id" | "levelId" | "position" | "size" | "height" | "color" | "imageUrl"> & {
+export type PlayerToken = Pick<Token, "id" | "levelId" | "position" | "size" | "height" | "color" | "imageUrl" | "model"> & {
   label: string | null
   /** Only for tokens the player controls or sees through (visionTokenIds). */
   name?: string
@@ -184,6 +185,11 @@ export interface GameState {
   seq: number
   /** Library scene the map comes from (absent / null: unknown, e.g. states saved before this field). */
   origin?: SceneOrigin | null
+  /**
+   * Free asset categories loaded into this game (chosen when it was started, changeable by the DM):
+   * what the host's asset pickers offer. DM-only; never sent to players. Absent = none.
+   */
+  freeAssets?: FreeAssetCategory[]
 }
 
 // ===========================================================================
@@ -263,3 +269,5 @@ export type DmCommand =
   | { t: "remove-player"; userId: string }
   | { t: "rebind-player"; fromUserId: string; toUserId: string }
   | { t: "reset-fog"; userId?: string }
+  /** Choose the free asset categories loaded into the game (GameState.freeAssets). */
+  | { t: "set-free-assets"; categories: FreeAssetCategory[] }

@@ -35,7 +35,8 @@ src/
     picking/            Ground/object/token picking
   editor/               DM editor state (zustand) + tools
   play/                 Play-mode controllers (token selection, drag-to-move, ruler, level switching)
-  net/                  Supabase client, auth, repositories, transports, host runner (+ vision worker), player client
+  net/                  Supabase client, auth, repositories, transports, host runner (+ vision worker), player client,
+                        free asset catalog (freeAssets.ts)
     assets/             Map images: import (decode / resample / WebP), DM asset stores, per-player tile chunks
     host/               DM-side host runner, vision worker client, flush pipeline, persistence, backdrop tiler
     player/             Player client (sync rules, requests), backdrop compositor
@@ -46,6 +47,7 @@ src/
   dev/                  Dev-only render harness (`dev/render.html`) and the Vineyard build helpers
   integration/          Cross-module consistency tests (render ↔ occlusion, vision ↔ movement, host → player, editor → session)
 supabase/migrations/    SQL: schema, RLS, RPCs, realtime policies
+scripts/free-assets/    Build (STL → LOD GLB + thumbnail) and publish free token models (§4.3, §6.4)
 ```
 
 Dependency rule: `core` imports nothing outside `core` (immer types allowed). `render` imports `core`.
@@ -150,7 +152,12 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
 
 ## 3. Scene document & versioning
 
-- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 1`.
+- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 2` (v2 added the
+  optional `Token.model`; the v1 → v2 migration is the identity).
+- `Token.model` (optional): the 3D figure the token is drawn with, a reference `free:<assetId>` into the
+  free asset catalog (category `token-models`, §6.4; `core/scene/tokenModel.ts`). The schema accepts only
+  that form (`^free:[a-z0-9][a-z0-9-]{0,63}$`), never a URL, so a document cannot make clients fetch an
+  arbitrary host. Other sources (e.g. models uploaded with a scene) would get their own prefix.
 - `core/scene/schema.ts`: zod **strict** schemas (`z.strictObject` at every depth) for the current version,
   with the bounds exported as `SCENE_LIMITS`:
   - grid ≤ 200×200 integer cells, cell size 0.5–100 ft; 1–32 levels, ≤ 20k objects, ≤ 1000 tokens (counted
@@ -292,6 +299,22 @@ direction D"), stored as octahedral linear-distance maps:
   (closed / locked / open).
 - Editor: per-level visibility toggles; ghosts of adjacent levels draw after opaques as depth-only pre-pass
   (clone, `colorWrite:false`) then colour (`depthWrite:false`, `LessEqual`, opacity ≈ 0.25).
+- **Token models** (`render/engine/tokenModels.ts`): a token with `model` draws that figure on its base
+  instead of the default body and portrait, once the model has loaded (until then, or if it fails, the
+  default body). The engine resolves references through `EngineOptions.tokenModels` (the app passes the
+  free asset catalog: `EngineCanvas` → `services.freeAssets.tokenModelUrl`) and loads every model the scene
+  references when the scene syncs; GLTFLoader and the meshopt decoder are imported with the first one.
+  Files are GLBs in footprint units (1 = the footprint side, feet on y = 0, facing +Z) with meshes `lod0`,
+  `lod1`, … (most detailed first); parsed geometry is cached per URL for the page. The figure is scaled to
+  the base disc (side × 0.9), coloured as unpainted resin with a hint of the token colour, and drawn with
+  a second instance of the token material whose rim light is faint (`TOKEN_MODEL_RIM`: a sculpt's grazing
+  surfaces would otherwise wash out); same program, no recompile. One InstancedMesh per (level, LOD
+  geometry), sharing the geometry's buffers. The LOD is chosen per token from its footprint's size in
+  physical pixels (`chooseLod`: the most detailed LOD with at least `MODEL_PX_PER_TRIANGLE[tier]` px² per
+  triangle — 4 / 3 / 2 / 1.25 from low to ultra — with a 10% hysteresis), because sub-pixel triangles cost
+  the lit token shader 2×2 quads each; the layer re-buckets when the zoom changes a token's LOD. Picking
+  raycasts an invisible body-shaped proxy as tall as the figure, never the sculpt. The free models are
+  24k / 6k / 1.5k triangles (`scripts/free-assets/build-token-models.mjs`).
 - Tokens are drawn whole if present in the scene data (no per-pixel discard), with a 150 ms fade on appear/disappear.
   They are opaque at rest and transparent only while that fade runs (PERFORMANCE §5). Their ground heights,
   like the light fixtures', come from the scene's `groundIndex` (one object scan per scene, not per token).
@@ -535,6 +558,7 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
     their carrier token is in the view (resolved position, `emitting = on`). Never `attachedTokenId`.
   - **tokens**: controlled + vision tokens always; others only while in `visibleTokenIds`; never hidden. Other
     players' tokens get `label` only; `name/eyeHeight/vision/speed` only for controlled/vision tokens.
+    `model` (a `free:<id>` reference, §3) is sent with every token sent: it is what the token looks like.
   - **levels**: known levels (any explored cell) + stubs (`known:false`, `name:null`) for levels referenced by a
     sent connector or own token. **terrain**: chunks overlapping explored cells, samples touching no explored cell
     zeroed. **masks**: perception (current), explored (persistent), sunlit (current ∧ perceived).
@@ -667,6 +691,15 @@ Tables (RLS enabled on every table; default privileges revoke anon; functions re
 - `session_state(session_id, epoch, state jsonb, updated_at)` — DM only; writes via `save_session_state`.
 - `player_views(session_id, user_id, epoch, seq, view jsonb, updated_at)` — player SELECT own row while active
   member; writes DM only via `upsert_player_view`.
+- `free_assets(id slug, category, name, description, path, thumbnail_path, bytes, metadata jsonb, attribution,
+  sort_order)` — the free asset catalog (migration `*_free_assets.sql`): SELECT for every signed-in user
+  (guests included), no client writes. Files live in the PUBLIC bucket `free-assets` (`{category}/{file}`,
+  GLB / PNG / WebP ≤ 20 MiB), served from `/storage/v1/object/public/…` so a player can load a token's model
+  without any grant; there is no client write policy on it either, so assets are published with a secret
+  key (`scripts/free-assets/upload.mjs`). Categories: `private.free_asset_categories()` (today
+  `token-models`), mirrored by the table's check and `FREE_ASSET_CATEGORIES` (`core/session/freeAssets.ts`).
+  Token model metadata: `{lods: [triangles…], height, radius (footprint sides), size?}`. `net/freeAssets.ts`
+  reads the catalog once per app run; local mode has none.
 
 Helpers in schema `private` (`set search_path = ''`; execute revoked from public / anon / authenticated,
 then granted to authenticated only for the ones policies call, which are `security definer` and stable):
@@ -685,8 +718,9 @@ then granted to authenticated only for the ones policies call, which are `securi
 RPCs (`security definer` unless noted, `search_path=''`, execute granted to authenticated
 only; return ids/booleans/small records, never whole rows; errors carry a stable MESSAGE code mapped by
 `net/supabase.ts`): `create_scene`, `save_scene_version` (optimistic `p_base_version`), `set_scene_visibility`,
-`set_display_name` (`security invoker`: own profile row under RLS), `create_session(scene_id)` (owner check, copies the scene into session_state,
-generates an 8-char Crockford room code), `join_session(room_code, display_name)`, `session_info(sid)`,
+`set_display_name` (`security invoker`: own profile row under RLS), `create_session(scene_id, free_assets = '{}')` (owner check, copies the scene into session_state,
+generates an 8-char Crockford room code; `free_assets`: the categories the game loads, validated against
+`private.free_asset_categories()`, stored de-duplicated and sorted in the seed's `freeAssets`), `join_session(room_code, display_name)`, `session_info(sid)`,
 `list_session_members(sid)` (DM; `security invoker`: it reads only rows the DM's RLS already allows),
 `set_member_status(sid, uid, status)` (DM), `claim_host(sid)`,
 `save_session_state`, `upsert_player_view`, `end_session(sid)`, `get_shared_scene(slug)`, and (`security invoker`,
@@ -797,6 +831,14 @@ script checks that it is off.
 - DM play controls: lock/unlock movement (global and per player), shared vision toggle, enforce speed, door and
   light toggles, sun/moon on/off (scene patch), move any token, hide/reveal tokens, reveal secret doors, assign
   tokens to players, preview any token's vision, kick players.
+- Free assets: "Start a game" (library and editor, `components/app/StartGameDialog`) chooses the free asset
+  categories the game loads (remembered per browser); they reach `GameState.freeAssets` through the seed
+  (§6.4) and are DM-only (never sent). The host console's Assets tab switches categories
+  (`set-free-assets` DmCommand) and lists their assets: a token model click sets the selected token's
+  `model`, a scene patch like hiding a token (so it marks the map as edited and "Save map to library" keeps
+  it). The Tokens tab menu and the inspector's Model field (editor: every model; host "Edit map": the
+  game's categories, `FreeAssetScopeContext`) offer the same models. Unloading a category keeps the
+  models tokens already have.
 
 ---
 
@@ -938,6 +980,7 @@ run against a Vite dev server (Chromium, NVIDIA through WSL d3d12 unless noted; 
 | `multiplayer-supabase` | 29/30 on the Crooked Lantern, 38/39 on the Vineyard with map chunks: the one failure is the "Allow public access" dashboard check (see Known gaps, Security); public channels received no session data, the kicked member's subscription stopped after a token refresh, and ending the session deleted the players' chunks |
 | `multiplayer-latency` | 7/7 (120×120 daylit field: a 20-step move answered in 325–610 ms, a concurrent 1-step move in 609–617 ms over two runs) |
 | `host-save-map` | 12/12 |
+| `free-assets` | 12/12 (2026-09-23, against Supabase with the bucket files served from a local build via `ATLAS_FREE_ASSETS_DIR`: start dialog, Assets tab, the host and a player download and draw the model, unloading keeps it) |
 | `engine-leak` | 5/5 (24 editor visits, every engine context collected) |
 | `perf` | 36/36 (AMD iGPU medium and NVIDIA ultra × Crooked Lantern, Stress Test, Vineyard; numbers in `docs/PERFORMANCE.md`) |
 | `showcase` | 5/5 (the screenshots in `docs/screenshots/` were re-shot: the darkvision views changed with the colour lift of §4.1) |
@@ -963,11 +1006,12 @@ The SQL suites run on the linked project, each in a transaction that is rolled b
 | `quotas_test.sql` | 27/27 |
 | `scene_asset_cleanup_test.sql` | passes |
 | `guest_merge_test.sql` | 28/28 |
+| `free_assets_test.sql` | 17/17 (catalog and bucket policies, `create_session`'s categories) |
 
 These were last run in wave 3 (`rls_test.sql` in its final verification, the others right after its
 migrations were applied); `guest_merge_test.sql` ran right after `*_guest_merge.sql` was applied, and the
 guest merge was also checked end to end against the deployed `merge-guest` function
-(`src/net/guestMerge.live.supabase.test.ts`). The applied migrations (`list_migrations`, 17) match
+(`src/net/guestMerge.live.supabase.test.ts`). The applied migrations (`list_migrations`, 18) match
 `supabase/migrations/` one to one.
 
 Security advisors report only the intentional warnings:
@@ -1049,6 +1093,15 @@ Known gaps and deliberate limits:
   not in a worker.
 - Local mode crops tiles from the locally stored image. It is dev only and not a security boundary, like
   `LocalTransport`.
+
+**Free assets**
+
+- The four token models' creators and licences are not recorded yet (`free_assets.attribution` is null);
+  the Assets tab shows an attribution once a row has one.
+- Model figures cast no shadows, like every token (blob shadow only, §2 blocking table), and are one
+  resin colour: the GLBs carry no materials or textures.
+- Publishing needs a secret key (or a dashboard upload): clients have no write path to the bucket or the
+  catalog by design.
 
 **Multiplayer**
 

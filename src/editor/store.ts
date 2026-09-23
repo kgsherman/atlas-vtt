@@ -789,6 +789,8 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
           (d) => {
             const t = d.tokens[id]
             Object.assign(t, rest)
+            // `model: undefined` means the default body: drop the key instead of storing undefined.
+            if (Object.hasOwn(rest, "model") && rest.model === undefined) delete t.model
             // Attached lights keep their stored level aligned with their carrier's.
             for (const o of Object.values(d.objects)) {
               if (o.type === "light" && o.attachedTokenId === id && o.levelId !== t.levelId) o.levelId = t.levelId

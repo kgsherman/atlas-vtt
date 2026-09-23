@@ -151,6 +151,17 @@ describe("parseScene", () => {
     expect(parseScene(ok).ok).toBe(true)
   })
 
+  it("accepts free token model references only", () => {
+    for (const model of ["https://x.example/a.glb", "free:", "free:Elf", "free:-x", "elf-archer", 42]) {
+      rejects((d) => ((Object.values(d.tokens)[0] as Record<string, unknown>).model = model), /model/)
+    }
+    const ok: Record<string, any> = json(fullScene())
+    const token = Object.values(ok.tokens)[0] as Record<string, unknown>
+    token.model = "free:elf-archer"
+    const parsed = parseScene(ok)
+    expect(parsed.ok && Object.values(parsed.scene.tokens)[0].model).toBe("free:elf-archer")
+  })
+
   it("validates heightmaps", () => {
     const hmOf = (d: Record<string, any>) => (Object.values(d.levels) as Record<string, any>[]).find((l) => l.heightmap)!.heightmap
     rejects((d) => (hmOf(d).resolution = 3), /resolution/)

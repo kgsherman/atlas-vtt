@@ -8,11 +8,13 @@ import { toast } from "sonner"
 
 import { groundHeightAt, levelById } from "@/core/scene/queries"
 import type { DoorState, Id, Scene, Vec2 } from "@/core/scene/types"
+import type { FreeAssetCategory } from "@/core/session/freeAssets"
 import type { DmCommand, GameState } from "@/core/session/types"
 import type { HostRunnerImpl } from "@/net/host"
 import {
   setDirectionalPatches,
   setObjectsHiddenPatches,
+  setTokenModelPatches,
   setTokensHiddenPatches,
 } from "@/play"
 
@@ -31,6 +33,10 @@ export interface HostActions {
   setObjectsHidden(objectIds: Id[], hidden: boolean): void
   setSun(enabled: boolean): void
   resetFog(userId?: string): void
+  /** Token.model (`free:<id>`), or null for the default body. A map edit like hiding a token. */
+  setTokenModel(tokenIds: Id[], model: string | null): void
+  /** Free asset categories loaded into the game. */
+  setFreeAssets(categories: FreeAssetCategory[]): void
 }
 
 export function createHostActions(
@@ -146,6 +152,20 @@ export function createHostActions(
     setSun(enabled) {
       const s = scene()
       if (s) patch(setDirectionalPatches(s, enabled), "Couldn't change the sky")
+    },
+    setTokenModel(tokenIds, model) {
+      const s = scene()
+      if (s)
+        patch(
+          setTokenModelPatches(s, tokenIds, model),
+          "Couldn't change the token's model"
+        )
+    },
+    setFreeAssets(categories) {
+      dispatch(
+        { t: "set-free-assets", categories },
+        "Couldn't change the game's free assets"
+      )
     },
     resetFog(userId) {
       if (

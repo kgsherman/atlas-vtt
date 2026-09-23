@@ -196,3 +196,23 @@ describe("origin (the library scene the live map comes from)", () => {
     }
   })
 })
+
+describe("freeAssets (the free asset categories a game loads)", () => {
+  it("round-trips; states saved before the field still load; unknown categories are dropped", () => {
+    const state = playedState()
+    expect("freeAssets" in state).toBe(false)
+    for (const freeAssets of [[], ["token-models"]] as GameState["freeAssets"][]) {
+      const parsed = parseGameStateJson(serializeGameState({ ...state, freeAssets }))
+      expect(parsed?.freeAssets).toEqual(freeAssets)
+    }
+    // A newer app's category is ignored rather than making the game unloadable.
+    expect(parseGameState({ ...clone(state), freeAssets: ["maps", "token-models", "token-models"] })?.freeAssets).toEqual(["token-models"])
+  })
+
+  it("rejects a malformed list", () => {
+    const state = playedState()
+    for (const freeAssets of ["token-models", [1], new Array(17).fill("token-models")]) {
+      expect(parseGameState({ ...clone(state), freeAssets }), JSON.stringify(freeAssets)).toBeNull()
+    }
+  })
+})

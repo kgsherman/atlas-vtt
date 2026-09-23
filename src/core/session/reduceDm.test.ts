@@ -132,6 +132,20 @@ describe("play commands", () => {
     expect(viewerTokenIds(state, "p1")).toEqual([])
   })
 
+  it("set-free-assets chooses the game's free asset categories (DM-only: no player is dirtied)", () => {
+    const { state } = setup()
+    expect(state.freeAssets).toBeUndefined()
+    const r = reduceDm(state, { t: "set-free-assets", categories: ["token-models", "token-models"] })
+    expect(r.state.freeAssets).toEqual(["token-models"])
+    expect(r.dirtyPlayers).toEqual([])
+    expect(r.state.seq).toBe(state.seq + 1)
+    // The same set again is a no-op.
+    expect(reduceDm(r.state, { t: "set-free-assets", categories: ["token-models"] }).state).toBe(r.state)
+    expect(reduceDm(r.state, { t: "set-free-assets", categories: [] }).state.freeAssets).toEqual([])
+    // createGameState takes the seed's categories.
+    expect(createGameState({ sessionId: "s", roomCode: "R", scene: state.scene, freeAssets: ["token-models"] }).freeAssets).toEqual(["token-models"])
+  })
+
   it("reveal-object reveals a secret door to one or all players and remembers it", () => {
     const { state: s0, door } = setup()
     const secret = reduceDm(s0, { t: "apply-scene-patches", patches: [{ op: "replace", path: ["objects", door.id, "style"], value: "secret" }] }).state

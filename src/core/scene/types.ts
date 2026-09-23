@@ -14,7 +14,7 @@
  *    session. Live play state lives in the session's GameState copy (core/session).
  */
 
-export const SCENE_SCHEMA_VERSION = 1 as const
+export const SCENE_SCHEMA_VERSION = 2 as const
 
 export type Id = string
 
@@ -391,6 +391,11 @@ export interface Token {
   speed: number
   color: string
   imageUrl: string | null
+  /**
+   * 3D figure drawn on the token's base instead of the default body (core/scene/tokenModel.ts):
+   * `free:<assetId>` names a free asset of category "token-models". Absent = the default body.
+   */
+  model?: string
   /** DM-only: hidden tokens (and lights attached to them) do not exist for players. */
   hidden: boolean
   dmNotes?: string

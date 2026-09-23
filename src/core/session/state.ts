@@ -9,6 +9,7 @@ import { TOKEN_COLORS } from "../scene/defaults"
 import { levelById } from "../scene/queries"
 import type { Id, Scene, Token } from "../scene/types"
 import { SUBCELLS, type VisibilityResult } from "../vision/types"
+import { normalizeFreeAssetCategories, type FreeAssetCategory } from "./freeAssets"
 import { GAME_STATE_VERSION, type GameState, type RequestResult, type SceneOrigin } from "./types"
 import { own } from "./util"
 
@@ -44,7 +45,13 @@ export function isEmptyDelta(d: SceneDelta): boolean {
 
 export { own }
 
-export function createGameState(args: { sessionId: string; roomCode: string; scene: Scene; origin?: SceneOrigin | null }): GameState {
+export function createGameState(args: {
+  sessionId: string
+  roomCode: string
+  scene: Scene
+  origin?: SceneOrigin | null
+  freeAssets?: readonly FreeAssetCategory[]
+}): GameState {
   const state: GameState = {
     stateVersion: GAME_STATE_VERSION,
     sessionId: args.sessionId,
@@ -61,6 +68,7 @@ export function createGameState(args: { sessionId: string; roomCode: string; sce
     seq: 0,
   }
   if (args.origin !== undefined) state.origin = args.origin && { ...args.origin }
+  if (args.freeAssets !== undefined) state.freeAssets = normalizeFreeAssetCategories(args.freeAssets)
   return state
 }
 

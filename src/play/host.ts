@@ -176,6 +176,21 @@ export function setTokensHiddenPatches(
   })
 }
 
+/** Patches that give tokens a 3D model (`free:<id>`, Token.model) or, with null, the default body. */
+export function setTokenModelPatches(
+  scene: Scene,
+  tokenIds: readonly Id[],
+  model: string | null
+): Patch[] {
+  return scenePatches(scene, (d) => {
+    for (const id of tokenIds) {
+      if (!Object.hasOwn(d.tokens, id)) continue
+      if (model === null) delete d.tokens[id].model
+      else d.tokens[id].model = model
+    }
+  })
+}
+
 /** Patches that turn the sun/moon on or off. */
 export function setDirectionalPatches(scene: Scene, enabled: boolean): Patch[] {
   return scenePatches(scene, (d) => {

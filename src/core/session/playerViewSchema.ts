@@ -5,6 +5,7 @@
  */
 import { z } from "zod"
 
+import { TOKEN_MODEL_REF_RE } from "../scene/tokenModel"
 import { PLAYER_VIEW_VERSION, type PlayerView } from "./types"
 
 const MAX_ID = 64
@@ -176,6 +177,7 @@ export const playerTokenSchema = z.strictObject({
   height: nonNeg,
   color,
   imageUrl: text.nullable(),
+  model: z.string().regex(TOKEN_MODEL_REF_RE).optional(),
   label: text.nullable(),
   name: text.optional(),
   eyeHeight: num.optional(),

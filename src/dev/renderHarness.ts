@@ -20,6 +20,9 @@
  *   opacity   backdrop opacity 0..1 (1); tint 0 | 1 wall tint from the image (1)
  *   adaptive  1 = adaptive quality on (default 0: the requested tier stays fixed for measurements)
  *   portraits 1 = give every token a generated portrait image (token imageUrl)
+ *   models    "<url prefix>": token models are loaded from `<prefix>/<assetId>.glb`; with `modelids`
+ *             "id,id,…" the tokens (by name) get these free models in turn (e.g. the output folder of
+ *             scripts/free-assets/build-token-models.mjs, served with CORS)
  *   postview  ao | bloom: show one post-processing buffer (high / ultra tuning)
  *   floor     material id: every floor of the scene uses it (eyeballing procedural materials)
  *   tilt      player camera tilt, degrees                            (15)
@@ -358,7 +361,20 @@ async function main(): Promise<void> {
     for (const t of Object.values(scene.tokens)) scene.tokens[t.id] = { ...t, imageUrl: portraitUrl(t.name, t.color) }
     if (engineScene !== scene) for (const t of Object.values(engineScene.tokens)) engineScene.tokens[t.id] = { ...t, imageUrl: portraitUrl(t.name, t.color) }
   }
-  const engine = createEngine(canvas, { quality })
+  const modelPrefix = params.get("models")
+  const modelIds = (params.get("modelids") ?? "").split(",").filter(Boolean)
+  if (modelIds.length > 0) {
+    const byName = Object.values(scene.tokens).sort((a, b) => a.name.localeCompare(b.name))
+    byName.forEach((t, k) => {
+      const model = `free:${modelIds[k % modelIds.length]}`
+      scene.tokens[t.id] = { ...t, model }
+      if (engineScene !== scene && Object.hasOwn(engineScene.tokens, t.id)) engineScene.tokens[t.id] = { ...engineScene.tokens[t.id], model }
+    })
+  }
+  const engine = createEngine(canvas, {
+    quality,
+    tokenModels: modelPrefix ? { resolveUrl: async (ref) => `${modelPrefix}/${ref.replace(/^free:/, "")}.glb` } : undefined,
+  })
   if (engine instanceof AtlasEngine) engine.debugFreezeQuality(!flag("adaptive", false))
   engine.setScene(engineScene)
   const postView = params.get("postview")

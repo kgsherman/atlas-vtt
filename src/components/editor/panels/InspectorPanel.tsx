@@ -31,7 +31,10 @@ import type {
 import type { ObjectUpdate, TokenUpdate } from "@/editor/store"
 import { normalizeAngle } from "@/editor/transform"
 
-import { useEditorActions, useEditorContext, useEditorShallow, useEditorState } from "../context"
+import { tokenModelAsset, tokenModelChoices, useFreeAssets } from "@/app/freeAssets"
+import { freeTokenModelRef } from "@/core/scene/tokenModel"
+
+import { FreeAssetScopeContext, useEditorActions, useEditorContext, useEditorShallow, useEditorState } from "../context"
 import { ColorInput, FieldPair, FieldRow, Hint, NotesInput, NumberInput, PanelSection, Segmented, SelectInput, SliderInput, SwitchField, TextInput, type Option } from "../fields"
 import { degrees, formatFeet, itemLabel, LIGHT_PRESET_LABELS, objectKindLabel, OBJECT_TYPE_LABELS, radians, selectionSummary, tokenLabel, trimNumber } from "../lib/format"
 import { DirectionPicker, MaterialSelect, PropPicker } from "../pickers"
@@ -535,6 +538,7 @@ function TokenFields({ t }: { t: Token }) {
         <FieldRow label="Colour">
           <ColorInput className="flex-1" value={t.color} disabled={readOnly} onChange={(color) => update({ color })} />
         </FieldRow>
+        <TokenModelField t={t} readOnly={readOnly} onChange={(model) => update({ model })} />
         <FieldRow label="Level">
           <SelectInput value={t.levelId} options={levelOptions} disabled={readOnly} onValueChange={(levelId) => update({ levelId })} />
         </FieldRow>
@@ -567,6 +571,28 @@ function TokenFields({ t }: { t: Token }) {
         </div>
       </PanelSection>
     </>
+  )
+}
+
+const DEFAULT_BODY = "default"
+
+/** Token.model from the free token models (only when there is something to choose or show). */
+function TokenModelField({ t, readOnly, onChange }: { t: Token; readOnly: boolean; onChange(model: string | undefined): void }) {
+  const catalog = useFreeAssets()
+  const scope = React.useContext(FreeAssetScopeContext)
+  const choices = tokenModelChoices(catalog.data, scope)
+  if (choices.length === 0 && !t.model) return null
+  const options: Option<string>[] = [{ value: DEFAULT_BODY, label: "Default body" }]
+  for (const a of choices) {
+    const ref = freeTokenModelRef(a.id)
+    if (ref) options.push({ value: ref, label: a.name })
+  }
+  // A model the picker does not offer (not loaded in this game, or unknown) still shows as chosen.
+  if (t.model && !options.some((o) => o.value === t.model)) options.push({ value: t.model, label: tokenModelAsset(catalog.data, t.model)?.name ?? t.model })
+  return (
+    <FieldRow label="Model" hint="A 3D figure on the token's base, seen by everyone who sees the token.">
+      <SelectInput value={t.model ?? DEFAULT_BODY} options={options} disabled={readOnly} onValueChange={(v) => onChange(v === DEFAULT_BODY ? undefined : v)} />
+    </FieldRow>
   )
 }
 

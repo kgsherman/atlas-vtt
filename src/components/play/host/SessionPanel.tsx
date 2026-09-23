@@ -1,11 +1,13 @@
 /**
  * The DM's session sidebar: room code + invite link, host status (with "Take over" on standby), and
- * three tabs — Players (online state, token assignment, per-player movement lock, fog reset, kick),
- * Tokens (by level: hide/reveal, move to level, preview vision, focus) and Table (global locks, party
- * vision, speed rule, sun/moon, fog reset).
+ * four tabs — Players (online state, token assignment, per-player movement lock, fog reset, kick),
+ * Tokens (by level: hide/reveal, move to level, 3D model, preview vision, focus), Table (global locks,
+ * party vision, speed rule, sun/moon, fog reset) and Assets (the free asset categories this game
+ * loads, and their assets: token models go on the selected token).
  */
 import * as React from "react"
 import {
+  Box,
   Check,
   Copy,
   Crown,
@@ -18,6 +20,7 @@ import {
   LockOpen,
   Moon,
   MoreHorizontal,
+  Package,
   RotateCcw,
   ScanEye,
   Sun,
@@ -31,6 +34,13 @@ import {
 import { toast } from "sonner"
 
 import { copyText } from "@/app/clipboard"
+import { useServices } from "@/app/services"
+import {
+  assetsOf,
+  tokenModelAsset,
+  tokenModelChoices,
+  useFreeAssets,
+} from "@/app/freeAssets"
 import { currentMode, withModeParam } from "@/app/mode"
 import { paths } from "@/app/routes"
 import { useConfirm } from "@/components/editor/context"
@@ -77,8 +87,14 @@ import {
 import { initials } from "@/app/format"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { sortedLevels } from "@/core/scene/queries"
+import { freeTokenModelRef } from "@/core/scene/tokenModel"
 import type { Id, Token } from "@/core/scene/types"
+import {
+  FREE_ASSET_CATEGORIES,
+  type FreeAssetCategory,
+} from "@/core/session/freeAssets"
 import type { GameState, SessionPlayer } from "@/core/session/types"
+import type { FreeAsset } from "@/net/freeAssets"
 import { cn } from "@/lib/utils"
 import type { HostMember, HostSnapshot } from "@/net/host"
 import { formatRoomCode } from "@/net/sessionsRepo"
@@ -89,7 +105,7 @@ import { TokenAvatar } from "../TokenAvatar"
 import type { HostActions } from "./hostActions"
 import { duplicateNames, playerLabels } from "./playerLabels"
 
-export type SessionTab = "players" | "tokens" | "table"
+export type SessionTab = "players" | "tokens" | "table" | "assets"
 
 export interface SessionPanelProps {
   snap: HostSnapshot
@@ -137,6 +153,9 @@ export function SessionPanel(props: SessionPanelProps) {
             <TabsTrigger value="table" className="gap-1 text-[0.6875rem]">
               <Crown /> Table
             </TabsTrigger>
+            <TabsTrigger value="assets" className="gap-1 text-[0.6875rem]">
+              <Package /> Assets
+            </TabsTrigger>
           </TabsList>
         </div>
         <TabsContent value="players" className="min-h-0 flex-1">
@@ -152,6 +171,11 @@ export function SessionPanel(props: SessionPanelProps) {
         <TabsContent value="table" className="min-h-0 flex-1">
           <ScrollArea className="h-full">
             <TableTab {...props} />
+          </ScrollArea>
+        </TabsContent>
+        <TabsContent value="assets" className="min-h-0 flex-1">
+          <ScrollArea className="h-full">
+            <AssetsTab {...props} />
           </ScrollArea>
         </TabsContent>
       </Tabs>
@@ -539,6 +563,8 @@ function TokensTab({
   onFocusToken,
   onPreviewToken,
 }: SessionPanelProps) {
+  const catalog = useFreeAssets()
+  const models = tokenModelChoices(catalog.data, state.freeAssets ?? [])
   const scene = state.scene
   const levels = sortedLevels(scene).reverse()
   const byLevel = new Map<Id, Token[]>()
@@ -680,6 +706,16 @@ function TokensTab({
                           ))}
                         </DropdownMenuSubContent>
                       </DropdownMenuSub>
+                      {models.length > 0 || t.model ? (
+                        <TokenModelSubmenu
+                          token={t}
+                          models={models}
+                          catalog={catalog.data}
+                          onModel={(model) =>
+                            actions.setTokenModel([t.id], model)
+                          }
+                        />
+                      ) : null}
                     </DropdownMenuContent>
                   </DropdownMenu>
                 </div>
@@ -798,6 +834,216 @@ function TableTab({ state, actions }: SessionPanelProps) {
         >
           <RotateCcw data-icon="inline-start" /> Reset for everyone…
         </Button>
+      </div>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Token models
+// ---------------------------------------------------------------------------
+
+function TokenModelSubmenu({
+  token,
+  models,
+  catalog,
+  onModel,
+}: {
+  token: Token
+  models: FreeAsset[]
+  catalog: FreeAsset[] | undefined
+  onModel(model: string | null): void
+}) {
+  const current = token.model ?? null
+  const offered = models.some((a) => freeTokenModelRef(a.id) === current)
+  const other = current && !offered ? tokenModelAsset(catalog, current) : null
+  return (
+    <DropdownMenuSub>
+      <DropdownMenuSubTrigger>
+        <Box /> Model
+      </DropdownMenuSubTrigger>
+      <DropdownMenuSubContent className="w-48">
+        <DropdownMenuCheckboxItem
+          checked={current === null}
+          onClick={() => onModel(null)}
+        >
+          Default body
+        </DropdownMenuCheckboxItem>
+        {current && !offered ? (
+          <DropdownMenuCheckboxItem checked disabled>
+            {other?.name ?? current}
+          </DropdownMenuCheckboxItem>
+        ) : null}
+        {models.length > 0 ? <DropdownMenuSeparator /> : null}
+        {models.map((a) => {
+          const ref = freeTokenModelRef(a.id)
+          return (
+            <DropdownMenuCheckboxItem
+              key={a.id}
+              checked={ref === current}
+              onClick={() => ref && onModel(ref)}
+            >
+              {a.name}
+            </DropdownMenuCheckboxItem>
+          )
+        })}
+      </DropdownMenuSubContent>
+    </DropdownMenuSub>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Assets (free asset categories loaded into this game)
+// ---------------------------------------------------------------------------
+
+function AssetsTab({ state, actions, selectedTokenId }: SessionPanelProps) {
+  const catalog = useFreeAssets()
+  const available = useServices().freeAssets.available
+  const loaded = state.freeAssets ?? []
+  const setLoaded = (id: FreeAssetCategory, on: boolean) =>
+    actions.setFreeAssets(on ? [...loaded, id] : loaded.filter((c) => c !== id))
+  if (!available) {
+    return (
+      <Empty className="m-3 border border-dashed">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <Package />
+          </EmptyMedia>
+          <EmptyTitle>No free assets offline</EmptyTitle>
+          <EmptyDescription>
+            Free assets need Atlas Cloud; this browser runs in local mode.
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    )
+  }
+  const token =
+    selectedTokenId && Object.hasOwn(state.scene.tokens, selectedTokenId)
+      ? state.scene.tokens[selectedTokenId]
+      : null
+  return (
+    <div className="flex flex-col gap-4 p-3">
+      <span className="text-[0.6875rem] text-muted-foreground">
+        Free libraries anyone can use. Choose which ones this game loads.
+      </span>
+      {catalog.error ? (
+        <Alert>
+          <TriangleAlert />
+          <AlertDescription>
+            The free asset list couldn’t be loaded.{" "}
+            <button
+              type="button"
+              className="underline underline-offset-2"
+              onClick={() => catalog.reload()}
+            >
+              Try again
+            </button>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      {FREE_ASSET_CATEGORIES.map((c) => {
+        const on = loaded.includes(c.id)
+        const items = assetsOf(catalog.data, c.id)
+        return (
+          <section key={c.id} className="flex flex-col gap-3">
+            <ToggleRow
+              icon={<Box />}
+              title={c.label}
+              description={`${c.description} ${
+                catalog.loading ? "" : `${items.length} available.`
+              }`}
+              checked={on}
+              onChange={(v) => setLoaded(c.id, v)}
+            />
+            {on && c.id === "token-models" ? (
+              <TokenModelGrid
+                models={items}
+                token={token}
+                onModel={(model) =>
+                  token && actions.setTokenModel([token.id], model)
+                }
+              />
+            ) : null}
+            <Separator />
+          </section>
+        )
+      })}
+    </div>
+  )
+}
+
+function TokenModelGrid({
+  models,
+  token,
+  onModel,
+}: {
+  models: FreeAsset[]
+  token: Token | null
+  onModel(model: string | null): void
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      <span className="text-[0.6875rem] text-muted-foreground">
+        {token ? (
+          <>
+            Pick a model for{" "}
+            <span className="font-medium text-foreground">
+              {tokenDisplayName(token)}
+            </span>
+            .
+          </>
+        ) : (
+          "Select a token on the map or in the Tokens tab, then pick its model."
+        )}
+      </span>
+      <div className="grid grid-cols-3 gap-1.5">
+        {models.map((a) => {
+          const ref = freeTokenModelRef(a.id)
+          const active = token !== null && ref !== null && token.model === ref
+          return (
+            <Tooltip key={a.id}>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    disabled={!token}
+                    aria-pressed={active}
+                    aria-label={a.name}
+                    onClick={() => ref && onModel(active ? null : ref)}
+                    className={cn(
+                      "flex flex-col items-center gap-1 rounded-md border bg-muted/30 p-1 text-[0.625rem] transition-colors outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60",
+                      active &&
+                        "border-primary bg-primary/15 hover:bg-primary/20"
+                    )}
+                  />
+                }
+              >
+                {a.thumbnailUrl ? (
+                  <img
+                    src={a.thumbnailUrl}
+                    alt=""
+                    loading="lazy"
+                    onError={(e) =>
+                      (e.currentTarget.style.visibility = "hidden")
+                    }
+                    className="aspect-square w-full object-contain"
+                  />
+                ) : (
+                  <Box className="aspect-square size-10 text-muted-foreground" />
+                )}
+                <span className="w-full truncate text-center">{a.name}</span>
+              </TooltipTrigger>
+              <TooltipContent>
+                {active
+                  ? "Click to go back to the default body"
+                  : token
+                    ? `Use for ${tokenDisplayName(token)}`
+                    : a.name}
+                {a.attribution ? ` · ${a.attribution}` : ""}
+              </TooltipContent>
+            </Tooltip>
+          )
+        })}
       </div>
     </div>
   )

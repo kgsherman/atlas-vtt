@@ -19,6 +19,7 @@ import { base64ToBytes } from "../scene/heightmap"
 import { idSchema, parseScene } from "../scene/schema"
 import type { Id } from "../scene/types"
 import type { EncodedMask } from "../vision/types"
+import { normalizeFreeAssetCategories } from "./freeAssets"
 import { memoryObjectSchema } from "./playerViewSchema"
 import { GAME_STATE_VERSION, type GameState, type PlayerObject, type SessionPlayer } from "./types"
 
@@ -135,6 +136,8 @@ const gameStateShape = z.strictObject({
     .strictObject({ sceneId: z.string().min(1).max(64), version: z.int().min(0).max(Number.MAX_SAFE_INTEGER).nullable(), dirty: z.boolean() })
     .nullable()
     .optional(),
+  // Optional too. Unknown categories (from a newer app) are dropped, not refused.
+  freeAssets: z.array(z.string().max(64)).max(16).optional(),
 })
 
 export type ParseGameStateResult = { ok: true; state: GameState } | { ok: false; issues: string[] }
@@ -236,6 +239,7 @@ export function parseGameStateDetailed(json: unknown): ParseGameStateResult {
       revealed,
       seq: raw.seq,
       ...(raw.origin !== undefined ? { origin: raw.origin && { sceneId: raw.origin.sceneId, version: raw.origin.version, dirty: raw.origin.dirty } } : {}),
+      ...(raw.freeAssets !== undefined ? { freeAssets: normalizeFreeAssetCategories(raw.freeAssets) } : {}),
     },
   }
 }
@@ -278,5 +282,6 @@ export function serializeGameState(state: GameState): string {
     seq: state.seq,
   }
   if (state.origin !== undefined) ordered.origin = state.origin
+  if (state.freeAssets !== undefined) ordered.freeAssets = state.freeAssets
   return JSON.stringify(ordered)
 }

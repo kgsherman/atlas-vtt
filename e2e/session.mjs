@@ -64,10 +64,28 @@ export async function openSceneInEditor(
   return page.evaluate(() => location.pathname.split("/").pop())
 }
 
-/** Editor → "Start session" → the host console is hosting. Returns the session id, room code and state. */
-export async function startSession(dm) {
+/**
+ * Editor → "Start session" → "Start a game" dialog → the host console is hosting. `freeAssets`: the
+ * labels of the free asset categories to load (e.g. ["Token models"]; the others are unticked);
+ * default: the dialog's remembered choice. Returns the session id, room code and state.
+ */
+export async function startSession(dm, { freeAssets = null } = {}) {
   await sleep(300)
   await dm.getByRole("button", { name: "Start session" }).click()
+  const dialog = dm.getByRole("dialog", { name: "Start a game" })
+  if (freeAssets) {
+    for (const box of await dialog.getByRole("checkbox").all()) {
+      const name = await box.evaluate(
+        (el) =>
+          document.getElementById(el.getAttribute("aria-labelledby") ?? "")
+            ?.textContent ?? ""
+      )
+      const want = freeAssets.includes(name.trim())
+      if ((await box.getAttribute("aria-checked")) !== String(want))
+        await box.click()
+    }
+  }
+  await dialog.getByRole("button", { name: "Start game" }).click()
   await waitFor(dm, () => location.pathname.startsWith("/host/"), null, {
     timeout: 30000,
     label: "host route",

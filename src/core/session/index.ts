@@ -33,6 +33,13 @@ export { backdropFromPlayer, levelFromPlayer, objectFromPlayer, playerBackdropAs
 export { memoryObjectSchema, parsePlayerView, playerObjectSchema, playerTokenSchema, playerViewSchema } from "./playerViewSchema"
 export { memorable, sanitizeObject, type MemoryFloor } from "./sanitize"
 export {
+  FREE_ASSET_CATEGORIES,
+  isFreeAssetCategory,
+  normalizeFreeAssetCategories,
+  type FreeAssetCategory,
+  type FreeAssetCategoryInfo,
+} from "./freeAssets"
+export {
   GAME_STATE_LIMITS,
   parseGameState,
   parseGameStateDetailed,

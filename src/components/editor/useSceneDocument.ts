@@ -16,6 +16,7 @@ import type { DocumentStash, EditorStore } from "@/editor/store"
 import { deleteDraft, getLocalStore, listDrafts, loadDraft, saveDraft } from "@/net/localStore"
 import { exportSceneFileWithAssets, importSceneFileWithAssets, type SceneSummary, type SceneVersionInfo, type SceneVisibility } from "@/net/scenesRepo"
 import { describeNetError, isNetError } from "@/net/supabase"
+import type { CreateSessionOptions } from "@/net/sessionsRepo"
 
 import type { ConfirmFn } from "./context"
 import { withPreset } from "./lib/environmentPresets"
@@ -75,7 +76,8 @@ export interface SceneDocument {
   exportFile(): Promise<void>
   importFile(file: File): Promise<void>
   setSharing(visibility: SceneVisibility, opts?: { rotate?: boolean }): Promise<string | null>
-  startSession(): Promise<void>
+  /** Save if needed, then start a game (with the free asset categories it loads) and open the host console. */
+  startSession(opts?: CreateSessionOptions): Promise<void>
   restoreDraft(): void
   discardDraft(): Promise<void>
   /** Adopt a scene created outside the store (e.g. "new scene from map images") as an unsaved document. */
@@ -583,7 +585,7 @@ export function useSceneDocument({ store, services, routeId, wantsImport, naviga
     [save, scenes]
   )
 
-  const startSession = React.useCallback(async () => {
+  const startSession = React.useCallback(async (sessionOpts: CreateSessionOptions = {}) => {
     const s = store.getState()
     if (s.readOnly) {
       toast.info("Open the latest version to start a session")
@@ -594,7 +596,7 @@ export function useSceneDocument({ store, services, routeId, wantsImport, naviga
     if (!id) return
     setBusy("Starting the session…")
     try {
-      const created = await sessions.createSession(id)
+      const created = await sessions.createSession(id, sessionOpts)
       opts.current.navigate(paths.host(created.sessionId))
     } catch (err) {
       toast.error("Could not start a session", { description: errorText(err) })

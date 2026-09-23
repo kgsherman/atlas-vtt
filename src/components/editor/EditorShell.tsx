@@ -13,6 +13,7 @@ import type { EditorController } from "@/editor/controller"
 import type { EditorStore } from "@/editor/store"
 import type { Engine } from "@/render/contracts"
 import { useQualityChoice } from "@/components/canvas/qualityChoice"
+import { StartGameDialog } from "@/components/app/StartGameDialog"
 import { KeybindingsDialog } from "@/components/keybindings/KeybindingsDialog"
 import { useSuppressThemeHotkey } from "@/components/theme-provider"
 import { overlayOpen, useAppHotkeys } from "@/lib/hotkeys"
@@ -69,6 +70,8 @@ export function EditorShell({ doc, goHome, importRequest, setImportRequest }: Ed
   const [shortcutsOpen, setShortcutsOpen] = React.useState(false)
   const [versionsOpen, setVersionsOpen] = React.useState(false)
   const [shareOpen, setShareOpen] = React.useState(false)
+  const [startOpen, setStartOpen] = React.useState(false)
+  const sceneName = useEditorState((s) => s.scene.name)
   const fileRef = React.useRef<HTMLInputElement | null>(null)
   const [dropHint, setDropHint] = React.useState(false)
   const activeLevelName = useEditorState((s) => s.scene.levels[s.activeLevelId]?.name ?? "the active level")
@@ -108,7 +111,10 @@ export function EditorShell({ doc, goHome, importRequest, setImportRequest }: Ed
       exportFile: () => void doc.exportFile(),
       importFile: () => fileRef.current?.click(),
       openShare: () => setShareOpen(true),
-      startSession: () => void doc.startSession(),
+      startSession: () => {
+        if (store.getState().readOnly) toast.info("Open the latest version to start a session")
+        else setStartOpen(true)
+      },
       goHome,
       openShortcuts: () => setShortcutsOpen(true),
       enterPreview: (tokenId?: Id) => {
@@ -285,6 +291,7 @@ export function EditorShell({ doc, goHome, importRequest, setImportRequest }: Ed
         <KeybindingsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} scopes={["editor", "play"]} host />
         <VersionHistorySheet open={versionsOpen} onOpenChange={setVersionsOpen} doc={doc} />
         <ShareDialog open={shareOpen} onOpenChange={setShareOpen} doc={doc} />
+        <StartGameDialog target={startOpen ? { name: sceneName } : null} onClose={() => setStartOpen(false)} onStart={(opts) => doc.startSession(opts)} />
       </EditorEngineContext.Provider>
     </EditorActionsContext.Provider>
   )

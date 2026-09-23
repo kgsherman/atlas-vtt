@@ -8,6 +8,7 @@ import type { OverlayState } from "../contracts"
 import { DEFAULT_VIEW } from "./defaults"
 import type { LevelPlanEntry } from "./levelPlan"
 import { PortraitAtlas, slotUv } from "./portraits"
+import { chooseLod, TokenModelLibrary, type TokenModel } from "./tokenModels"
 import { TOKEN_FADE_MS, TokenLayer } from "./tokens"
 
 const overlays = (o: Partial<OverlayState> = {}): OverlayState => ({ selectedIds: [], hoveredId: null, preview: null, ruler: null, pendingMoves: {}, dragGhosts: {}, ...o })
@@ -45,7 +46,8 @@ describe("TokenLayer", () => {
     layer.update({ scene, plan, view: DEFAULT_VIEW, overlays: overlays() }, 0)
     const all = meshes(layer.root)
     // Base, ring, body and the portrait cap draw with the token material; the blob shadow has its own.
-    const solid = all.filter((m) => m.material === material && m.geometry.name !== "token:cap")
+    // (The pick proxy of model tokens is invisible and empty here.)
+    const solid = all.filter((m) => m.material === material && m.geometry.name !== "token:cap" && m.userData.slot !== "token-pick")
     expect(solid).toHaveLength(3)
     expect(all.find((m) => m.userData.slot === "token-shadow")!.count).toBe(2)
     // No portraits: the cap mesh draws nothing.
@@ -124,9 +126,118 @@ describe("TokenLayer", () => {
     layer.syncScene(scene, 0, false)
     layer.update({ scene, plan, view: DEFAULT_VIEW, overlays: overlays() }, 0)
     const picks = layer.pickMeshes()
-    expect(picks).toHaveLength(2)
+    // Bodies, model pick proxies (none here) and bases.
+    expect(picks).toHaveLength(3)
     expect(picks[0].count).toBe(42)
+    expect(picks[1].count).toBe(0)
+    expect(picks[1].visible).toBe(false)
     expect((picks[0].userData.tokenIds as string[]).length).toBe(42)
+  })
+})
+
+describe("TokenLayer with models", () => {
+  /** A model whose LODs have 1200 / 300 / 12 triangles (boxes subdivided), 1.5 footprints tall. */
+  const fakeModel = (): TokenModel => {
+    const lods = [
+      new THREE.BoxGeometry(1, 1.5, 1, 10, 10, 10),
+      new THREE.BoxGeometry(1, 1.5, 1, 5, 5, 5),
+      new THREE.BoxGeometry(1, 1.5, 1),
+    ].map((g) => g.translate(0, 0.75, 0))
+    return { lods, triangles: lods.map((g) => g.index!.count / 3), height: 1.5 }
+  }
+
+  function modelSetup() {
+    const s = setup()
+    s.scene.tokens[s.a.id] = { ...s.a, model: "free:elf" }
+    const loads: string[] = []
+    const model = fakeModel()
+    const library = new TokenModelLibrary({ resolveUrl: async (ref) => (ref === "free:elf" ? "https://x/elf.glb" : null) }, async (url) => {
+      loads.push(url)
+      return model
+    })
+    const modelMaterial = new THREE.ShaderMaterial()
+    const layer = new TokenLayer(s.material, library, modelMaterial)
+    return { ...s, layer, loads, model, modelMaterial }
+  }
+
+  const flush = () => new Promise((r) => setTimeout(r, 0))
+  const bySlot = (layer: TokenLayer, slot: string) => meshes(layer.root).filter((m) => m.userData.slot === slot && m.count > 0)
+
+  it("draws the default body until the model loads, then the figure on the base", async () => {
+    const { scene, a, b, plan, layer, loads, model, modelMaterial } = modelSetup()
+    const inputs = { scene, plan, view: DEFAULT_VIEW, overlays: overlays() }
+    layer.syncScene(scene, 0, false)
+    layer.update(inputs, 0)
+    const body = () => meshes(layer.root).find((m) => m.geometry.name === "token:body")!
+    expect(body().userData.tokenIds).toEqual([a.id, b.id].sort())
+    await flush()
+    expect(loads).toEqual(["https://x/elf.glb"])
+    // Ready: the layer re-buckets on its own (no scene change needed).
+    expect(layer.update(inputs, 16)).toBe(false)
+    expect(body().userData.tokenIds).toEqual([b.id])
+    const [figure] = bySlot(layer, "token-model")
+    expect(figure.material).toBe(modelMaterial)
+    expect(figure.userData.tokenIds).toEqual([a.id])
+    // No pixel density given: the most detailed LOD, sharing its attributes with the model's geometry.
+    expect(figure.geometry.getAttribute("position")).toBe(model.lods[0].getAttribute("position"))
+    // Base still drawn for both; picking goes through the invisible proxy, as tall as the figure.
+    expect(meshes(layer.root).find((m) => m.geometry.name === "token:base")!.count).toBe(2)
+    const [proxy] = bySlot(layer, "token-pick")
+    expect(proxy.visible).toBe(false)
+    expect(proxy.userData.tokenIds).toEqual([a.id])
+    expect(layer.pickMeshes()).toContain(proxy)
+    const m = new THREE.Matrix4()
+    figure.getMatrixAt(0, m)
+    const scale = new THREE.Vector3().setFromMatrixScale(m)
+    // Figure unit = the base disc (0.9 × the 5 ft footprint).
+    expect(scale.x).toBeCloseTo(4.5)
+    proxy.getMatrixAt(0, m)
+    expect(new THREE.Vector3().setFromMatrixScale(m).y).toBeCloseTo(1.5 * 4.5)
+  })
+
+  it("picks the level of detail from the on-screen size and follows the zoom", async () => {
+    const { scene, plan, layer, model } = modelSetup()
+    let ppf = 1
+    const inputs = { scene, plan, view: DEFAULT_VIEW, overlays: overlays(), pixelsPerFootAt: () => ppf }
+    layer.syncScene(scene, 0, false)
+    layer.update(inputs, 0)
+    await flush()
+    layer.update(inputs, 16)
+    // 5 ft at 1 px/ft: 25 px² → the coarsest LOD.
+    const lodOf = () => model.lods.findIndex((g) => g.getAttribute("position") === bySlot(layer, "token-model")[0].geometry.getAttribute("position"))
+    expect(lodOf()).toBe(2)
+    // Zooming in far enough re-buckets without any scene change.
+    ppf = 20
+    layer.update(inputs, 32)
+    expect(lodOf()).toBe(0)
+    // Removing the model returns the default body.
+    const plain = { ...scene, tokens: { ...scene.tokens } }
+    const t = { ...plain.tokens[Object.keys(plain.tokens).find((id) => plain.tokens[id].model)!] }
+    delete t.model
+    plain.tokens[t.id] = t
+    layer.syncScene(plain, 48, false)
+    layer.update({ ...inputs, scene: plain }, 48)
+    expect(bySlot(layer, "token-model")).toHaveLength(0)
+  })
+})
+
+describe("chooseLod", () => {
+  const tris = [24000, 6000, 1500]
+  it("keeps about 3 px² per triangle by default", () => {
+    expect(chooseLod(tris, 40)).toBe(2)
+    expect(chooseLod(tris, 150)).toBe(1)
+    expect(chooseLod(tris, 300)).toBe(0)
+    // Fewer pixels per triangle (strong GPUs): finer sooner.
+    expect(chooseLod(tris, 180)).toBe(1)
+    expect(chooseLod(tris, 180, undefined, 1.25)).toBe(0)
+  })
+
+  it("switches only 10% past a threshold", () => {
+    // 6000 triangles need 134 px at 3 px² each.
+    expect(chooseLod(tris, 136, 2)).toBe(2)
+    expect(chooseLod(tris, 150, 2)).toBe(1)
+    expect(chooseLod(tris, 130, 1)).toBe(1)
+    expect(chooseLod(tris, 118, 1)).toBe(2)
   })
 })
 

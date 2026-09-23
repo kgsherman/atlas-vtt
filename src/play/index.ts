@@ -67,5 +67,6 @@ export {
   scenePatches,
   setDirectionalPatches,
   setObjectsHiddenPatches,
+  setTokenModelPatches,
   setTokensHiddenPatches,
 } from "./host"

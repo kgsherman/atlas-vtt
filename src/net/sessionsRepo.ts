@@ -11,6 +11,7 @@
  * and player client run unchanged across tabs of one browser. It enforces the same rules but is NOT
  * a security boundary (every tab can read the store).
  */
+import { normalizeFreeAssetCategories, type FreeAssetCategory } from "@/core/session/freeAssets"
 import { PLAYER_VIEW_VERSION, type GameState, type PlayerView } from "@/core/session/types"
 
 import { localIdentity, normalizeDisplayName } from "./auth"
@@ -73,6 +74,13 @@ export interface SessionSeed {
   schemaVersion: number
   /** The raw scene document: run it through parseScene before use. */
   scene: unknown
+  /** Free asset categories chosen when the game was started (absent in seeds from before them). */
+  freeAssets?: FreeAssetCategory[]
+}
+
+export interface CreateSessionOptions {
+  /** Free asset categories the game loads (GameState.freeAssets). Default: none. */
+  freeAssets?: readonly FreeAssetCategory[]
 }
 
 /** session_state.state: the seed, or a GameState saved by a host (validate before use). */
@@ -111,7 +119,7 @@ export interface UpsertPlayerViewArgs {
 export interface SessionsRepo {
   readonly storage: "remote" | "local"
   /** DM: start a session for one of my scenes; its latest version seeds session_state. */
-  createSession(sceneId: string): Promise<CreatedSession>
+  createSession(sceneId: string, opts?: CreateSessionOptions): Promise<CreatedSession>
   /** Player: join (or rejoin) by room code. Throws kicked / session_not_found / is_dm / … */
   joinSession(roomCode: string, displayName: string): Promise<string>
   /** DM or member (kicked members too, so the UI can explain); null for anyone else. */
@@ -197,6 +205,7 @@ export function parseSessionStateContent(json: unknown): SessionStateContent {
       sceneVersion: typeof json.sceneVersion === "number" ? json.sceneVersion : 0,
       schemaVersion: typeof json.schemaVersion === "number" ? json.schemaVersion : 0,
       scene: json.scene,
+      ...(Array.isArray(json.freeAssets) ? { freeAssets: normalizeFreeAssetCategories(json.freeAssets) } : {}),
     }
   }
   return { kind: "game", state: json }
@@ -230,8 +239,8 @@ function requireCode(roomCode: string): string {
 export function createRemoteSessionsRepo(client: AtlasClient): SessionsRepo {
   return {
     storage: "remote",
-    async createSession(sceneId) {
-      const rows = unwrap(await client.rpc("create_session", { p_scene_id: sceneId }))
+    async createSession(sceneId, opts = {}) {
+      const rows = unwrap(await client.rpc("create_session", { p_scene_id: sceneId, p_free_assets: normalizeFreeAssetCategories(opts.freeAssets ?? []) }))
       const row = rows?.[0]
       if (!row) throw new NetError("unknown", "create_session returned nothing")
       return { sessionId: row.session_id, roomCode: row.room_code }
@@ -411,7 +420,7 @@ export function createLocalSessionsRepo(opts: LocalSessionsRepoOptions = {}): Se
 
   return {
     storage: "local",
-    async createSession(sceneId) {
+    async createSession(sceneId, opts = {}) {
       const loaded = await scenes.load(sceneId)
       if (!loaded.parsed.ok) throw new NetError("invalid_data", "the scene cannot be loaded")
       const st = await store()
@@ -429,7 +438,14 @@ export function createLocalSessionsRepo(opts: LocalSessionsRepoOptions = {}): Se
         endedAt: null,
         members: {},
       }
-      const seed: SessionSeed = { kind: "seed", sceneId, sceneVersion: loaded.version, schemaVersion: loaded.schemaVersion, scene: loaded.parsed.scene }
+      const seed: SessionSeed = {
+        kind: "seed",
+        sceneId,
+        sceneVersion: loaded.version,
+        schemaVersion: loaded.schemaVersion,
+        scene: loaded.parsed.scene,
+        freeAssets: normalizeFreeAssetCategories(opts.freeAssets ?? []),
+      }
       await putSession(session)
       await st.put("sessions", codeKey(code), session.id)
       await st.put<LocalStateRecord>("sessions", stateKey(session.id), { epoch: 0, state: seed, updatedAt: now })

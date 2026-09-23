@@ -423,6 +423,19 @@ describe("editor store: object edits", () => {
     expect(store.getState().updateToken(hero.id, { levelId: "nope" })).toBe(false)
   })
 
+  it("updateToken sets a token model and `model: undefined` removes the key", () => {
+    const f = fixtureScene()
+    const hero = createToken(f.groundId, { x: 2.5, z: 2.5 })
+    f.scene.tokens[hero.id] = hero
+    const store = makeStore(f.scene)
+    expect(store.getState().updateToken(hero.id, { model: "free:elf-archer" })).toBe(true)
+    expect(store.getState().scene.tokens[hero.id].model).toBe("free:elf-archer")
+    // The editor's document guard refuses what the schema would not load.
+    expect(store.getState().updateToken(hero.id, { model: "https://x.example/a.glb" })).toBe(false)
+    expect(store.getState().updateToken(hero.id, { model: undefined })).toBe(true)
+    expect("model" in store.getState().scene.tokens[hero.id]).toBe(false)
+  })
+
   it("detaching a light keeps its world position; attaching makes it an offset", () => {
     const f = fixtureScene()
     const hero = createToken(f.upperId, { x: 22.5, z: 12.5 })

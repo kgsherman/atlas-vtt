@@ -55,6 +55,10 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
   To climb stairs or a ramp, drag the token past the top step, or use the **Go up** / **Go down** buttons
   on the top step and the landing; ladders offer climb up / down.
 - Click a door next to your token to open or close it. There is also a standalone measure tool.
+- Free assets: when starting a game, the DM chooses which libraries of free assets it loads (one
+  category so far, **Token models**: 3D miniatures). The host console's **Assets** tab lists them and puts
+  a model on the selected token; the token inspector and each token's menu offer them too. A model stands
+  on the token's base for everyone who sees the token, at a level of detail that fits its size on screen.
 - DM controls: lock movement (for everyone or per player), shared vision, speed enforcement, door and light
   toggles, hide or reveal tokens, reveal secret doors, assign tokens to players, reset fog, and kick
   players. The DM can switch to "Edit map" mid-session, and players see the edits live. Those edits stay
@@ -108,8 +112,9 @@ with `?local=0`.
 1. Create a Supabase project and apply the migrations in `supabase/migrations/`, in filename order. You can
    use the Supabase CLI (`supabase init` if needed, then `supabase link --project-ref <ref>` and
    `supabase db push`), or paste each file into the SQL editor. They create the
-   tables, RLS policies, RPCs, Realtime policies and the private Storage buckets `scene-assets` and
-   `session-tiles`.
+   tables, RLS policies, RPCs, Realtime policies, the private Storage buckets `scene-assets` and
+   `session-tiles`, the public bucket `free-assets` and the free asset catalog (`free_assets`).
+   The free asset files themselves are published separately (see "Free assets" below).
 2. In the Supabase dashboard:
    - **Authentication → Sign In / Providers → allow anonymous sign-ins** (on). Players and DMs sign in
      anonymously.
@@ -147,7 +152,25 @@ with `?local=0`.
 | `npm run format:check` | List files that differ from the Prettier config (see Conventions) |
 
 Dev-only pages: `/dev/render.html` is the renderer harness. `?mode=player&pipeline=1` renders exactly what
-a player is sent.
+a player is sent; `?models=<url prefix>&modelids=elf-archer,…` puts token models on the sample's tokens.
+
+### Free assets
+
+Free assets are files anyone may use in their games (token models today; maps and audio later), grouped by
+category. The catalog is the `free_assets` table and the files live in the public `free-assets` bucket;
+clients cannot write either. To publish token models from miniature STL sculpts:
+
+```bash
+node scripts/free-assets/build-token-models.mjs --in "<folder of .stl files>" --out <folder>
+SUPABASE_URL=https://<project-ref>.supabase.co SUPABASE_SECRET_KEY=sb_secret_... \
+  node scripts/free-assets/upload.mjs --dir <folder>
+```
+
+The build script (models are listed at its top: file, facing, base cut, scale) orients each figure,
+removes a sculpted base, and writes a meshopt-compressed GLB with three levels of detail plus a thumbnail.
+The upload script puts the files in the bucket and upserts the catalog rows. A new category also needs
+`FREE_ASSET_CATEGORIES` (`src/core/session/freeAssets.ts`), `private.free_asset_categories()` and the
+table's category check.
 
 ## Architecture
 
@@ -223,7 +246,7 @@ delete. `src/net/guestMerge.live.supabase.test.ts` (needs the deployed `merge-gu
 guest into a new email sign-up and prints that permanent user's id for deletion.
 
 **SQL tests** (`supabase/tests/*.sql`: RLS, RPCs, Realtime authorisation, Storage policies, tile chunks,
-per-account quotas).
+per-account quotas, free assets).
 Run each file as `postgres`, in the SQL editor or with psql. Each file runs in one transaction that is
 rolled back, and its final row reports `passed` / `failed`.
 
@@ -238,6 +261,7 @@ ATLAS_SCENE=$PWD/test_maps/vineyard.atlas.json ATLAS_URL=http://127.0.0.1:5173 n
 ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-supabase.mjs # the same against the real backend (+ Realtime / table / Storage RLS checks, no public channels, a kicked member's subscriptions, sub-cell chunk clipping)
 ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-latency.mjs  # move results on a 120×120 daylit field arrive well under the 5 s timeout
 ATLAS_URL=http://127.0.0.1:5173 node e2e/host-save-map.mjs        # "Save map to library" from a live session, including the conflict path
+ATLAS_URL=http://127.0.0.1:5173 node e2e/free-assets.mjs          # start a game with token models, put one on a token, a player downloads and draws it (ATLAS_FREE_ASSETS_DIR serves a local build)
 ATLAS_URL=http://127.0.0.1:5173 node e2e/engine-leak.mjs          # editor ↔ library round trips release every WebGL context
 ATLAS_URL=http://127.0.0.1:5173 node e2e/perf.mjs                 # frame times per GPU / tier / scene
 ATLAS_URL=http://127.0.0.1:5173 node e2e/showcase.mjs             # regenerate docs/screenshots

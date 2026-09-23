@@ -3,8 +3,12 @@
  * InstancedMeshes per level (the material reads `userData.levelId` for the level's host-mask layer
  * and `userData.tokenIds` for per-instance dimming): a dark bevelled base, a ring and a body in the
  * token colour, a portrait disc on top when `imageUrl` loaded (engine/portraits.ts), and a soft blob
- * shadow on the ground. Unlit decorations (OVERLAY layer): faded outline markers for tokens on levels
- * above the cutaway, soft pulsing selection / hover / pending rings and drag ghosts.
+ * shadow on the ground. A token with a loaded 3D model (Token.model, engine/tokenModels.ts) draws the
+ * figure on its base instead of the body and portrait, at the level of detail its on-screen size calls
+ * for (one InstancedMesh per level and LOD geometry, re-bucketed when the zoom changes a token's LOD),
+ * and picks through an invisible body-shaped proxy (raycasting the sculpt would be slow).
+ * Unlit decorations (OVERLAY layer): faded outline markers for tokens on levels above the cutaway, soft
+ * pulsing selection / hover / pending rings and drag ghosts.
  *
  * Appear/disappear: 150 ms fade through the token material's per-instance `aFade` attribute (with
  * a slight scale-in). Instance data is recomputed only when inputs change or a fade is running.
@@ -14,7 +18,7 @@ import * as THREE from "three"
 import { groundIndex } from "@/core/scene/queries"
 import type { Id, SceneLike, Token } from "@/core/scene/types"
 
-import { hexToLinear, scaleRgb, type RGB } from "../builders/color"
+import { hexToLinear, mixRgb, scaleRgb, type RGB } from "../builders/color"
 import {
   tokenBaseGeometry,
   tokenBodyGeometry,
@@ -25,10 +29,12 @@ import {
   tokenVisual,
   type TokenVisual,
 } from "../builders/tokens"
-import type { OverlayState, ViewState } from "../contracts"
+import { TOKEN_BASE_HEIGHT } from "../builders/tokens"
+import type { OverlayState, TokenModelSource, ViewState } from "../contracts"
 import { LAYER } from "../internal"
 import type { LevelPlanEntry } from "./levelPlan"
 import { PortraitAtlas } from "./portraits"
+import { chooseLod, TokenModelLibrary } from "./tokenModels"
 
 export const TOKEN_FADE_MS = 150
 
@@ -40,7 +46,16 @@ interface Entry {
   leaveAt: number | null
   hidden: boolean
   imageUrl: string | null
+  model: string | null
+  /** LOD drawn for the model (undefined until drawn with one). */
+  lod?: number
 }
+
+/** Unpainted-miniature resin, with a hint of the token colour. */
+const RESIN: RGB = hexToLinear("#bdb5a8")
+const RESIN_TINT = 0.14
+/** A model's footprint unit spans the base disc (tokenTransforms: side × 0.9). */
+const MODEL_SCALE = 0.9
 
 const SELECT: RGB = hexToLinear("#34d399")
 const HOVER: RGB = hexToLinear("#d4d4d8")
@@ -147,14 +162,20 @@ class GrowingInstances {
   private readonly configure: (m: THREE.InstancedMesh) => void
 
   private readonly portraits: boolean
+  private readonly shareAttributes: boolean
 
+  /**
+   * `shareAttributes` (with `ownGeometry`): the private geometry reuses the unit's index and vertex
+   * attributes instead of copying them (large model geometries are uploaded once, not per mesh).
+   */
   constructor(
     parent: THREE.Object3D,
     unit: THREE.BufferGeometry,
     material: THREE.Material,
     ownGeometry: boolean,
     configure: (m: THREE.InstancedMesh) => void,
-    portraits = false
+    portraits = false,
+    shareAttributes = false
   ) {
     this.parent = parent
     this.unit = unit
@@ -162,13 +183,14 @@ class GrowingInstances {
     this.ownGeometry = ownGeometry
     this.configure = configure
     this.portraits = portraits
+    this.shareAttributes = shareAttributes
     this.mesh = this.create(16)
   }
 
   private create(capacity: number): THREE.InstancedMesh {
     let geometry = this.unit
     if (this.ownGeometry) {
-      geometry = this.unit.clone()
+      geometry = this.shareAttributes ? shallowCopy(this.unit) : this.unit.clone()
       geometry.userData = { owned: true }
       const fade = new THREE.InstancedBufferAttribute(new Float32Array(capacity).fill(1), 1)
       fade.setUsage(THREE.DynamicDrawUsage)
@@ -230,6 +252,15 @@ class GrowingInstances {
   }
 }
 
+function shallowCopy(unit: THREE.BufferGeometry): THREE.BufferGeometry {
+  const g = new THREE.BufferGeometry()
+  g.setIndex(unit.index)
+  for (const [name, attr] of Object.entries(unit.attributes)) g.setAttribute(name, attr)
+  g.boundingSphere = unit.boundingSphere
+  g.name = unit.name
+  return g
+}
+
 /** Solid tokens of one level. */
 class LevelTokens {
   readonly root = new THREE.Object3D()
@@ -239,8 +270,16 @@ class LevelTokens {
   /** Portrait discs (only tokens whose image loaded). */
   readonly cap: GrowingInstances
   readonly shadow: GrowingInstances
+  /** Model figures, one mesh per LOD geometry (created on first use). */
+  readonly models = new Map<THREE.BufferGeometry, GrowingInstances>()
+  /** Invisible bodies of model tokens: what picking raycasts for them. */
+  readonly proxy: GrowingInstances
+  private readonly levelId: Id
+  private readonly modelMaterial: THREE.Material
 
-  constructor(levelId: Id, material: THREE.Material, shadowMaterial: THREE.Material) {
+  constructor(levelId: Id, material: THREE.Material, shadowMaterial: THREE.Material, modelMaterial: THREE.Material) {
+    this.levelId = levelId
+    this.modelMaterial = modelMaterial
     this.root.name = `tokens:${levelId}`
     const configure = (m: THREE.InstancedMesh) => {
       m.userData.levelId = levelId
@@ -261,6 +300,33 @@ class LevelTokens {
       configure(m)
       m.raycast = () => {}
     }, true)
+    this.proxy = new GrowingInstances(this.root, tokenBodyGeometry(), material, false, (m) => {
+      m.userData.levelId = levelId
+      m.userData.slot = "token-pick"
+      m.visible = false
+    })
+  }
+
+  model(geometry: THREE.BufferGeometry): GrowingInstances {
+    let g = this.models.get(geometry)
+    if (!g) {
+      const levelId = this.levelId
+      g = new GrowingInstances(
+        this.root,
+        geometry,
+        this.modelMaterial,
+        true,
+        (m) => {
+          m.userData.levelId = levelId
+          m.userData.slot = "token-model"
+          m.raycast = () => {}
+        },
+        false,
+        true
+      )
+      this.models.set(geometry, g)
+    }
+    return g
   }
 
   dispose(): void {
@@ -269,6 +335,9 @@ class LevelTokens {
     this.ring.dispose()
     this.body.dispose()
     this.cap.dispose()
+    this.proxy.dispose()
+    for (const g of this.models.values()) g.dispose()
+    this.models.clear()
     this.root.removeFromParent()
   }
 }
@@ -278,6 +347,10 @@ export interface TokenLayerInputs {
   plan: ReadonlyMap<Id, LevelPlanEntry>
   view: ViewState
   overlays: OverlayState
+  /** Physical pixels per foot at a world point (model LODs); absent = draw the most detailed LOD. */
+  pixelsPerFootAt?: (x: number, y: number, z: number) => number
+  /** Pixels per model triangle the LOD choice aims for (default 3; lower = more detail). */
+  modelPxPerTriangle?: number
 }
 
 export class TokenLayer {
@@ -286,6 +359,7 @@ export class TokenLayer {
   /** Unlit decorations; the engine adds this under the overlay root. */
   readonly decor = new THREE.Object3D()
   private readonly material: THREE.Material
+  private readonly modelMaterial: THREE.Material
   private readonly levels = new Map<Id, LevelTokens>()
   private readonly markers: GrowingInstances
   private readonly rings: GrowingInstances
@@ -296,6 +370,7 @@ export class TokenLayer {
   private readonly ringMaterial: THREE.ShaderMaterial
   private readonly entries = new Map<Id, Entry>()
   private readonly portraits = new PortraitAtlas()
+  private readonly models: TokenModelLibrary
   private dirty = true
   private wasAnimating = false
   private initialised = false
@@ -309,9 +384,17 @@ export class TokenLayer {
    * (high) of GPU time on the AMD iGPU. Toggling `transparent` needs no recompile (three reads it
    * per frame for list placement and blending; the token shader never reads the OPAQUE define).
    */
-  constructor(tokenMaterial: THREE.Material) {
+  /**
+   * `models`: where token models come from (a TokenModelLibrary in tests); `modelMaterial`: the
+   * material of model figures (default: `tokenMaterial`).
+   */
+  constructor(tokenMaterial: THREE.Material, models: TokenModelSource | TokenModelLibrary | null = null, modelMaterial: THREE.Material = tokenMaterial) {
     this.material = tokenMaterial
+    this.modelMaterial = modelMaterial
     tokenMaterial.transparent = false
+    modelMaterial.transparent = false
+    this.models = models instanceof TokenModelLibrary ? models : new TokenModelLibrary(models)
+    this.models.onChange = () => this.invalidate()
     this.portraits.onChange = () => {
       // Bind the atlas once it exists (tokens without images keep sampling the 1×1 placeholder).
       const tu = (tokenMaterial as THREE.ShaderMaterial).uniforms
@@ -380,7 +463,7 @@ export class TokenLayer {
   /** Solid token meshes (for picking). */
   pickMeshes(): THREE.InstancedMesh[] {
     const out: THREE.InstancedMesh[] = []
-    for (const lt of this.levels.values()) out.push(lt.body.mesh, lt.base.mesh)
+    for (const lt of this.levels.values()) out.push(lt.body.mesh, lt.proxy.mesh, lt.base.mesh)
     return out
   }
 
@@ -396,14 +479,25 @@ export class TokenLayer {
       for (const t of Object.values(scene.tokens) as Token[]) {
         if (!Object.hasOwn(scene.levels, t.levelId)) continue
         present.add(t.id)
+        // Load every model the scene uses up front, so switching levels does not pop bodies into figures.
+        if (t.model) this.models.get(t.model)
         const visual = tokenVisual(scene, t, ground)
         const e = this.entries.get(t.id)
         if (e && e.leaveAt === null) {
           e.visual = visual
           e.hidden = t.hidden
           e.imageUrl = t.imageUrl ?? null
+          if (e.model !== (t.model ?? null)) e.lod = undefined
+          e.model = t.model ?? null
         } else {
-          this.entries.set(t.id, { visual, appearAt: animate && this.initialised ? now : null, leaveAt: null, hidden: t.hidden, imageUrl: t.imageUrl ?? null })
+          this.entries.set(t.id, {
+            visual,
+            appearAt: animate && this.initialised ? now : null,
+            leaveAt: null,
+            hidden: t.hidden,
+            imageUrl: t.imageUrl ?? null,
+            model: t.model ?? null,
+          })
         }
       }
       // Levels that no longer exist lose their meshes.
@@ -426,7 +520,7 @@ export class TokenLayer {
   private levelTokens(levelId: Id): LevelTokens {
     let lt = this.levels.get(levelId)
     if (!lt) {
-      lt = new LevelTokens(levelId, this.material, this.shadowMaterial)
+      lt = new LevelTokens(levelId, this.material, this.shadowMaterial, this.modelMaterial)
       this.levels.set(levelId, lt)
       this.root.add(lt.root)
     }
@@ -447,11 +541,27 @@ export class TokenLayer {
     this.wasAnimating = animating
     // Blend only while a fade runs (alpha < 1 through aFade); opaque at rest (constructor comment).
     this.material.transparent = animating
-    if (!this.dirty && !animating && !settle) return false
+    this.modelMaterial.transparent = animating
+    // Model LODs follow the zoom: re-bucket when one would change.
+    if (!this.dirty && !animating && !settle && !this.lodChanged(inputs)) return false
     this.dirty = false
     const { plan, view, overlays } = inputs
     const selected = new Set(overlays.selectedIds)
-    const perLevel = new Map<Id, { base: InstanceData; body: InstanceData; ids: Id[]; cap: InstanceData; capIds: Id[]; shadow: InstanceData }>()
+    const perLevel = new Map<
+      Id,
+      {
+        base: InstanceData
+        ids: Id[]
+        body: InstanceData
+        bodyIds: Id[]
+        cap: InstanceData
+        capIds: Id[]
+        shadow: InstanceData
+        proxy: InstanceData
+        proxyIds: Id[]
+        models: Map<THREE.BufferGeometry, { data: InstanceData; ids: Id[] }>
+      }
+    >()
     const markers: InstanceData = { matrices: [], colors: [] }
     const rings: InstanceData = { matrices: [], colors: [] }
     const sorted = [...this.entries.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
@@ -477,25 +587,51 @@ export class TokenLayer {
       if (!lvl) {
         lvl = {
           base: { matrices: [], colors: [], fades: [] },
-          body: { matrices: [], colors: [], fades: [] },
           ids: [],
+          body: { matrices: [], colors: [], fades: [] },
+          bodyIds: [],
           cap: { matrices: [], colors: [], fades: [], portraits: [] },
           capIds: [],
           shadow: { matrices: [], colors: [], fades: [] },
+          proxy: { matrices: [], colors: [] },
+          proxyIds: [],
+          models: new Map(),
         }
         perLevel.set(e.visual.levelId, lvl)
       }
       lvl.base.matrices.push(tr.base.clone())
       lvl.base.colors.push(color)
       lvl.base.fades!.push(f)
-      lvl.body.matrices.push(tr.body.clone())
-      lvl.body.colors.push(color)
-      lvl.body.fades!.push(f)
       lvl.ids.push(id)
       lvl.shadow.matrices.push(tr.shadow.clone())
       lvl.shadow.colors.push(color)
       lvl.shadow.fades!.push(f)
-      const slot = this.portraits.lookup(e.imageUrl)
+      const model = this.models.get(e.model ?? undefined)
+      if (model) {
+        // The figure stands on the base; the proxy is a body as tall as the figure.
+        const lod = this.lodFor(e, model.triangles, inputs)
+        e.lod = lod
+        const scale = e.visual.side * MODEL_SCALE * (0.85 + 0.15 * f)
+        const baseTop = e.visual.y + TOKEN_BASE_HEIGHT * (0.85 + 0.15 * f)
+        const geometry = model.lods[lod]
+        let bucket = lvl.models.get(geometry)
+        if (!bucket) lvl.models.set(geometry, (bucket = { data: { matrices: [], colors: [], fades: [] }, ids: [] }))
+        bucket.data.matrices.push(new THREE.Matrix4().makeScale(scale, scale, scale).setPosition(e.visual.x, baseTop, e.visual.z))
+        const resin = mixRgb(RESIN, e.visual.color, RESIN_TINT)
+        bucket.data.colors.push(e.hidden && view.mode !== "player" ? scaleRgb(resin, 0.5) : resin)
+        bucket.data.fades!.push(f)
+        bucket.ids.push(id)
+        const bd = e.visual.side * 0.45
+        lvl.proxy.matrices.push(new THREE.Matrix4().makeScale(bd, Math.max(0.1, model.height * scale), bd).setPosition(e.visual.x, baseTop, e.visual.z))
+        lvl.proxy.colors.push(color)
+        lvl.proxyIds.push(id)
+      } else {
+        lvl.body.matrices.push(tr.body.clone())
+        lvl.body.colors.push(color)
+        lvl.body.fades!.push(f)
+        lvl.bodyIds.push(id)
+      }
+      const slot = model ? null : this.portraits.lookup(e.imageUrl)
       if (slot) {
         lvl.cap.matrices.push(tr.cap.clone())
         // The portrait replaces the colour; hidden tokens stay darker for the DM.
@@ -518,13 +654,36 @@ export class TokenLayer {
       lt.shadow.set(data?.shadow ?? empty)
       lt.base.set(data?.base ?? empty, data?.ids ?? [])
       lt.ring.set(data?.base ?? empty, data?.ids ?? [])
-      lt.body.set(data?.body ?? empty, data?.ids ?? [])
+      lt.body.set(data?.body ?? empty, data?.bodyIds ?? [])
       lt.cap.set(data?.cap ?? empty, data?.capIds ?? [])
+      lt.proxy.set(data?.proxy ?? empty, data?.proxyIds ?? [])
+      for (const geometry of new Set([...lt.models.keys(), ...(data?.models.keys() ?? [])])) {
+        const bucket = data?.models.get(geometry)
+        lt.model(geometry).set(bucket?.data ?? empty, bucket?.ids ?? [])
+      }
     }
     this.markers.set(markers)
     this.rings.set(rings)
     this.updateGhosts(inputs)
     return animating
+  }
+
+  /** The LOD a model token should draw now (hysteresis around its current one). */
+  private lodFor(e: Entry, triangles: readonly number[], inputs: TokenLayerInputs): number {
+    const ppf = inputs.pixelsPerFootAt?.(e.visual.x, e.visual.y, e.visual.z)
+    if (ppf === undefined || !Number.isFinite(ppf)) return 0
+    return chooseLod(triangles, e.visual.side * ppf, e.lod, inputs.modelPxPerTriangle)
+  }
+
+  /** Whether any drawn model token would switch LOD at the current zoom. */
+  private lodChanged(inputs: TokenLayerInputs): boolean {
+    if (!inputs.pixelsPerFootAt) return false
+    for (const e of this.entries.values()) {
+      if (e.lod === undefined || e.model === null) continue
+      const model = this.models.get(e.model)
+      if (model && this.lodFor(e, model.triangles, inputs) !== e.lod) return true
+    }
+    return false
   }
 
   private updateGhosts(inputs: TokenLayerInputs): void {
@@ -554,6 +713,7 @@ export class TokenLayer {
     for (const g of [this.markers, this.rings, this.ghostBase, this.ghostBody]) g.dispose()
     for (const m of this.decorMaterials) m.dispose()
     this.portraits.dispose()
+    this.models.dispose()
     this.root.removeFromParent()
     this.decor.removeFromParent()
   }

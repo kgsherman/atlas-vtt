@@ -17,13 +17,13 @@ import {
 import { isNetError } from "./supabase"
 
 // core/scene parseScene is owned (and tested) by the core-scene module; here it is a stand-in so these
-// tests exercise only the repository: migrate/validate is modelled as "schemaVersion 1 → ok,
+// tests exercise only the repository: migrate/validate is modelled as "schemaVersion 1 or 2 → ok,
 // higher → too-new, anything else → invalid".
 vi.mock("@/core/scene/schema", () => ({
   parseScene: vi.fn((json: unknown) => {
     const doc = json as { schemaVersion?: unknown } | null
-    if (doc && typeof doc === "object" && doc.schemaVersion === 1) return { ok: true, scene: structuredClone(doc), migratedFrom: null }
-    if (doc && typeof doc === "object" && typeof doc.schemaVersion === "number" && doc.schemaVersion > 1) {
+    if (doc && typeof doc === "object" && (doc.schemaVersion === 1 || doc.schemaVersion === 2)) return { ok: true, scene: structuredClone(doc), migratedFrom: null }
+    if (doc && typeof doc === "object" && typeof doc.schemaVersion === "number" && doc.schemaVersion > 2) {
       return { ok: false, error: "too-new", issues: ["newer schema"] }
     }
     return { ok: false, error: "invalid", issues: ["not a scene"] }
@@ -111,7 +111,7 @@ describe("local scenes repo", () => {
   })
 
   it("reports too-new documents instead of failing (opened read-only)", async () => {
-    const { id } = await repo.create({ ...scene, schemaVersion: 2 as 1 })
+    const { id } = await repo.create({ ...scene, schemaVersion: 3 as 2 })
     const loaded = await repo.load(id)
     expect(loaded.parsed).toEqual({ ok: false, error: "too-new", issues: ["newer schema"] })
   })

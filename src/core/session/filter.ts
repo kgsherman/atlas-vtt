@@ -108,6 +108,8 @@ function playerToken(t: Token, full: boolean): PlayerToken {
     imageUrl: t.imageUrl,
     label: t.label,
   }
+  // What the token looks like: every player who sees it may see its figure.
+  if (t.model !== undefined) out.model = t.model
   if (full) {
     out.name = t.name
     out.eyeHeight = t.eyeHeight

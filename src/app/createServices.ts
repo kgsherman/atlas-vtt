@@ -19,6 +19,7 @@ import {
   signOut as authSignOut,
   type AtlasIdentity,
 } from "@/net/auth"
+import { createLocalFreeAssetsRepo, createRemoteFreeAssetsRepo } from "@/net/freeAssets"
 import { getLocalStore, type LocalStore } from "@/net/localStore"
 import { createMergeTicket, mergeGuest } from "@/net/guestMerge"
 import { createLocalTransport } from "@/net/localTransport"
@@ -72,6 +73,7 @@ export async function createServices(opts: CreateServicesOptions = {}): Promise<
   const sessions = client ? createRemoteSessionsRepo(client) : createLocalSessionsRepo({ store, scenes, userId: () => identity.userId })
   const transport = client ? createSupabaseTransport(client) : createLocalTransport()
   const assets = safeAssetStore(mode, () => createAssetStore({ client, store, userId: identity.userId }))
+  const freeAssets = client ? createRemoteFreeAssetsRepo(client) : createLocalFreeAssetsRepo()
 
   return {
     mode,
@@ -80,6 +82,7 @@ export async function createServices(opts: CreateServicesOptions = {}): Promise<
     sessions,
     transport,
     assets,
+    freeAssets,
     tilesFor(sessionId: string): BackdropTileSource {
       try {
         return createTileSource({ sessionId, userId: identity.userId, client, store })

@@ -20,6 +20,48 @@ export type Database = {
   }
   public: {
     Tables: {
+      free_assets: {
+        Row: {
+          attribution: string | null
+          bytes: number
+          category: string
+          created_at: string
+          description: string
+          id: string
+          metadata: Json
+          name: string
+          path: string
+          sort_order: number
+          thumbnail_path: string | null
+        }
+        Insert: {
+          attribution?: string | null
+          bytes: number
+          category: string
+          created_at?: string
+          description?: string
+          id: string
+          metadata?: Json
+          name: string
+          path: string
+          sort_order?: number
+          thumbnail_path?: string | null
+        }
+        Update: {
+          attribution?: string | null
+          bytes?: number
+          category?: string
+          created_at?: string
+          description?: string
+          id?: string
+          metadata?: Json
+          name?: string
+          path?: string
+          sort_order?: number
+          thumbnail_path?: string | null
+        }
+        Relationships: []
+      }
       player_views: {
         Row: {
           epoch: string
@@ -262,7 +304,7 @@ export type Database = {
         Returns: string
       }
       create_session: {
-        Args: { p_scene_id: string }
+        Args: { p_free_assets?: string[]; p_scene_id: string }
         Returns: {
           room_code: string
           session_id: string

@@ -40,6 +40,7 @@ import type { Engine, EngineOptions, FrameStats, OverlayState, PickOptions, Pick
 import { LAYER, type LightingSystem } from "../internal"
 import { createLightingSystem } from "../lighting/system"
 import { precompileScene, TIER_DEFINE } from "../materials/util"
+import { TOKEN_MODEL_RIM } from "../materials/tokenMaterial"
 import { DIRECT_EMISSIVE, POST_SETTINGS, PostPipeline, type PostSettings } from "../post/pipeline"
 import { disposeCachedEdges, type ObjectMeshRef } from "../overlays/highlight"
 import { OverlayManager } from "../overlays/manager"
@@ -67,6 +68,12 @@ interface PendingQuality {
   release: () => void
 }
 
+/**
+ * Token model detail per tier: screen pixels per model triangle the LOD choice aims for (engine/tokenModels
+ * chooseLod). Sub-pixel triangles waste the lit token shader on 2×2 quads, which only strong GPUs afford.
+ */
+const MODEL_PX_PER_TRIANGLE: Record<Quality, number> = { low: 4, medium: 3, high: 2, ultra: 1.25 }
+
 const LAYERS_ALL = (1 << LAYER.VISUAL) | (1 << LAYER.OVERLAY)
 const LAYERS_WORLD = 1 << LAYER.VISUAL
 const LAYERS_OVERLAY = 1 << LAYER.OVERLAY
@@ -81,6 +88,8 @@ export class AtlasEngine implements Engine {
   private readonly levels = new Map<Id, LevelView>()
   private readonly shared: SharedMaterials
   private readonly tokenInstancedMaterial: THREE.ShaderMaterial
+  /** Token models: the instanced token material with a fainter rim (same program). */
+  private readonly tokenModelMaterial: THREE.ShaderMaterial
   private readonly tokens: TokenLayer
   private readonly overlays: OverlayManager
   private readonly picker: Picker
@@ -160,6 +169,8 @@ export class AtlasEngine implements Engine {
 
     this.lighting = createLightingSystem(this.renderer, { quality: this.quality })
     this.tokenInstancedMaterial = this.lighting.createTokenMaterial({ instanced: true })
+    this.tokenModelMaterial = this.lighting.createTokenMaterial({ instanced: true })
+    this.tokenModelMaterial.uniforms.uTokenParams?.value.set(TOKEN_MODEL_RIM.strength, TOKEN_MODEL_RIM.exponent, TOKEN_MODEL_RIM.lift, 0)
     this.shared = {
       token: this.lighting.createTokenMaterial({ instanced: false }),
       glass: this.lighting.createOverlayMaterial({ kind: "glass" }),
@@ -172,7 +183,7 @@ export class AtlasEngine implements Engine {
     this.configurePost(this.quality)
 
     this.worldRoot.name = "world"
-    this.tokens = new TokenLayer(this.tokenInstancedMaterial)
+    this.tokens = new TokenLayer(this.tokenInstancedMaterial, opts.tokenModels ?? null, this.tokenModelMaterial)
     this.overlays = new OverlayManager({
       scene: () => this.scene,
       view: () => this.view,
@@ -662,7 +673,17 @@ export class AtlasEngine implements Engine {
 
     this.controller.update(dt)
     this.animateDoors(dt)
-    this.tokens.update({ scene: this.scene, plan: this.plan, view: this.view, overlays: this.overlays.current }, now)
+    this.tokens.update(
+      {
+        scene: this.scene,
+        plan: this.plan,
+        view: this.view,
+        overlays: this.overlays.current,
+        pixelsPerFootAt: this.pixelsPerFootAt,
+        modelPxPerTriangle: MODEL_PX_PER_TRIANGLE[this.quality],
+      },
+      now
+    )
     const timeSec = now / 1000
     this.tokens.tick(timeSec)
     for (const lv of this.levels.values()) lv.animateFlames(timeSec, flameFlicker)
@@ -858,6 +879,7 @@ export class AtlasEngine implements Engine {
     add(world, this.shared.token, false)
     add(world, this.shared.token, true)
     add(world, this.tokenInstancedMaterial, true)
+    add(world, this.tokenModelMaterial, true)
     add(world, this.shared.glass, false)
     add(emissive, this.shared.flame, true)
     add(emissive, this.shared.flame, false)
@@ -1087,6 +1109,11 @@ export class AtlasEngine implements Engine {
     return this.levels.get(levelId)?.objectRefs(id) ?? []
   }
 
+  /** Physical pixels per foot at a world point (token model LODs, MODEL_PX_PER_TRIANGLE). */
+  private readonly pixelsPerFootAt = (x: number, y: number, z: number): number =>
+    this.pixelRatio / Math.max(1e-6, this.worldPerPixelAt(this.lodProbe.set(x, y, z)))
+  private readonly lodProbe = new THREE.Vector3()
+
   private worldPerPixelAt(p: THREE.Vector3): number {
     const cam = this.controller.camera
     if ((cam as THREE.PerspectiveCamera).isPerspectiveCamera) {
@@ -1126,6 +1153,7 @@ export class AtlasEngine implements Engine {
     this.shared.flame.dispose()
     this.shared.glow?.dispose()
     this.tokenInstancedMaterial.dispose()
+    this.tokenModelMaterial.dispose()
     this.backdrops.dispose()
     this.post?.dispose()
     this.post = null

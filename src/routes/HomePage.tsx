@@ -20,6 +20,8 @@ import { HomeHero } from "@/components/app/HomeHero"
 import { SampleSceneCard } from "@/components/app/SampleSceneCard"
 import { SceneCard, SceneCardSkeleton, type SceneAction } from "@/components/app/SceneCard"
 import { DeleteSceneDialog, RenameSceneDialog, ShareSceneDialog } from "@/components/app/SceneDialogs"
+import { StartGameDialog } from "@/components/app/StartGameDialog"
+import type { FreeAssetCategory } from "@/core/session/freeAssets"
 import { SessionsPanel } from "@/components/app/SessionsPanel"
 import { SignInButtons } from "@/components/app/SignInButtons"
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -34,7 +36,7 @@ import { formatRoomCode } from "@/net/sessionsRepo"
 
 const SHOWN_SAMPLES = SAMPLE_SCENES.filter((s) => s.id === "crooked-lantern" || s.id === "stress-test")
 
-type DialogState = { kind: "rename" | "share" | "delete"; scene: SceneSummary } | null
+type DialogState = { kind: "rename" | "share" | "delete" | "start"; scene: SceneSummary } | null
 
 function isEditable(target: EventTarget | null): boolean {
   return (
@@ -86,6 +88,7 @@ export default function HomePage() {
       case "rename":
       case "share":
       case "delete":
+      case "start":
         setDialog({ kind: action, scene })
         return
       default:
@@ -93,11 +96,7 @@ export default function HomePage() {
     }
     setBusy({ id: scene.id, action })
     try {
-      if (action === "start") {
-        const created = await services.sessions.createSession(scene.id)
-        toast.success(`Game started · room ${formatRoomCode(created.roomCode)}`, { description: "Share the room code with your players." })
-        navigate(paths.host(created.sessionId))
-      } else if (action === "duplicate") {
+      if (action === "duplicate") {
         const { summary, warnings } = await duplicateScene(
           services,
           scene,
@@ -113,8 +112,22 @@ export default function HomePage() {
         for (const w of file.warnings) toast.warning(w)
       }
     } catch (err) {
-      const verb = action === "start" ? "start the game" : action === "duplicate" ? "duplicate the scene" : "export the scene"
+      const verb = action === "duplicate" ? "duplicate the scene" : "export the scene"
       toast.error(`Couldn't ${verb}`, { description: describeError(err) })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const startGame = async (scene: SceneSummary, freeAssets: FreeAssetCategory[]) => {
+    setBusy({ id: scene.id, action: "start" })
+    try {
+      const created = await services.sessions.createSession(scene.id, { freeAssets })
+      toast.success(`Game started · room ${formatRoomCode(created.roomCode)}`, { description: "Share the room code with your players." })
+      setDialog(null)
+      navigate(paths.host(created.sessionId))
+    } catch (err) {
+      toast.error("Couldn't start the game", { description: describeError(err) })
     } finally {
       setBusy(null)
     }
@@ -449,6 +462,13 @@ export default function HomePage() {
       />
 
       <RenameSceneDialog scene={dialog?.kind === "rename" ? dialog.scene : null} onClose={() => setDialog(null)} onRenamed={replaceScene} />
+      <StartGameDialog
+        target={dialog?.kind === "start" ? dialog.scene : null}
+        onClose={() => setDialog(null)}
+        onStart={async ({ freeAssets }) => {
+          if (dialog?.kind === "start") await startGame(dialog.scene, freeAssets)
+        }}
+      />
       <ShareSceneDialog scene={dialog?.kind === "share" ? dialog.scene : null} onClose={() => setDialog(null)} onChanged={replaceScene} />
       <DeleteSceneDialog
         scene={dialog?.kind === "delete" ? dialog.scene : null}

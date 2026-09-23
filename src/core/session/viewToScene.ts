@@ -113,6 +113,7 @@ export function tokenFromPlayer(t: PlayerToken, controlled: boolean): Token {
     speed: t.speed ?? 0,
     color: t.color,
     imageUrl: t.imageUrl,
+    ...(t.model !== undefined ? { model: t.model } : {}),
     hidden: false,
   }
 }

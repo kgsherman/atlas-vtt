@@ -9,6 +9,7 @@ import { applyPatches, enablePatches, produce, type Patch } from "immer"
 import { levelById } from "../scene/queries"
 import { SCENE_LIMITS } from "../scene/schema"
 import type { GridSettings, Id, Scene } from "../scene/types"
+import { normalizeFreeAssetCategories } from "./freeAssets"
 import { remapExplored } from "./masks"
 import { sanitizeObject } from "./sanitize"
 import { staticLightWorldY } from "./memory"
@@ -191,6 +192,13 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
     case "set-shared-vision":
       if (state.sharedVision === cmd.enabled) return noop(state)
       return { state: { ...state, sharedVision: cmd.enabled, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: "all" }
+    case "set-free-assets": {
+      const categories = normalizeFreeAssetCategories(cmd.categories)
+      const current = state.freeAssets ?? []
+      if (categories.length === current.length && categories.every((c, k) => c === current[k])) return noop(state)
+      // DM-only: no player's view depends on it.
+      return { state: { ...state, freeAssets: categories, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: [] }
+    }
     case "set-enforce-speed":
       if (state.enforceSpeed === cmd.enabled) return noop(state)
       return { state: { ...state, enforceSpeed: cmd.enabled, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: "all" }

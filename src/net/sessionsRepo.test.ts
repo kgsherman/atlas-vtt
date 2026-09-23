@@ -66,6 +66,11 @@ describe("parseSessionStateContent", () => {
     })
   })
 
+  it("reads the free asset categories of the seed (known ones, sorted, each once)", () => {
+    const content = parseSessionStateContent({ kind: "seed", sceneId: "x", sceneVersion: 1, schemaVersion: 2, scene: {}, freeAssets: ["token-models", "maps", "token-models"] })
+    expect(content).toMatchObject({ kind: "seed", freeAssets: ["token-models"] })
+  })
+
   it("treats anything else as a saved game state (validated by the host)", () => {
     expect(parseSessionStateContent({ stateVersion: 1 })).toEqual({ kind: "game", state: { stateVersion: 1 } })
   })
@@ -92,9 +97,15 @@ describe("local sessions repo (dev mode, mirrors the SQL rules)", () => {
     expect(roomCode).toMatch(ROOM_CODE_RE)
     const row = await repo.loadSessionState(sessionId)
     expect(row?.epoch).toBe(0)
-    expect(row?.content).toMatchObject({ kind: "seed", sceneId, sceneVersion: 2, schemaVersion: 1 })
+    expect(row?.content).toMatchObject({ kind: "seed", sceneId, sceneVersion: 2, schemaVersion: 2, freeAssets: [] })
     expect(row?.content.kind === "seed" && (row.content.scene as { name: string }).name).toBe("Keep v2")
     expect(await repo.listMySessions()).toEqual([expect.objectContaining({ id: sessionId, status: "active", hostEpoch: 0 })])
+  })
+
+  it("seeds the free asset categories chosen for the game", async () => {
+    const { sessionId } = await repo.createSession(sceneId, { freeAssets: ["token-models", "token-models"] })
+    const row = await repo.loadSessionState(sessionId)
+    expect(row?.content).toMatchObject({ kind: "seed", freeAssets: ["token-models"] })
   })
 
   it("joins by room code, rejects the DM, bad codes and kicked players", async () => {

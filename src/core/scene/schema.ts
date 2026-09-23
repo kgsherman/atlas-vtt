@@ -14,6 +14,7 @@ import { base64ToBytes, chunkSamples, parseChunkKey, sampleCounts } from "./heig
 import { MAX_TERRAIN_HEIGHT } from "./heightmapBrush"
 import { validateReferences } from "./integrity"
 import { migrateToCurrent } from "./migrations"
+import { TOKEN_MODEL_REF_RE } from "./tokenModel"
 import { SCENE_SCHEMA_VERSION, type Scene } from "./types"
 
 export const SCENE_LIMITS = {
@@ -345,6 +346,7 @@ const tokenSchema = z.strictObject({
   speed: nonNeg(SCENE_LIMITS.maxRange),
   color: colorSchema,
   imageUrl: imageUrlSchema.nullable(),
+  model: z.string().regex(TOKEN_MODEL_REF_RE).optional(),
   hidden: z.boolean(),
   dmNotes: text.optional(),
 })

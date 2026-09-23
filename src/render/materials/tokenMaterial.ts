@@ -28,6 +28,11 @@ export interface TokenMaterialContext {
 
 /** Rim light strength / exponent and the colour ring's self-lit lift (uTokenParams). */
 export const TOKEN_RIM = { strength: 0.55, exponent: 2.6, lift: 0.035 }
+/**
+ * The same for token models (engine/tokenModels.ts): a sculpt has grazing surfaces everywhere, where
+ * the body's rim would wash the whole figure out; a faint, tight rim keeps it readable in the dark.
+ */
+export const TOKEN_MODEL_RIM = { strength: 0.16, exponent: 4, lift: 0.02 }
 
 export function createTokenMaterial(ctx: TokenMaterialContext, opts: { instanced: boolean }): THREE.ShaderMaterial {
   const own = {

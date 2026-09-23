@@ -6,6 +6,7 @@ import * as React from "react"
 import { useStore } from "zustand"
 import { useShallow } from "zustand/react/shallow"
 
+import type { FreeAssetCategory } from "@/core/session/freeAssets"
 import type { EditorController } from "@/editor/controller"
 import type { EditorState, EditorStore } from "@/editor/store"
 import type { Engine } from "@/render/contracts"
@@ -78,6 +79,12 @@ export function useConfirm(): ConfirmFn {
 // ---------------------------------------------------------------------------
 // Page-level commands (menus, panels and shortcuts all call the same functions)
 // ---------------------------------------------------------------------------
+
+/**
+ * Free asset categories whose assets the editor panels offer (e.g. token models in the inspector):
+ * a live session's GameState.freeAssets; null (the editor) = every category.
+ */
+export const FreeAssetScopeContext = React.createContext<readonly FreeAssetCategory[] | null>(null)
 
 export interface EditorActions {
   save(): void

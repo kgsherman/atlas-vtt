@@ -13,7 +13,10 @@ import { useLocation } from "wouter"
 import { paths } from "@/app/routes"
 import { useServices } from "@/app/services"
 import { useQualityChoice } from "@/components/canvas/qualityChoice"
-import { EditorContext } from "@/components/editor/context"
+import {
+  EditorContext,
+  FreeAssetScopeContext,
+} from "@/components/editor/context"
 import { useEditorHotkeys } from "@/components/editor/useEditorHotkeys"
 import { KeybindingsDialog } from "@/components/keybindings/KeybindingsDialog"
 import { Sidebar as EditorSidebar } from "@/components/editor/Sidebar"
@@ -199,6 +202,10 @@ function HostConsole({
   navigate: (to: string) => void
 }) {
   const scene = state.scene
+  const freeAssetScope = React.useMemo(
+    () => state.freeAssets ?? [],
+    [state.freeAssets]
+  )
   const [mode, setMode] = React.useState<HostMode>("play")
   const [editor, setEditor] = React.useState<HostEditor | null>(null)
   const [levelChoice, setLevelChoice] = React.useState<Id | null>(null)
@@ -683,21 +690,24 @@ function HostConsole({
   )
 
   // The providers are always present (null while playing) so entering edit mode never remounts the map.
+  // The inspector's asset pickers offer what this game loads (GameState.freeAssets).
   return (
-    <EditorContext.Provider value={editor ? editor.ctx : null}>
-      <HostEditorProviders
-        editor={editor}
-        engine={engine}
-        onPreviewToken={(id) => {
-          exitEdit()
-          previewToken(id)
-        }}
-        onExit={exitEdit}
-        onSave={saveToLibrary}
-        onShortcuts={() => setKeysOpen(true)}
-      >
-        {main}
-      </HostEditorProviders>
-    </EditorContext.Provider>
+    <FreeAssetScopeContext.Provider value={freeAssetScope}>
+      <EditorContext.Provider value={editor ? editor.ctx : null}>
+        <HostEditorProviders
+          editor={editor}
+          engine={engine}
+          onPreviewToken={(id) => {
+            exitEdit()
+            previewToken(id)
+          }}
+          onExit={exitEdit}
+          onSave={saveToLibrary}
+          onShortcuts={() => setKeysOpen(true)}
+        >
+          {main}
+        </HostEditorProviders>
+      </EditorContext.Provider>
+    </FreeAssetScopeContext.Provider>
   )
 }

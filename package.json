@@ -42,6 +42,9 @@
   },
   "devDependencies": {
     "@eslint/js": "^10",
+    "@gltf-transform/core": "^4.5.0",
+    "@gltf-transform/extensions": "^4.5.0",
+    "@gltf-transform/functions": "^4.5.0",
     "@types/node": "^24.13.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",
@@ -53,6 +56,7 @@
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17",
     "jsdom": "^29.1.1",
+    "meshoptimizer": "^1.2.0",
     "playwright": "^1.63.0",
     "prettier": "^3.9.6",
     "prettier-plugin-tailwindcss": "^0.8.1",

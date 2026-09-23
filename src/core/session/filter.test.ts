@@ -705,3 +705,34 @@ describe("invariants on The Crooked Lantern (every PC)", () => {
     }
   })
 })
+
+describe("token models", () => {
+  it("sends a visible token's model reference (and nothing for tokens without one); viewToScene keeps it", () => {
+    const { scene, ground } = flatScene(10, 10)
+    const own = addToken(scene, ground, 7.5, 7.5, { kind: "pc", model: "free:elf-archer" })
+    const other = addToken(scene, ground, 17.5, 7.5, { kind: "npc", model: "free:kenku-rogue" })
+    const plain = addToken(scene, ground, 27.5, 7.5, { kind: "npc" })
+    let s = withPlayer(scene)
+    s = reduceDm(s, { t: "assign-token", tokenId: own.id, userId: "p1", assigned: true }).state
+    const cells: [number, number][] = [1, 3, 5].map((i) => [i, 1])
+    const { view } = know(s, synthVis(scene, { [ground]: cells }, [], { visibleTokenIds: new Set([own.id, other.id, plain.id]) }))
+    expect(view.tokens[own.id].model).toBe("free:elf-archer")
+    expect(view.tokens[other.id].model).toBe("free:kenku-rogue")
+    expect("model" in view.tokens[plain.id]).toBe(false)
+    expect(playerViewSchema.parse(view)).toEqual(view)
+    expect(viewToScene(view).tokens[other.id].model).toBe("free:kenku-rogue")
+    expect("model" in viewToScene(view).tokens[plain.id]).toBe(false)
+  })
+
+  it("the view schema refuses anything but a model reference", () => {
+    const { scene, ground } = flatScene(4, 4)
+    const t = addToken(scene, ground, 2.5, 2.5, { kind: "pc", model: "free:elf-archer" })
+    let s = withPlayer(scene)
+    s = reduceDm(s, { t: "assign-token", tokenId: t.id, userId: "p1", assigned: true }).state
+    const { view } = know(s, synthVis(scene, { [ground]: [[0, 0]] }))
+    for (const model of ["https://evil.example/x.glb", "free:", "free:Elf", "asset:x"]) {
+      const bad = { ...view, tokens: { [t.id]: { ...view.tokens[t.id], model } } }
+      expect(playerViewSchema.safeParse(bad).success, model).toBe(false)
+    }
+  })
+})

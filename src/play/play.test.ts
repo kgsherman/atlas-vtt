@@ -46,6 +46,7 @@ import {
   previewSeenTokens,
   sceneChangeBetween,
   setDirectionalPatches,
+  setTokenModelPatches,
   setTokensHiddenPatches,
 } from "./host"
 import { MeasureTool } from "./measure"
@@ -685,6 +686,17 @@ describe("host helpers", () => {
       { op: "replace", path: ["tokens", t.id, "hidden"], value: true },
     ])
     expect(setTokensHiddenPatches(scene, [t.id], false)).toEqual([])
+    const model = setTokenModelPatches(scene, [t.id, "missing"], "free:elf-archer")
+    expect(model).toEqual([
+      { op: "add", path: ["tokens", t.id, "model"], value: "free:elf-archer" },
+    ])
+    const withModel = {
+      ...scene,
+      tokens: { ...scene.tokens, [t.id]: { ...t, model: "free:elf-archer" } },
+    }
+    expect(setTokenModelPatches(withModel, [t.id], null)).toEqual([
+      { op: "remove", path: ["tokens", t.id, "model"] },
+    ])
     const sun = setDirectionalPatches(
       scene,
       !scene.environment.directional.enabled

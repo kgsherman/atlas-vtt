@@ -10,12 +10,14 @@
  */
 import * as React from "react"
 
+import { ServicesContext } from "@/app/services"
 import {
   cachedQuality,
   createEngine,
   pickInitialQuality,
   type Engine,
   type Quality,
+  type TokenModelSource,
 } from "@/render"
 import { cn } from "@/lib/utils"
 
@@ -76,6 +78,13 @@ export function EngineCanvas({
   const onEngineRef = React.useRef(onEngine)
   const onCeilingRef = React.useRef(onQualityCeiling)
   const initialQuality = React.useRef(quality)
+  // Token models come from the free asset catalog (none without services, e.g. in tests).
+  const services = React.useContext(ServicesContext)
+  const tokenModels = React.useRef<TokenModelSource | undefined>(
+    services
+      ? { resolveUrl: (ref) => services.freeAssets.tokenModelUrl(ref) }
+      : undefined
+  )
 
   React.useEffect(() => {
     onEngineRef.current = onEngine
@@ -92,7 +101,10 @@ export function EngineCanvas({
       if (cancelled) return
       let engine: Engine
       try {
-        engine = createEngine(canvas, { quality: q })
+        engine = createEngine(canvas, {
+          quality: q,
+          tokenModels: tokenModels.current,
+        })
       } catch (err) {
         queueMicrotask(() =>
           setError(err instanceof Error ? err.message : String(err))

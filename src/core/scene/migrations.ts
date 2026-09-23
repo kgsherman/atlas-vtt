@@ -14,8 +14,11 @@ import { SCENE_SCHEMA_VERSION } from "./types"
 /** Converts a document of version N (the key) into version N+1. Input is a private deep copy; mutate or rebuild freely. */
 export type Migration = (doc: unknown) => unknown
 
-/** vN → vN+1 migrations keyed by N. Empty while the schema is at v1. */
-export const MIGRATIONS: Readonly<Record<number, Migration>> = Object.freeze({})
+/** vN → vN+1 migrations keyed by N. */
+export const MIGRATIONS: Readonly<Record<number, Migration>> = Object.freeze({
+  // v2 added the optional Token.model; v1 documents are valid v2 documents.
+  1: (doc: unknown) => doc,
+})
 
 export type MigrateResult =
   | { ok: true; doc: unknown; from: number }

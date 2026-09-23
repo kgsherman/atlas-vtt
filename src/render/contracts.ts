@@ -225,10 +225,18 @@ export interface Engine {
   dispose(): void
 }
 
+/** Resolves Token.model references (e.g. "free:elf-archer") to the URL of a GLB (render/engine/tokenModels.ts). */
+export interface TokenModelSource {
+  /** null when the reference names no model this app can load. */
+  resolveUrl(ref: string): Promise<string | null>
+}
+
 export interface EngineOptions {
   quality?: Quality
   /** Called when WebGL context is lost/restored. */
   onContextLost?: () => void
+  /** Where token models come from; without it every token keeps the default body. */
+  tokenModels?: TokenModelSource
 }
 
 export type CreateEngine = (canvas: HTMLCanvasElement, opts?: EngineOptions) => Engine
