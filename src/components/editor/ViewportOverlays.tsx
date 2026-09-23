@@ -69,9 +69,9 @@ export function LevelSwitcher() {
         setOpen(next)
         writeAxisOpen(next)
       }}
-      className="flex flex-col items-start"
+      className={cn("pointer-events-auto flex flex-col rounded-lg p-1", glass, "bg-card/75")}
     >
-      <div className={cn("pointer-events-auto flex items-center gap-1 rounded-lg p-1", glass)}>
+      <div className="flex items-center gap-1">
         <Tooltip>
           <TooltipTrigger
             render={<CollapsibleTrigger render={<Button variant="ghost" size="icon-xs" className="text-muted-foreground" aria-label={open ? "Hide the level axis" : "Show the level axis"} />} />}
@@ -103,7 +103,7 @@ export function LevelSwitcher() {
           </Tooltip>
         </ButtonGroup>
       </div>
-      <CollapsibleContent className="-ml-3 max-h-[60vh] overflow-y-auto">
+      <CollapsibleContent className="max-h-[60vh] overflow-y-auto">
         <LevelAxis />
       </CollapsibleContent>
     </Collapsible>
@@ -112,15 +112,11 @@ export function LevelSwitcher() {
 
 /** Pixel layout of the level axis: label pitch, top/bottom padding, least height, axis and label x. */
 const AXIS = { row: 26, pad: 14, minHeight: 200, x: 30, labelX: 54, width: 208 }
-/** The scrim runs from the viewport's left edge to this far past the labels, fading out. */
-const SCRIM_FADE = 72
-const SCRIM_MASK = "linear-gradient(to bottom, transparent, #000 20px, #000 calc(100% - 20px), transparent)"
 
 /**
  * Every level as a point on a vertical elevation axis, with a label (visibility eye + name) leading off
  * to the right. Labels keep to their level's height where they can and are pushed apart where levels
- * crowd (see `spreadLabels`). A soft scrim (theme background fading out to the right, and at the top and
- * bottom) keeps it legible over light and dark maps; only the labels take pointer input.
+ * crowd (see `spreadLabels`). It sits on the switcher's glass card, so it reads over any map.
  */
 function LevelAxis() {
   const { store } = useEditorContext()
@@ -154,75 +150,72 @@ function LevelAxis() {
   }, [levels])
 
   return (
-    <div className="relative py-5 pl-4" style={{ width: AXIS.width + 16 + SCRIM_FADE }}>
-      <div aria-hidden className="absolute inset-0 bg-linear-to-r from-background/85 via-background/65 via-65% to-transparent" style={{ maskImage: SCRIM_MASK }} />
-      <div className="relative" style={{ height, width: AXIS.width }}>
-        <svg className="absolute inset-0 size-full" aria-hidden>
-          <line x1={AXIS.x} x2={AXIS.x} y1={top} y2={bottom} className="stroke-muted-foreground/60" />
-          {minor.map((my) => (
-            <line key={my} x1={AXIS.x - 2} x2={AXIS.x} y1={my} y2={my} className="stroke-muted-foreground/40" />
-          ))}
-          {ticks.map((t) => (
-            <g key={t.v}>
-              <line x1={AXIS.x - 4} x2={AXIS.x} y1={t.y} y2={t.y} className="stroke-muted-foreground/60" />
-              <text x={AXIS.x - 6} y={t.y} dominantBaseline="middle" textAnchor="end" className="fill-muted-foreground text-[0.5625rem] tabular-nums">
-                {t.v < 0 ? `−${-t.v}` : t.v}
-              </text>
-            </g>
-          ))}
-          {rows.map(({ level, y, labelY }) => (
-            <path
-              key={level.id}
-              d={`M${AXIS.x} ${y} H${AXIS.x + 6} L${AXIS.labelX - 6} ${labelY} H${AXIS.labelX}`}
-              fill="none"
-              className={level.id === activeLevelId ? "stroke-primary" : "stroke-muted-foreground/60"}
-            />
-          ))}
-          {rows.map(({ level, y }) => (
-            <circle key={level.id} cx={AXIS.x} cy={y} r={level.id === activeLevelId ? 3.5 : 2.5} className={level.id === activeLevelId ? "fill-primary" : "fill-foreground"} />
-          ))}
-        </svg>
-        {rows.map(({ level, labelY }) => {
-          const active = level.id === activeLevelId
-          const visible = visibility[level.id] !== false
-          return (
-            <ButtonGroup key={level.id} className="pointer-events-auto absolute -translate-y-1/2" style={{ top: labelY, left: AXIS.labelX }}>
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <Button
-                      variant="outline"
-                      size="icon-sm"
-                      aria-label={visible ? `Hide ${level.name}` : `Show ${level.name}`}
-                      className={cn("text-muted-foreground", !visible && "text-muted-foreground/50")}
-                      onClick={() => store.getState().toggleLevelVisibility(level.id)}
-                    />
-                  }
-                >
-                  {visible ? <Eye /> : <EyeOff />}
-                </TooltipTrigger>
-                <TooltipContent side="right">{visible ? "Hide in the editor" : "Show in the editor"}</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <Button
-                      variant={active ? "default" : "outline"}
-                      size="sm"
-                      aria-pressed={active}
-                      className="max-w-32 justify-start"
-                      onClick={() => store.getState().setActiveLevel(level.id)}
-                    />
-                  }
-                >
-                  <span className={cn("truncate", !visible && !active && "opacity-50")}>{level.name}</span>
-                </TooltipTrigger>
-                <TooltipContent side="right">{formatElevation(level.elevation)}</TooltipContent>
-              </Tooltip>
-            </ButtonGroup>
-          )
-        })}
-      </div>
+    <div className="relative mt-1 border-t" style={{ height, width: AXIS.width }}>
+      <svg className="absolute inset-0 size-full" aria-hidden>
+        <line x1={AXIS.x} x2={AXIS.x} y1={top} y2={bottom} className="stroke-muted-foreground/60" />
+        {minor.map((my) => (
+          <line key={my} x1={AXIS.x - 2} x2={AXIS.x} y1={my} y2={my} className="stroke-muted-foreground/40" />
+        ))}
+        {ticks.map((t) => (
+          <g key={t.v}>
+            <line x1={AXIS.x - 4} x2={AXIS.x} y1={t.y} y2={t.y} className="stroke-muted-foreground/60" />
+            <text x={AXIS.x - 6} y={t.y} dominantBaseline="middle" textAnchor="end" className="fill-muted-foreground text-[0.5625rem] tabular-nums">
+              {t.v < 0 ? `−${-t.v}` : t.v}
+            </text>
+          </g>
+        ))}
+        {rows.map(({ level, y, labelY }) => (
+          <path
+            key={level.id}
+            d={`M${AXIS.x} ${y} H${AXIS.x + 6} L${AXIS.labelX - 6} ${labelY} H${AXIS.labelX}`}
+            fill="none"
+            className={level.id === activeLevelId ? "stroke-primary" : "stroke-muted-foreground/60"}
+          />
+        ))}
+        {rows.map(({ level, y }) => (
+          <circle key={level.id} cx={AXIS.x} cy={y} r={level.id === activeLevelId ? 3.5 : 2.5} className={level.id === activeLevelId ? "fill-primary" : "fill-foreground"} />
+        ))}
+      </svg>
+      {rows.map(({ level, labelY }) => {
+        const active = level.id === activeLevelId
+        const visible = visibility[level.id] !== false
+        return (
+          <ButtonGroup key={level.id} className="absolute -translate-y-1/2" style={{ top: labelY, left: AXIS.labelX }}>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    variant="outline"
+                    size="icon-sm"
+                    aria-label={visible ? `Hide ${level.name}` : `Show ${level.name}`}
+                    className={cn("text-muted-foreground", !visible && "text-muted-foreground/50")}
+                    onClick={() => store.getState().toggleLevelVisibility(level.id)}
+                  />
+                }
+              >
+                {visible ? <Eye /> : <EyeOff />}
+              </TooltipTrigger>
+              <TooltipContent side="right">{visible ? "Hide in the editor" : "Show in the editor"}</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Button
+                    variant={active ? "default" : "outline"}
+                    size="sm"
+                    aria-pressed={active}
+                    className="max-w-32 justify-start"
+                    onClick={() => store.getState().setActiveLevel(level.id)}
+                  />
+                }
+              >
+                <span className={cn("truncate", !visible && !active && "opacity-50")}>{level.name}</span>
+              </TooltipTrigger>
+              <TooltipContent side="right">{formatElevation(level.elevation)}</TooltipContent>
+            </Tooltip>
+          </ButtonGroup>
+        )
+      })}
     </div>
   )
 }
