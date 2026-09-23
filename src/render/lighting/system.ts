@@ -8,17 +8,25 @@
  *  - static sun/moon shadow map and sky-exposure map, re-rendered only when occluders or the sun change;
  *  - light manager: resolve, cull (off/hidden, frustum ∩ dim sphere, cutaway), rank → 32 uniform slots,
  *    flicker on intensity only; shadowed lights without a captured tile are dropped (never unshadowed);
+ *    a per-cell mask of the slots whose dim disc reaches each 10 ft cell lets the shaders skip the rest;
  *  - host-mask textures (render/fog) and the shared uniforms of world / token materials;
  *  - per-level backdrop uniforms (battlemap images) and the quality tier define of every material.
  *
  * Ultra tier: the 16 highest-ranked shadowed lights get 1024² tiles in a second (hi-res) atlas, and every
  * light soft (PCSS-style) shadows. A light switching between the two atlases keeps drawing from whichever
  * tile is captured until its new tile is ready (never unshadowed, never dropped for a frame).
+ *
+ * Tier changes: an adaptive step first prepares the new tier (prepareQuality): atlases whose layout
+ * changes are allocated unbound and filled in later frames under their own tile budget, including lo
+ * tiles for lights leaving the hi-res atlas; qualityReady says when every ranked shadowed light (and
+ * viewer) has a capture where it will draw from, and setQuality then swaps them in, so no light drops
+ * out on the switch. An unprepared setQuality (the user's choice) re-allocates at once and recaptures
+ * every visible tile in its first frame (TIER_SWITCH_CAPTURE_MS) instead of 4 per frame.
  */
 import * as THREE from "three"
 
 import type { BlockChannel, DirtyRegion, OcclusionWorld } from "@/core/occlusion/types"
-import { levelCeilingY, nominalTokenEye, sortedLevels } from "@/core/scene/queries"
+import { levelCeilingY, nominalTokenEye, sortedLevels, tokenRect } from "@/core/scene/queries"
 import type { Id, Rect, SceneLike, Token, Vec3, VisionSettings } from "@/core/scene/types"
 import { resolveViewerEye } from "@/core/vision"
 import type { Quality, SceneChange, ViewState } from "../contracts"
@@ -27,7 +35,7 @@ import { LAYER, type CreateLightingSystem, type LightingFrameStats, type Lightin
 import { createBackdropUniforms, setBackdropUniforms, type BackdropUniforms } from "../materials/backdrop"
 import { createOccluderDepthMaterial, createOccluderDistanceMaterial, createReencodeMaterial } from "../materials/occluderMaterials"
 import { createOverlayMaterial } from "../materials/overlayMaterial"
-import { placeholderFloatTexture } from "../materials/placeholders"
+import { lightMaskTexture, placeholderFloatTexture, placeholderLightMaskTexture } from "../materials/placeholders"
 import { precompileScene, TIER_DEFINE, TierRegistry } from "../materials/util"
 import { createTokenMaterial } from "../materials/tokenMaterial"
 import { createWorldMaterial } from "../materials/worldMaterial"
@@ -36,13 +44,15 @@ import { DirectionalShadowMap } from "../shadows/directionalShadow"
 import { DistanceAtlas, type DistanceAtlasOptions } from "../shadows/distanceAtlas"
 import { flickerFactor } from "./flicker"
 import { directionToSun, levelFill } from "./lightModel"
-import { cullAndRankLights, cutawayPlaneY, linearColor, resolveLights, type ResolvedLight } from "./lights"
+import { buildLightMask, packedLightSlots, updateLightMaskKey } from "./lightMask"
+import { cullAndRankLights, cutawayPlaneY, linearColor, resolveLights, type RankedLight, type ResolvedLight } from "./lights"
 import { orderTileUpdates, runTileUpdates, SHADOW_UPDATE_MS, SHADOW_UPDATES_PER_FRAME, type TileUpdateRequest } from "./scheduler"
 import {
   createSharedUniforms,
   ENV_FLAG_SKY_MAP,
   ENV_FLAG_SUN_MAP,
   LIGHT_LEVEL_NUMBER,
+  LIGHT_VEC4S,
   MAX_LIGHTS,
   MAX_VIEWERS,
   packLight,
@@ -58,7 +68,8 @@ export interface QualityConfig {
   /**
    * Strongest shadowed lights that get the 3×3 (2-texel box) PCF instead of 2×2 bilinear. At grazing
    * angles a 1-texel filter leaves long radial "comb" teeth along shadow edges; the wider box softens
-   * them for ~0.1 ms on the stress scene (measured on an integrated GPU), so high uses it for every light.
+   * them. Cost on the AMD iGPU at 1080p, medium: 0.5–0.7 ms for 8 lights on the Crooked Lantern DM view
+   * (4 lights would save ~0.3 ms, at a visible cost on the next 4). High uses it for every light.
    */
   widePcfLights: number
   /** Hi-res atlas for the `hiLights` highest-ranked shadowed lights (ultra), null = none. */
@@ -145,6 +156,23 @@ export interface ResolvedViewer {
   vision: VisionSettings
   /** Capture range of its LOS tile (feet). */
   range: number
+  /** Half-extent (ft) of the square around the eye covering the token's own footprint cells (viewerTouch). */
+  touch: number
+}
+
+/**
+ * Half-extent (ft, Chebyshev around `eye`) of the cells a viewer perceives by touch whatever its senses:
+ * the cells its footprint overlaps with positive area (core/vision footprintCells). The world shader
+ * never removes grade-1 perception inside it (its per-pixel blindsight range test).
+ */
+export function viewerTouch(scene: SceneLike, token: Token, eye: Vec3): number {
+  const s = scene.grid.cellSize
+  const r = tokenRect(scene, token)
+  const x0 = Math.floor(r.x / s) * s
+  const z0 = Math.floor(r.z / s) * s
+  const x1 = Math.max(x0 + s, Math.ceil((r.x + r.w) / s) * s)
+  const z1 = Math.max(z0 + s, Math.ceil((r.z + r.d) / s) * s)
+  return Math.max(eye.x - x0, x1 - eye.x, eye.z - z0, z1 - eye.z)
 }
 
 /** Eye through core/vision (so CPU and GPU agree), with a nominal-eye fallback if it fails. */
@@ -195,6 +223,21 @@ function restoreRendererState(r: THREE.WebGLRenderer, s: RendererState): void {
   r.setClearColor(r.getClearColor(_clearColor), r.getClearAlpha())
 }
 
+/** Atlases of a tier being prepared (prepareQuality). */
+interface PendingTier {
+  q: Quality
+  config: QualityConfig
+  /** The tier's new light atlas; undefined = the current one carries over (same layout). */
+  light?: DistanceAtlas
+  /** The tier's new hi-res / viewer atlas; null = the tier has none; undefined = the current one carries over. */
+  hi?: DistanceAtlas | null
+  viewer?: DistanceAtlas | null
+  /** Every ranked shadowed light (and viewer) had a capture in its tier-`q` atlas after the last frame. */
+  ready: boolean
+}
+
+const sameLayout = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
+
 export interface LightingSystemOptions {
   /** Clock for the per-frame CPU budget (default performance.now; tests inject a fake one). */
   now?: () => number
@@ -225,7 +268,14 @@ export class AtlasLightingSystem implements LightingSystem {
   private lights: ResolvedLight[] | null = null
   /** The atlases were just reallocated (tier change): the next frame recaptures with TIER_SWITCH_CAPTURE_MS. */
   private captureBurst = false
+  /** Tier being prepared (adaptive step), committed by setQuality. */
+  private pending: PendingTier | null = null
+  /** Per-cell slot mask texture (null until the first non-empty slot list) and the slots it was built from. */
+  private lightMask: THREE.DataTexture | null = null
+  private readonly lightMaskKey = new Float32Array(1 + MAX_LIGHTS * 3).fill(Number.NaN)
   private viewers: ResolvedViewer[] | null = null
+  /** More viewers than MAX_VIEWERS uniform slots (set with `viewers`): no per-pixel perception removal. */
+  private viewersTruncated = false
   private readonly bounds = new THREE.Box3()
   private sceneDiagonal = 100
   private sunDirty = true
@@ -310,9 +360,7 @@ export class AtlasLightingSystem implements LightingSystem {
     this.scene = scene
     this.world = world
     this.proxies.rebuild(world)
-    this.lightAtlas.invalidateAll()
-    this.hiAtlas?.invalidateAll()
-    this.viewerAtlas?.invalidateAll()
+    for (const atlas of this.allAtlases()) atlas.invalidateAll()
     this.lights = null
     this.viewers = null
     this.recomputeBounds()
@@ -328,11 +376,8 @@ export class AtlasLightingSystem implements LightingSystem {
     this.world = world
     const proxyDirty = this.proxies.update(world)
     const regions = dirty.concat(proxyDirty)
-    for (const r of regions) {
-      this.lightAtlas.invalidateRegion(r)
-      this.hiAtlas?.invalidateRegion(r)
-      this.viewerAtlas?.invalidateRegion(r)
-    }
+    const atlases = this.allAtlases()
+    for (const r of regions) for (const atlas of atlases) atlas.invalidateRegion(r)
     if (regions.length > 0 || change.structure || (change.terrain?.length ?? 0) > 0) {
       this.recomputeBounds()
       this.sunDirty = true
@@ -358,35 +403,127 @@ export class AtlasLightingSystem implements LightingSystem {
     this.syncMasks()
   }
 
+  /**
+   * Start preparing tier `q` (see the header): allocate the atlases whose layout differs, unbound; later
+   * frames fill them. Preparing the current tier cancels a pending one; a different tier replaces it.
+   */
+  prepareQuality(q: Quality): void {
+    if (this.pending?.q === q) return
+    this.discardPending()
+    if (q === this.quality) return
+    const next = QUALITY_CONFIG[q]
+    const p: PendingTier = { q, config: next, ready: false }
+    if (!sameLayout(next.lightAtlas, this.config.lightAtlas)) p.light = new DistanceAtlas({ name: "atlas-lights", ...next.lightAtlas }, this.reencodeMaterial)
+    if (!sameLayout(next.hiAtlas, this.config.hiAtlas)) p.hi = next.hiAtlas ? new DistanceAtlas({ name: "atlas-lights-hi", ...next.hiAtlas }, this.reencodeMaterial) : null
+    if (!sameLayout(next.viewerAtlas, this.config.viewerAtlas)) {
+      p.viewer = next.viewerAtlas ? new DistanceAtlas({ name: "atlas-viewers", ...next.viewerAtlas }, this.reencodeMaterial) : null
+    }
+    this.pending = p
+  }
+
+  /** Tier `q` can be committed without dropping a light: it is current, or prepared and filled. */
+  qualityReady(q: Quality): boolean {
+    return q === this.quality || (this.pending?.q === q && this.pending.ready)
+  }
+
+  /** Commit tier `q`: the prepared atlases if `q` was prepared, else new ones recaptured in one burst. */
   setQuality(q: Quality): void {
+    const p = this.pending?.q === q ? this.pending : null
+    if (p) this.pending = null
+    else this.discardPending()
     if (q === this.quality) return
     this.quality = q
     const next = QUALITY_CONFIG[q]
-    const sameLights = JSON.stringify(next.lightAtlas) === JSON.stringify(this.config.lightAtlas)
-    const sameHi = JSON.stringify(next.hiAtlas) === JSON.stringify(this.config.hiAtlas)
-    const sameViewers = JSON.stringify(next.viewerAtlas) === JSON.stringify(this.config.viewerAtlas)
+    if (p) {
+      if (p.light) {
+        this.lightAtlas.dispose()
+        this.lightAtlas = p.light
+      }
+      if (p.hi !== undefined) {
+        this.hiAtlas?.dispose()
+        this.hiAtlas = p.hi
+      }
+      if (p.viewer !== undefined) {
+        this.viewerAtlas?.dispose()
+        this.viewerAtlas = p.viewer
+      }
+      // Committed before every light was filled (the engine's deadline): recapture the rest at once.
+      if (!p.ready) this.captureBurst = true
+    } else {
+      const sameLights = sameLayout(next.lightAtlas, this.config.lightAtlas)
+      const sameHi = sameLayout(next.hiAtlas, this.config.hiAtlas)
+      const sameViewers = sameLayout(next.viewerAtlas, this.config.viewerAtlas)
+      if (!sameLights) {
+        this.lightAtlas.dispose()
+        this.lightAtlas = new DistanceAtlas({ name: "atlas-lights", ...next.lightAtlas }, this.reencodeMaterial)
+      }
+      if (!sameHi) {
+        this.hiAtlas?.dispose()
+        this.hiAtlas = next.hiAtlas ? new DistanceAtlas({ name: "atlas-lights-hi", ...next.hiAtlas }, this.reencodeMaterial) : null
+      }
+      if (!sameViewers) {
+        this.viewerAtlas?.dispose()
+        this.viewerAtlas = next.viewerAtlas ? new DistanceAtlas({ name: "atlas-viewers", ...next.viewerAtlas }, this.reencodeMaterial) : null
+      }
+      // New atlases hold no captures: recapture everything on screen in the next frame (one longer frame)
+      // instead of dropping every shadowed light and switching them back on 4 per frame.
+      if (!sameLights || !sameHi || !sameViewers) this.captureBurst = true
+    }
     this.config = next
-    if (!sameLights) {
-      this.lightAtlas.dispose()
-      this.lightAtlas = new DistanceAtlas({ name: "atlas-lights", ...next.lightAtlas }, this.reencodeMaterial)
-    }
-    if (!sameHi) {
-      this.hiAtlas?.dispose()
-      this.hiAtlas = next.hiAtlas ? new DistanceAtlas({ name: "atlas-lights-hi", ...next.hiAtlas }, this.reencodeMaterial) : null
-    }
-    if (!sameViewers) {
-      this.viewerAtlas?.dispose()
-      this.viewerAtlas = next.viewerAtlas ? new DistanceAtlas({ name: "atlas-viewers", ...next.viewerAtlas }, this.reencodeMaterial) : null
-    }
-    // New atlases hold no captures: recapture everything on screen in the next frame (one longer frame)
-    // instead of dropping every shadowed light and switching them back on 4 per frame.
-    if (!sameLights || !sameHi || !sameViewers) this.captureBurst = true
     // One-time recompile of every material for the new tier's shader features.
     this.tiers.set(TIER_DEFINE[q])
-    // beforeRender binds the new atlases once they hold captures.
-    this.shared.uLightAtlas.value = placeholderFloatTexture()
-    this.shared.uLightAtlasHi.value = placeholderFloatTexture()
-    this.shared.uViewerAtlas.value = placeholderFloatTexture()
+    // Prepared atlases already hold captures; new ones are bound by beforeRender once they do.
+    const bind = (a: DistanceAtlas | null) => (a?.captured ? a.texture : placeholderFloatTexture())
+    this.shared.uLightAtlas.value = bind(this.lightAtlas)
+    this.shared.uLightAtlasHi.value = bind(this.hiAtlas)
+    this.shared.uViewerAtlas.value = bind(this.viewerAtlas)
+  }
+
+  private discardPending(): void {
+    const p = this.pending
+    this.pending = null
+    if (!p) return
+    p.light?.dispose()
+    p.hi?.dispose()
+    p.viewer?.dispose()
+  }
+
+  /**
+   * Per-cell point-light slot mask (lighting/lightMask.ts) of the packed slots, rebuilt only when the slot
+   * list changed (count, positions, radii; slots are re-ranked every frame).
+   */
+  private updateLightMask(packed: Float32Array, count: number): void {
+    const slots = packedLightSlots(packed, count, LIGHT_VEC4S)
+    if (updateLightMaskKey(this.lightMaskKey, slots)) return
+    const s = this.shared
+    const mask = buildLightMask(slots)
+    if (!mask) {
+      s.uLightMask.value = placeholderLightMaskTexture()
+      s.uLightMaskGrid.value.set(0, 0, 0, 0)
+      return
+    }
+    let t = this.lightMask
+    if (!t || t.image.width !== mask.width || t.image.height !== mask.depth) {
+      t?.dispose()
+      t = this.lightMask = lightMaskTexture(mask.bits, mask.width, mask.depth)
+    } else {
+      ;(t.image.data as Uint32Array).set(mask.bits)
+      t.needsUpdate = true
+    }
+    s.uLightMask.value = t
+    s.uLightMaskGrid.value.set(mask.originX, mask.originZ, 1 / mask.cell, 1)
+  }
+
+  /** Live and pending atlases (invalidation and resets reach both). */
+  private allAtlases(): DistanceAtlas[] {
+    const out: DistanceAtlas[] = [this.lightAtlas]
+    if (this.hiAtlas) out.push(this.hiAtlas)
+    if (this.viewerAtlas) out.push(this.viewerAtlas)
+    const p = this.pending
+    if (p?.light) out.push(p.light)
+    if (p?.hi) out.push(p.hi)
+    if (p?.viewer) out.push(p.viewer)
+    return out
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -419,7 +556,9 @@ export class AtlasLightingSystem implements LightingSystem {
       maxLights: MAX_LIGHTS,
     })
     const viewers = this.view.vision === "off" ? [] : this.resolvedViewers(scene, world)
-    const refine = this.refineActive()
+    // GPU line of sight can only veto perception: a viewer without a slot would lose what only it sees.
+    const allViewers = this.view.vision === "off" || !this.viewersTruncated
+    const refine = this.refineActive() && allViewers
 
     // Tile requests: every slotted shadowed light / viewer claims its tile (LRU keeps the rest cached).
     // Ultra: the first `hiLights` shadowed lights by rank claim a hi-res tile instead.
@@ -468,11 +607,12 @@ export class AtlasLightingSystem implements LightingSystem {
     const ordered = orderTileUpdates(requests)
     const burst = this.captureBurst
     this.captureBurst = false
+    const prep = this.pending ? this.pendingTileRequests(this.pending, ranked, viewers, allViewers, world, renderer, frame) : null
     const needSun = this.sunEnabled && this.sunDirty
     const needSky = this.skyEnabled && this.skyDirty
     let tilesUpdated = 0
     let updateMs = 0
-    if (ordered.length > 0 || needSun || needSky) {
+    if (ordered.length > 0 || needSun || needSky || (prep?.ordered.length ?? 0) > 0) {
       const t0 = this.now()
       const saved = saveRendererState(renderer)
       renderer.autoClear = false
@@ -486,11 +626,17 @@ export class AtlasLightingSystem implements LightingSystem {
         const budget = burst ? { maxTiles: MAX_LIGHTS + MAX_VIEWERS, maxMs: TIER_SWITCH_CAPTURE_MS } : { maxTiles: SHADOW_UPDATES_PER_FRAME, maxMs: SHADOW_UPDATE_MS }
         const run = runTileUpdates(ordered, budget, (r) => jobs.get(r.key)?.(), this.now)
         tilesUpdated = run.updated.length
+        // The tier being prepared fills its atlases under a budget of its own (unbound until committed).
+        if (prep && prep.ordered.length > 0) {
+          const pre = runTileUpdates(prep.ordered, { maxTiles: SHADOW_UPDATES_PER_FRAME, maxMs: SHADOW_UPDATE_MS }, (r) => prep.jobs.get(r.key)?.(), this.now)
+          tilesUpdated += pre.updated.length
+        }
       } finally {
         restoreRendererState(renderer, saved)
       }
       updateMs = this.now() - t0
     }
+    if (prep && this.pending) this.pending.ready = prep.isReady()
 
     // Which directional maps hold a current render (the perception refinement trusts only those).
     s.uEnvLevels.value.w = (this.skyEnabled && !this.skyDirty ? ENV_FLAG_SKY_MAP : 0) + (this.sunEnabled && !this.sunDirty ? ENV_FLAG_SUN_MAP : 0)
@@ -536,6 +682,7 @@ export class AtlasLightingSystem implements LightingSystem {
       count++
     }
     s.uLightCount.value = count
+    this.updateLightMask(packed, count)
 
     let viewerCount = 0
     for (const v of viewers) {
@@ -546,10 +693,11 @@ export class AtlasLightingSystem implements LightingSystem {
         blindsight: v.vision.blindsight,
         tile: t?.state ? t : null,
         capture: t?.state?.origin ?? null,
-        far: t?.state?.far ?? v.range,
+        touch: v.touch,
       })
     }
     s.uViewerCount.value = viewerCount
+    s.uViewersAll.value = allViewers ? 1 : 0
     s.uGpuRefine.value = viewerAtlas ? 1 : 0
     // Atlases are allocated on their first capture; until then the samplers read a real placeholder.
     s.uLightAtlas.value = lightAtlas.captured ? lightAtlas.texture : placeholderFloatTexture()
@@ -565,6 +713,9 @@ export class AtlasLightingSystem implements LightingSystem {
 
   dispose(): void {
     this.canvas?.removeEventListener("webglcontextrestored", this.onContextRestored)
+    this.discardPending()
+    this.lightMask?.dispose()
+    this.lightMask = null
     this.lightAtlas.dispose()
     this.hiAtlas?.dispose()
     this.viewerAtlas?.dispose()
@@ -601,6 +752,68 @@ export class AtlasLightingSystem implements LightingSystem {
   // ---------------------------------------------------------------------------------------------
   // Internals
 
+  /**
+   * Captures the tier being prepared still needs: each ranked shadowed light in the atlas it will draw
+   * from at that tier (its hi-res tile by rank, else a lo tile, in the new atlas or, when the lo layout
+   * carries over, the current one: ultra → high lights keep their lo tiles captured), and each viewer when
+   * the tier refines line of sight on the GPU. Tiles the current tier already keeps up to date for the
+   * same atlas need nothing. `isReady()` (after the captures ran) = every one of them has a capture.
+   */
+  private pendingTileRequests(
+    p: PendingTier,
+    ranked: readonly RankedLight[],
+    viewers: readonly ResolvedViewer[],
+    allViewers: boolean,
+    world: OcclusionWorld,
+    renderer: THREE.WebGLRenderer,
+    frame: number
+  ): { ordered: TileUpdateRequest[]; jobs: Map<string, () => void>; isReady: () => boolean } {
+    const lightAtlas = p.light ?? this.lightAtlas
+    const hiAtlas = p.hi === undefined ? this.hiAtlas : p.hi
+    const viewerAtlas = p.viewer === undefined ? this.viewerAtlas : p.viewer
+    const requests: TileUpdateRequest[] = []
+    const jobs = new Map<string, () => void>()
+    const needed: { atlas: DistanceAtlas; key: string }[] = []
+    let hiCount = 0
+    for (const l of ranked) {
+      if (!l.castsShadows) continue
+      const key = `light:${l.id}`
+      const useHi = hiAtlas !== null && hiCount < p.config.hiLights
+      if (useHi) hiCount++
+      const atlas = useHi ? hiAtlas : lightAtlas
+      const tile = atlas.tiles.acquire(key, frame)
+      if (!tile) continue
+      needed.push({ atlas, key })
+      const st = tile.state
+      const moved = st !== null && DistanceAtlas.moved(st, l.position, l.dim)
+      if (st !== null && !moved && !st.dirty) continue
+      const job = `prep:${atlas.options.name}:${key}`
+      requests.push({ key: job, kind: "light", forced: false, moved, uncaptured: st === null, dirty: st?.dirty ?? false, coverage: l.coverage })
+      jobs.set(job, () => atlas.capture(renderer, tile, l.position, l.dim, LIGHT_LAYER_MASK, this.proxies.scene, this.distanceMaterial, this.excludeKeys(world, l.position, "light")))
+    }
+    const refine = viewerAtlas !== null && viewerAtlas !== this.viewerAtlas && allViewers && this.view.vision !== "off" && this.view.gpuVisionRefine
+    if (refine) {
+      for (const v of viewers) {
+        const key = `viewer:${v.tokenId}`
+        const tile = viewerAtlas.tiles.acquire(key, frame)
+        if (!tile) continue
+        needed.push({ atlas: viewerAtlas, key })
+        const st = tile.state
+        const moved = st !== null && DistanceAtlas.moved(st, v.eye, v.range)
+        if (st !== null && !moved && !st.dirty) continue
+        const job = `prep:${viewerAtlas.options.name}:${key}`
+        requests.push({ key: job, kind: "viewer", forced: false, moved, uncaptured: st === null, dirty: st?.dirty ?? false, coverage: 1 })
+        jobs.set(job, () => viewerAtlas.capture(renderer, tile, v.eye, v.range, SIGHT_LAYER_MASK, this.proxies.scene, this.distanceMaterial, this.excludeKeys(world, v.eye, "sight")))
+      }
+    }
+    return {
+      ordered: orderTileUpdates(requests),
+      jobs,
+      // Stale captures are fine (they are refreshed after the switch); missing ones would drop a light.
+      isReady: () => needed.every(({ atlas, key }) => atlas.tiles.get(key)?.state != null),
+    }
+  }
+
   private resolvedLights(scene: SceneLike, world: OcclusionWorld): ResolvedLight[] {
     // The DM with vision "off" sees hidden lights; previews show what the previewed tokens' players see.
     // Origins are pushed out of light blockers (cleared with the world in setScene / applyChange).
@@ -611,16 +824,21 @@ export class AtlasLightingSystem implements LightingSystem {
   private resolvedViewers(scene: SceneLike, world: OcclusionWorld): ResolvedViewer[] {
     if (this.viewers) return this.viewers
     const out: ResolvedViewer[] = []
+    let truncated = false
     for (const id of this.view.viewerTokenIds) {
-      if (out.length >= MAX_VIEWERS) break
       if (!Object.hasOwn(scene.tokens, id)) continue
       const token = scene.tokens[id]
       const range = token.vision.blind ? Math.max(token.vision.blindsight, 1) : Math.max(this.sceneDiagonal, 1)
       const eye = viewerEye(world, scene, token)
       if (!Number.isFinite(eye.x + eye.y + eye.z + range)) continue
-      out.push({ tokenId: id, levelId: token.levelId, eye, vision: token.vision, range })
+      if (out.length >= MAX_VIEWERS) {
+        truncated = true
+        break
+      }
+      out.push({ tokenId: id, levelId: token.levelId, eye, vision: token.vision, range, touch: viewerTouch(scene, token, eye) })
     }
     this.viewers = out
+    this.viewersTruncated = truncated
     return out
   }
 
@@ -737,9 +955,8 @@ export class AtlasLightingSystem implements LightingSystem {
   }
 
   private resetGpuState(): void {
-    this.lightAtlas.reset()
-    this.hiAtlas?.reset()
-    this.viewerAtlas?.reset()
+    for (const atlas of this.allAtlases()) atlas.reset()
+    if (this.pending) this.pending.ready = false
     this.sunDirty = true
     this.skyDirty = true
     this.masks.invalidate()

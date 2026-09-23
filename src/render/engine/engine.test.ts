@@ -17,6 +17,9 @@ const calls = vi.hoisted(() => ({
   applyChange: [] as { change: SceneChange; dirty: unknown[] }[],
   setView: [] as { mode: string; activeLevelId: string | null }[],
   setQuality: [] as string[],
+  prepareQuality: [] as string[],
+  /** Tiers the mock lighting system reports as prepared (qualityReady). */
+  readyTiers: [] as string[],
   beforeRender: 0,
   backdrops: [] as { levelId: string; texture: unknown; opacity: number; tintWalls: boolean }[],
   renderParams: [] as { hdr: boolean; emissive: number; glow: number }[],
@@ -111,6 +114,10 @@ vi.mock("../lighting/system", async () => {
       setQuality: (q: string) => {
         calls.setQuality.push(q)
       },
+      prepareQuality: (q: string) => {
+        calls.prepareQuality.push(q)
+      },
+      qualityReady: (q: string) => calls.readyTiers.includes(q),
       beforeRender: () => {
         calls.beforeRender++
         return { activeLights: 2, tilesUpdated: 1, tilesTotal: 3, updateMs: 0.5 }
@@ -171,6 +178,8 @@ describe("engine", () => {
     calls.applyChange = []
     calls.setView = []
     calls.setQuality = []
+    calls.prepareQuality = []
+    calls.readyTiers = ["low", "medium", "high", "ultra"]
     calls.beforeRender = 0
     calls.backdrops = []
     calls.renderParams = []
@@ -405,6 +414,56 @@ describe("engine", () => {
     engine.setQuality("ultra")
     expect(calls.setQuality).toEqual(["medium", "ultra"])
     expect(engine.getQualityCeiling()).toBe("ultra")
+    engine.dispose()
+  })
+
+  it("commits an adaptive step only once the lighting system filled the tier's shadow atlases", async () => {
+    const { scene } = sampleScene()
+    calls.readyTiers = []
+    const engine = createEngine(canvasEl(), { quality: "high" })
+    const internals = engine as unknown as { pendingQuality: { q: string } | null }
+    engine.setScene(scene)
+    let t = 0
+    while (!internals.pendingQuality && t < 10000) frame((t += 40))
+    expect(internals.pendingQuality?.q).toBe("medium")
+    expect(calls.prepareQuality).toEqual(["medium"])
+    await Promise.resolve()
+    await Promise.resolve()
+    // Compiled, but the atlases are still filling: the old tier keeps drawing.
+    frame((t += 16))
+    frame((t += 16))
+    expect(calls.setQuality).toEqual([])
+    calls.readyTiers = ["medium"]
+    frame(t + 16)
+    expect(calls.setQuality).toEqual(["medium"])
+    expect(internals.pendingQuality).toBeNull()
+    engine.dispose()
+  })
+
+  it("commits a pending step at its deadline even if the atlases are not filled, and cancels on a user choice", async () => {
+    const { scene } = sampleScene()
+    calls.readyTiers = []
+    const engine = createEngine(canvasEl(), { quality: "high" })
+    const internals = engine as unknown as { pendingQuality: { q: string; deadline: number } | null }
+    engine.setScene(scene)
+    let t = 0
+    while (!internals.pendingQuality && t < 10000) frame((t += 40))
+    await Promise.resolve()
+    await Promise.resolve()
+    const deadline = internals.pendingQuality!.deadline
+    frame(deadline - 1)
+    expect(calls.setQuality).toEqual([])
+    frame(deadline + 1)
+    expect(calls.setQuality).toEqual(["medium"])
+    // The next adaptive request is cancelled (and its atlases dropped) by the user's choice.
+    t = deadline + 1
+    while (!internals.pendingQuality && t < 30000) frame((t += 40))
+    expect(internals.pendingQuality?.q).toBe("low")
+    calls.prepareQuality = []
+    engine.setQuality("high")
+    expect(internals.pendingQuality).toBeNull()
+    expect(calls.prepareQuality).toEqual(["medium"])
+    expect(calls.setQuality).toEqual(["medium", "high"])
     engine.dispose()
   })
 

@@ -7,13 +7,11 @@ import { createScene } from "@/core/scene/factory"
 import type { TraceImage } from "@/core/scene/imageTrace"
 import { floorRects } from "@/core/scene/queries"
 import { parseScene } from "@/core/scene/schema"
-import type { FloorObject, Scene, Vec2, WallObject } from "@/core/scene/types"
-import { createAssetStore } from "@/net/assets"
+import type { FloorObject, Vec2, WallObject } from "@/core/scene/types"
 import type { ImportedImage } from "@/net/assets/import"
 import type { AssetMeta } from "@/net/assets/types"
-import { createMemoryStore } from "@/net/localStore"
 
-import { addBackdrop, createSceneFromImages, createSceneFromImagesStored, floorFromImage, planSceneFromImages, removeBackdrop, updateBackdrop, wallsFromImage } from "./imageOps"
+import { addBackdrop, floorFromImage, removeBackdrop, updateBackdrop, wallsFromImage } from "./imageOps"
 import { makeStore } from "./test-utils"
 
 /** RGBA image (width×height px) opaque inside `inside(px, py)` (pixel centres). */
@@ -162,50 +160,5 @@ describe("wallsFromImage", () => {
     const store = makeStore(createScene({ width: 20, depth: 20 }))
     const blank = imported(image(40, 40, () => false))
     expect(wallsFromImage(store, store.getState().activeLevelId, blank.pixels, blank)).toEqual([])
-  })
-})
-
-describe("createSceneFromImages", () => {
-  const images = () => [
-    { name: "Second floor.png", imported: imported(lStorey()), elevation: 10, levelName: "Second Floor" },
-    { name: "Ground.jpg", imported: imported(image(400, 400, () => true)), elevation: 0, levelName: "Ground Floor" },
-    {
-      name: "Caves.png",
-      imported: imported(image(400, 400, (x, y) => Math.hypot(x - 200, y - 200) < 150)),
-      elevation: -10,
-      levelName: "Basement",
-    },
-  ]
-
-  it("builds one level per image with backdrops and traced floors", () => {
-    const scene: Scene = createSceneFromImages(images(), { sceneName: "Vineyard", traceWalls: true })
-    expect(scene.name).toBe("Vineyard")
-    expect(scene.grid).toMatchObject({ cellSize: 5, width: 20, depth: 20 })
-    const levels = Object.values(scene.levels).sort((a, b) => a.elevation - b.elevation)
-    expect(levels.map((l) => l.name)).toEqual(["Basement", "Ground Floor", "Second Floor"])
-    for (const l of levels) {
-      expect(l.backdrop).toBeTruthy()
-      expect(scene.assets?.[l.backdrop!.assetId]).toBeTruthy()
-    }
-    const floorsOf = (levelId: string) => Object.values(scene.objects).filter((o): o is FloorObject => o.type === "floor" && o.levelId === levelId)
-    expect(floorsOf(levels[1].id)[0].mask).toBeUndefined()
-    expect(floorsOf(levels[0].id)[0].mask).toBeDefined()
-    expect(floorsOf(levels[2].id)[0].mask).toBeDefined()
-    // Walls only around images with transparency.
-    const wallsOn = (levelId: string) => Object.values(scene.objects).filter((o) => o.type === "wall" && o.levelId === levelId).length
-    expect(wallsOn(levels[1].id)).toBe(0)
-    expect(wallsOn(levels[2].id)).toBe(6)
-    expect(wallsOn(levels[0].id)).toBeGreaterThan(8)
-    const parsed = parseScene(JSON.parse(JSON.stringify(scene)))
-    expect(parsed.ok).toBe(true)
-  })
-
-  it("plans uploads with the backdrops' asset ids and stores them", async () => {
-    const plan = planSceneFromImages(images())
-    expect(plan.uploads.map((u) => u.assetId).sort()).toEqual(Object.keys(plan.scene.assets!).sort())
-    const assets = createAssetStore({ client: null, store: createMemoryStore(), userId: "dm" })
-    const scene = await createSceneFromImagesStored(assets, images())
-    for (const l of Object.values(scene.levels)) expect(await assets.getImage(scene.id, l.backdrop!.assetId)).not.toBeNull()
-    expect(() => planSceneFromImages([])).toThrow()
   })
 })

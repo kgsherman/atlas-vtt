@@ -6,7 +6,7 @@
 import * as THREE from "three"
 
 import { SIZE_FOOTPRINT } from "@/core/scene/defaults"
-import { tokenGroundY } from "@/core/scene/queries"
+import { tokenGroundY, type GroundIndex } from "@/core/scene/queries"
 import type { Id, SceneLike, Token } from "@/core/scene/types"
 
 import { trackShared } from "../engine/sharedResources"
@@ -117,12 +117,13 @@ export interface TokenVisual {
   color: RGB
 }
 
-export function tokenVisual(scene: Pick<SceneLike, "grid" | "levels" | "objects">, token: Token): TokenVisual {
+/** `ground`: the scene's GroundIndex when visuals are built for many tokens (one object scan, not one per token). */
+export function tokenVisual(scene: Pick<SceneLike, "grid" | "levels" | "objects">, token: Token, ground?: GroundIndex): TokenVisual {
   return {
     id: token.id,
     levelId: token.levelId,
     x: token.position.x,
-    y: tokenGroundY(scene, token),
+    y: tokenGroundY(scene, token, ground),
     z: token.position.z,
     side: (SIZE_FOOTPRINT[token.size] ?? 1) * scene.grid.cellSize,
     height: Math.max(0.5, token.height),

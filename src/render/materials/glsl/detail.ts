@@ -5,14 +5,15 @@
  * bump mapping turn into a perturbed shading normal via screen-space derivatives.
  *
  * Cost is fixed and branch-free: every material is a row of parameters (uMatTable) driving ONE
- * pattern (running bond / square / planks), 3 (medium) or 4 (high / ultra) noise texture taps and a
- * handful of mixes; floors covered by a battlemap skip it entirely. (A chain
+ * pattern (running bond / square / planks), 3 (medium) or 4 (high / ultra; 5 when zoomed in close)
+ * noise texture taps and a handful of mixes; floors covered by a battlemap skip it entirely. (A chain
  * of per-material branches is flattened by some shader compilers — ANGLE's D3D backend — into running
  * every branch for every pixel, which cost ~8 ms at 2 MP on an integrated GPU.) Only high / ultra add
  * the few material "specials" (Voronoi cobbles, marble veins, water sparkle) in one small switch.
  *
  * Detail fades by pixel footprint (fw, world feet per pixel), so zoomed-out views never alias into
- * moiré: features smaller than a few pixels resolve to their average.
+ * moiré: features smaller than a few pixels resolve to their average. Magnified past a few pixels per
+ * lattice cell, the fine band (high / ultra) averages two rotated lattices, where one turns blocky.
  *
  * Material ids: materials/surface.ts MAT (mirrored by AT_MAT_* here).
  */
@@ -78,6 +79,11 @@ vec4 atNoise4(vec2 p) {
 // 1 while a feature of world size s is resolved at pixel footprint fw, fading to 0 below ~2 pixels.
 float atFeature(float s, float fw) {
   return 1.0 - atSmoothstepSafe(0.2 * s, 0.6 * s, fw);
+}
+
+// 0 while a noise lattice cell of world size s spans at most ~3 pixels at footprint fw, 1 from ~6.
+float atMagnified(float s, float fw) {
+  return atSmoothstepSafe(3.0 * fw, 6.0 * fw, s);
 }
 
 // Grout / seam coverage of a rectangular cell pattern: f = position in the cell (0..1 square), size =
@@ -157,7 +163,17 @@ vec4 atSurfaceDetail(vec3 p, vec3 n, float m, float fw, float weight, out float 
 #if AT_TIER >= 2
   float n2 = atNoise4(mat2(0.8, 0.6, -0.6, 0.8) * uv * (lo.y * 2.03) - flow * 1.7 + 17.13).b;
   float nLo = n1 * 0.6667 + n2 * 0.3333;
-  float nHi = mix(0.5, atNoise4(uv * hi.xy + h * 31.0 + flow * 2.0).a, atFeature(hi.w, fw));
+  vec2 fuv = uv * hi.xy + h * 31.0 + flow * 2.0;
+  float fine = atNoise4(fuv).a;
+  // Magnified past ~3 px per lattice cell, value noise shows its square cells as blocks: blend in a
+  // second tap on a rotated lattice (variance restored), like medium's low band. Only then: the branch
+  // is coherent across the screen, so ordinary zooms skip the extra tap.
+  float mag = atMagnified(1.0 / max(max(hi.x, hi.y), 1e-3), fw);
+  if (mag > 0.0) {
+    float fine2 = atNoise4(mat2(0.8, 0.6, -0.6, 0.8) * fuv + 11.3).a;
+    fine = mix(fine, 0.5 + (fine + fine2 - 1.0) * 0.7071, mag);
+  }
+  float nHi = mix(0.5, fine, atFeature(hi.w, fw));
 #else
   // Medium: one more tap of the low band on a rotated, rescaled lattice hides value noise's square cells.
   float n2 = atNoise4(mat2(0.8, 0.6, -0.6, 0.8) * uv * (lo.y * 1.73) + 41.7).b;

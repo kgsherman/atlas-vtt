@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { formatBytes, formatRelativeTime, initials, plural } from "./format"
+import { formatRelativeTime, initials, plural } from "./format"
 import { extractCodeFromText, inviteLink, parseRoomCodeInput } from "./roomCodeInput"
 
 describe("formatRelativeTime", () => {
@@ -40,12 +40,6 @@ describe("small formatters", () => {
     expect(initials("gandalf")).toBe("GA")
     expect(initials("  ")).toBe("?")
     expect(initials(null)).toBe("?")
-  })
-
-  it("formats sizes", () => {
-    expect(formatBytes(512)).toBe("512 B")
-    expect(formatBytes(820 * 1024)).toBe("820 KB")
-    expect(formatBytes(12.4 * 1024 * 1024)).toBe("12.4 MB")
   })
 })
 

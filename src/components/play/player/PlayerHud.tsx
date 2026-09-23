@@ -1,8 +1,8 @@
 /**
- * The player's HUD over the map: session chip (scene, connection), status banners (DM away, movement
- * locked, reconnecting), the party panel (own characters, selected character card with senses, speed
- * and level changes: ladder climbs, stairs/ramp steps), the tool dock and the camera dock. Everything floats in fixed-size glass panels so
- * nothing shifts the map.
+ * The player's HUD over the map: session chip (scene, connection), status banners (own connection
+ * offline, DM away, movement locked, reconnecting), the party panel (own characters, selected
+ * character card with senses, speed and level changes: ladder climbs, stairs/ramp steps), the tool
+ * dock and the camera dock. Everything floats in fixed-size glass panels so nothing shifts the map.
  */
 import * as React from "react"
 import {
@@ -160,7 +160,11 @@ export function PlayerHud({
                 size="sm"
                 className="h-7 whitespace-nowrap"
                 onClick={() => onClimb(c)}
-                disabled={view.flags.movementLocked || snap.status !== "live"}
+                disabled={
+                  view.flags.movementLocked ||
+                  snap.status !== "live" ||
+                  snap.networkOffline
+                }
               >
                 {c.direction === "up" ? (
                   <ArrowUpToLine data-icon="inline-start" />
@@ -193,6 +197,13 @@ function statusInfo(snap: PlayerClientSnapshot): {
   label: string
   pulse: boolean
 } {
+  // The player's own connection is down: say so rather than blaming the DM.
+  if (
+    snap.networkOffline &&
+    snap.status !== "ended" &&
+    snap.status !== "kicked"
+  )
+    return { tone: "bad", label: "You're offline", pulse: true }
   switch (snap.status) {
     case "live":
       return snap.hostUnresponsive
@@ -238,7 +249,19 @@ function SessionChip({ snap }: { snap: PlayerClientSnapshot }) {
 function StatusBanners({ snap }: { snap: PlayerClientSnapshot }) {
   const locked = snap.view?.flags.movementLocked ?? false
   let main: React.ReactNode = null
-  if (snap.status === "host-offline") {
+  if (snap.networkOffline) {
+    main = (
+      <HudPanel className="flex items-center gap-2.5 px-3 py-2 text-xs">
+        <WifiOff className="size-4 text-destructive" />
+        <div className="flex flex-col">
+          <span className="font-medium">You're offline, reconnecting…</span>
+          <span className="text-[0.6875rem] text-muted-foreground">
+            Check your connection. Moves resume when you're back online.
+          </span>
+        </div>
+      </HudPanel>
+    )
+  } else if (snap.status === "host-offline") {
     main = (
       <HudPanel className="flex items-center gap-2.5 px-3 py-2 text-xs">
         <Hourglass className="size-4 text-muted-foreground" />

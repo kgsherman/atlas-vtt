@@ -10,7 +10,7 @@ import type { OccluderPrimitive, OcclusionWorld, OrientedBox } from "@/core/occl
 import { createLevel, createLight, createScene, createToken } from "@/core/scene/factory"
 import type { LightObject, Scene, Vec3 } from "@/core/scene/types"
 import { LAYER } from "../internal"
-import { AtlasLightingSystem, DEFAULT_VIEW_STATE, QUALITY_CONFIG } from "./system"
+import { AtlasLightingSystem, DEFAULT_VIEW_STATE, QUALITY_CONFIG, viewerTouch } from "./system"
 import { LIGHT_VEC4S, VIEWER_VEC4S } from "./uniforms"
 
 interface RenderCall {
@@ -303,6 +303,69 @@ describe("AtlasLightingSystem", () => {
     expect(sys.shared.uViewers.value[6]).toBe(0)
   })
 
+  it("builds the per-cell slot mask from the packed slots and rebuilds it only when they change", () => {
+    const { sys, renderer, camera } = setup(4)
+    // No slots yet: the placeholder (every bit set, grid off).
+    expect(sys.shared.uLightMaskGrid.value.w).toBe(0)
+    for (let k = 0; k < 3; k++) sys.beforeRender(renderer, camera, k)
+    const grid = sys.shared.uLightMaskGrid.value
+    expect(grid.w).toBe(1)
+    const tex = sys.shared.uLightMask.value as THREE.DataTexture
+    const version = tex.version
+    const data = tex.image.data as Uint32Array
+    const w = tex.image.width
+    const u = sys.shared.uLights.value
+    const count = sys.shared.uLightCount.value
+    expect(count).toBeGreaterThan(0)
+    for (let k = 0; k < count; k++) {
+      // Each slot's own position lies in a cell carrying its bit.
+      const x = u[k * LIGHT_VEC4S * 4]
+      const z = u[k * LIGHT_VEC4S * 4 + 2]
+      const i = Math.floor((x - grid.x) * grid.z)
+      const j = Math.floor((z - grid.y) * grid.z)
+      expect((data[j * w + i] >>> k) & 1).toBe(1)
+    }
+    sys.beforeRender(renderer, camera, 3)
+    expect(sys.shared.uLightMask.value).toBe(tex)
+    expect(tex.version).toBe(version)
+  })
+
+  it("packs each viewer's touch square and skips per-pixel perception removal beyond MAX_VIEWERS", () => {
+    const { sys, renderer, camera, scene, ground, world } = setup()
+    const small = createToken(ground, { x: 102.5, z: 102.5 }, { id: "small" })
+    // Off-grid large token: its footprint (10 ft) overlaps a 3×3 block of cells.
+    const large = createToken(ground, { x: 51, z: 101 }, { id: "large", size: "large" })
+    scene.tokens = { small, large }
+    sys.applyChange(scene, world, { tokens: ["small", "large"] }, [])
+    sys.setView({ ...DEFAULT_VIEW_STATE, mode: "player", vision: "fog", viewerTokenIds: ["small", "large"], gpuVisionRefine: true })
+    sys.beforeRender(renderer, camera, 0)
+    const v = sys.shared.uViewers.value
+    expect(v[11]).toBeCloseTo(2.5) // centred medium token: its own cell
+    expect(v[VIEWER_VEC4S * 4 + 11]).toBeCloseTo(9) // cells x ∈ [45, 60), z ∈ [95, 110) around (51, 101)
+    expect(viewerTouch(scene, large, { x: 51, y: 5, z: 101 })).toBeCloseTo(9)
+    expect(sys.shared.uViewersAll.value).toBe(1)
+    expect(sys.shared.uGpuRefine.value).toBe(1)
+    // Nine viewers: the ninth has no slot, so GPU line of sight and the senses' range cut are off.
+    const ids: string[] = []
+    const tokens: Scene["tokens"] = {}
+    for (let k = 0; k < 9; k++) {
+      const t = createToken(ground, { x: 12.5 + k * 20, z: 12.5 }, { id: `v${k}` })
+      tokens[t.id] = t
+      ids.push(t.id)
+    }
+    scene.tokens = tokens
+    sys.applyChange(scene, world, { tokens: ids }, [])
+    sys.setView({ ...DEFAULT_VIEW_STATE, mode: "player", vision: "fog", viewerTokenIds: ids, gpuVisionRefine: true })
+    sys.beforeRender(renderer, camera, 1)
+    expect(sys.shared.uViewerCount.value).toBe(8)
+    expect(sys.shared.uViewersAll.value).toBe(0)
+    expect(sys.shared.uGpuRefine.value).toBe(0)
+    sys.setView({ ...DEFAULT_VIEW_STATE, mode: "player", vision: "fog", viewerTokenIds: ids.slice(0, 8), gpuVisionRefine: true })
+    sys.beforeRender(renderer, camera, 2)
+    expect(sys.shared.uViewersAll.value).toBe(1)
+    expect(sys.shared.uGpuRefine.value).toBe(1)
+  })
+
   it("switches atlas resolution and wide PCF with the quality tier", () => {
     const { sys, renderer, camera } = setup(5)
     sys.setQuality("high")
@@ -330,6 +393,85 @@ describe("AtlasLightingSystem", () => {
     expect(drawn).toBe(shadowed)
     expect(u[10]).toBe(256)
     expect(sys.beforeRender(renderer, camera, 5).tilesUpdated).toBeLessThanOrEqual(4)
+  })
+
+  it("prepares an adaptive tier in unbound atlases and commits it without dropping a light", () => {
+    const { sys, renderer, camera, calls } = setup(7)
+    for (let k = 0; k < 4; k++) sys.beforeRender(renderer, camera, k)
+    const u = sys.shared.uLights.value
+    const shadowedNow = () => {
+      let n = 0
+      for (let k = 0; k < sys.shared.uLightCount.value; k++) if (u[k * 16 + 10] > 0) n++
+      return n
+    }
+    const count = sys.shared.uLightCount.value
+    const shadowed = shadowedNow()
+    expect(shadowed).toBeGreaterThan(4)
+    const bound = sys.shared.uLightAtlas.value
+    sys.prepareQuality("low")
+    expect(sys.qualityReady("low")).toBe(false)
+    expect(sys.qualityReady("medium")).toBe(true)
+    // Filling runs under its own budget (4 tiles per frame) while the medium atlas stays bound and drawn.
+    let frames = 0
+    for (let k = 4; !sys.qualityReady("low") && k < 20; k++, frames++) {
+      calls.length = 0
+      sys.beforeRender(renderer, camera, k)
+      expect(sys.shared.uLightAtlas.value).toBe(bound)
+      expect(shadowedNow()).toBe(shadowed)
+      expect(u[10]).toBe(512)
+      expect(calls.filter((c) => c.target === "atlas-lights-atlas").length).toBeLessThanOrEqual(4)
+    }
+    expect(sys.qualityReady("low")).toBe(true)
+    expect(frames).toBe(Math.ceil(shadowed / 4))
+    // Commit: the prepared atlas is swapped in; the first frame at low draws every light, with no burst.
+    sys.setQuality("low")
+    const s = sys.beforeRender(renderer, camera, 30)
+    expect(sys.shared.uLightCount.value).toBe(count)
+    expect(shadowedNow()).toBe(shadowed)
+    expect(u[10]).toBe(256)
+    expect(s.tilesUpdated).toBe(0)
+  })
+
+  it("keeps every light when an ultra → high step is prepared (lo tiles for the hi-res lights)", () => {
+    const { sys, renderer, camera } = setup(5)
+    sys.setQuality("ultra")
+    for (let k = 0; k < 6; k++) sys.beforeRender(renderer, camera, k)
+    const u = sys.shared.uLights.value
+    const lights = () => {
+      const out: number[] = []
+      for (let k = 0; k < sys.shared.uLightCount.value; k++) if (u[k * 16 + 10] > 0) out.push(u[k * 16])
+      return out.sort((a, b) => a - b)
+    }
+    const before = lights()
+    expect(before.length).toBeGreaterThan(0)
+    sys.prepareQuality("high")
+    for (let k = 6; !sys.qualityReady("high") && k < 30; k++) {
+      sys.beforeRender(renderer, camera, k)
+      expect(lights()).toEqual(before)
+    }
+    expect(sys.qualityReady("high")).toBe(true)
+    sys.setQuality("high")
+    const s = sys.beforeRender(renderer, camera, 40)
+    expect(lights()).toEqual(before)
+    for (let k = 0; k < sys.shared.uLightCount.value; k++) expect(u[k * 16 + 11] & 6).toBe(0)
+    expect(s.tilesUpdated).toBe(0)
+  })
+
+  it("drops a prepared tier when the current one is prepared again, and refills it after occluder changes", () => {
+    const { sys, renderer, camera, scene, world } = setup(3)
+    for (let k = 0; k < 3; k++) sys.beforeRender(renderer, camera, k)
+    sys.prepareQuality("low")
+    for (let k = 3; k < 8; k++) sys.beforeRender(renderer, camera, k)
+    expect(sys.qualityReady("low")).toBe(true)
+    // A wall edit dirties the prepared captures as well (stale captures still count as ready).
+    sys.applyChange(scene, world, { objects: ["w1"] }, [{ levelId: "ground", min: { x: 0, y: 0, z: 90 }, max: { x: 200, y: 20, z: 120 } }])
+    const s = sys.beforeRender(renderer, camera, 8)
+    expect(s.tilesUpdated).toBeGreaterThan(4) // live tiles (4) plus prepared ones
+    sys.prepareQuality("medium")
+    expect(sys.qualityReady("low")).toBe(false)
+    // Unprepared commit: re-allocates and recaptures in one burst.
+    sys.setQuality("low")
+    expect(sys.beforeRender(renderer, camera, 9).tilesUpdated).toBeGreaterThan(0)
   })
 
   it("gives the highest-ranked lights hi-res tiles and soft shadows on ultra", () => {

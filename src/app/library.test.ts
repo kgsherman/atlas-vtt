@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { createScene } from "@/core/scene/factory"
 import { parseScene } from "@/core/scene/schema"
@@ -8,7 +8,20 @@ import { createMemoryStore } from "@/net/localStore"
 import { readSceneFile } from "@/net/scenesRepo"
 
 import { createServices } from "./createServices"
-import { copySharedScene, createFromSample, deleteScene, duplicateScene, exportScene, importedName, importSceneFile, LibraryError, nextCopyName, userMessage } from "./library"
+import {
+  copySharedScene,
+  createFromSample,
+  deleteScene,
+  duplicateScene,
+  exportScene,
+  IMAGE_SWEEP_INTERVAL_MS,
+  importedName,
+  importSceneFile,
+  LibraryError,
+  nextCopyName,
+  sweepUnusedImages,
+  userMessage,
+} from "./library"
 import type { AppServices } from "./services"
 
 const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 250])
@@ -46,8 +59,20 @@ function fakeAssets(): AssetStore & { blobs: Map<string, Blob>; calls: string[] 
     async removeSessionTiles() {
       return 0
     },
-    async publishTiles() {},
-    async grantTiles() {},
+    async deleteSceneImages(sceneId) {
+      calls.push(`delete ${sceneId}`)
+      let n = 0
+      for (const key of [...blobs.keys()])
+        if (key.startsWith(`${sceneId}/`)) {
+          blobs.delete(key)
+          n++
+        }
+      return n
+    },
+    async sweepUnreferencedImages() {
+      calls.push("sweep")
+      return { removed: 0, bytes: 0 }
+    },
   }
 }
 
@@ -233,6 +258,55 @@ describe("map image cleanup", () => {
     expect(s.assets.blobs.has(`${scene.id}/map1`)).toBe(false)
   })
 
+  it("deleting a scene also removes images only older versions used, never another scene's", async () => {
+    const s = await localServices()
+    const scene = sceneWithBackdrop()
+    await storeMap(s, scene)
+    // An image an older version used (the latest no longer references it).
+    s.assets.blobs.set(`${scene.id}/old-map`, new Blob([PNG_BYTES]))
+    const summary = await s.scenes.create(scene)
+    const other = sceneWithBackdrop()
+    await storeMap(s, other)
+    await s.scenes.create(other)
+    await deleteScene(s, summary)
+    expect(s.assets.calls).toContain(`delete ${scene.id}`)
+    expect(s.assets.blobs.has(`${scene.id}/old-map`)).toBe(false)
+    expect(s.assets.blobs.has(`${scene.id}/map1`)).toBe(false)
+    expect(s.assets.blobs.has(`${other.id}/map1`)).toBe(true)
+  })
+
+  it("deletes the scene and keeps its images when the unused folders can't be determined", async () => {
+    const s = await localServices()
+    const scene = sceneWithBackdrop()
+    await storeMap(s, scene)
+    const summary = await s.scenes.create(scene)
+    const flaky = { ...s, scenes: { ...s.scenes, imageFoldersToFree: async () => Promise.reject(new Error("offline")) } }
+    expect(await deleteScene(flaky, summary)).toEqual({ warnings: [] })
+    expect(await s.scenes.get(summary.id)).toBeNull()
+    expect(s.assets.blobs.has(`${scene.id}/map1`)).toBe(true)
+  })
+
+  it("imports the scene when the image store fails part-way, keeping the images already stored", async () => {
+    const s = await localServices()
+    const scene = sceneWithBackdrop()
+    scene.assets!.map2 = { ...scene.assets!.map1, id: "map2", name: "upper.webp" }
+    await storeMap(s, scene)
+    await s.assets.putImage(scene.id, new Blob([PNG_BYTES], { type: "image/png" }), { id: "map2", kind: "image", name: "upper.webp", mime: "image/png", width: 1400, height: 1400 })
+    const file = await exportScene(s, await s.scenes.create(scene))
+    const put = s.assets.putImage.bind(s.assets)
+    let puts = 0
+    s.assets.putImage = async (...args) => {
+      if (++puts > 1) throw new Error("quota full")
+      return put(...args)
+    }
+    const imported = await importSceneFile(s, new Blob([file.text]))
+    expect(imported.warnings).toEqual(["Map images could not be stored: quota full"])
+    const loaded = await s.scenes.load(imported.summary.id)
+    if (!loaded.parsed.ok) throw new Error("import did not load")
+    // Same document id as the images stored before the failure.
+    expect(s.assets.blobs.has(`${loaded.parsed.scene.id}/map1`)).toBe(true)
+  })
+
   it("keeps the images while an active session started from the scene may use them", async () => {
     const s = await localServices()
     const scene = sceneWithBackdrop()
@@ -261,5 +335,44 @@ describe("map image cleanup", () => {
     const file = await exportScene(s, await s.scenes.create(scene))
     const imported = await importSceneFile(s, new Blob([file.text]))
     expect(imported.summary.name).toBe("Vineyard (imported)")
+  })
+})
+
+describe("sweepUnusedImages", () => {
+  const memoryStorage = () => {
+    const m = new Map<string, string>()
+    return {
+      getItem: (k: string) => m.get(k) ?? null,
+      setItem: (k: string, v: string) => void m.set(k, v),
+      removeItem: (k: string) => void m.delete(k),
+    }
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it("sweeps at most once per interval, on Supabase only, and never throws", async () => {
+    vi.stubGlobal("localStorage", memoryStorage())
+    const assets = fakeAssets()
+    expect(await sweepUnusedImages({ mode: "local", assets }, 1000)).toBeNull()
+    expect(assets.calls).toEqual([])
+    const remote = { mode: "supabase" as const, assets }
+    expect(await sweepUnusedImages(remote, 1000)).toEqual({ removed: 0, bytes: 0 })
+    expect(await sweepUnusedImages(remote, 2000)).toBeNull()
+    expect(assets.calls).toEqual(["sweep"])
+    expect(await sweepUnusedImages(remote, 1000 + IMAGE_SWEEP_INTERVAL_MS)).not.toBeNull()
+    expect(assets.calls).toEqual(["sweep", "sweep"])
+    assets.sweepUnreferencedImages = async () => Promise.reject(new Error("offline"))
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    expect(await sweepUnusedImages(remote, 1000 + 2 * IMAGE_SWEEP_INTERVAL_MS)).toBeNull()
+    warn.mockRestore()
+  })
+
+  it("skips without browser storage", async () => {
+    vi.stubGlobal("localStorage", undefined)
+    const assets = fakeAssets()
+    expect(await sweepUnusedImages({ mode: "supabase", assets })).toBeNull()
+    expect(assets.calls).toEqual([])
   })
 })

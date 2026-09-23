@@ -406,15 +406,6 @@ function douglasPeucker(pts: readonly Vec2[], idx: readonly number[], tolerance:
   return idx.filter((_, k) => keep[k])
 }
 
-/** Douglas–Peucker on an open polyline (keeps both ends). */
-export function simplifyPolyline(pts: readonly Vec2[], tolerance: number): Vec2[] {
-  return douglasPeucker(
-    pts,
-    pts.map((_, k) => k),
-    tolerance
-  ).map((k) => pts[k])
-}
-
 /** Indices (in ring order) of the vertices Douglas–Peucker keeps on a closed ring. */
 function simplifyRingIndices(ring: readonly Vec2[], tolerance: number): number[] {
   const n = ring.length
@@ -619,12 +610,6 @@ export function wallObjectsFromSegments(levelId: Id, segs: readonly TracedSegmen
   if (partial.height !== undefined) extra.height = partial.height
   if (partial.thickness !== undefined) extra.thickness = partial.thickness
   return segs.map((s) => createWall(levelId, { ...s.a }, { ...s.b }, extra))
-}
-
-/** floorMaskFromAlpha → FloorObject (null when nothing is opaque). */
-export function floorObjectFromAlpha(levelId: Id, img: TraceImage, calib: TraceCalibration, opts: FloorMaskOptions & { material?: MaterialId } = {}): FloorObject | null {
-  const traced = floorMaskFromAlpha(img, calib, opts)
-  return traced ? floorObjectFromTrace(levelId, traced, { material: opts.material }) : null
 }
 
 /** wallsFromAlpha → WallObjects (thickness default 1 ft). */

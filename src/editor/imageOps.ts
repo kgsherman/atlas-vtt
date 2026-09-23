@@ -2,13 +2,13 @@
  * Editor commands for battlemap images (ARCHITECTURE §9), used by the import dialog:
  *  - addBackdrop / updateBackdrop / removeBackdrop: Scene.assets metadata + Level.backdrop, one undo step each;
  *  - floorFromImage: a (masked) floor covering the image's opaque part ("Floor from image");
- *  - wallsFromImage: walls along the image's alpha outline ("Walls from image outline");
- *  - planSceneFromImages / createSceneFromImages: a new scene with one level per image.
+ *  - wallsFromImage: walls along the image's alpha outline ("Walls from image outline").
+ * "New scene from map images" (components/editor/dialogs/MapImportDialog) runs the same commands on a
+ * fresh editor store, one level per image.
  *
  * The image bytes live in the AssetStore (net/assets); the document only references them by id. Store
  * the image (AssetStore.putImage) BEFORE adding the backdrop so the id in `assetMeta` exists.
  */
-import { createFloor, createLevel, createScene, newId } from "@/core/scene/factory"
 import {
   floorMaskFromAlpha,
   floorObjectFromTrace,
@@ -20,7 +20,7 @@ import {
 } from "@/core/scene/imageTrace"
 import { SCENE_LIMITS } from "@/core/scene/schema"
 import type { Id, LevelBackdrop, MaterialId, Rect, Scene, SceneAsset } from "@/core/scene/types"
-import type { AssetMeta, AssetStore } from "@/net/assets/types"
+import type { AssetMeta } from "@/net/assets/types"
 import type { ImportedImage } from "@/net/assets/import"
 
 import type { EditorStore } from "./store"
@@ -179,113 +179,4 @@ export function wallsFromImage(store: EditorStore, levelId: Id, pixels: TraceIma
     `Walls from image outline (${walls.length})`
   )
   return patches.length > 0 ? walls.map((w) => w.id) : []
-}
-
-// ---------------------------------------------------------------------------
-// New scene from map images
-// ---------------------------------------------------------------------------
-
-export interface SceneImage {
-  /** Image (file) name, kept as the asset name. */
-  name: string
-  imported: ImportedImage
-  /** Level elevation (feet). */
-  elevation: number
-  levelName: string
-  /** Asset id to use (default: a fresh id). */
-  assetId?: Id
-}
-
-export interface SceneFromImagesOptions {
-  sceneName?: string
-  /** Floors covering each image's opaque part (default true; a plain full floor otherwise). */
-  traceFloors?: boolean
-  /** Walls along the alpha outline of images with transparency (default false). */
-  traceWalls?: boolean
-  floorMaterial?: MaterialId
-  wallMaterial?: MaterialId
-  /** Storey height of every level (default 10 ft). */
-  levelHeight?: number
-}
-
-export interface SceneFromImagesPlan {
-  scene: Scene
-  /** Images to store under `scene.id` (AssetStore.putImage) with these ids. */
-  uploads: Array<{ assetId: Id; blob: Blob; meta: Omit<AssetMeta, "bytes"> }>
-}
-
-/** Grid cell size implied by an imported image (rect width / cells across). */
-function importedCellSize(img: Pick<ImportedImage, "rect" | "width" | "pxPerCell">): number {
-  const cells = img.width / img.pxPerCell
-  return Math.round((img.rect.w / cells) * 1e6) / 1e6
-}
-
-/**
- * A new scene with one level per image (sorted by elevation): grid sized from the images (cell size
- * from the first image's calibration), each level with its backdrop and a floor covering the image's
- * opaque part (masked for caves / rotated storeys; a plain rect for opaque maps), optionally walls
- * along the outline of images that have transparency.
- */
-export function planSceneFromImages(images: SceneImage[], opts: SceneFromImagesOptions = {}): SceneFromImagesPlan {
-  if (images.length === 0) throw new Error("createSceneFromImages: no images")
-  if (images.length > SCENE_LIMITS.maxLevels) throw new Error(`at most ${SCENE_LIMITS.maxLevels} levels`)
-  const cellSize = Math.min(SCENE_LIMITS.maxCellSize, Math.max(SCENE_LIMITS.minCellSize, importedCellSize(images[0].imported)))
-  let maxX = 0
-  let maxZ = 0
-  for (const { imported } of images) {
-    maxX = Math.max(maxX, imported.rect.x + imported.rect.w)
-    maxZ = Math.max(maxZ, imported.rect.z + imported.rect.d)
-  }
-  const width = Math.min(SCENE_LIMITS.maxGridCells, Math.max(1, Math.ceil(maxX / cellSize - 1e-6)))
-  const depth = Math.min(SCENE_LIMITS.maxGridCells, Math.max(1, Math.ceil(maxZ / cellSize - 1e-6)))
-  const scene = createScene({ name: opts.sceneName ?? images[0].levelName, width, depth, groundFloor: false })
-  scene.grid.cellSize = cellSize
-  scene.levels = {}
-  scene.assets = {}
-  const levelHeight = opts.levelHeight ?? 10
-  const uploads: SceneFromImagesPlan["uploads"] = []
-  const sorted = [...images].sort((a, b) => a.elevation - b.elevation)
-  for (const img of sorted) {
-    const level = createLevel({ name: img.levelName, elevation: img.elevation, height: levelHeight })
-    scene.levels[level.id] = level
-    const assetId = img.assetId ?? newId()
-    const meta: Omit<AssetMeta, "bytes"> = { id: assetId, kind: "image", name: img.name.slice(0, SCENE_LIMITS.maxString), mime: img.imported.mime, width: img.imported.width, height: img.imported.height }
-    scene.assets[assetId] = { ...meta, bytes: img.imported.blob.size }
-    uploads.push({ assetId, blob: img.imported.blob, meta })
-    const r = img.imported.rect
-    level.backdrop = { assetId, rect: { x: r.x, z: r.z, w: r.w, d: r.d }, opacity: 1, tintWalls: false }
-
-    const px = img.imported.pixels
-    const hasPixels = px.width > 0 && px.height > 0 && px.data.length >= px.width * px.height * 4
-    const calib = { rect: r, cellSize }
-    const traced = opts.traceFloors !== false && hasPixels ? floorMaskFromAlpha(px, calib) : null
-    if (traced) {
-      const floor = floorObjectFromTrace(level.id, traced, { material: opts.floorMaterial ?? "stone" })
-      scene.objects[floor.id] = floor
-    } else if (opts.traceFloors === false || !hasPixels) {
-      const floor = createFloor(level.id, { x: r.x, z: r.z, w: r.w, d: r.d }, opts.floorMaterial ?? "stone")
-      scene.objects[floor.id] = floor
-    }
-    // An opaque map's outline is just its border: only images with transparency get outline walls.
-    if (opts.traceWalls && hasPixels && traced && traced.fill < 1) {
-      const segs = wallsFromAlpha(px, calib)
-      for (const w of wallObjectsFromSegments(level.id, segs, { height: levelHeight, thickness: 1, material: opts.wallMaterial ?? "stone" })) scene.objects[w.id] = w
-    }
-  }
-  return { scene, uploads }
-}
-
-/** planSceneFromImages(...).scene — store the images under scene.id with the backdrops' asset ids. */
-export function createSceneFromImages(images: SceneImage[], opts: SceneFromImagesOptions = {}): Scene {
-  return planSceneFromImages(images, opts).scene
-}
-
-/** Plan the scene, store every image under its id (AssetStore.putImage), and return the scene. */
-export async function createSceneFromImagesStored(assets: Pick<AssetStore, "putImage">, images: SceneImage[], opts: SceneFromImagesOptions = {}): Promise<Scene> {
-  const { scene, uploads } = planSceneFromImages(images, opts)
-  for (const u of uploads) {
-    const stored = await assets.putImage(scene.id, u.blob, u.meta)
-    scene.assets![u.assetId] = { ...scene.assets![u.assetId], bytes: stored.bytes }
-  }
-  return scene
 }

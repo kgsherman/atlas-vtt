@@ -21,28 +21,6 @@ import { cn } from "@/lib/utils"
 
 import { glass } from "./hud"
 
-export function CenterCard({
-  children,
-  className,
-}: {
-  children: React.ReactNode
-  className?: string
-}) {
-  return (
-    <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center p-6">
-      <div
-        className={cn(
-          "pointer-events-auto w-full max-w-sm rounded-xl",
-          glass,
-          className
-        )}
-      >
-        {children}
-      </div>
-    </div>
-  )
-}
-
 /** Blocking screen (the map underneath is meaningless): dims everything. */
 export function BlockingScreen({
   icon,

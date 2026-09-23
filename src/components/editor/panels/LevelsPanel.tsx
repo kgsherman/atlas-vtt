@@ -417,10 +417,16 @@ function BackdropSection({ level }: { level: Level }) {
           size="xs"
           className="text-destructive hover:text-destructive"
           disabled={readOnly}
-          onClick={async () => {
-            if (await confirm({ title: "Remove the map image?", description: `The image is removed from “${level.name}”. Traced floors and walls stay. You can undo this.`, confirmLabel: "Remove image", destructive: true })) {
-              removeBackdrop(store, level.id)
-            }
+          onClick={() => {
+            void (async () => {
+              try {
+                if (await confirm({ title: "Remove the map image?", description: `The image is removed from “${level.name}”. Traced floors and walls stay. You can undo this.`, confirmLabel: "Remove image", destructive: true })) {
+                  removeBackdrop(store, level.id)
+                }
+              } catch (err) {
+                toast.error("Couldn't remove the map image", { description: err instanceof Error ? err.message : String(err) })
+              }
+            })()
           }}
         >
           <Trash2 data-icon="inline-start" /> Remove

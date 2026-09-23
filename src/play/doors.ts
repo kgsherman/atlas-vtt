@@ -109,11 +109,3 @@ export function tokensInReach(
     )
   })
 }
-
-/** Door centre (for labels / camera). */
-export function doorCenter(hit: DoorHit): Vec2 {
-  return {
-    x: (hit.segment.a.x + hit.segment.b.x) / 2,
-    z: (hit.segment.a.z + hit.segment.b.z) / 2,
-  }
-}

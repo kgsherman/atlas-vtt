@@ -38,6 +38,9 @@ describe("format", () => {
     expect(formatElevation(0.01)).toBe("0 ft")
     expect(formatBytes(512)).toBe("512 B")
     expect(formatBytes(3 * 1024 * 1024)).toBe("3 MB")
+    expect(formatBytes(820 * 1024)).toBe("820 KB")
+    expect(formatBytes(12.4 * 1024 * 1024)).toBe("12.4 MB")
+    expect(formatBytes(-1)).toBe("—")
   })
 
   it("describes relative times", () => {
@@ -255,6 +258,9 @@ describe("importPlan", () => {
     expect(sceneNameFromFiles(["181-FA-Vineyard-Interiors-27x47-NoGrid-FirstFloor-Night.jpg"])).toBe("Vineyard Interiors")
     expect(sceneNameFromFiles(["181-FA-Vineyard-Interior-27x47-NoGrid-Basement-Night.png"])).toBe("Vineyard Interior")
     expect(sceneNameFromFiles(["12.png"])).toBe("Imported Map")
+    // One tokenizer for scene and level names: noise words go even inside camelCase runs.
+    expect(sceneNameFromFiles(["Keep-GroundFloorDusk.png"])).toBe("Keep")
+    expect(levelNameFromFile("Keep-TowerDawn-NoGrid.png")).toBe("Keep Tower")
   })
 })
 

@@ -65,7 +65,18 @@ export interface LightingSystem {
   applyChange(scene: SceneLike, world: OcclusionWorld, change: SceneChange, dirty: DirtyRegion[]): void
   /** View state: vision mode, viewer tokens, host masks, active level (culling), dimmed tokens. */
   setView(view: ViewState): void
+  /**
+   * Commit tier `q` (atlas layouts, AT_TIER). If `q` was prepared, its filled atlases are swapped in;
+   * otherwise new ones are recaptured in the next frame.
+   */
   setQuality(q: Quality): void
+  /**
+   * Prepare tier `q` for an adaptive step: allocate its differing atlases without binding them and fill
+   * them in later frames under their own budget. Preparing the current tier cancels a pending one.
+   */
+  prepareQuality(q: Quality): void
+  /** `q` is current, or prepared with a capture for every ranked shadowed light and viewer. */
+  qualityReady(q: Quality): boolean
   /**
    * Battlemap image of a level (ARCHITECTURE §9): the level's world materials sample `texture` over `rect`
    * (null = none). A uniform update, never a recompile.

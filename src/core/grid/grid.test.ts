@@ -10,7 +10,9 @@ import {
   cellsInConvexPolygon,
   cellsInRect,
   distanceToCell,
+  legCells,
   pathDistance,
+  rulerDistance,
   segmentCellIntervals,
   snapPoint,
   stepCost,
@@ -71,6 +73,33 @@ describe("basic cell math", () => {
     expect(stepCost(grid, { i: 0, j: 0 }, { i: 0, j: 1 }, 0)).toBe(5)
     // Level switches (same cell twice) are free.
     expect(pathDistance(grid, [{ i: 0, j: 0 }, { i: 0, j: 0 }, { i: 1, j: 0 }])).toBe(5)
+  })
+
+  it("rulers: king-move legs, the diagonal rule over the whole route, or euclidean when free", () => {
+    expect(legCells({ i: 0, j: 0 }, { i: 3, j: 1 })).toEqual([
+      { i: 1, j: 1 },
+      { i: 2, j: 1 },
+      { i: 3, j: 1 },
+    ])
+    expect(legCells({ i: 2, j: 2 }, { i: 2, j: 2 })).toEqual([])
+    const g = (diagonalRule: GridSettings["diagonalRule"]): GridSettings => ({ ...grid, diagonalRule })
+    // (0,0) → (5,2): 2 diagonals + 3 straight.
+    const pts = [
+      { x: 2.5, z: 2.5 },
+      { x: 27.5, z: 12.5 },
+    ]
+    expect(rulerDistance(g("5-5-5"), pts)).toBe(25)
+    expect(rulerDistance(g("5-10-5"), pts)).toBe(30)
+    // The diagonal count carries across legs: one diagonal in each of two legs is 5 + 10 under 5-10-5.
+    const legs = [
+      { x: 2.5, z: 2.5 },
+      { x: 7.5, z: 7.5 },
+      { x: 12.5, z: 12.5 },
+    ]
+    expect(rulerDistance(g("5-10-5"), legs)).toBe(15)
+    expect(rulerDistance(g("euclidean"), legs)).toBeCloseTo(10 * Math.SQRT2)
+    expect(rulerDistance(grid, [{ x: 0, z: 0 }, { x: 3, z: 4 }, { x: 3, z: 10 }], true)).toBe(11)
+    expect(rulerDistance(grid, [{ x: 0, z: 0 }])).toBe(0)
   })
 
   it("lists cells overlapped by a rect (positive area)", () => {

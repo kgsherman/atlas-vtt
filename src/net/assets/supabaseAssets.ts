@@ -224,24 +224,42 @@ export async function downloadChunk(client: AtlasClient, sessionId: string, user
   return data
 }
 
+/** Delays (ms) before retrying a session clean-up call that Storage rate-limited (429), refused with a 5xx or lost to the network. */
+export const TILE_CLEANUP_RETRY_MS: readonly number[] = [1000, 2000, 4000, 8000]
+
+const transientStorageError = (err: unknown): boolean => {
+  const status = storageStatus(err)
+  if (status === 429 || (status !== null && status >= 500)) return true
+  return status === null && /fetch|network/i.test(err instanceof Error ? err.message : String((err as { message?: unknown })?.message ?? err))
+}
+
 /**
  * DM cleanup: delete every tile object of a session (its players' chunks, and leftovers of the old
- * per-cell layout), e.g. after ending it. Returns the number of objects removed.
+ * per-cell layout), e.g. after ending it. Returns the number of objects removed. The host runs it once,
+ * when the session ends, so rate-limited or failed Storage calls are retried (`retryMs`) rather than
+ * leaving the players' chunks behind.
  */
-export async function removeSessionTiles(client: AtlasClient, sessionId: string): Promise<number> {
+export async function removeSessionTiles(client: AtlasClient, sessionId: string, retryMs: readonly number[] = TILE_CLEANUP_RETRY_MS): Promise<number> {
   if (!UUID_RE.test(sessionId)) throw new NetError("invalid_argument", "invalid session id")
   const bucket = client.storage.from(TILE_BUCKET)
+  const retrying = async <T extends { error: unknown }>(call: () => Promise<T>): Promise<T> => {
+    for (let attempt = 0; ; attempt++) {
+      const res = await call()
+      if (!res.error || attempt >= retryMs.length || !transientStorageError(res.error)) return res
+      await new Promise((resolve) => setTimeout(resolve, retryMs[attempt]))
+    }
+  }
   let removed = 0
   const walk = async (folder: string, depth: number): Promise<void> => {
     for (;;) {
-      const { data, error } = await bucket.list(folder, { limit: 1000 })
+      const { data, error } = await retrying(() => bucket.list(folder, { limit: 1000 }))
       if (error) throw storageError(error, "list tiles")
       const entries = data ?? []
       // Folders come back with a null id.
       const files = entries.filter((f) => f.id !== null).map((f) => `${folder}/${f.name}`)
       if (depth < 3) for (const f of entries.filter((e) => e.id === null)) await walk(`${folder}/${f.name}`, depth + 1)
       if (files.length === 0) return
-      const res = await bucket.remove(files)
+      const res = await retrying(() => bucket.remove(files))
       if (res.error) throw storageError(res.error, "remove tiles")
       removed += files.length
       if (files.length < 1000) return

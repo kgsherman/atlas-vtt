@@ -58,3 +58,21 @@ export function directionToSun(d: Pick<DirectionalLightSettings, "azimuth" | "el
 export function luma(r: number, g: number, b: number): number {
   return 0.2126 * r + 0.7152 * g + 0.0722 * b
 }
+
+/** Largest gain darkvision applies to a lit colour before adding grey (AT_DV_MAX_GAIN). */
+export const DARKVISION_MAX_GAIN = 3
+
+/**
+ * Darkvision's raise of a lit colour `c` toward the luma `target` of the same surface's darkvision grey
+ * (atGradeColour, glsl/common.ts), weighted by `dv` (1 in range, fading out over the range's last feet):
+ * the colour is scaled (hue kept) by at most DARKVISION_MAX_GAIN and only the rest is added as grey, so
+ * at dv = 1 it is never darker than the grey.
+ */
+export function darkvisionRaise(c: [number, number, number], target: number, dv: number): [number, number, number] {
+  const l = luma(c[0], c[1], c[2])
+  if (!(dv > 0) || l >= target) return c
+  const gain = Math.min(target / Math.max(l, 1e-4), DARKVISION_MAX_GAIN)
+  const raised = c.map((v) => v * gain) as [number, number, number]
+  const grey = Math.max(target - luma(raised[0], raised[1], raised[2]), 0)
+  return c.map((v, k) => v + (raised[k] + grey - v) * dv) as [number, number, number]
+}

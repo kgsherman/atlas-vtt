@@ -42,32 +42,61 @@ async function addCrate(dm, name) {
     label: "host editor",
   })
   // No dynamic import here (a first-time module fetch in a tab that was in the background can hang):
-  // copy one of the scene's own crates under a fresh id.
-  return dm.evaluate((name) => {
-    const store = window.__atlasHost.editor.ctx.store
-    const s = store.getState()
-    const g = s.scene.grid
-    const model = Object.values(s.scene.objects).find(
-      (o) => o.type === "prop" && o.kind === "crate"
-    )
-    if (!model) throw new Error("the scene has no crate to copy")
-    const id = `e2e${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`
-    const crate = {
-      ...structuredClone(model),
-      id,
-      name,
-      levelId: s.activeLevelId,
-      position: {
-        x: (Math.floor(g.width / 2) + 0.5) * g.cellSize,
-        y: 0,
-        z: (Math.floor(g.depth / 2) + 0.5) * g.cellSize,
-      },
+  // copy one of the scene's own crates under a fresh id. The id is chosen here so a retried evaluate
+  // (see evaluateRetry) cannot add a second crate.
+  const id = `e2e${crypto.randomUUID().replace(/-/g, "").slice(0, 12)}`
+  return evaluateRetry(
+    dm,
+    ({ id, name }) => {
+      const store = window.__atlasHost.editor.ctx.store
+      const s = store.getState()
+      if (Object.hasOwn(s.scene.objects, id)) return id
+      const g = s.scene.grid
+      const model = Object.values(s.scene.objects).find(
+        (o) => o.type === "prop" && o.kind === "crate"
+      )
+      if (!model) throw new Error("the scene has no crate to copy")
+      const crate = {
+        ...structuredClone(model),
+        id,
+        name,
+        levelId: s.activeLevelId,
+        position: {
+          x: (Math.floor(g.width / 2) + 0.5) * g.cellSize,
+          y: 0,
+          z: (Math.floor(g.depth / 2) + 0.5) * g.cellSize,
+        },
+      }
+      store.getState().apply((d) => {
+        d.objects[id] = crate
+      }, "Add crate")
+      return Object.hasOwn(store.getState().scene.objects, id) ? id : null
+    },
+    { id, name }
+  )
+}
+
+/**
+ * page.evaluate with retries. The first evaluate on the DM tab right after another tab of the context
+ * closed sometimes fails with "Resulting promise was garbage collected" (a Playwright / Chromium quirk,
+ * not an app error); the retried call then succeeds.
+ */
+async function evaluateRetry(page, fn, arg, tries = 3) {
+  for (let k = 1; ; k++) {
+    try {
+      return await page.evaluate(fn, arg)
+    } catch (err) {
+      if (
+        k >= tries ||
+        !/garbage collected|context was destroyed/i.test(String(err?.message))
+      )
+        throw err
+      console.log(
+        `   (evaluate retried: ${String(err.message).split("\n")[0]})`
+      )
+      await sleep(300)
     }
-    store.getState().apply((d) => {
-      d.objects[id] = crate
-    }, "Add crate")
-    return Object.hasOwn(store.getState().scene.objects, id) ? id : null
-  }, name)
+  }
 }
 
 /** The library scene's latest version (local mode repositories, as the DM). */

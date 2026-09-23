@@ -380,6 +380,72 @@ describe("host → player pipeline", () => {
     }
   })
 
+  it("on terrain, the renderer draws the player's clipped wall pieces at the host's heights", () => {
+    // A slope h = 0.3·x; wall W runs past both grid edges with a closed door and a window. The PC sees
+    // by darkvision only, so W is explored in part and sent as pieces whose midpoints (where the
+    // client puts their base, Terrain rule) differ from W's.
+    const scene = createScene({ width: 16, depth: 8 })
+    const ground = Object.keys(scene.levels)[0]
+    scene.environment = { ...scene.environment, skyLevel: "dark", ambientLevel: "dark", directional: { ...scene.environment.directional, enabled: false } }
+    const res = 2
+    const samplesX = scene.grid.width * res + 1
+    const samplesZ = scene.grid.depth * res + 1
+    const dense = new Float32Array(samplesX * samplesZ)
+    for (let j = 0; j < samplesZ; j++) for (let i = 0; i < samplesX; i++) dense[j * samplesX + i] = 0.3 * i * (scene.grid.cellSize / res)
+    scene.levels[ground] = { ...scene.levels[ground], heightmap: writeHeights({ resolution: res, chunks: {} }, scene.grid, dense) }
+    const wall = createWall(ground, { x: -20, z: 20 }, { x: 100, z: 20 }, { height: 12, thickness: 0.5 })
+    scene.objects[wall.id] = wall
+    const door = createDoor(wall, 40, { state: "closed", height: 7 })
+    scene.objects[door.id] = door
+    const win = createWindow(wall, 52, { sillHeight: 3, height: 4 })
+    scene.objects[win.id] = win
+    const pc = createToken(ground, { x: 22.5, z: 12.5 }, { kind: "pc", vision: { darkvision: 20, blindsight: 0, blind: false } })
+    scene.tokens[pc.id] = pc
+    expect(parseScene(JSON.parse(JSON.stringify(scene))).ok).toBe(true)
+    const host = new TestHost(scene, ["p1"])
+    host.assign(pc.id, "p1")
+    const { view } = host.refresh("p1")
+    const playerScene = viewToScene(view)
+
+    /** Solid Y spans of a wall's render pieces at wall-frame position u, clipped to y ≥ from. */
+    const spansAt = (pieces: ReturnType<typeof wallPieces>, u: number, from: number) =>
+      pieces
+        .filter((p) => p.u0 < u && u < p.u1 && p.y1 > from)
+        .map((p) => [Math.max(p.y0, from), p.y1])
+        .sort((a, b) => a[0] - b[0])
+    const hostCtx = new RenderContext(host.scene)
+    const hostFrame = renderWallFrame(hostCtx, wall)!
+    const hostPieces = wallPieces(hostCtx, hostFrame)
+    const playerCtx = new RenderContext(playerScene)
+    const pieces = Object.values(playerScene.objects).filter((o) => o.type === "wall" && baseId(o.id) === wall.id)
+    expect(pieces.length).toBeGreaterThan(0)
+    let compared = 0
+    let rebased = 0
+    for (const piece of pieces) {
+      if (piece.type !== "wall") continue
+      const frame = renderWallFrame(playerCtx, piece)!
+      const own = wallPieces(playerCtx, frame)
+      // The piece lies on W's line: its frame's u = 0 is W's u = offset.
+      const offset = Math.hypot(piece.a.x - wall.a.x, piece.a.z - wall.a.z)
+      if (Math.abs(frame.baseY - hostFrame.baseY) > 0.5) rebased++
+      expect(frame.topY, piece.id).toBeCloseTo(hostFrame.topY, 6)
+      // Above both bottoms (the host's depends on terrain the player is not sent), every solid span
+      // matches: the wall top, the door head and the window's sill and lintel keep their world Y.
+      const from = Math.max(frame.bottomY, hostFrame.bottomY)
+      for (let u = 0.07; u < frame.len; u += 0.25) {
+        expect(spansAt(own, u, from), `${piece.id} at u = ${u}`).toEqual(
+          spansAt(hostPieces, u + offset, from).map(([a, b]) => [expect.closeTo(a, 6), expect.closeTo(b, 6)])
+        )
+        compared++
+      }
+    }
+    expect(compared).toBeGreaterThan(20)
+    // The case this guards: at least one piece stands on ground other than W's base.
+    expect(rebased).toBeGreaterThan(0)
+    // The door and the window were sent (on a piece).
+    expect(Object.hasOwn(playerScene.objects, door.id) || Object.hasOwn(playerScene.objects, win.id)).toBe(true)
+  })
+
   it("paths the host finds through perceived cells also validate on the player's rebuilt scene", () => {
     const { host, players, pcs } = lanternSession()
     let checked = 0

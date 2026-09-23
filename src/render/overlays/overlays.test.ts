@@ -32,6 +32,9 @@ function setup() {
   return { scene, lv, view, wall, door, crate }
 }
 
+/** Anti-aliased overlay lines (materials/aaLineMaterial): outlines, rings, preview outlines. */
+const isAALine = (o: THREE.Object3D) => (o as THREE.Mesh).isMesh && ((o as THREE.Mesh).material as THREE.Material).name === "atlas-overlay-aa-line"
+
 const count = (root: THREE.Object3D, pred: (o: THREE.Object3D) => boolean) => {
   let n = 0
   root.traverse((o) => {
@@ -87,7 +90,10 @@ describe("tool previews", () => {
   for (const p of previews) {
     it(`builds a ${p.kind} preview`, () => {
       const root = buildToolPreview(p, { ground: () => ground(), scene, worldPerPixel: 0.1 })
-      expect(count(root, (o) => (o as THREE.Mesh).isMesh || (o as THREE.Line).isLine)).toBeGreaterThan(0)
+      expect(count(root, (o) => (o as THREE.Mesh).isMesh)).toBeGreaterThan(0)
+      // Outlines are anti-aliased quads, never 1-px GL lines.
+      expect(count(root, (o) => (o as THREE.Line).isLine)).toBe(0)
+      if (p.kind !== "brush" && p.kind !== "ghost-objects") expect(count(root, isAALine)).toBeGreaterThan(0)
       root.traverse((o) => {
         const g = (o as THREE.Mesh).geometry
         if (!g) return
@@ -142,14 +148,18 @@ describe("OverlayManager", () => {
     expect(m.gridRoot.visible).toBe(true)
     expect(m.grid.mesh.geometry.getAttribute("position").count).toBeGreaterThan(0)
     // Selection outline in the overlay root; the door's hover outline follows the leaf.
-    expect(count(m.root, (o) => (o as THREE.LineSegments).isLineSegments)).toBeGreaterThanOrEqual(2)
+    expect(count(m.root, isAALine)).toBeGreaterThanOrEqual(2)
     const leafMesh = view.doorLeaves()[0].mesh
-    expect(leafMesh.children.some((c) => (c as THREE.LineSegments).isLineSegments)).toBe(true)
+    expect(leafMesh.children.some(isAALine)).toBe(true)
   })
 
   it("draws rulers, pending paths and previews, and clears them", () => {
     const { m, scene, lv } = manager()
     const token = Object.values(scene.tokens)[0]
+    const visibleMeshes = () => count(m.root, (o) => (o as THREE.Mesh).isMesh && o.visible && !(o as THREE.InstancedMesh).isInstancedMesh && o.type !== "Sprite")
+    m.update()
+    // The hidden wall's helper outline stays.
+    const baseline = visibleMeshes()
     m.set({
       ruler: { levelId: lv, points: [{ x: 0, y: 0, z: 0 }, { x: 10, y: 0, z: 0 }], label: "10 ft" },
       pendingMoves: { [token?.id ?? "t"]: [{ cell: { i: 0, j: 0 }, levelId: lv }, { cell: { i: 3, j: 0 }, levelId: lv }] },
@@ -161,7 +171,7 @@ describe("OverlayManager", () => {
     expect(m.rulerAnchor()).toEqual({ x: 10, y: 0, z: 0 })
     m.set({ ruler: null, pendingMoves: {}, preview: null })
     m.update()
-    expect(count(m.root, (o) => (o as THREE.Mesh).isMesh && o.visible && !(o as THREE.InstancedMesh).isInstancedMesh && o.type !== "Sprite")).toBe(0)
+    expect(visibleMeshes()).toBe(baseline)
   })
 
   it("draws light rings for the active level's lights and selected lights only", () => {
@@ -184,7 +194,7 @@ describe("OverlayManager", () => {
       worldPerPixelAt: () => 0.1,
       fade: () => ({ x: 25, z: 25, radius: 100 }),
     })
-    const rings = () => count(m.root, (o) => (o as THREE.Line).isLine && !(o as THREE.LineSegments).isLineSegments)
+    const rings = () => count(m.root, (o) => isAALine(o) && o.userData.ownMaterial === true)
     m.update()
     expect(rings()).toBe(2)
     m.set({ selectedIds: [above.id] })
@@ -204,6 +214,11 @@ describe("OverlayManager", () => {
   it("hides helpers in player mode", () => {
     const { m } = manager({ mode: "player" })
     m.update()
-    expect(count(m.root, (o) => (o as THREE.LineSegments).isLineSegments)).toBe(0)
+    expect(count(m.root, isAALine)).toBe(0)
+    // No 1-px GL lines anywhere in the overlays (the canvas has no MSAA).
+    const { m: dm } = manager()
+    dm.update()
+    expect(count(dm.root, isAALine)).toBeGreaterThan(0)
+    expect(count(dm.root, (o) => (o as THREE.Line).isLine)).toBe(0)
   })
 })

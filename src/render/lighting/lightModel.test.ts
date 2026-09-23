@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { flickerFactor, flickerSeed, valueNoise } from "./flicker"
-import { directionToSun, lightFalloff, softLambert } from "./lightModel"
+import { DARKVISION_MAX_GAIN, darkvisionRaise, directionToSun, lightFalloff, luma, softLambert } from "./lightModel"
 
 describe("lightFalloff", () => {
   it("is 1 at the source, 0.5 at the bright radius and 0 at the dim radius", () => {
@@ -97,5 +97,49 @@ describe("flicker", () => {
       expect(v).toBeGreaterThanOrEqual(0)
       expect(v).toBeLessThan(1)
     }
+  })
+})
+
+describe("darkvisionRaise", () => {
+  const l = (c: number[]) => luma(c[0], c[1], c[2])
+
+  it("scales dark paint toward the grey's luma keeping its hue instead of adding flat grey", () => {
+    // A night-painted battlemap: dark, saturated blue-green.
+    const c: [number, number, number] = [0.01, 0.025, 0.04]
+    const target = 0.05
+    const out = darkvisionRaise(c, target, 1)
+    expect(l(out)).toBeCloseTo(target, 9)
+    // Within the gain: exactly proportional (no grey added), so the chroma ratios are unchanged.
+    const k = out[0] / c[0]
+    expect(k).toBeLessThanOrEqual(DARKVISION_MAX_GAIN + 1e-9)
+    expect(out[1] / c[1]).toBeCloseTo(k, 9)
+    expect(out[2] / c[2]).toBeCloseTo(k, 9)
+  })
+
+  it("never reads darker than the grey at full weight; adds grey only beyond the gain cap", () => {
+    for (const c of [
+      [0, 0, 0],
+      [0.001, 0.002, 0.0005],
+      [0.2, 0.01, 0.01],
+      [0.04, 0.04, 0.04],
+    ] as [number, number, number][]) {
+      for (const target of [0.04, 0.1, 0.16]) {
+        const out = darkvisionRaise(c, target, 1)
+        expect(l(out)).toBeGreaterThanOrEqual(Math.max(target, l(c)) - 1e-9)
+      }
+    }
+    // Very dark paint: the gain alone cannot reach the target, the remainder is grey.
+    const out = darkvisionRaise([0.004, 0.004, 0.012], 0.1, 1)
+    expect(out[0]).toBeGreaterThan(0.004 * DARKVISION_MAX_GAIN)
+  })
+
+  it("fades with the weight and leaves bright colours alone", () => {
+    const c: [number, number, number] = [0.01, 0.02, 0.03]
+    expect(darkvisionRaise(c, 0.1, 0)).toEqual(c)
+    const half = darkvisionRaise(c, 0.1, 0.5)
+    const full = darkvisionRaise(c, 0.1, 1)
+    for (let k = 0; k < 3; k++) expect(half[k]).toBeCloseTo((c[k] + full[k]) / 2, 12)
+    const bright: [number, number, number] = [0.3, 0.3, 0.3]
+    expect(darkvisionRaise(bright, 0.1, 1)).toEqual(bright)
   })
 })

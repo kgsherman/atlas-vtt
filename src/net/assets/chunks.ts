@@ -12,6 +12,9 @@
  * the object is re-cut, e.g. when a partly explored cell grows. Removals are `[ci, cj, 0]`.
  * Uploading per player chunk (instead of one object per cell) keeps an open outdoor map's first view at
  * ~70 uploads/downloads instead of ~1000, which Storage rate-limits.
+ *
+ * Which grid cells a backdrop covers is core/session/backdrop `backdropCellRange`, the one rule the host
+ * tiler (cells it cuts) and the player compositor (cells it waits for) share.
  */
 import type { Id } from "@/core/scene/types"
 

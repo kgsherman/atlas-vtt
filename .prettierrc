@@ -4,8 +4,14 @@
   "singleQuote": false,
   "tabWidth": 2,
   "trailingComma": "es5",
-  "printWidth": 80,
+  "printWidth": 160,
   "plugins": ["prettier-plugin-tailwindcss"],
   "tailwindStylesheet": "src/index.css",
-  "tailwindFunctions": ["cn", "cva"]
+  "tailwindFunctions": ["cn", "cva"],
+  "overrides": [
+    {
+      "files": ["src/components/ui/**", "src/components/play/**", "src/play/**", "e2e/**", "scripts/**"],
+      "options": { "printWidth": 80 }
+    }
+  ]
 }

@@ -45,10 +45,3 @@ export function initials(name: string | null | undefined): string {
   const letters = words.length === 1 ? [...words[0]].slice(0, 2) : [[...words[0]][0], [...words[words.length - 1]][0]]
   return letters.join("").toUpperCase()
 }
-
-/** Human file size ("820 KB", "12.4 MB"). */
-export function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}

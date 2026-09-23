@@ -7,7 +7,7 @@ import { newId } from "@/core/scene/factory"
 import { sampleById } from "@/core/scene/samples"
 import type { ParseSceneResult } from "@/core/scene/schema"
 import type { Scene } from "@/core/scene/types"
-import { exportSceneFile, exportSceneFileWithAssets, importSceneFileWithAssets, readSceneFile, type SceneSummary, type SharedScene } from "@/net/scenesRepo"
+import { exportSceneFile, exportSceneFileWithAssets, importSceneFileWithAssets, type SceneSummary, type SharedScene } from "@/net/scenesRepo"
 import { describeNetError, isNetError } from "@/net/supabase"
 
 import type { AppServices } from "./services"
@@ -104,38 +104,64 @@ async function deleteImages(services: AppServices, docId: string, assetIds: read
 }
 
 /**
- * Delete a library scene and (best-effort) its map images. The row goes first, so a failed image
- * delete leaves an orphan image, never a scene with missing images. Images stay while an active
- * session started from the scene may still read them (or when that can't be checked). Only the latest
- * version's images are known here; ones only older versions referenced are not removed.
+ * Delete a library scene and (best-effort) its map images. The image folders only this scene's
+ * versions use (ScenesRepo.imageFoldersToFree: no other scene's versions, no active session) are
+ * looked up BEFORE the row goes, and deleted after it (AssetStore.deleteSceneImages), so a failed image
+ * delete leaves an orphan image, never a scene with missing images. Folders still in use (e.g. by an
+ * active session started from the scene) stay; orphans are collected later by sweepUnusedImages.
  */
 export async function deleteScene(services: AppServices, summary: SceneSummary): Promise<{ warnings: string[] }> {
-  let docId: string | null = null
-  let assetIds: string[] = []
+  let folders: string[] = []
   try {
-    const loaded = await services.scenes.load(summary.id)
-    if (loaded.parsed.ok) {
-      docId = loaded.parsed.scene.id
-      assetIds = Object.keys(loaded.parsed.scene.assets ?? {})
-    }
+    folders = await services.scenes.imageFoldersToFree(summary.id)
   } catch {
-    // Unreadable latest version: delete the row anyway; its images (if any) stay.
-  }
-  let inUse = false
-  if (assetIds.length > 0) {
-    try {
-      inUse = (await services.sessions.listMySessions()).some((s) => s.sceneId === summary.id && s.status === "active")
-    } catch {
-      inUse = true
-    }
+    // Can't tell which images are unused: delete the row anyway; the images stay for the sweep.
   }
   await services.scenes.remove(summary.id)
   const warnings: string[] = []
-  if (docId && !inUse && assetIds.length > 0) {
-    const failed = await deleteImages(services, docId, assetIds)
-    if (failed > 0) warnings.push(`${plural(failed, "map image", "map images")} could not be removed from storage.`)
+  const deleteFolder = services.assets.deleteSceneImages?.bind(services.assets)
+  if (deleteFolder && folders.length > 0) {
+    let failed = 0
+    for (const folder of folders) {
+      try {
+        await deleteFolder(folder)
+      } catch {
+        failed++
+      }
+    }
+    if (failed > 0) warnings.push("Some map images could not be removed from storage.")
   }
   return { warnings }
+}
+
+/** Minimum time between two background image sweeps from this browser. */
+export const IMAGE_SWEEP_INTERVAL_MS = 24 * 60 * 60 * 1000
+const SWEEP_KEY = "atlas:image-sweep"
+
+/**
+ * Background clean-up of map images no saved scene version, active session or editor draft uses any
+ * more (deleted scenes whose folders were in use then, images of versions pruned from history, imports
+ * or editor sessions that never saved). Runs at most once per IMAGE_SWEEP_INTERVAL_MS per browser and
+ * only on Supabase, where the store also skips images younger than a week (an import or an editor in
+ * another tab may not have saved the scene that references a new image yet); local mode has no age to
+ * protect such images. Never throws.
+ */
+export async function sweepUnusedImages(services: Pick<AppServices, "mode" | "assets">, now = Date.now()): Promise<{ removed: number; bytes: number } | null> {
+  if (services.mode !== "supabase" || !services.assets.sweepUnreferencedImages) return null
+  try {
+    const last = Number(localStorage.getItem(SWEEP_KEY))
+    if (Number.isFinite(last) && last > 0 && now - last < IMAGE_SWEEP_INTERVAL_MS) return null
+    localStorage.setItem(SWEEP_KEY, String(now))
+  } catch {
+    // No storage: sweeping on every home visit would be wasteful; skip.
+    return null
+  }
+  try {
+    return await services.assets.sweepUnreferencedImages()
+  } catch (err) {
+    console.warn("[atlas] map image clean-up failed:", err)
+    return null
+  }
 }
 
 /** "Keep (imported)", then "Keep (imported 2)", … when the library already has the name. */
@@ -152,18 +178,14 @@ export function importedName(name: string, existing: Iterable<string>): string {
 export async function importSceneFile(services: AppServices, file: Blob): Promise<LibraryResult> {
   const text = await file.text()
   const warnings: string[] = []
-  let parsed: ParseSceneResult
-  let missing = 0
-  try {
-    // Restores embedded images under the imported scene's fresh document id.
-    const result = await importSceneFileWithAssets(text, services.assets)
-    parsed = result.parsed
-    missing = result.missing.length
-  } catch (err) {
-    // The image store failed: import the document anyway, without its images.
-    parsed = readSceneFile(text).parsed
-    if (parsed.ok && Object.keys(parsed.scene.assets ?? {}).length > 0) warnings.push(`Map images could not be stored: ${userMessage(err)}`)
-  }
+  // Restores embedded images under the imported scene's fresh document id. It never throws for the
+  // image store: a failing store (quota, network) is reported as storeError with the same scene, so
+  // the images stored before the failure still resolve.
+  const result = await importSceneFileWithAssets(text, services.assets)
+  const parsed = result.parsed
+  const failed = result.storeError !== undefined
+  const missing = result.missing.length
+  if (failed) warnings.push(`Map images could not be stored: ${userMessage(result.storeError)}`)
   if (!parsed.ok) {
     if (parsed.error === "too-new") throw new LibraryError("This file was made by a newer version of Atlas. Update the app to open it.")
     throw new LibraryError("This file is not a valid Atlas scene.", parsed.issues.slice(0, 5))
@@ -183,7 +205,7 @@ export async function importSceneFile(services: AppServices, file: Blob): Promis
     await deleteImages(services, scene.id, Object.keys(scene.assets ?? {}))
     throw err
   }
-  if (missing > 0) warnings.push(`${plural(missing, "map image is", "map images are")} not included in the file.`)
+  if (missing > 0 && !failed) warnings.push(`${plural(missing, "map image is", "map images are")} not included in the file.`)
   return { summary, warnings }
 }
 

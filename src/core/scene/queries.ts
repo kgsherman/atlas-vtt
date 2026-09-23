@@ -75,10 +75,6 @@ export function sortedLevels(scene: Levels): Level[] {
   return out
 }
 
-export function levelIndex(scene: Levels, id: Id): number {
-  return sortedLevels(scene).findIndex((l) => l.id === id)
-}
-
 export function adjacentLevels(scene: Levels, id: Id): { below?: Level; above?: Level } {
   const levels = sortedLevels(scene)
   const k = levels.findIndex((l) => l.id === id)
@@ -110,12 +106,6 @@ export function objectsOfType<T extends SceneObjectType>(
     }
   }
   return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
-}
-
-export function objectsOnLevel(scene: Pick<SceneLike, "objects">, levelId: Id): SceneObject[] {
-  return Object.values(scene.objects)
-    .filter((o) => o.levelId === levelId)
-    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 }
 
 export function wallOpenings(scene: Pick<SceneLike, "objects">, wallId: Id): Opening[] {
@@ -445,11 +435,17 @@ export class GroundIndex {
     return out
   }
 
+  /** The stairs / ramp run whose ground applies at p on the level (the first of connectorsAt that is not a ladder). */
+  runAt(levelId: Id, p: Vec2): ConnectorObject | undefined {
+    const runs = this.runs.get(levelId)
+    if (runs) for (const c of runs) if (rectContains(c.rect, p)) return c
+    return undefined
+  }
+
   /** Same as groundHeightAt(scene, levelId, p). */
   groundHeightAt(levelId: Id, p: Vec2): number {
-    const runs = this.runs.get(levelId)
-    if (runs) for (const c of runs) if (rectContains(c.rect, p)) return connectorGround(this.scene, c, p)
-    return levelGround(this.scene, levelId, p.x, p.z)
+    const c = this.runAt(levelId, p)
+    return c ? connectorGround(this.scene, c, p) : levelGround(this.scene, levelId, p.x, p.z)
   }
 
   /** Same as hasGroundAt(scene, levelId, p). */
@@ -476,16 +472,26 @@ export function groundIndex(scene: GroundScene): GroundIndex {
 // Tokens and lights
 // ---------------------------------------------------------------------------
 
-export function tokenGroundY(scene: Pick<SceneLike, "levels" | "grid" | "objects">, token: Pick<Token, "levelId" | "position">): number {
-  return groundHeightAt(scene, token.levelId, token.position)
+/*
+ * The token and light helpers below take an optional `ground`: the scene's GroundIndex (for the SAME
+ * scene), which callers that resolve many tokens or lights of an unchanging scene pass to skip the
+ * O(objects) scan of groundHeightAt per call. Results are identical either way.
+ */
+
+export function tokenGroundY(scene: Pick<SceneLike, "levels" | "grid" | "objects">, token: Pick<Token, "levelId" | "position">, ground?: GroundIndex): number {
+  return ground ? ground.groundHeightAt(token.levelId, token.position) : groundHeightAt(scene, token.levelId, token.position)
 }
 
 /**
  * Nominal eye position (ground + eyeHeight), NOT clamped below ceilings. Vision and the renderer
  * must use core/vision's resolveViewerEye(), which clamps it.
  */
-export function nominalTokenEye(scene: Pick<SceneLike, "levels" | "grid" | "objects">, token: Pick<Token, "levelId" | "position" | "eyeHeight">): Vec3 {
-  return { x: token.position.x, y: tokenGroundY(scene, token) + token.eyeHeight, z: token.position.z }
+export function nominalTokenEye(
+  scene: Pick<SceneLike, "levels" | "grid" | "objects">,
+  token: Pick<Token, "levelId" | "position" | "eyeHeight">,
+  ground?: GroundIndex
+): Vec3 {
+  return { x: token.position.x, y: tokenGroundY(scene, token, ground) + token.eyeHeight, z: token.position.z }
 }
 
 /**
@@ -495,8 +501,12 @@ export function nominalTokenEye(scene: Pick<SceneLike, "levels" | "grid" | "obje
  * stands in the upper room. The nominal eye (not resolveViewerEye) is right here: the stairwell is cut
  * out of the upper floor, so no slab clamps the eye on the run. Ladders never switch the view.
  */
-export function tokenViewLevelId(scene: Pick<SceneLike, "levels" | "grid" | "objects">, token: Pick<Token, "levelId" | "position" | "eyeHeight">): Id {
-  const c = connectorsAt(scene, token.levelId, token.position).find((o) => o.style !== "ladder")
+export function tokenViewLevelId(
+  scene: Pick<SceneLike, "levels" | "grid" | "objects">,
+  token: Pick<Token, "levelId" | "position" | "eyeHeight">,
+  ground?: GroundIndex
+): Id {
+  const c = ground ? ground.runAt(token.levelId, token.position) : connectorsAt(scene, token.levelId, token.position).find((o) => o.style !== "ladder")
   if (!c || !levelById(scene, c.toLevelId)) return token.levelId
   const eye = connectorGround(scene, c, token.position) + token.eyeHeight
   return eye > levelGround(scene, c.toLevelId, token.position.x, token.position.z) ? c.toLevelId : token.levelId
@@ -516,14 +526,23 @@ export function lightLevelId(scene: Pick<SceneLike, "tokens">, light: LightObjec
   return light.levelId
 }
 
+/**
+ * Ground (world Y) a light stands on: its carrier token's ground for an attached light, else the
+ * ground under its own position on its level. lightWorldPosition() adds `position.y` to it.
+ */
+export function lightGroundY(scene: Pick<SceneLike, "levels" | "grid" | "objects" | "tokens">, light: LightObject, ground?: GroundIndex): number {
+  if (light.attachedTokenId && Object.hasOwn(scene.tokens, light.attachedTokenId)) return tokenGroundY(scene, scene.tokens[light.attachedTokenId], ground)
+  return ground ? ground.groundHeightAt(light.levelId, light.position) : groundHeightAt(scene, light.levelId, light.position)
+}
+
 /** World-space position of a light (resolves attachment to a token). */
-export function lightWorldPosition(scene: Pick<SceneLike, "levels" | "grid" | "objects" | "tokens">, light: LightObject): Vec3 {
+export function lightWorldPosition(scene: Pick<SceneLike, "levels" | "grid" | "objects" | "tokens">, light: LightObject, ground?: GroundIndex): Vec3 {
+  const y = lightGroundY(scene, light, ground) + light.position.y
   if (light.attachedTokenId && Object.hasOwn(scene.tokens, light.attachedTokenId)) {
     const t = scene.tokens[light.attachedTokenId]
-    return { x: t.position.x + light.position.x, y: tokenGroundY(scene, t) + light.position.y, z: t.position.z + light.position.z }
+    return { x: t.position.x + light.position.x, y, z: t.position.z + light.position.z }
   }
-  const ground = groundHeightAt(scene, light.levelId, light.position)
-  return { x: light.position.x, y: ground + light.position.y, z: light.position.z }
+  return { x: light.position.x, y, z: light.position.z }
 }
 
 /** A light is effectively hidden if it or the token carrying it is hidden. */

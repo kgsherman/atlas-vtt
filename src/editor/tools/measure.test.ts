@@ -1,45 +1,20 @@
 import { describe, expect, it } from "vitest"
 
 import { createScene } from "@/core/scene/factory"
-import type { GridSettings } from "@/core/scene/types"
+import { formatFeet as playFormatFeet } from "@/play/geometry"
 
 import { at, key, makeStore } from "../test-utils"
-import { createMeasureTool, formatFeet, legCells, measureDistance } from "./measure"
 
-const grid = (diagonalRule: GridSettings["diagonalRule"]): GridSettings => ({ cellSize: 5, width: 20, depth: 20, diagonalRule })
+import { createMeasureTool, formatFeet } from "./measure"
 
 describe("measure: distance", () => {
-  it("expands legs into king moves (diagonals first)", () => {
-    expect(legCells({ i: 0, j: 0 }, { i: 3, j: 1 })).toEqual([
-      { i: 1, j: 1 },
-      { i: 2, j: 1 },
-      { i: 3, j: 1 },
-    ])
-    expect(legCells({ i: 2, j: 2 }, { i: 2, j: 2 })).toEqual([])
-  })
-
-  it("follows the grid's diagonal rule across the whole path", () => {
-    const pts = [
-      { x: 2.5, z: 2.5 },
-      { x: 27.5, z: 12.5 },
-    ]
-    expect(measureDistance(grid("5-5-5"), pts, false)).toBe(25)
-    expect(measureDistance(grid("5-10-5"), pts, false)).toBe(30)
-    // One diagonal per leg: the second diagonal of the path costs 10 under 5-10-5.
-    const legs = [
-      { x: 2.5, z: 2.5 },
-      { x: 7.5, z: 7.5 },
-      { x: 12.5, z: 12.5 },
-    ]
-    expect(measureDistance(grid("5-10-5"), legs, false)).toBe(15)
-    expect(measureDistance(grid("euclidean"), legs, false)).toBeCloseTo(10 * Math.SQRT2)
-  })
-
-  it("free mode is euclidean", () => {
-    expect(measureDistance(grid("5-5-5"), [{ x: 0, z: 0 }, { x: 3, z: 4 }, { x: 3, z: 10 }], true)).toBe(11)
-    expect(measureDistance(grid("5-5-5"), [{ x: 0, z: 0 }], true)).toBe(0)
-    expect(formatFeet(11.26, true)).toBe("11.3 ft")
-    expect(formatFeet(25.4, false)).toBe("25 ft")
+  // The distance itself is core/grid rulerDistance (tested there); the tool tests below check its wiring.
+  it("formats feet like the play ruler", () => {
+    expect(formatFeet(11.26)).toBe("11.3 ft")
+    // Same text as the play ruler: whole feet when (nearly) whole, else one decimal.
+    expect(formatFeet(25.02)).toBe("25 ft")
+    expect(formatFeet(10 * Math.SQRT2)).toBe(playFormatFeet(10 * Math.SQRT2))
+    expect(formatFeet(25.4)).toBe(playFormatFeet(25.4))
   })
 })
 

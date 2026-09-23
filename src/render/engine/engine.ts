@@ -16,8 +16,8 @@
  * has MSAA (a context attribute is fixed at creation; render targets follow the tier at runtime), so
  * flat overlay meshes anti-alias their own edges (materials/edgeAAMaterial).
  *
- * Adaptive tier steps compile the next tier's programs in the background and switch once they are ready
- * (requestQuality); the user's setQuality applies at once.
+ * Adaptive tier steps compile the next tier's programs and fill its shadow atlases in the background, and
+ * switch once both are ready (requestQuality); the user's setQuality applies at once.
  */
 import * as THREE from "three"
 
@@ -51,6 +51,7 @@ import { computeLevelPlan, effectiveActiveLevelId, type LevelPlanEntry } from ".
 import { LevelView, type LevelMaterials, type SharedMaterials } from "./levels"
 import { pickInitialQuality } from "./autoQuality"
 import { BackdropManager, type BackdropOptions } from "./backdrops"
+import { guardStaleDeletes } from "./contextGuard"
 import { releaseSharedGpuResources, sharedGpuGeometries } from "./sharedResources"
 import { AdaptiveQuality, computePixelRatio, FrameTimeWindow, intervalFrameCost, MAX_PIXEL_RATIO, MISSED_VSYNC_MS, PIXEL_BUDGET } from "./quality"
 import { TokenLayer } from "./tokens"
@@ -129,6 +130,8 @@ export class AtlasEngine implements Engine {
   private errorLogged = false
   private readonly resizeObserver: ResizeObserver | null
   private readonly cleanups: (() => void)[] = []
+  /** Removes the stale-delete guard of the GL context (engine/contextGuard). */
+  private readonly releaseContextGuard: () => void
 
   constructor(canvas: HTMLCanvasElement, opts: EngineOptions = {}) {
     this.canvas = canvas
@@ -149,6 +152,8 @@ export class AtlasEngine implements Engine {
       powerPreference: "high-performance",
     })
     this.configureRenderer()
+    // After a context restore, objects of the lost context disposed later must not reach gl.delete*.
+    this.releaseContextGuard = guardStaleDeletes(this.renderer.getContext(), canvas)
     this.gpuTimer = new GpuTimer(this.renderer.getContext() as WebGL2RenderingContext)
 
     this.lighting = createLightingSystem(this.renderer, { quality: this.quality })
@@ -535,6 +540,8 @@ export class AtlasEngine implements Engine {
     const p = this.pendingQuality
     this.pendingQuality = null
     p?.release()
+    // Drops the lighting system's prepared atlases too.
+    if (p) this.lighting.prepareQuality(this.quality)
   }
 
   private applyQuality(q: Quality): void {
@@ -782,8 +789,9 @@ export class AtlasEngine implements Engine {
     this.contextLost = false
     // three.js re-creates its GL state (and a fresh `info`); GPU resources re-upload lazily. The lighting
     // system resets its own GPU state (atlases, directional maps, mask textures) from its listener; no
-    // rebuild here: disposing geometries created in the lost context only makes WebGL warn about
-    // deleting objects that no longer exist.
+    // rebuild here. Objects of the lost context disposed later (post targets on resize, replaced images,
+    // rebuilt levels) would make WebGL warn about deleting objects that no longer exist: the context
+    // guard (engine/contextGuard) drops those deletes.
     this.configureRenderer()
     this.gpuTimer = new GpuTimer(this.renderer.getContext() as WebGL2RenderingContext)
     this.backdrops.invalidate()
@@ -867,11 +875,12 @@ export class AtlasEngine implements Engine {
   }
 
   /**
-   * Adaptive tier step, in two phases (no shader-compile stall mid-game): the next tier's programs are
-   * compiled in the background from clones of every material variant with that tier's AT_TIER define
-   * (KHR_parallel_shader_compile through compileAsync), then renderFrame commits the tier once they are
-   * ready, or after TIER_COMPILE_DEADLINE_MS. three's program cache hands the live materials the
-   * precompiled programs when their defines switch. A newer request replaces a pending one.
+   * Adaptive tier step, in two phases (no shader-compile stall mid-game, no lights dropping out): the
+   * next tier's programs are compiled in the background from clones of every material variant with that
+   * tier's AT_TIER define (KHR_parallel_shader_compile through compileAsync), and the lighting system
+   * fills the tier's new shadow atlases under their own budget (prepareQuality); renderFrame commits the
+   * tier once both are ready, or after TIER_COMPILE_DEADLINE_MS. three's program cache hands the live
+   * materials the precompiled programs when their defines switch. A newer request replaces a pending one.
    */
   private requestQuality(q: Quality, now: number): void {
     const pending = this.pendingQuality
@@ -880,7 +889,10 @@ export class AtlasEngine implements Engine {
       this.pendingQuality = null
       pending.release()
     }
-    if (q === this.quality) return
+    if (q === this.quality) {
+      if (pending) this.lighting.prepareQuality(q)
+      return
+    }
     const define = String(TIER_DEFINE[q])
     const clones: THREE.Material[] = []
     const holders = this.compileHolders((m) => {
@@ -908,15 +920,16 @@ export class AtlasEngine implements Engine {
       },
     }
     this.pendingQuality = next
+    this.lighting.prepareQuality(q)
     void Promise.all(holders.map((h) => this.compileHolderFor(h.holder, h.canvas ? null : offscreen))).then(() => {
       next.compiled = true
     })
   }
 
-  /** Commit a pending adaptive step when its programs are ready (or its deadline passed). */
+  /** Commit a pending adaptive step when its programs and shadow atlases are ready (or its deadline passed). */
   private commitPendingQuality(now: number): void {
     const p = this.pendingQuality
-    if (!p || (!p.compiled && now < p.deadline)) return
+    if (!p || ((!p.compiled || !this.lighting.qualityReady(p.q)) && now < p.deadline)) return
     this.pendingQuality = null
     this.applyQuality(p.q)
     if (this.sizeDirty) this.applySize()
@@ -1119,5 +1132,6 @@ export class AtlasEngine implements Engine {
     releaseSharedGpuResources()
     this.renderer.dispose()
     if (!this.canvas.isConnected) this.renderer.forceContextLoss()
+    this.releaseContextGuard()
   }
 }

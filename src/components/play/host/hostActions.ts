@@ -6,18 +6,8 @@
  */
 import { toast } from "sonner"
 
-import {
-  groundHeightAt,
-  levelById,
-  lightWorldPosition,
-} from "@/core/scene/queries"
-import type {
-  DoorState,
-  Id,
-  LightObject,
-  Scene,
-  Vec2,
-} from "@/core/scene/types"
+import { groundHeightAt, levelById } from "@/core/scene/queries"
+import type { DoorState, Id, Scene, Vec2 } from "@/core/scene/types"
 import type { DmCommand, GameState } from "@/core/session/types"
 import type { HostRunnerImpl } from "@/net/host"
 import {
@@ -174,14 +164,6 @@ export function createHostActions(
       }
     },
   }
-}
-
-/** World point of a light (for focusing / menus). */
-export function lightPoint(
-  scene: Scene,
-  light: LightObject
-): { x: number; y: number; z: number } {
-  return lightWorldPosition(scene, light)
 }
 
 /** Ground point of a token (camera focus). */

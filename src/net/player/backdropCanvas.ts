@@ -27,6 +27,7 @@
  * one change event per level every `flushMs`.
  */
 import type { Cell, Id, Rect } from "@/core/scene/types"
+import { BACKDROP_CELL_EPS, backdropCellRange, type BackdropCellRange } from "@/core/session/backdrop"
 import type { PlayerBackdrop, PlayerView } from "@/core/session/types"
 import { cellTouched, decodeMask } from "@/core/vision/mask"
 import type { CellMask, EncodedMask } from "@/core/vision/types"
@@ -183,33 +184,21 @@ export function cellPixelRect(i: number, j: number, cellSize: number, rect: Rect
 }
 
 /**
- * Cells (index j·maskWidth + i) of `explored` that overlap `rect` with positive area and are touched
- * (fully or partly explored). The mask's own width/depth define the grid.
+ * Cells (index j·maskWidth + i) of `explored` that the backdrop `rect` covers (`backdropCellRange`, the
+ * host tiler's rule: exactly the cells it cuts tiles for) and that are touched (fully or partly
+ * explored). The mask's own width/depth define the grid.
  */
 export function exploredCellsInRect(explored: CellMask, cellSize: number, rect: Rect): Set<number> {
   const out = new Set<number>()
-  if (!(rect.w > 0 && rect.d > 0)) return out
-  const i0 = Math.max(0, Math.floor(rect.x / cellSize))
-  const i1 = Math.min(explored.width, Math.ceil((rect.x + rect.w) / cellSize))
-  const j0 = Math.max(0, Math.floor(rect.z / cellSize))
-  const j1 = Math.min(explored.depth, Math.ceil((rect.z + rect.d) / cellSize))
-  for (let j = j0; j < j1; j++) {
-    if (!((j + 1) * cellSize > rect.z && j * cellSize < rect.z + rect.d)) continue
-    for (let i = i0; i < i1; i++) {
-      if (!((i + 1) * cellSize > rect.x && i * cellSize < rect.x + rect.w)) continue
+  const range = backdropCellRange(rect, { cellSize, width: explored.width, depth: explored.depth })
+  if (!range) return out
+  for (let j = range.j0; j <= range.j1; j++) {
+    for (let i = range.i0; i <= range.i1; i++) {
       const k = j * explored.width + i
       if (cellTouched(explored, k)) out.add(k)
     }
   }
   return out
-}
-
-/** Inclusive cell range. */
-interface CellRange {
-  i0: number
-  j0: number
-  i1: number
-  j1: number
 }
 
 /**
@@ -269,7 +258,7 @@ interface LayerState {
   /** Whole canvas pixels per cell (fixed for the layer, except through setMaxCanvasPixels). */
   ppc: number
   /** Cells the backdrop overlaps (clamped to the grid): a canvas never extends beyond them. */
-  limits: CellRange
+  limits: BackdropCellRange
   /** Cell (bi0, bj0)'s top-left corner is pixel (0, 0) of the layer's pixel space. */
   bi0: number
   bj0: number
@@ -278,7 +267,7 @@ interface LayerState {
   canvas: BackdropCanvas | null
   ctx: Ctx2D | null
   /** Cells the canvas covers, its pixel origin in the layer's pixel space, and its world rect. */
-  cells: CellRange | null
+  cells: BackdropCellRange | null
   px0: number
   py0: number
   width: number
@@ -321,8 +310,6 @@ function isUsableBackdrop(b: PlayerBackdrop | undefined): b is PlayerBackdrop {
     b.tilePx > 0
   )
 }
-
-const EPS = 1e-9
 
 /**
  * Keeps one composited canvas per backdrop level in sync with a PlayerView (see module doc).
@@ -495,15 +482,16 @@ export class BackdropCompositor {
     }
   }
 
-  /** Layer bookkeeping only: the canvas is created with the first explored cell. */
+  /**
+   * Layer bookkeeping only: the canvas is created with the first explored cell. null when the backdrop
+   * covers no grid cell (nothing could ever be drawn).
+   */
   private createLayer(levelId: Id, key: string, b: PlayerBackdrop, cellSize: number, gridW: number, gridD: number, ppc: number): LayerState | null {
     const r = b.rect
-    const i0 = Math.max(0, Math.floor(r.x / cellSize + EPS))
-    const j0 = Math.max(0, Math.floor(r.z / cellSize + EPS))
-    const i1 = Math.min(gridW - 1, Math.ceil((r.x + r.w) / cellSize - EPS) - 1)
-    const j1 = Math.min(gridD - 1, Math.ceil((r.z + r.d) / cellSize - EPS) - 1)
-    const bi0 = Math.floor(r.x / cellSize + EPS)
-    const bj0 = Math.floor(r.z / cellSize + EPS)
+    const limits = backdropCellRange(r, { cellSize, width: gridW, depth: gridD })
+    if (!limits) return null
+    const bi0 = Math.floor(r.x / cellSize + BACKDROP_CELL_EPS)
+    const bj0 = Math.floor(r.z / cellSize + BACKDROP_CELL_EPS)
     const layer: LayerState = {
       levelId,
       key,
@@ -515,7 +503,7 @@ export class BackdropCompositor {
       opacity: b.opacity,
       tintWalls: b.tintWalls,
       ppc,
-      limits: { i0, j0, i1, j1 },
+      limits,
       bi0,
       bj0,
       clip: { x0: 0, y0: 0, x1: 0, y1: 0 },
@@ -564,7 +552,7 @@ export class BackdropCompositor {
   }
 
   /** Pixel bounds (layer pixel space) and world rect of a canvas covering `cells`. */
-  private canvasGeometry(layer: LayerState, cells: CellRange): { px0: number; py0: number; width: number; height: number; rect: Rect } {
+  private canvasGeometry(layer: LayerState, cells: BackdropCellRange): { px0: number; py0: number; width: number; height: number; rect: Rect } {
     const ppc = layer.ppc
     const c = layer.clip
     const px0 = Math.max((cells.i0 - layer.bi0) * ppc, c.x0)
@@ -654,7 +642,7 @@ export class BackdropCompositor {
     return true
   }
 
-  private install(layer: LayerState, made: { canvas: BackdropCanvas; ctx: Ctx2D }, cells: CellRange, geo: { px0: number; py0: number; width: number; height: number; rect: Rect }): void {
+  private install(layer: LayerState, made: { canvas: BackdropCanvas; ctx: Ctx2D }, cells: BackdropCellRange, geo: { px0: number; py0: number; width: number; height: number; rect: Rect }): void {
     layer.canvas = made.canvas
     layer.ctx = made.ctx
     layer.cells = cells

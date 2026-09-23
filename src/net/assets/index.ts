@@ -5,8 +5,9 @@
  *  - createTileSource: player-side tile fetches for explored cells (Supabase: per-player chunks, see
  *    ./chunks.ts; local: crops of the locally stored image);
  *  - importMapImage / guessGridFromName: battlemap import (decode huge images, normalise, encode WebP);
- *  - tiles: tile geometry (the host uploads per-player chunks, net/host/tiles.ts; the player
- *    composites them, net/player/backdropCanvas.ts).
+ *  - chunks / tiles: tile geometry shared by the host (uploads per-player chunks, net/host/tiles.ts)
+ *    and the player (composites them, net/player/backdropCanvas.ts); the cells a backdrop covers and
+ *    its tile size come from core/session/backdrop.
  */
 import type { Id } from "@/core/scene/types"
 
@@ -34,7 +35,7 @@ export {
   type ImportedImage,
   type ImportOptions,
 } from "./import"
-export { backdropCanvasSize, backdropCells, backdropTilePx, decodeImageBlob, tileDestRect, tileSourceRect, type TileSourceOptions } from "./tiles"
+export { decodeImageBlob, tileSourceRect, type TileSourceOptions } from "./tiles"
 export { ASSET_BUCKET, TILE_BUCKET, SWEEP_MIN_AGE_MS, assetPath, downloadChunk, removeSessionTiles } from "./supabaseAssets"
 export { addImageRefs, draftDocIds } from "./references"
 export { chunkFromKey, chunkKey, chunkOfCell, chunkPath, FULL_CHUNK_MASK, isChunkEntry, TILE_CHUNK, type CellChunk, type ChunkEntry } from "./chunks"

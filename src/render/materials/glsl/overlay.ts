@@ -24,6 +24,10 @@ ${VERTEX_TRANSFORM_GLSL}
 
 // Glow sprite size relative to the flame's diameter (instance scale x).
 #define AT_GLOW_SIZE 4.5
+// The sprite is moved this far toward the camera (at most its half-size): a camera-facing quad at the
+// flame cut into the wall a torch is mounted on (0.3–0.6 ft away), a hard edge around the flame on the
+// direct path. Short enough that a glow behind a wall stays inside or behind it.
+#define AT_GLOW_PUSH 0.6
 
 void main() {
   vec3 c = color;
@@ -41,8 +45,11 @@ void main() {
 #endif
   vec3 right = vec3(viewMatrix[0][0], viewMatrix[1][0], viewMatrix[2][0]);
   vec3 up = vec3(viewMatrix[0][1], viewMatrix[1][1], viewMatrix[2][1]);
+  vec3 toCamera = isOrthographic ? vec3(viewMatrix[0][2], viewMatrix[1][2], viewMatrix[2][2]) : normalize(cameraPosition - centre.xyz);
+  // Perception is looked up at the flame itself.
   vWorldPos = centre.xyz;
-  gl_Position = projectionMatrix * viewMatrix * vec4(centre.xyz + (right * position.x + up * position.y) * size, 1.0);
+  vec3 pushed = centre.xyz + toCamera * min(0.5 * size, AT_GLOW_PUSH);
+  gl_Position = projectionMatrix * viewMatrix * vec4(pushed + (right * position.x + up * position.y) * size, 1.0);
 #else
   vec4 local = atLocalPosition(position);
   vWorldPos = (modelMatrix * local).xyz;
@@ -76,6 +83,9 @@ void main() {
   float r = length(vUv - 0.5) * 2.0;
   float g = max(0.0, 1.0 - r);
   g = g * g * (0.35 + 0.65 * exp(-r * r * 9.0));
+  // The sprite sits in front of its flame (AT_GLOW_PUSH), which covers r < ~0.22 (1 / AT_GLOW_SIZE): a
+  // hollow core keeps the flame's own colour instead of washing it out to white.
+  g *= atSmoothstepSafe(0.05, 0.3, r);
   col = vColor * (g * uRenderParams.y);
 #endif
   if (uVisionMode != 0) {

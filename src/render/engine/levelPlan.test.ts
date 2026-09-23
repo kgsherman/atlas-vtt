@@ -31,6 +31,15 @@ describe("level plan", () => {
     expect(p.get("roof")!.rank).toBe(4)
   })
 
+  it("ranks every level 1 or more (resting tokens, renderOrder 0, draw before all level geometry)", () => {
+    for (const mode of ["editor", "player", "dm-play"] as const) {
+      for (const active of [...levels.map((l) => l.id), null]) {
+        const p = computeLevelPlan(levels, view({ mode, activeLevelId: active }))
+        for (const e of p.values()) expect(e.rank).toBeGreaterThanOrEqual(1)
+      }
+    }
+  })
+
   it("editor: honours visibility toggles", () => {
     const p = computeLevelPlan(levels, view({ levelVisibility: { upper: false } }))
     expect(modes(p)).toEqual({ cellar: "solid", ground: "solid", upper: "hidden", roof: "solid" })

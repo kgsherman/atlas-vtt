@@ -17,6 +17,7 @@
  * Image placement: the image's top-left pixel is at the rect's min corner (x, z); image +x → world +x,
  * image +y (down) → world +z.
  */
+import { backdropCellRange, playerBackdrop, type BackdropCellRange } from "@/core/session/backdrop"
 import { decodeMaskCached } from "@/core/session/masks"
 import type { PlayerBackdrop } from "@/core/session/types"
 import type { Cell, GridSettings, Id, Rect, Scene, Vec2 } from "@/core/scene/types"
@@ -30,32 +31,11 @@ import type { AssetStore } from "../assets/types"
 // Geometry (pure)
 // ---------------------------------------------------------------------------
 
-/** Inclusive cell range. */
-export interface CellRange {
-  i0: number
-  j0: number
-  i1: number
-  j1: number
-}
+// The cells a backdrop covers (`backdropCellRange`) and its tile size (`playerBackdrop(…).tilePx`) come
+// from core/session/backdrop: the rules the player compositor and the filter use too.
 
+/** Zero-area tolerance of a crop (world feet). */
 const EPS = 1e-6
-
-/** Grid cells overlapping the rect with positive area, clamped to the grid. */
-export function backdropCellRange(rect: Rect, grid: Pick<GridSettings, "cellSize" | "width" | "depth">): CellRange | null {
-  if (!(rect.w > 0) || !(rect.d > 0)) return null
-  const s = grid.cellSize
-  const i0 = Math.max(0, Math.floor(rect.x / s + EPS))
-  const j0 = Math.max(0, Math.floor(rect.z / s + EPS))
-  const i1 = Math.min(grid.width - 1, Math.ceil((rect.x + rect.w) / s - EPS) - 1)
-  const j1 = Math.min(grid.depth - 1, Math.ceil((rect.z + rect.d) / s - EPS) - 1)
-  return i1 < i0 || j1 < j0 ? null : { i0, j0, i1, j1 }
-}
-
-/** Stored pixels per grid cell of an image stretched over `rect` (the tile edge length). */
-export function tilePxFor(rect: Rect, imageWidth: number, cellSize: number): number {
-  const px = Math.round((imageWidth * cellSize) / rect.w)
-  return Math.max(1, Math.min(1024, Number.isFinite(px) ? px : 1))
-}
 
 /** Source rect in image pixels and destination rect in tile pixels for one cell's tile. */
 export interface TileCrop {
@@ -240,7 +220,7 @@ interface LevelSpec {
   imageWidth: number
   imageHeight: number
   tilePx: number
-  range: CellRange
+  range: BackdropCellRange
   opacity: number
   tintWalls: boolean
   /** Changes when anything affecting the tile pixels changes. */
@@ -390,8 +370,9 @@ export class BackdropTiler {
       const asset = scene.assets && Object.hasOwn(scene.assets, b.assetId) ? scene.assets[b.assetId] : undefined
       if (!asset || !(asset.width > 0) || !(asset.height > 0)) continue
       const range = backdropCellRange(b.rect, scene.grid)
-      if (!range) continue
-      const tilePx = tilePxFor(b.rect, asset.width, scene.grid.cellSize)
+      // The tile size the filter announces to players (no backdrop for them: nothing to cut either).
+      const tilePx = playerBackdrop(scene, level.id)?.tilePx
+      if (!range || tilePx === undefined) continue
       const key = [b.assetId, asset.width, asset.height, b.rect.x, b.rect.z, b.rect.w, b.rect.d, scene.grid.cellSize, scene.grid.width, scene.grid.depth].join("|")
       next.set(level.id, {
         levelId: level.id,

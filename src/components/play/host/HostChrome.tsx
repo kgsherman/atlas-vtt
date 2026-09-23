@@ -226,6 +226,8 @@ export function HostTopBar({
       <Button
         variant="destructive"
         size="sm"
+        // Light theme: the tinted fill left the red label at 4.0:1; on the plain bar it passes 4.5:1.
+        className="border-destructive/30 bg-transparent hover:bg-destructive/5"
         onClick={onEnd}
         disabled={snap.status === "ended"}
       >

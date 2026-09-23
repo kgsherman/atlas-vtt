@@ -8,9 +8,16 @@
  * A drag target is a ground point on the active level; when that level has no ground there (a stair
  * landing upstairs, the room under a ladder), the other levels with ground at that cell are tried in
  * order of elevation distance, so dragging onto the top of a staircase paths up it. A drop on the cell
- * just beyond a stairs/ramp top edge (on the run's lower level) means going up: the run's upper level
- * is tried first there, even when the lower level also has floor at that cell (the usual layout: stairs
- * inside a room). If the landing is blocked, the lower-level path is still found.
+ * just beyond a stairs/ramp top edge (on the run's lower level, or the upper one when the token's view
+ * has already switched to it) means going up: the run's upper level is tried first there, even when
+ * the lower level also has floor at that cell (the usual layout: stairs inside a room). If the landing
+ * is blocked, the lower-level path is still found.
+ *
+ * Blind landings (players, `PlannerOptions.unexplored`): a player's scene has floor only where the
+ * player explored, so an upper storey never seen (a stub level) or an unseen landing has no ground on
+ * the client. Such a drop is planned up the run to its top row plus the step across the top edge; the
+ * client validates everything it knows (walls, doors, the run itself) and the host, which knows the
+ * floor, validates the landing (a missing or blocked one stops the token on the top step).
  */
 import {
   anchorPosition,
@@ -25,11 +32,23 @@ import {
   footprintAlong,
   footprintWithinLateral,
 } from "@/core/movement/context"
-import type { MoveRejectReason, PathStep } from "@/core/movement/types"
+import type {
+  MoveRejectReason,
+  MoveValidation,
+  PathStep,
+} from "@/core/movement/types"
 import { buildOcclusionWorld } from "@/core/occlusion"
 import type { OcclusionWorld } from "@/core/occlusion/types"
 import { groundIndex, levelById, sortedLevels } from "@/core/scene/queries"
-import type { Cell, Id, SceneLike, Token } from "@/core/scene/types"
+import type {
+  Cell,
+  ConnectorObject,
+  Id,
+  SceneLike,
+  Token,
+} from "@/core/scene/types"
+import { decodeMaskCached, exploredTouched } from "@/core/session/masks"
+import type { PlayerView } from "@/core/session/types"
 import type { SceneChange } from "@/render/contracts"
 
 export interface PlannedMove {
@@ -48,6 +67,11 @@ export interface PlannerOptions {
   /** Node budget for interactive previews (default 12k: a few ms on big maps). */
   nodeLimit?: number
   maxSteps?: number
+  /**
+   * Players: whether this client knows nothing of a level's cell (never explored). Enables blind
+   * landings (see the file header). Omitted for the DM, whose scene is complete.
+   */
+  unexplored?: (levelId: Id, cell: Cell) => boolean
 }
 
 const DEFAULT_NODE_LIMIT = 12_000
@@ -59,10 +83,12 @@ export class MovePlanner {
     null
   private readonly nodeLimit: number
   private readonly maxSteps: number
+  private readonly unexplored: PlannerOptions["unexplored"]
 
   constructor(opts: PlannerOptions = {}) {
     this.nodeLimit = opts.nodeLimit ?? DEFAULT_NODE_LIMIT
     this.maxSteps = opts.maxSteps ?? MAX_PATH_STEPS
+    this.unexplored = opts.unexplored
   }
 
   /**
@@ -152,24 +178,53 @@ export class MovePlanner {
         reason: "unreachable",
       }
     const centre = anchorPosition(scene, token.size, cell)
-    const levels = this.candidateLevels(
-      scene,
-      preferred,
-      centre,
-      cell,
-      footprintCells(token.size)
-    )
-    if (levels.length === 0)
+    const k = footprintCells(token.size)
+    const g = groundIndex(scene)
+    // Runs whose top edge the drop lies just beyond: from the preferred level, and from the token's
+    // own level (its view may already be upstairs while it stands on the top rows).
+    const runs = runsBelowTop(scene, [preferred, token.levelId], cell, k)
+    // Levels to path to, in order; `run`: a blind crossing of that run onto an unexplored landing.
+    const attempts: Array<{ levelId: Id; run: RunBelowTop | null }> = []
+    const seen = new Set<Id>()
+    const tryLevel = (levelId: Id) => {
+      if (seen.has(levelId) || !g.hasGroundAt(levelId, centre)) return
+      seen.add(levelId)
+      attempts.push({ levelId, run: null })
+    }
+    for (const r of runs) tryLevel(r.connector.toLevelId)
+    for (const r of runs) {
+      const up = r.connector.toLevelId
+      if (seen.has(up) || !this.landingUnexplored(up, cell, k)) continue
+      attempts.push({ levelId: up, run: r })
+    }
+    for (const id of this.candidateLevels(scene, preferred, centre))
+      tryLevel(id)
+    if (attempts.length === 0)
       return {
         ...base,
         target: { cell, levelId: preferred },
         path: null,
         reason: "no-ground",
       }
-    for (const levelId of levels) {
-      const target: PathStep = { cell: { i: cell.i, j: cell.j }, levelId }
+    for (const a of attempts) {
+      const target: PathStep = {
+        cell: { i: cell.i, j: cell.j },
+        levelId: a.levelId,
+      }
+      if (a.run) {
+        const blind = this.blindCrossing(
+          scene,
+          world,
+          token,
+          start,
+          a.run,
+          target
+        )
+        if (blind) return { ...base, target, ...blind, reason: null }
+        continue
+      }
       if (
-        levelId === start.levelId &&
+        a.levelId === start.levelId &&
         cell.i === start.cell.i &&
         cell.j === start.cell.j
       )
@@ -188,34 +243,72 @@ export class MovePlanner {
     }
     return {
       ...base,
-      target: { cell, levelId: levels[0] },
+      target: { cell, levelId: attempts[0].levelId },
       path: null,
       reason: "unreachable",
     }
   }
 
+  /** Some footprint cell of a landing is unexplored by this client (blind landings enabled). */
+  private landingUnexplored(levelId: Id, cell: Cell, k: number): boolean {
+    const unexplored = this.unexplored
+    if (!unexplored) return false
+    for (let dj = 0; dj < k; dj++)
+      for (let di = 0; di < k; di++)
+        if (unexplored(levelId, { i: cell.i + di, j: cell.j + dj })) return true
+    return false
+  }
+
   /**
-   * Upper levels of stairs/ramps whose top edge `cell` lies just beyond (from `preferred`, their lower
-   * level) first, then the preferred level (if it has ground there), then other levels with ground,
-   * nearest elevation first.
+   * A path up `run` to its top row, plus the step across the top edge onto the unexplored landing
+   * `target`. Everything the client knows must be legal; the landing's ground is left to the host.
+   */
+  private blindCrossing(
+    scene: SceneLike,
+    world: OcclusionWorld,
+    token: Token,
+    start: PathStep,
+    run: RunBelowTop,
+    target: PathStep
+  ): { path: PathStep[]; distance: number } | null {
+    const top: PathStep = { cell: run.lower, levelId: run.connector.levelId }
+    const prefix =
+      top.levelId === start.levelId &&
+      top.cell.i === start.cell.i &&
+      top.cell.j === start.cell.j
+        ? [start]
+        : findPath(scene, world, token, top, {
+            maxSteps: this.maxSteps - 1,
+            nodeLimit: this.nodeLimit,
+          })
+    if (!prefix) return null
+    const path = [...prefix, target]
+    const v = validateMove(scene, world, token, path, {
+      enforceSpeed: false,
+      maxSteps: this.maxSteps,
+    })
+    if (!blindLandingOk(v, path, footprintCells(token.size), this.unexplored))
+      return null
+    // The crossing is one orthogonal step.
+    return {
+      path,
+      distance: v.ok ? v.distance : v.distance + scene.grid.cellSize,
+    }
+  }
+
+  /**
+   * The preferred level (if it has ground at `p`), then other levels with ground there, nearest
+   * elevation first.
    */
   private candidateLevels(
     scene: SceneLike,
     preferred: Id,
-    p: { x: number; z: number },
-    cell: Cell,
-    k: number
+    p: { x: number; z: number }
   ): Id[] {
     const pref = levelById(scene, preferred)
     const g = groundIndex(scene)
     const out: Id[] = []
-    const add = (id: Id) => {
-      if (!out.includes(id)) out.push(id)
-    }
-    for (const id of upLevelsBeyondTop(scene, preferred, cell, k)) {
-      if (g.hasGroundAt(id, p)) add(id)
-    }
-    if (pref && g.hasGroundAt(preferred, p)) add(preferred)
+    if (pref && g.hasGroundAt(preferred, p)) out.push(preferred)
     const others = sortedLevels(scene)
       .filter((l) => l.id !== preferred && g.hasGroundAt(l.id, p))
       .sort(
@@ -223,7 +316,7 @@ export class MovePlanner {
           Math.abs(a.elevation - (pref?.elevation ?? 0)) -
           Math.abs(b.elevation - (pref?.elevation ?? 0))
       )
-    for (const l of others) add(l.id)
+    for (const l of others) out.push(l.id)
     return out
   }
 
@@ -258,10 +351,46 @@ export class MovePlanner {
   }
 }
 
+/** A stairs/ramp run whose top edge a drop lies just beyond, and the top-row anchor below it. */
+export interface RunBelowTop {
+  connector: ConnectorObject
+  /** Anchor of the footprint on the run's top row (on the run's lower level). */
+  lower: Cell
+}
+
+/**
+ * Stairs/ramps on any of `levelIds` whose top edge a k × k footprint anchored at `cell` sits just
+ * beyond (the cell an orthogonal step across the top edge lands on: core crossingFor's test), in
+ * object-id order, one per upper level.
+ */
+export function runsBelowTop(
+  scene: SceneLike,
+  levelIds: readonly Id[],
+  cell: Cell,
+  k: number
+): RunBelowTop[] {
+  const out: RunBelowTop[] = []
+  for (const id of Object.keys(scene.objects).sort()) {
+    const o = scene.objects[id]
+    if (o.type !== "connector" || o.style === "ladder") continue
+    if (!levelIds.includes(o.levelId) || !levelById(scene, o.toLevelId))
+      continue
+    if (out.some((r) => r.connector.toLevelId === o.toLevelId)) continue
+    const sp = connectorSpan(o, scene.grid.cellSize)
+    if (!sp) continue
+    const lower = { i: cell.i - sp.fwd.i, j: cell.j - sp.fwd.j }
+    if (
+      footprintWithinLateral(sp, lower, k) &&
+      footprintAlong(sp, lower, k).hi === sp.top
+    )
+      out.push({ connector: o, lower })
+  }
+  return out
+}
+
 /**
  * `toLevelId`s of the stairs/ramps on `levelId` whose top edge a k × k footprint anchored at `cell`
- * sits just beyond (the cell an orthogonal step across the top edge lands on: core crossingFor's
- * test), in object-id order.
+ * sits just beyond, in object-id order.
  */
 export function upLevelsBeyondTop(
   scene: SceneLike,
@@ -269,20 +398,47 @@ export function upLevelsBeyondTop(
   cell: Cell,
   k: number
 ): Id[] {
-  const out: Id[] = []
-  for (const id of Object.keys(scene.objects).sort()) {
-    const o = scene.objects[id]
-    if (o.type !== "connector" || o.style === "ladder") continue
-    if (o.levelId !== levelId || !levelById(scene, o.toLevelId)) continue
-    const sp = connectorSpan(o, scene.grid.cellSize)
-    if (!sp) continue
-    const lower = { i: cell.i - sp.fwd.i, j: cell.j - sp.fwd.j }
-    if (
-      footprintWithinLateral(sp, lower, k) &&
-      footprintAlong(sp, lower, k).hi === sp.top &&
-      !out.includes(o.toLevelId)
-    )
-      out.push(o.toLevelId)
-  }
-  return out
+  return runsBelowTop(scene, [levelId], cell, k).map(
+    (r) => r.connector.toLevelId
+  )
+}
+
+/**
+ * Whether a path may be sent although the client could not validate all of it: it is fully legal, or
+ * its only fault is missing ground at its final step, a level change onto a landing with a footprint
+ * cell this client has not explored (`unexplored`; without it, only legal paths pass). The host knows
+ * the floor there and validates the move.
+ */
+export function blindLandingOk(
+  v: MoveValidation,
+  path: readonly PathStep[],
+  k: number,
+  unexplored?: (levelId: Id, cell: Cell) => boolean
+): boolean {
+  if (v.ok) return true
+  if (!unexplored || v.reason !== "no-ground") return false
+  if (path.length < 2 || v.failedAt !== path.length - 1) return false
+  const a = path[path.length - 2]
+  const b = path[path.length - 1]
+  if (a.levelId === b.levelId) return false
+  for (let dj = 0; dj < k; dj++)
+    for (let di = 0; di < k; di++)
+      if (unexplored(b.levelId, { i: b.cell.i + di, j: b.cell.j + dj }))
+        return true
+  return false
+}
+
+/**
+ * Whether a player has never explored any part of a cell of a level, i.e. its floor is unknown to
+ * the client (the `PlannerOptions.unexplored` / `blindLandingOk` test for players). No mask = nothing
+ * explored.
+ */
+export function unexploredIn(
+  view: Pick<PlayerView, "masks"> | null,
+  levelId: Id,
+  cell: Cell
+): boolean {
+  const m =
+    view && Object.hasOwn(view.masks, levelId) ? view.masks[levelId] : null
+  return !m || !exploredTouched(decodeMaskCached(m.explored), cell.i, cell.j)
 }

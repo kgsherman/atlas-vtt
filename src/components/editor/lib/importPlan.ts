@@ -6,6 +6,8 @@ import { effectiveFloorRects, rectIntersection } from "@/core/scene/queries"
 import { SCENE_LIMITS } from "@/core/scene/schema"
 import type { FloorObject, GridSettings, Id, Rect, SceneLike } from "@/core/scene/types"
 
+import { FILE_NOISE_WORDS, fileNameWords, nameFromWords } from "./fileNames"
+
 /** Forgotten Adventures maps are drawn at 140 px per 5 ft cell. */
 export const FA_PX_PER_CELL = 140
 
@@ -60,21 +62,17 @@ export function requiredGrid(entries: readonly Pick<ImportEntrySettings, "cellsX
   return { width: clampCells(width), depth: clampCells(depth) }
 }
 
-const STOREY_WORD = /^(basement|cellar|crypt|undercroft|sewers?|caves?|caverns?|dungeon|ground|first|second|third|fourth|1st|2nd|3rd|4th|floor|floors|level|upper|lower|upstairs|attic|loft|roof(top)?|groundfloor|firstfloor|secondfloor|thirdfloor|fourthfloor|day|night|dusk|dawn|nogrid|grid|gridless|fa)$/i
+/** Storey words (and the file-name noise words): a scene name leaves them out. */
+const STOREY_WORD = new RegExp(
+  `^(basement|cellar|crypt|undercroft|sewers?|caves?|caverns?|dungeon|ground|first|second|third|fourth|1st|2nd|3rd|4th|floor|floors|level|upper|lower|upstairs|attic|loft|roof(top)?|groundfloor|firstfloor|secondfloor|thirdfloor|fourthfloor|${FILE_NOISE_WORDS})$`,
+  "i"
+)
 
 /** A scene name from battlemap file names ("181-FA-Vineyard-Interiors-27x47-NoGrid-FirstFloor-Night.jpg" → "Vineyard Interiors"). */
 export function sceneNameFromFiles(names: readonly string[]): string {
   for (const name of names) {
-    const base = name.replace(/\.[a-z0-9]+$/i, "")
-    const words = base
-      .split(/[\s_\-.]+/)
-      .filter((w) => w && !/^\d+$/.test(w) && !/^\d+x\d+$/i.test(w) && !STOREY_WORD.test(w))
-      .flatMap((w) => w.replace(/([a-z])([A-Z])/g, "$1 $2").split(" "))
-      .filter((w) => !STOREY_WORD.test(w))
-    if (words.length > 0) {
-      const text = words.slice(0, 4).join(" ")
-      return text[0].toUpperCase() + text.slice(1)
-    }
+    const text = nameFromWords(fileNameWords(name, STOREY_WORD))
+    if (text) return text
   }
   return "Imported Map"
 }

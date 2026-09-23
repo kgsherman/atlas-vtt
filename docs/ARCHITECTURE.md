@@ -66,8 +66,11 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
   connectors. `createScene()` adds a full-grid floor to the first level.
   `groundHeightAt`, `hasGroundAt` and `effectiveFloorRects` (`core/scene/queries`) scan the scene's objects on
   every call. `groundIndex(scene)` is the cached form for callers that query many points (path overlays,
-  planners, per-pointer-move tools); it is valid only on a scene that is never changed after creation (not an
-  immer draft, not a scene mutated in place). The free functions stay uncached.
+  planners, per-pointer-move tools, the renderer's light origins, light fixtures and token visuals); it is
+  valid only on a scene that is never changed after creation (not an immer draft, not a scene mutated in
+  place). The free functions stay uncached; the token / light helpers (`tokenGroundY`, `lightGroundY`, `lightWorldPosition`,
+  `tokenViewLevelId`) take an optional `GroundIndex` of the same scene, and integrity code that reads a
+  draft builds a throwaway `GroundIndex` for the duration of one call.
 - **Ceiling** of level N = underside of the slabs of the level above (`levelCeilingY`).
 - Object Y values are relative to the ground at the object's anchor. Extended objects on terrain
   (the "Terrain rule"). Here "ground" is the **terrain** ground `levelGround` = elevation + heightmap
@@ -79,8 +82,14 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
   - Pillars/props resting on the ground (`y = 0`): top = ground(centre) + y + height; bottom = min ground
     over the footprint. Stairs/ramp occluder bottoms: min lower-level ground over the rect − 0.05 ft.
   - Lights and tokens follow `groundHeightAt` (so a torch or token on a stair run rises with it).
-  `render/builders` (walls.ts, ground.ts) and `core/occlusion` (build.ts, terrain.ts) implement these rules
-  independently and identically; `src/integration` checks they agree on the sample scenes.
+  `render/builders` (walls.ts, ground.ts, floors.ts) and `core/occlusion` (build.ts, terrain.ts) implement
+  these rules separately. Shared quantities come from `core/scene`: slab thickness is
+  `floorThickness(scene, floor)` (the floor's own thickness, else its level's; no visual minimum, so a
+  0.01 ft slab is drawn and blocks at 0.01 ft). `src/integration/crossModule.test.ts` checks that both sides
+  agree on walls (frames, volumes, proxy ↔ primitive mapping), floor / terrain slabs (incl. mask floors;
+  terrain top cells = heightfield solid cells), stairs / ramp bottoms and tops, pillars and blocking props,
+  on the sample scenes plus a test-only mask-floor fixture (flat and heightmap levels with irregular masks,
+  stairs cutting them, every prop kind rotated, a 0.01 ft slab). Door leaves are not compared.
 - **Walls** are segments centred on a→b; at shared endpoints (within 1e-3 ft) both ends extend by
   thickness/2 so corners have no notch (in both render and occlusion). Only endpoint–endpoint contacts form
   joints (a T-junction stem is not extended; it already reaches the other wall's centreline).
@@ -160,7 +169,10 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
 - The editor never commits a revision `parseScene` would refuse (`editor/validate.ts`, see §7), so every
   saved version can be reopened.
 - Heightmaps are chunked (8×8 cells per chunk, base64 Float32) so edits, undo patches and network diffs touch
-  only dirty chunks.
+  only dirty chunks. Samples beyond the grid's lattice read as 0 everywhere (`sampleHeight` with the grid,
+  like the occlusion terrain sampler), and a grid resize in the editor crops each heightmap to the new
+  lattice (`cropHeightmapToGrid`: chunks beyond it dropped, the padding of boundary chunks zeroed), so old
+  heights cannot come back if the grid grows again.
 - Storage: `scenes` + immutable `scene_versions` in Supabase; `.atlas.json` export/import; import regenerates `Scene.id`.
 - Sharing: `visibility: 'private' | 'link'`. Link shares are read only through the `get_shared_scene(slug)` RPC and
   publish the FULL DM document (the UI warns). Scene ids are never capabilities; session membership never grants
@@ -176,10 +188,16 @@ Per fragment, in one forward pass:
 1. **Lighting**: ambient + directional (sun/moon; own shadow map) + up to `MAX_LIGHTS = 32` point lights in
    **uniform arrays** (`vec4 uLights[32*4]`: pos+dim, colour×intensity×flicker + bright, tile rect, misc).
    The CPU culls/sorts lights (frustum ∩ dim sphere, level cutaway, priority) into the 32 slots; the loop
-   bound is `uLightCount`, so light count changes never recompile. Per light: skip if `d > dimRadius`,
-   gate by `N·L > 0`, then shadow test. Flicker modulates intensity only; radii are static.
-2. **Shadows**: point lights sample the **light atlas** (§4.2), bilinear-weighted 2×2 PCF via `texelFetch`
-   (3×3 on high for the 4 strongest lights). Sun: hardware PCF `sampler2DShadow`.
+   bound is `uLightCount`, so light count changes never recompile. A per-cell slot mask
+   (`render/lighting/lightMask.ts`: an R32UI texture over XZ, 10 ft cells, bit i = slot i's dim disc
+   reaches the cell, rebuilt only when the slot list changes) lets a fragment skip the slots whose disc
+   misses its cell before fetching their uniforms. It is XZ only, so conservative across levels. Per
+   remaining light: skip if `d > dimRadius`, gate by `N·L > 0`, then shadow test. Flicker modulates
+   intensity only; radii are static.
+2. **Shadows**: point lights sample the **light atlas** (§4.2), bilinear-weighted 2×2 PCF via `texelFetch`;
+   a 3×3 (2-texel box) filter instead for the 8 strongest shadowed lights on medium and for every light on
+   high / ultra (`widePcfLights` in `render/lighting/system.ts` `QUALITY_CONFIG`; ultra adds PCSS-style soft
+   shadows, §10). Sun: hardware PCF `sampler2DShadow`.
 3. **Perception** (`vision != "off"`): the cell's host grade from the perception texture (§4.4) decides
    colour / greyscale (darkvision) / blindsight tint / unperceived. If `gpuVisionRefine`, per-pixel line of
    sight against the **viewer atlas** can only *remove* perception inside host-perceived cells (never add).
@@ -191,6 +209,14 @@ Per fragment, in one forward pass:
      `p.xz + horiz(eye − p)·0.6` (the cell on the viewer's side);
    - a fragment passes if `|q − eye| ≤ stored(q) + 0.05` with the normal-offset rule of §4.2.
    Host-mask lookups for non-walkable fragments use `p.xz + n.xz·0.3` (the cell a face faces).
+   Darkvision (grade 2) and blindsight (grade 1) also end at their range per pixel (3D distance from the
+   eye, over the last `AT_SENSE_EDGE` = 0.5 ft), where the host's cells and sub-cells draw the range as a
+   staircase; this too only removes perception, needs every viewer in the uniform slots, and never removes
+   a viewer's own footprint cells (perceived by touch). With more than `MAX_VIEWERS` viewers (a large party
+   with shared vision) both the GPU refinement and this range cut are off (`uViewersAll`), because a viewer
+   without a slot may perceive what the slotted ones do not. The darkvision colour lift fades over the last
+   `AT_DV_FEATHER` = 1.5 ft of its range (a look, not a rule), and scales a dark colour up (hue kept, at
+   most 3×) before adding any grey, so painted night battlemaps keep their colours; grade 2 stays grey.
 4. **Fog**: perceived → lit colour (grey/tinted per grade); else explored (host explored mask) → memory
    style: desaturated albedo × constant, **no light terms** (stale lights can't make memory look lit);
    else black. Player mode: directional term = local sun shadow × `sunlit` mask.
@@ -262,6 +288,8 @@ direction D"), stored as octahedral linear-distance maps:
 - Editor: per-level visibility toggles; ghosts of adjacent levels draw after opaques as depth-only pre-pass
   (clone, `colorWrite:false`) then colour (`depthWrite:false`, `LessEqual`, opacity ≈ 0.25).
 - Tokens are drawn whole if present in the scene data (no per-pixel discard), with a 150 ms fade on appear/disappear.
+  They are opaque at rest and transparent only while that fade runs (PERFORMANCE §5). Their ground heights,
+  like the light fixtures', come from the scene's `groundIndex` (one object scan per scene, not per token).
 
 ### 4.4 Host mask textures (`render/fog`)
 
@@ -295,6 +323,17 @@ Per level, the engine expands `HostLevelMasks` into R8 layers of `DataArrayTextu
   15–25%, so "< 12 ms" alone kept promoting a tier that could not hold). Frame cost is max(CPU time, GPU time
   from `EXT_disjoint_timer_query_webgl2`) when the timer query exists, otherwise the frame interval (a steady
   vsync-locked interval counts as headroom).
+- Tier switches: an adaptive step prepares the next tier while the old one keeps rendering. Its programs
+  compile in the background (clones of every material variant with the new `AT_TIER` define,
+  `renderer.compileAsync`, i.e. `KHR_parallel_shader_compile` where the driver has it), and the lighting
+  system allocates the shadow atlases whose layout changes, unbound, and fills them in later frames under a
+  tile budget of their own (`prepareQuality`; lights leaving ultra's hi-res atlas get their 512² tiles).
+  The engine commits the tier in one frame once both are ready (`qualityReady`: every ranked shadowed light
+  and viewer has a capture where it will draw from), or after `TIER_COMPILE_DEADLINE_MS` (1.5 s), in which
+  case the missing tiles are recaptured in that frame. So no light drops out on a switch (before, every
+  shadowed light went dark and came back 4 per frame over 4–6 frames). A tier the user picks applies at
+  once: a deliberate recompile, with the reallocated atlases recaptured in its first frame (up to
+  `TIER_SWITCH_CAPTURE_MS` = 12 ms of CPU). Adaptive steps never resize map images.
 
 ---
 
@@ -464,7 +503,7 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
                         ▼
    flush scheduler (per player, ≤ every 100 ms): view' = filterForPlayer(state, uid, vis); ops = diffViews(last, view')
                         ▼ non-empty ops only
-   patch{epoch, baseSeq, seq, ops, results} on view:{uid}   (+ throttled player_views upsert ≤ every 5 s)
+   patch{epoch, baseSeq, seq, ops, results} on view:{uid}   (+ player_views upsert: ≤ every 5 s, ~1 s after own tokens / exploration change)
 ```
 
 - Request handling is event-driven (no rAF). The Supabase client uses `realtime.worker = true`.
@@ -472,13 +511,16 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
   (allowlist types in `core/session/types.ts`, zod `.strict()` schema test):
   - **viewers**: the player's tokens (owners) + party PC tokens if shared vision and the player owns ≥ 1 PC.
   - **objects**: from `memory[uid]` only (observed objects are refreshed there first), CLIPPED to explored
-    cells with no dilation: walls → parametric runs whose inflated footprint overlaps explored cells, widened to
-    contain any sent opening; floors → per-row runs of explored cells merged to rects; piece ids
+    cells with no dilation: walls → parametric runs whose inflated footprint overlaps explored cells or
+    explored sub-cells, widened to contain any sent opening; floors → per-row runs of explored cells (whole
+    cells, even partly explored ones) merged to rects; piece ids
     `${id}@${x},${z}`; openings re-parented (`wallId` = piece, `offset` rebased). On heightmap levels a
     wall's base is the ground at *its own* midpoint (Terrain rule, §2), and the client computes it at the
     piece's midpoint, so pieces are sent with `height` (and their doors' `height`, windows' `sillHeight` /
     `height`) rebased by `hostBase − clientGround(piece midpoint)`: the client then reproduces the host's
-    absolute wall top, door heads, sills and lintels. A piece whose rebased height would be ≤ 0 (buried) is
+    absolute wall top, door heads, sills and lintels (`src/integration/crossModule.test.ts` runs vision →
+    knowledge → filter → `viewToScene` on a sloped heightmap and checks that the render builders draw the
+    player's clipped pieces at the host's heights). A piece whose rebased height would be ≤ 0 (buried) is
     omitted. Connectors, pillars, props: whole or nothing. Secret doors are omitted unless `revealed[uid]`
     contains them (auto-revealed when observed open, or by `reveal-object`) and then sent as style "wood";
     the host wall renders solid without them.
@@ -516,13 +558,14 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
   with a `baseVersion` conflict check: another version saved meanwhile (e.g. from the editor) rejects with
   `version_conflict`, and `force` overwrites (the version history still keeps every earlier version); a
   deleted library scene rejects with `not_found`. It needs `HostRunnerOptions.scenes` (the scene library),
-  and `HostSnapshot.library = {sceneId, version, dirty} | null` exposes the origin.
-  The host console's "Save map to library" button and "Save map & end" (end-session dialog, offered when
-  the map has unsaved edits) currently go through `components/play/host/useSaveMap` instead: it finds the
-  library scene from the DM's session list, and saves the live scene with `ScenesRepo.saveVersion` — the
-  first save of a session treats a library scene updated after the session started as a conflict, later
-  saves pass the version it saved last as `baseVersion`; the conflict toast offers "Overwrite" (force).
-  Its "unsaved edits" flag is set by Edit map changes and remembered per session in `localStorage`.
+  and `HostSnapshot.library = {sceneId, version, dirty} | null` exposes the origin. The saved version keeps
+  the library entry's current name, and edits made while a save is in flight leave `dirty` set.
+  The host console passes `services.scenes`, and its "Save map to library" button, Ctrl+S in Edit map and
+  "Save map & end" (end-session dialog, offered while `origin.dirty`) all call `saveMapToLibrary` through
+  `components/play/host/useSaveMap`; a conflict toast offers "Overwrite" (force). The "unsaved edits" dot is
+  `origin.dirty`, stored with the game, so it survives reloads and other devices. A game saved before the
+  origin existed resumes with `version: null` (the scene id comes from the DM's session list): its first
+  save treats a library scene updated after the session started as changed elsewhere and asks first.
 
 ### 6.3 Sync, reconnection, persistence
 
@@ -540,15 +583,26 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
   treated as absent; same-epoch snapshots/patches older than the local seq are ignored without a hello; a
   standalone `result` or `sync` with `seq` > local (or another epoch) triggers a hello. Hellos are coalesced and
   retried with backoff (2.5 s doubling to 15 s).
-- Join order (client): subscribe `view:{uid}` → SUBSCRIBED → subscribe `req:{uid}` → send hello. Host: on every
-  `req:{uid}` SUBSCRIBED (boot, reconnect, new member) push a snapshot/snapshot_ready. Host sends `sync` on idle
-  (~10 s) so a lost final patch is detected.
+- Join order (client): subscribe `view:{uid}` → SUBSCRIBED → subscribe `req:{uid}` → send hello. Host: when a
+  player's link becomes ready for the first time in this host run (boot, new member) it pushes a
+  snapshot / snapshot_ready. A later rejoin of the same link (Realtime error, JWT refresh, network blip), where
+  the client most likely still holds its view, gets the backdrop tile table (§9) and `sync` at the current seq
+  instead (`resumeLink`): a client that missed patches answers with hello and gets a catch-up, or a snapshot if
+  the log no longer covers it. Results whose send failed while the link was down go out with the next flush.
+  The host keeps each player's last 32 results with their seq (`ResultLog`): catch-up patches and hello-driven
+  snapshots carry the results after the client's `lastSeq`, so a result lost with a patch still arrives (the
+  client ignores ones it has already settled). Host sends `sync` on idle (~10 s) so a lost final patch is
+  detected.
 - Host liveness = DM presence on `session:{sid}:host` (1.5 s grace after the host channel joins). On leave: the
   client loads its `player_views` row (adopted only if it has no view, or the row is the same epoch with a
   higher seq), shows "Waiting for DM", disables moves. While not live, the client re-checks
   `session_info(sid)` every ~10 s, so it notices a kick or a session ended from the library (where no host is
   running to broadcast `ended`) and shows the ended / kicked screen. Pending optimistic moves are overlays
   only; they clear when their result is applied, on snapshot/epoch change, or after 5 s ("DM not responding").
+  The client's own network is watched separately (`Transport.networkOnline` / `onNetworkChange`; Supabase:
+  `navigator.onLine` plus a socket poll that needs two failures): while it is down, requests are refused
+  locally as `not-connected`, an expiring request is not blamed on the DM, and the snapshot's
+  `networkOffline` flag lets the HUD say "You're offline, reconnecting…".
 - Host timing (`HOST_TIMING`): per-player flush ≤ every 100 ms, idle `sync` after 10 s, member re-read every
   10 s and on lobby presence changes. A move's result latency is the flush throttle (≤ 100 ms) + one vision
   compute of the final position + at most one in-flight step probe (§5.2 Moves). That compute is ~7 ms on
@@ -561,9 +615,13 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
 - Persistence (fenced by epoch RPCs): `save_session_state(sid, host_epoch, state)` throttled ~5 s + immediately after
   DM commands that reduce what players may see (hide token, remove token, reset fog, scene edits) + within ~1 s
   after token moves and exploration (so a reloaded host tab resumes where the tokens were) + best-effort on
-  `visibilitychange→hidden`; `upsert_player_view(sid, uid, host_epoch, epoch, seq, view)` throttled ≤ 5 s and awaited
-  before `snapshot_ready`. `host_epoch` (bigint, from `claim_host`) is the database fence (a stale host gets
-  `stale_epoch`); `epoch` (text) is the wire epoch stored with the view so a reloading client can match it.
+  `visibilitychange→hidden`; `upsert_player_view(sid, uid, host_epoch, epoch, seq, view)` throttled ≤ 5 s for
+  ordinary changes (other tokens, doors, lights), but within ~1 s (`moveSaveGapMs`) when the player's own
+  situation changed — which tokens they control or see through (e.g. the first assignment after joining),
+  where those tokens stand, what they explored (`viewSaveUrgency`, `net/host/flush.ts`) — and awaited
+  before `snapshot_ready`. The row is what a player who reloads while the DM is away sees. `host_epoch`
+  (bigint, from `claim_host`) is the database fence (a stale host gets `stale_epoch`); `epoch` (text) is the
+  wire epoch stored with the view so a reloading client can match it.
 
 ### 6.4 Database & RLS (`supabase/migrations`)
 
@@ -581,9 +639,21 @@ Tables (RLS enabled on every table; default privileges revoke anon; functions re
 - `player_views(session_id, user_id, epoch, seq, view jsonb, updated_at)` — player SELECT own row while active
   member; writes DM only via `upsert_player_view`.
 
-Helpers in schema `private` (`security definer`, `set search_path = ''`, stable): `topic_sid()`, `topic_kind()`,
-`topic_uid()` (regex-validated parsing of `realtime.topic()`), `is_session_dm(sid)` (from `sessions.dm_id` only),
-`is_active_member(sid)`. RPCs (`security definer` unless noted, `search_path=''`, execute granted to authenticated
+Helpers in schema `private` (`set search_path = ''`; execute revoked from public / anon / authenticated,
+then granted to authenticated only for the ones policies call, which are `security definer` and stable):
+- policy helpers: `topic_sid()`, `topic_kind()`, `topic_uid()` (regex-validated parsing of `realtime.topic()`
+  via `parse_topic`), `is_session_dm(sid)` (from `sessions.dm_id` only), `is_active_member(sid)`; Storage:
+  `can_read_session_tile` / `can_write_session_tile` / `can_delete_session_tile(name)` (`session-tiles`,
+  parsing paths with `parse_chunk_path`) and `can_insert_scene_asset(name)` (`scene-assets`: own folder,
+  well-formed path, per-owner quota); `normalize_display_name`;
+- RPC internals: `lock_fenced_session(sid, host_epoch)` (locks the session row and checks the fence for
+  `save_session_state` / `upsert_player_view`), `check_scene_payload` (schema version and size of a scene
+  document), `check_owner_scene_quota` / `prune_scene_history` (quotas below), `display_name_taken`,
+  `normalize_room_code` / `normalize_scene_name`, `generate_room_code` / `generate_share_slug`, and the
+  `max_*()` limit constants;
+- triggers: `touch_updated_at`, `forbid_update` (immutable `scene_versions`).
+
+RPCs (`security definer` unless noted, `search_path=''`, execute granted to authenticated
 only; return ids/booleans/small records, never whole rows; errors carry a stable MESSAGE code mapped by
 `net/supabase.ts`): `create_scene`, `save_scene_version` (optimistic `p_base_version`), `set_scene_visibility`,
 `set_display_name` (`security invoker`: own profile row under RLS), `create_session(scene_id)` (owner check, copies the scene into session_state,
@@ -609,9 +679,17 @@ advisory lock). Sizes are `pg_column_size` (on-disk, compressed). Over a limit, 
 The limits are per anonymous account: abuse spread over many accounts is bounded only by Supabase's per-IP
 anonymous sign-in rate limit (README).
 Realtime: `realtime.messages` policies per the §6.1 table, checking `extension` ('broadcast'/'presence').
+Realtime evaluates them when a channel is joined and again when the client sends a new JWT (`access_token`,
+e.g. on a token refresh), and caches them in between. So a member kicked while subscribed keeps receiving
+the host and lobby topics until their client sends a new JWT, or is disconnected when that JWT expires
+(1 h by default); the host stops sending on their view topic at once, and the host topic carries only
+`status` (wire epoch, scene name) and `ended`, the lobby only presence. A new join is refused at once.
 Dashboard settings (not SQL): enable anonymous sign-ins; disable Realtime "Allow public access"; keep the
 anonymous sign-in rate limit low for public deployments (Authentication → Rate Limits, default 30 per hour
-per IP).
+per IP). Realtime keeps a topic's public and private channels apart (a public subscriber to a session topic
+receives none of its private broadcasts, checked by `e2e/multiplayer-supabase.mjs`), so the public-access
+switch guards the project's Realtime quota and future channels rather than today's session data; the same
+script checks that it is off.
 
 ---
 
@@ -652,13 +730,20 @@ per IP).
   arrives. Drags target the token's view level (`tokenViewLevelId`, §2), and a drag aimed at the cell just
   beyond a stairs/ramp top edge prefers the run's upper level (falling back to the token's level if the upper
   one is unreachable), so a staircase inside a room with known floor beyond its top is climbed rather than
-  walked around. A token whose footprint's leading row is on the run's top row gets a "Go up" HUD button,
-  and one on the landing cell just beyond the top gets "Go down", validated like ladder climbs. Ladders keep
-  "Climb up/down".
+  walked around. A player's scene has floor only where the player explored, so an upper storey never seen
+  (a stub level) or an unseen landing has no ground on the client: such a drop is a **blind landing**,
+  planned up the run to its top row plus the step across the top edge (`PlannerOptions.unexplored`). The
+  client validates everything it knows (walls, doors, the run itself) and the host, which knows the floor,
+  validates the landing: a missing or blocked landing stops the token on the top step (the legal prefix,
+  §5.3). A token whose footprint's leading row is on the run's top row gets a "Go up" HUD button (also onto
+  an unexplored landing), and one on the landing cell just beyond the top gets "Go down", validated like
+  ladder climbs. Ladders keep "Climb up/down".
 - Door requests: a click on a door leaf, its top-down marker (§4.3) or the ground next to its segment
   (`doorAt()` proximity) toggles it. Hover highlight and the pointer cursor use the same `doorAt()` rule, so
   a door is discoverable wherever a click would work.
-- A standalone Measure tool (players and DM) uses `pathDistance`.
+- The play-mode Measure tool (players and DM) and the editor's Measure tool share one rule, `rulerDistance`
+  (`core/grid`): the king-move cells through the waypoints' cells (`legCells`, diagonals first), priced with
+  the grid's diagonal rule over the whole route (`pathDistance`), or the euclidean length in free mode.
 - DM play controls: lock/unlock movement (global and per player), shared vision toggle, enforce speed, door and
   light toggles, sun/moon on/off (scene patch), move any token, hide/reveal tokens, reveal secret doors, assign
   tokens to players, preview any token's vision, kick players.
@@ -695,7 +780,10 @@ per storey, transparent outside the drawn area on upper floors/basements).
   stored px per cell, a chunk image is 4·tilePx square, ≤ 1024 px). A chunk is clipped to the player's
   explored 4×4 **sub-cells** (1.25 ft on a 5 ft grid): a cell explored only on one side of a wall carries
   only that side's art, and everything else is transparent. What remains beyond the explored area is at most
-  the canvas's antialiasing at the clip edges.
+  the canvas's antialiasing at the clip edges. The tile edge (`tilePx`) and the cells a backdrop covers
+  (`backdropCellRange`: positive-area overlap, with calibrated edges within a small tolerance of a grid line
+  snapped to it) come from one module, `core/session/backdrop`, which the filter, the host tiler, the tile
+  source and the player compositor all use.
   - Supabase: private bucket `session-tiles`, object path `{sessionId}/{userId}/{levelId}/{ci}_{cj}.webp`,
     written only by the DM of the active session, readable only by that user while an active member (and the
     DM) — storage RLS, migration `*_tile_chunks.sql`. After each knowledge update the host re-draws the chunks
@@ -716,7 +804,18 @@ per storey, transparent outside the drawn area on upper floors/basements).
     `*_session_tiles_dm_read.sql`). A chunk's `{userId}` must be a member of the session (§6.4). DM assets
     live in the private bucket `scene-assets` under `{ownerId}/{sceneId}/{assetId}.webp` (owner-only
     policies, per-owner quotas §6.4), where `sceneId` is the document's `Scene.id` (not the library row id;
-    `AssetStore` in `net/assets/types.ts`). The DM deletes the session's chunks when it ends.
+    `AssetStore` in `net/assets/types.ts`). The DM deletes the session's chunks when it ends
+    (`removeSessionTiles`, once, best effort; Storage answers 429 / 5xx or a network failure are retried
+    after 1, 2, 4 and 8 s, so rate limiting at that moment does not leave the chunks behind).
+  - Image clean-up: deleting a library scene first asks `image_folders_to_free(scene_id)` which image
+    folders only this scene's versions use (no other scene's versions, no active session), deletes the row,
+    then those folders (`AssetStore.deleteSceneImages`), so a failure leaves an orphan image, never a scene
+    with missing images. Folders still in use stay. The home page sweeps images that no saved version,
+    active session or editor draft of this browser uses (`AssetStore.sweepUnreferencedImages`, RPC
+    `unreferenced_scene_assets`) at most once a day per browser, on Supabase only, skipping images younger
+    than a week (an import or an editor in another tab may not have saved its scene yet). An import whose
+    image store fails keeps the scene and reports the error (`storeError`) instead of re-importing without
+    images.
   - Local mode: the tile source crops from the locally stored asset (dev only, insecure like LocalTransport).
   - `PlayerView.backdrops[levelId] = {rect, opacity, tintWalls, tilePx}`; the player client prefetches the
     announced chunks, crops cell tiles from them and composites them into a per-level canvas (transparent
@@ -735,13 +834,21 @@ per storey, transparent outside the drawn area on upper floors/basements).
 ## 10. Quality tiers
 
 `Quality = "low" | "medium" | "high" | "ultra"`. With "Auto", the tier is picked at start-up by
-`pickInitialQuality()` (GPU renderer string + a short timed render of a synthetic world-shader workload,
-cached per GPU), which `EngineCanvas` runs on every route whenever it is given no tier, and then adapted at
-runtime (§4.5).
+`pickInitialQuality()` (`render/engine/autoQuality.ts`), which `EngineCanvas` runs on every route whenever it
+is given no tier, and then adapted at runtime (§4.5). The probe reads the GPU renderer string first
+(`RENDERER`, or `WEBGL_debug_renderer_info` where `RENDERER` is masked, as in Chromium; Firefox reports its
+GPU in `RENDERER` and has deprecated the extension): a
+software renderer (SwiftShader, llvmpipe) is classified low without timing, other classes cap the tier. It
+then renders a synthetic world-shader-like workload over a 1024² target in its own tiny WebGL2 context:
+after a warm-up and a measurement of the sync round-trip (subtracted), the number of full-screen passes per
+frame doubles until a frame costs ≥ 6 ms, and 16 timed frames give a median cost per megapixel. That cost,
+scaled per tier (`TIER_COST_FACTOR`) at the pixels each tier would render, picks the highest tier within the
+renderer cap whose predicted frame fits 14 ms. The measurement is cached per GPU for 30 days
+(`atlas:quality-probe:v2`); a cached one is re-mapped to the current window size.
 
 | Tier   | Pixel budget | MSAA (post scene target) | Light atlas tile | PCF | GPU LOS refine | Post |
 |--------|--------------|------|------------------|-----|----------------|------|
-| low    | 1.3 MP       | off (direct to the canvas) | 256²   | 1 tap | off          | none |
+| low    | 1.3 MP       | off (direct to the canvas) | 256²   | 2×2 bilinear | off   | none |
 | medium | 2.1 MP       | 2×   | 512²             | 2×2 (3×3 for 8 strongest) | on | lite: MSAA resolve + Reinhard composite, no bloom or AO |
 | high   | native ≤ 2× DPR | 4× | 512²            | 3×3 all | on           | bloom (fixtures), vignette |
 | ultra  | native ≤ 2× DPR | 4× | 1024² (16 lights) + 512² | PCSS-style soft shadows (blocker search) | on | GTAO ambient occlusion, bloom, filmic tone mapping, subtle film grain |
@@ -753,49 +860,62 @@ above render the world into it (half-float on high / ultra) and composite to the
 directly. Medium uses 2×: on the AMD iGPU (Crooked Lantern DM view, 1080p) the lite path measured
 13.8–14.0 ms at 4× and 13.5–13.7 ms at 2×, against 12.8–12.9 ms for the former context-MSAA medium. Overlays (grid,
 selection, rulers) are drawn after the composite with analytic antialiasing (smoothed edges in their
-shaders), not MSAA. The world material is compiled once per tier (a tier change is a deliberate one-time
-recompile).
+shaders), not MSAA. On medium, flames and glow sprites are drawn in that overlay pass too (medium has no
+bloom for them to feed, and the composite would flatten them), which keeps the direct path's look. The world
+material is compiled once per tier: a tier the user picks recompiles at once, while adaptive steps compile
+the next tier and fill its shadow atlases in the background, then switch in one frame (§4.5). What remains
+is the cost of the compile and of a canvas resize itself: on the WSL / ANGLE / Mesa d3d12 test machines
+shader compiles are not parallel, so an adaptive step still stalls (measured after the background compile
+landed: two frames of ~170–480 ms, where one frame of 500–870 ms was measured before; before, too, high →
+ultra took 633 ms on the AMD iGPU and 983 ms on NVIDIA, medium → low 250 + 117 ms). Native drivers with
+parallel compilation are untested.
 
 ---
 
 ## Appendix: Implementation status (2026-09-23)
 
-Everything above is implemented. Final verification of the current tree (after the wave-3 review fixes):
-`npx tsc -b --force` (0 errors), `npx vitest run` (113 files, 1317 tests pass and 3 opt-in live Supabase
-tests are skipped; one early run hit a timing-dependent assertion in `net/player/playerClient.test.ts`,
-which was fixed, and the 7 full runs since were green),
-`npx eslint .` (clean) and `npm run build` all pass. Every end-to-end script in `e2e/` passed against a Vite
-dev server (Chromium, NVIDIA through WSL d3d12 unless noted):
+Everything above is implemented, except for the known gaps and deliberate limits listed at the end of
+this appendix. Final verification of the current tree (after the wave-4 fixes): `tsc -b --force` (0 errors),
+`npx vitest run` three times in a row (each: 115 test files and 1367 tests pass; the 3 opt-in live Supabase
+files are skipped), `npx eslint .` (clean) and `npm run build` all pass. The end-to-end scripts in `e2e/` were
+run against a Vite dev server (Chromium, NVIDIA through WSL d3d12 unless noted; 2026-09-23, final pass):
 
 | Script | Result |
 |---|---|
-| `editor-smoke` | 32/32 (quality probe, menus, labels, options bar at 1280 px, tools, undo / redo, shortcuts, save, reload) |
-| `vineyard-build` | 23/23 (builds and exports `test_maps/vineyard.atlas.json`) |
-| `multiplayer-local` | 53/53 on the Crooked Lantern; 55/55 on the Vineyard (host menus, oracle-equal views, moves, doors, stairs, lock, reloads, leak scan) |
-| `multiplayer-supabase` | 22/22 on the Crooked Lantern, 31/31 on the Vineyard with map chunks (incl. sub-cell clipping of downloaded chunks) |
-| `multiplayer-latency` | 7/7 (120×120 daylit field: a 20-step move answered in 320–616 ms, a concurrent 1-step move in ~600 ms, over two runs) |
+| `editor-smoke` | 34/34 on NVIDIA (probe picks ultra) and 34/34 on SwiftShader (probe picks low): quality probe, menus, labels, options bar at 1280 px, tools, undo / redo, shortcuts, save, reload |
+| `vineyard-build` | 23/23 (import dialog, traced floors and walls, the layout in one undoable edit, every storey reachable, save / reload, export) |
+| `multiplayer-local` | 54/54 on the Crooked Lantern and 54/54 on the Vineyard (probed tiers on host and players, host menus, oracle-equal views, moves, doors, stairs incl. a blind landing on the Vineyard, lock, reloads, leak scan) |
+| `multiplayer-supabase` | 29/30 on the Crooked Lantern, 38/39 on the Vineyard with map chunks: the one failure is the "Allow public access" dashboard check (see Known gaps, Security); public channels received no session data, the kicked member's subscription stopped after a token refresh, and ending the session deleted the players' chunks |
+| `multiplayer-latency` | 7/7 (120×120 daylit field: a 20-step move answered in 325–610 ms, a concurrent 1-step move in 609–617 ms over two runs) |
 | `host-save-map` | 12/12 |
 | `engine-leak` | 5/5 (24 editor visits, every engine context collected) |
 | `perf` | 36/36 (AMD iGPU medium and NVIDIA ultra × Crooked Lantern, Stress Test, Vineyard; numbers in `docs/PERFORMANCE.md`) |
-| `showcase` | 5/5 (`docs/screenshots/` regenerated) |
+| `showcase` | 5/5 (the screenshots in `docs/screenshots/` were re-shot: the darkvision views changed with the colour lift of §4.1) |
+| `firefox-smoke` | 14/14 in headless Firefox 155 (software WebGL2): the library, the editor at all four tiers, a local-mode player whose view equals the oracle, no console errors |
 
-On the Vineyard the `multiplayer-local` stairs step needs two things the Crooked Lantern does not: the
-manor stairs are behind closed doors, so the DM opens the storey's doors first (the planner only paths
-through open, known space), and the upper landing cannot be seen from the foot of the stairs, so the token
-walks up to the top step (where its view level switches) before the drag past the top climbs.
+Editing files while these scripts run no longer disturbs them unless the files are modules the page
+loads: Tailwind scans only `src/` and `index.html` (`src/index.css` `source(".")`). Before, a change to
+any other scanned file (a doc, an e2e script) made the dev server reload every open page, which broke
+runs mid-way.
+
+On the Vineyard the `multiplayer-local` stairs step differs from the Crooked Lantern: the manor stairs are
+behind closed doors, so the DM opens the storey's doors first (the planner only paths through open, known
+space), and the upper landing cannot be seen from the foot of the stairs, so the drag from the foot is a
+blind landing that the host validates (§8).
 
 The SQL suites run on the linked project, each in a transaction that is rolled back:
 
 | Suite | Result |
 |---|---|
-| `rls_test.sql` | 326/326 (re-run in the final verification; checks run against `realtime.messages`) |
+| `rls_test.sql` | 326/326 (checks run against `realtime.messages`) |
 | `assets_storage_test.sql` | 25/25 (the legacy per-cell tile checks now assert the API is gone) |
 | `tile_chunks_test.sql` | 22/22 |
 | `quotas_test.sql` | 27/27 |
 | `scene_asset_cleanup_test.sql` | passes |
 
-All but `rls_test.sql` were last run right after the wave-3 migrations were applied; no migration or SQL
-test changed since. The applied migrations match `supabase/migrations/` one to one.
+These were last run in wave 3 (`rls_test.sql` in its final verification, the others right after its
+migrations were applied). No migration or SQL test has changed since, so they were not re-run for wave 4;
+the applied migrations (`list_migrations`, 16) still match `supabase/migrations/` one to one.
 
 Security advisors report only the intentional warnings:
 - signed-in users can execute the `SECURITY DEFINER` RPCs;
@@ -828,6 +948,32 @@ Security advisors report only the intentional warnings:
 - Backend: per-account quotas (§6.4), the legacy per-cell tile API dropped, display names that pose as the
   DM refused, and map images no scene references any more can be found and deleted (§6.4, §9).
 
+**Review fixes (wave 4)**, finishing the cross-area wiring of wave 3:
+- "Save map to library" has one path: the host console calls `HostRunner.saveMapToLibrary`, and the
+  unsaved-edits flag is `GameState.origin.dirty`, stored with the game (§6.2, `e2e/host-save-map.mjs`).
+- Stairs: a drag past the top step also climbs onto a landing the player has never seen (a blind landing
+  the host validates; §8, the Vineyard run of `e2e/multiplayer-local.mjs`).
+- Map images: deleting a library scene frees the image folders only its versions used, a daily sweep
+  removes images nothing uses any more, and an import whose image store fails keeps the scene (§9).
+- The player HUD says "You're offline, reconnecting…" when the player's own network is down (§6.3).
+- A grid resize crops heightmaps to the new lattice (§3); the renderer resolves light origins with one
+  `groundIndex` per scene instead of a scan of every object per light (§2).
+- Rendering: per-cell light mask (§4.1), per-pixel darkvision / blindsight range edges (§4.1), adaptive
+  tier switches that prepare the new tier's shadow atlases before switching (§4.5), antialiased 1-px
+  overlays (§10), tokens opaque at rest (PERFORMANCE §5), and a guard against deleting GL objects of a
+  lost context after a WebGL context restore.
+- Bundle: the home route no longer loads the player filter, vision or pathfinding.
+- Tooling and tests: `npm run typecheck` runs `tsc -b` (plain `tsc` checked nothing), `npm test`,
+  `npm run format:check` and a `.prettierrc` closer to the code; new e2e checks for the probed quality
+  tier per GPU on the editor, host console and player page, Realtime public channels and a kicked
+  member's subscriptions (`e2e/multiplayer-supabase.mjs`), and monotonic timings in the e2e scripts.
+- Final verification pass: the editor's and the play-mode Measure tools share `core/grid` `rulerDistance`
+  (their copies are gone, §8); token visuals and light fixtures read ground heights from `groundIndex`
+  (§4.3); ending a session retries the players' chunk clean-up when Storage rate-limits it (§9: one
+  Vineyard run logged `removing session tiles failed … Too many connections`); the quality probe reads
+  `RENDERER` before the deprecated debug extension (§10), which Firefox warned about; Tailwind scans only
+  `src/`; and `e2e/firefox-smoke.mjs` is new.
+
 Known gaps and deliberate limits:
 
 **Contracts vs. code**
@@ -840,9 +986,6 @@ Known gaps and deliberate limits:
 - `HostRunner.stop()` leaves the status at `"standby"`, because there is no separate "stopped" status.
 - A second move request for a token whose move is still in flight is rejected with `"rate-limited"`. There is
   no dedicated reason.
-- "Save map to library" exists twice: `HostRunner.saveMapToLibrary` (with `GameState.origin`, §6.2) and the
-  host console's own `useSaveMap`, which the UI uses; the host console does not pass
-  `HostRunnerOptions.scenes`, so the runner path is unused there.
 
 **Map images**
 
@@ -872,36 +1015,37 @@ Known gaps and deliberate limits:
   host (§6.2), but its below-ground bottom can differ: the host's depends on the terrain under the whole
   wall, which the player is not sent. Nothing above ground is affected.
 
-**Play and editor**
-
-- A drop beyond a staircase's top edge climbs only onto upper floor the player already knows. Where the
-  upper landing cannot be seen from the foot of the stairs (the Vineyard manor's stairwell), the drop
-  walks to the landing cell on the lower level instead; the player walks up the run first (the view level
-  switches to the upper storey on the top steps) or uses **Go up** on the top step.
-- Shrinking the grid drops heightmap chunks beyond the new lattice but does not zero the padding of the
-  boundary chunks (`cropHeightmapToGrid` exists but the editor does not call it). Every read ignores
-  samples beyond the lattice, so this only keeps a few unused floats in the document.
-
 **Rendering**
 
-- The Crooked Lantern DM view on an integrated GPU (Radeon iGPU, medium) takes ~13–13.5 ms of GPU time at
-  p95, about 81% of the frame budget. The high tier costs ~21–23 ms there (51 fps with vsync); the start-up
+- The Crooked Lantern DM view on an integrated GPU (Radeon iGPU, medium) takes 12.3–12.7 ms of GPU time
+  at p95, about 74–76% of the frame budget. The high tier costs ~21–23 ms there (51 fps with vsync); the start-up
   probe (every route, "Auto") and adaptive quality keep such machines on medium, and the host console and
   the player page have a quality selector like the editor.
-- A tier change recompiles the world shaders. Adaptive steps compile the next tier in the background, but
-  on the tested WSL Mesa d3d12 / ANGLE setup shader compiles are not parallel, so a step still costs two
-  frames of ~170–480 ms (one frame of 500–870 ms before). Parallel compilation on native drivers is untested.
-- The canvas has no MSAA, and not every overlay has analytic antialiasing yet: 1-px line overlays
-  (selection and hover outlines, light radius rings, preview outlines), the 3D drag ghosts, preview fills
-  and connector arrows are aliased. Rulers, move paths, brush circles and token markers are smoothed.
-- Light origins are resolved (§2) per light on every scene change through `groundHeightAt`, which scans
-  the scene's objects; on very large maps a `groundIndex`-based resolve would be cheaper.
+- A tier change recompiles the world shaders. Adaptive steps compile the next tier and fill its shadow
+  atlases in the background, so no light drops out, but on the tested WSL Mesa d3d12 / ANGLE setup shader
+  compiles are not parallel, so a step still stalls (two frames of ~170–480 ms were measured after the
+  background compile landed, one frame of 500–870 ms before). Parallel compilation on native drivers is
+  untested.
+- The canvas has no MSAA. Overlays are antialiased in their shaders (1-px outlines and rings as screen-space
+  quads, rulers, move paths, brush circles, token markers, fills with an outline over their edge), except
+  the 3D ghost objects of paste / drag previews and small preview markers, which are aliased.
 - In cutaway views, the part of a lower storey's wall inner face that sits flush with the next storey's
   slab edge (between the cutaway plane and the next elevation) can be lit by lights of the hidden storey:
   the receiver's normal offset puts the test point inside the slab. The cap rule (§4.2) covers wall tops
   only. Repro: `dev/render.html?sample=crooked-lantern&mode=dm-play&at=66,89.5&zoom=3&lights=floating&moon=0&rotate=2&tilt=35`.
-- Only Chromium has been tested, on NVIDIA and AMD through WSL d3d12 and on SwiftShader. Firefox and Safari
-  are untested.
+- Fog and perception edges along diagonal line-of-sight boundaries are scalloped (bumps of a 1.25 ft
+  sub-cell). The host sends perception per 4×4 sub-cell, and the GPU line-of-sight refinement can only
+  remove perception inside it, so the valleys (sub-cells the host says are not perceived) stay. Straight
+  edges would need finer or analytic edges from the host. The darkvision / blindsight range, which the
+  host also draws as a staircase, is already cut per pixel (§4.1).
+- On low, a thin light leak can show along the base of a wall on the side facing away from the light: a
+  coarse 256² light-atlas texel straddles the wall's bottom edge (0.05 ft below the ground), so a
+  neighbouring texel passes under it. A smaller receiver epsilon did not help; deeper wall bottoms in
+  `core/occlusion` (or a GPU-proxy-only extension, which would depart from the single blocking truth) would.
+- Browsers: Chromium is tested end to end, on NVIDIA and AMD through WSL d3d12 and on SwiftShader. Firefox
+  155 passes `e2e/firefox-smoke.mjs` (headless, WebGL2 on its software rasteriser: the library, the editor
+  on the Crooked Lantern at all four tiers, a local-mode player whose view equals the oracle, no console
+  errors). Firefox on a GPU, the multiplayer scripts in Firefox, and Safari are untested.
 
 **Security**
 
@@ -911,11 +1055,40 @@ Known gaps and deliberate limits:
 - Token portraits are the DM-supplied http(s) `imageUrl`, sent to players who see the token and loaded by
   their browsers from that host (without a referrer). The image host therefore learns the viewers' IP
   addresses. Portraits are not copied into Storage, and there is no CSP `img-src` restriction.
+- Realtime authorises a channel when it is joined and re-checks only when the client sends a new JWT
+  (§6.4): a member kicked while subscribed keeps receiving the host topic's `status` broadcasts (wire
+  epoch, scene name) and lobby presence until their client refreshes its token, or at most until the JWT
+  expires (1 h by default). `e2e/multiplayer-supabase.mjs` shows one broadcast arriving after the kick and
+  none after a token refresh; a new join is refused at once. The view topic carries nothing more after the
+  kick. Shortening the project's JWT expiry narrows the window.
+- Retention: `end_session` keeps an ended session's `session_state`, and the `sessions_delete_dm` policy and
+  the `DELETE` grant on `public.sessions` are unused. Growth is bounded (each DM keeps ≤ 50 sessions,
+  ended ones included, §6.4), but ended games stay stored until then. A migration that drops the state on
+  `end_session`, the unused policy and grant (plus a one-time purge of existing ended sessions' state) was
+  drafted in wave 4 and not applied: it needs the project owner's approval.
+- On the linked project Realtime's "Allow public access" is still on (a dashboard switch that migrations
+  cannot set; README step 2 says to turn it off), so `e2e/multiplayer-supabase.mjs` fails that one check.
+  The same run shows that public subscribers to a session's host and view topics receive none of its
+  private broadcasts, so no session data is exposed.
+
+**Tooling**
+
+- The tree is not uniformly Prettier-formatted: `.prettierrc` (160 columns; 80 for `src/components/ui`,
+  `src/components/play`, `src/play`, `e2e`, `scripts`) matches about two thirds of the source files, and
+  `npm run format:check` lists ~170 files under `src` whose widths vary within the file, so formatting is
+  not part of `lint`. A one-time `npm run format` would make it enforceable.
+- `tsconfig.node.json` (which covers only `vite.config.ts`) does not set `strict`, unlike
+  `tsconfig.app.json`; `vite.config.ts` passes under `--strict` today.
 
 **Bundle** (`npm run build`, minified)
 
-- The home route loads ~1.05 MB of JavaScript (~320 kB gzip): React, Base UI, zod, supabase-js and the
-  `core` modules the library needs.
-- three.js and the renderer are a separate ~1.06 MB chunk (~308 kB gzip), loaded only by the editor, host
-  and play routes. Rolldown names it after a module that imports it (currently `QualitySelect-*.js`); a
-  `codeSplitting` group in `vite.config.ts` would give it a clearer name.
+- The home route loads ~1.05 MB of JavaScript (~321 kB gzip) in three chunks: React, Base UI, zod,
+  supabase-js, sonner, the app shell and repositories, and from `core` only the scene document modules
+  (`core/scene`: schema, migrations, factory, queries, integrity, heightmap, samples) plus
+  `core/session/backdrop` (the tile rule the asset module shares with the host and the filter). The player
+  filter, vision and pathfinding are no longer pulled in (`net/assets/tiles.ts` imports
+  `core/session/backdrop` directly, not the session barrel).
+- three.js and the renderer are a separate ~1.08 MB chunk (~313 kB gzip), loaded only by the editor, host
+  and play routes. Rolldown names chunks after a module in them (currently `QualitySelect-*.js` for
+  three.js and `backdrop-*.js` for the shared home chunk); a `codeSplitting` group in `vite.config.ts`
+  would give them clearer names.

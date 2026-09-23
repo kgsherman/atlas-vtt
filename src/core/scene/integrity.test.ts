@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest"
 
 import { createConnector, createDoor, createFloor, createLevel, createLight, createPillar, createProp, createScene, createToken, createWall, createWindow } from "./factory"
 import { copySelection, deleteWithDependents, objectBounds, pasteClipboard, reprojectOpenings, selectionBounds, splitWall, validateReferences } from "./integrity"
-import { lightLevelId, lightWorldPosition, wallOpenings } from "./queries"
+import { groundHeightAt, lightLevelId, lightWorldPosition, wallOpenings } from "./queries"
 import { parseScene } from "./schema"
 import type { ConnectorObject, LightObject, Scene, SceneObject, WallObject } from "./types"
 
@@ -450,5 +450,82 @@ describe("copySelection openings", () => {
     const ms = performance.now() - t0
     expect(clip.objects).toHaveLength(ids.length)
     expect(ms).toBeLessThan(1000)
+  })
+
+  it("resolves many lights with one ground index: 3000 lights among 20k objects copy and bound in well under a second", () => {
+    // Before, every light scanned every object for its ground (about 1 ms each at this size).
+    const scene = createScene({ width: 200, depth: 200 })
+    const L = Object.keys(scene.levels)[0]
+    const upper = createLevel({ elevation: 10 })
+    scene.levels[upper.id] = upper
+    for (let k = 0; k < 20; k++) {
+      const c = createConnector(L, upper.id, { x: k * 50, z: 500, w: 5, d: 20 }, 0)
+      scene.objects[c.id] = c
+    }
+    for (let k = 0; k < 17_000; k++) {
+      const p = createProp(L, "crate", { x: (k % 200) * 5 + 2.5, y: 0, z: Math.floor(k / 200) * 5 + 2.5 })
+      scene.objects[p.id] = p
+    }
+    const carriers: string[] = []
+    for (let k = 0; k < 3000; k++) {
+      const x = (k % 200) * 5 + 1
+      const z = 500 + Math.floor(k / 200) * 1.3
+      if (k % 3 === 0) {
+        const t = createToken(L, { x, z })
+        scene.tokens[t.id] = t
+        carriers.push(t.id)
+        const l = createLight(L, "torch", { x: 0, z: 0 }, { attachedTokenId: t.id, position: { x: 0, y: 4, z: 0 } })
+        scene.objects[l.id] = l
+      } else {
+        const l = createLight(L, "torch", { x, z })
+        scene.objects[l.id] = l
+      }
+    }
+    // Every object but the carriers: carried lights are detached at their world position.
+    const ids = Object.keys(scene.objects)
+    let t0 = performance.now()
+    const clip = copySelection(scene, ids)
+    const copyMs = performance.now() - t0
+    t0 = performance.now()
+    const bounds = selectionBounds(scene, ids)
+    const boundsMs = performance.now() - t0
+    expect(clip.objects).toHaveLength(ids.length)
+    expect(bounds).not.toBeNull()
+    // The fast path gives the per-light results: spot-check detached lights on and off the stair runs.
+    const lights = clip.objects.filter((c, k): c is LightObject => c.type === "light" && k % 50 === 0)
+    expect(lights.some((o) => (scene.objects[o.id] as LightObject).attachedTokenId !== null)).toBe(true)
+    for (const o of lights) {
+      const src = scene.objects[o.id] as LightObject
+      const w = lightWorldPosition(scene, src)
+      expect(o.attachedTokenId).toBeNull()
+      expect(o.position.x).toBeCloseTo(w.x, 9)
+      expect(o.position.y).toBeCloseTo(w.y - groundHeightAt(scene, o.levelId, w), 9)
+      expect(o.position.z).toBeCloseTo(w.z, 9)
+      expect(objectBounds(scene, src)).toEqual({ x: w.x, z: w.z, w: 0, d: 0 })
+    }
+    expect(copyMs).toBeLessThan(1000)
+    expect(boundsMs).toBeLessThan(500)
+
+    // Deleting the 1000 carriers detaches their lights where they are (same index per phase).
+    const sample = carriers.filter((_, k) => k % 97 === 0)
+    const carried = new Map(
+      Object.values(scene.objects).flatMap((o) =>
+        o.type === "light" && o.attachedTokenId && sample.includes(o.attachedTokenId) ? [[o.id, lightWorldPosition(scene, o)] as const] : []
+      )
+    )
+    t0 = performance.now()
+    const next = produce(scene, (d) => deleteWithDependents(d, carriers))
+    const deleteMs = performance.now() - t0
+    expect(Object.keys(next.tokens)).toHaveLength(0)
+    expect(carried.size).toBe(sample.length)
+    for (const [id, before] of carried) {
+      const light = next.objects[id] as LightObject
+      expect(light.attachedTokenId).toBeNull()
+      const after = lightWorldPosition(next, light)
+      expect(after.x).toBeCloseTo(before.x, 9)
+      expect(after.y).toBeCloseTo(before.y, 9)
+      expect(after.z).toBeCloseTo(before.z, 9)
+    }
+    expect(deleteMs).toBeLessThan(1000)
   })
 })

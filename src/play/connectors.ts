@@ -97,24 +97,6 @@ export function climbOptions(scene: SceneLike, token: Token): ClimbOption[] {
   )
 }
 
-/** Stairs / ramps whose footprint the token stands on (for a "walk up the stairs" hint). */
-export function stairsUnder(scene: SceneLike, token: Token): ConnectorObject[] {
-  const s = scene.grid.cellSize
-  const anchor = tokenAnchor(scene, token)
-  const k = footprintCells(token.size)
-  const foot = { x: anchor.i * s, z: anchor.j * s, w: k * s, d: k * s }
-  const out: ConnectorObject[] = []
-  for (const o of Object.values(scene.objects)) {
-    if (o.type !== "connector" || o.style === "ladder") continue
-    if (
-      (o.levelId === token.levelId || o.toLevelId === token.levelId) &&
-      overlapsPositive(foot, o.rect)
-    )
-      out.push(o)
-  }
-  return out
-}
-
 function otherLevel(c: ConnectorObject, levelId: Id): Id | null {
   if (c.levelId === levelId) return c.toLevelId
   if (c.toLevelId === levelId) return c.levelId

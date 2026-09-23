@@ -17,7 +17,7 @@ import { useServices } from "@/app/services"
 import { EngineCanvas } from "@/components/canvas/EngineCanvas"
 import { useEngine } from "@/components/canvas/engineContext"
 import { useQualityChoice } from "@/components/canvas/qualityChoice"
-import { validateMove } from "@/core/movement"
+import { footprintCells, validateMove } from "@/core/movement"
 import { buildOcclusionWorld } from "@/core/occlusion"
 import {
   sortedLevels,
@@ -34,11 +34,13 @@ import {
   type PlayerClientSnapshot,
 } from "@/net/player"
 import {
+  blindLandingOk,
   climbOptions,
   MovePlanner,
   PlayController,
   resolveSelection,
   tokensInReach,
+  unexploredIn,
   cycleToken,
   type ClimbOption,
   type PlayTool,
@@ -73,6 +75,15 @@ const FOCUS_VIEW_HEIGHT = 70
 /** Backdrop canvas pixels for a quality ceiling: just under the engine's texel cap, so it is uploaded as is. */
 function backdropCanvasBudget(q: Quality): number {
   return Math.floor(backdropTexelBudget(q) * 0.99)
+}
+
+/** "Can't do that right now" while the player's own connection or the DM is away (null: go ahead). */
+function offlineHint(snap: PlayerClientSnapshot): string | null {
+  if (snap.networkOffline) return "You're offline, reconnecting…"
+  if (snap.status === "live") return null
+  return snap.status === "host-offline"
+    ? "Waiting for the DM to reconnect"
+    : "Reconnecting…"
 }
 
 declare global {
@@ -160,7 +171,14 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
   React.useEffect(() => {
     live.set({ snap, scene, activeLevelId, controlled, engine })
   })
-  const [planner] = React.useState(() => new MovePlanner())
+  // Blind stairs landings: the upper storey's floor is known here only where this player explored.
+  const [planner] = React.useState(
+    () =>
+      new MovePlanner({
+        unexplored: (levelId, cell) =>
+          unexploredIn(live.get().snap.view, levelId, cell),
+      })
+  )
   const [controller] = React.useState(
     () =>
       new PlayController({
@@ -184,14 +202,9 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
         onSelect: (id) => setSelected(id),
         onMove: (m) => {
           if (m.kind !== "path") return
-          const s = live.get().snap
-          if (s.status !== "live") {
-            toast.info(
-              s.status === "host-offline"
-                ? "Waiting for the DM to reconnect"
-                : "Reconnecting…",
-              { id: "move-offline" }
-            )
+          const hint = offlineHint(live.get().snap)
+          if (hint) {
+            toast.info(hint, { id: "move-offline" })
             return
           }
           client.requestMove(m.tokenId, m.path)
@@ -316,23 +329,30 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
     if (!scene || !selectedToken) return []
     const options = climbOptions(scene, selectedToken)
     if (options.length === 0) return []
-    // Only on a ladder or next to a stairs/ramp top edge: validate the step like the host will.
+    // Only on a ladder or next to a stairs/ramp top edge: validate the step like the host will. A
+    // stairs landing this player never explored has no known floor: the host decides (blind landing).
     const world = buildOcclusionWorld(scene)
-    return options.filter(
-      (o) =>
+    const k = footprintCells(selectedToken.size)
+    return options.filter((o) =>
+      blindLandingOk(
         validateMove(scene, world, selectedToken, o.path, {
           enforceSpeed: false,
-        }).ok
+        }),
+        o.path,
+        k,
+        (levelId, cell) => unexploredIn(view, levelId, cell)
+      )
     )
-  }, [scene, selectedToken])
+  }, [scene, selectedToken, view])
   const climb = (o: ClimbOption) => {
     if (!selectedToken) return
     if (snap.view?.flags.movementLocked) {
       toast.info("Movement is locked by the DM", { id: "move-locked" })
       return
     }
-    if (snap.status !== "live") {
-      toast.info("Waiting for the DM to reconnect", { id: "move-offline" })
+    const hint = offlineHint(snap)
+    if (hint) {
+      toast.info(hint, { id: "move-offline" })
       return
     }
     client.requestMove(selectedToken.id, o.path)
@@ -368,11 +388,13 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
     ) : !view ? (
       <JoiningScreen
         label={
-          snap.status === "host-offline"
-            ? "Waiting for the DM to open the table…"
-            : snap.status === "syncing"
-              ? "Syncing with the DM…"
-              : "Connecting…"
+          snap.networkOffline
+            ? "You're offline, reconnecting…"
+            : snap.status === "host-offline"
+              ? "Waiting for the DM to open the table…"
+              : snap.status === "syncing"
+                ? "Syncing with the DM…"
+                : "Connecting…"
         }
       />
     ) : null

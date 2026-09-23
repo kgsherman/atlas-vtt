@@ -117,6 +117,8 @@ export function recordingAssets(mode: "supabase" | "local" = "local", opts: { de
       chunks.clear()
       return n
     },
+    deleteSceneImages: async () => 0,
+    sweepUnreferencedImages: async () => ({ removed: 0, bytes: 0 }),
   }
   return { store, chunks, uploads, removed, cleaned: () => sessionsCleaned }
 }

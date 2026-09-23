@@ -25,7 +25,14 @@ const gpuArgs = [
 export function launchOptions(backend = "nvidia") {
   switch (backend) {
     case "swiftshader":
-      return { args: ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"], env: process.env }
+      return {
+        args: [
+          "--use-gl=angle",
+          "--use-angle=swiftshader",
+          "--enable-unsafe-swiftshader",
+        ],
+        env: process.env,
+      }
     case "amd":
     case "nvidia":
       return {
@@ -44,7 +51,13 @@ export function launchOptions(backend = "nvidia") {
 
 export async function launchBrowser(backend = "nvidia", extra = {}) {
   const o = launchOptions(backend)
-  return chromium.launch({ headless: true, executablePath: HEADLESS_SHELL, args: o.args, env: o.env, ...extra })
+  return chromium.launch({
+    headless: true,
+    executablePath: HEADLESS_SHELL,
+    args: o.args,
+    env: o.env,
+    ...extra,
+  })
 }
 
 export { chromium }

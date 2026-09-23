@@ -222,9 +222,9 @@ export async function playerSnap(page) {
 
 /** Poll until the player's view equals the oracle; returns the remaining differences (empty = match). */
 export async function viewConverges(dm, page, uid, timeout = 10000) {
-  const t0 = Date.now()
+  const t0 = performance.now()
   let diff = []
-  while (Date.now() - t0 < timeout) {
+  while (performance.now() - t0 < timeout) {
     const [want, got] = await Promise.all([
       expectedView(dm, uid),
       playerView(page),

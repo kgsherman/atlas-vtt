@@ -84,6 +84,37 @@ export function pathDistance(grid: GridSettings, cells: Cell[], rule: DiagonalRu
   return total
 }
 
+/** Cells of a king-move path from a (excluded) to b (included): diagonal steps first, then straight. */
+export function legCells(a: Cell, b: Cell): Cell[] {
+  const out: Cell[] = []
+  let i = a.i
+  let j = a.j
+  // Bounded: every step moves one closer on at least one axis.
+  while (i !== b.i || j !== b.j) {
+    i += Math.sign(b.i - i)
+    j += Math.sign(b.j - j)
+    out.push({ i, j })
+  }
+  return out
+}
+
+/**
+ * Length (feet) of a ruler through `points` (the one rule for every measuring tool): the grid distance
+ * of the king-move cell path through the points' cells, whose diagonal rule counts diagonals across
+ * all legs; with `free`, the euclidean length on XZ instead.
+ */
+export function rulerDistance(grid: GridSettings, points: readonly Vec2[], free = false): number {
+  if (points.length < 2) return 0
+  if (free) {
+    let total = 0
+    for (let k = 1; k < points.length; k++) total += Math.hypot(points[k].x - points[k - 1].x, points[k].z - points[k - 1].z)
+    return total
+  }
+  const cells: Cell[] = [cellOf(grid, points[0])]
+  for (let k = 1; k < points.length; k++) cells.push(...legCells(cells[cells.length - 1], cellOf(grid, points[k])))
+  return pathDistance(grid, cells)
+}
+
 /** Cells overlapped by a rect (inclusive of partially covered cells). */
 export function cellsInRect(grid: GridSettings, r: Rect): Cell[] {
   const s = grid.cellSize

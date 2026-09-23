@@ -11,12 +11,13 @@
  * Viewer slot v occupies uViewers[3v .. 3v+2]:
  *   [0] xyz = current resolved eye, w = darkvision range
  *   [1] xy = atlas texel of the LOS tile, z = tile size (0 = no tile: cannot refine), w = blindsight range
- *   [2] xyz = capture origin of the LOS tile, w = capture range (far plane)
+ *   [2] xyz = capture origin of the LOS tile, w = touch half-extent: the viewer perceives its own footprint
+ *       cells by touch whatever its senses (core/vision), inside the square max(|dx|, |dz|) ≤ w around the eye
  */
 import * as THREE from "three"
 
 import type { Vec3 } from "@/core/scene/types"
-import { placeholderFloatTexture, placeholderMaskTexture, placeholderShadowTexture } from "../materials/placeholders"
+import { placeholderFloatTexture, placeholderLightMaskTexture, placeholderMaskTexture, placeholderShadowTexture } from "../materials/placeholders"
 
 export const MAX_LIGHTS = 32
 export const MAX_VIEWERS = 8
@@ -90,7 +91,8 @@ export interface PackedViewer {
   blindsight: number
   tile: PackedTile | null
   capture: Vec3 | null
-  far: number
+  /** Half-extent (ft) of the square around the eye that covers the viewer's own footprint cells. */
+  touch: number
 }
 
 export function packViewer(out: Float32Array, slot: number, v: PackedViewer): void {
@@ -107,7 +109,7 @@ export function packViewer(out: Float32Array, slot: number, v: PackedViewer): vo
   out[o + 8] = c.x
   out[o + 9] = c.y
   out[o + 10] = c.z
-  out[o + 11] = v.far
+  out[o + 11] = v.touch
 }
 
 export interface SharedUniforms {
@@ -117,6 +119,13 @@ export interface SharedUniforms {
   uLightAtlas: THREE.IUniform<THREE.Texture | null>
   /** Hi-res light atlas (ultra: 1024² tiles), a placeholder on the other tiers. */
   uLightAtlasHi: THREE.IUniform<THREE.Texture | null>
+  /**
+   * Per-cell point-light slot mask (R32UI, lighting/lightMask.ts): bit i = slot i's dim disc reaches the
+   * cell. Grid: x, y = world XZ of its corner, z = 1 / cell size, w = 1 when a mask is bound (0 = every
+   * slot is tested, the placeholder).
+   */
+  uLightMask: THREE.IUniform<THREE.Texture>
+  uLightMaskGrid: THREE.IUniform<THREE.Vector4>
   /** Fill under cover: ambientColor × (ambientIntensity + levelFill(ambientLevel)). */
   uAmbient: THREE.IUniform<THREE.Color>
   /** Fill where the sky is exposed: ambientColor × (ambientIntensity + levelFill(skyLevel)). */
@@ -141,6 +150,11 @@ export interface SharedUniforms {
   uEnvLevels: THREE.IUniform<THREE.Vector4>
   uViewers: THREE.IUniform<Float32Array>
   uViewerCount: THREE.IUniform<number>
+  /**
+   * 1 when uViewers holds every viewer (at most MAX_VIEWERS). Per-pixel tests that remove perception
+   * (GPU line of sight, the senses' ranges) need all of them: with more viewers they are skipped.
+   */
+  uViewersAll: THREE.IUniform<number>
   uViewerAtlas: THREE.IUniform<THREE.Texture | null>
   uVisionMode: THREE.IUniform<number>
   /** 1 = per-pixel LOS refinement against the viewer atlas. */
@@ -163,6 +177,8 @@ export function createSharedUniforms(): SharedUniforms {
     uLightCount: { value: 0 },
     uLightAtlas: { value: placeholderFloatTexture() },
     uLightAtlasHi: { value: placeholderFloatTexture() },
+    uLightMask: { value: placeholderLightMaskTexture() },
+    uLightMaskGrid: { value: new THREE.Vector4(0, 0, 0, 0) },
     uAmbient: { value: new THREE.Color(0, 0, 0) },
     uSkyAmbient: { value: new THREE.Color(0, 0, 0) },
     uSkyMatrix: { value: new THREE.Matrix4() },
@@ -176,6 +192,7 @@ export function createSharedUniforms(): SharedUniforms {
     uEnvLevels: { value: new THREE.Vector4(0, 0, 0, 0) },
     uViewers: { value: new Float32Array(MAX_VIEWERS * VIEWER_VEC4S * 4) },
     uViewerCount: { value: 0 },
+    uViewersAll: { value: 1 },
     uViewerAtlas: { value: placeholderFloatTexture() },
     uVisionMode: { value: VISION_MODE.off },
     uGpuRefine: { value: 0 },

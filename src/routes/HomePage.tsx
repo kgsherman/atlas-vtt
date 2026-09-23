@@ -10,7 +10,7 @@ import { useLocation } from "wouter"
 import { downloadText } from "@/app/clipboard"
 import { forgetDigest } from "@/app/digestCache"
 import { describeJoinError } from "@/app/joinErrors"
-import { createFromSample, duplicateScene, exportScene, importSceneFile, LibraryError, userMessage } from "@/app/library"
+import { createFromSample, duplicateScene, exportScene, importSceneFile, LibraryError, sweepUnusedImages, userMessage } from "@/app/library"
 import { currentMode, modeSwitchUrl } from "@/app/mode"
 import { paths, preloadRoute } from "@/app/routes"
 import { useServices } from "@/app/services"
@@ -48,6 +48,11 @@ export default function HomePage() {
   const scenesQ = useAsync(`scenes:${services.mode}:${services.identity.userId}`, () => services.scenes.list())
   const reloadScenes = scenesQ.reload
   useOnFocus(reloadScenes)
+
+  // Map images no scene uses any more (at most daily, in the background; Supabase only).
+  React.useEffect(() => {
+    void sweepUnusedImages(services)
+  }, [services])
 
   const [busy, setBusy] = React.useState<{ id: string; action: SceneAction } | null>(null)
   const [sampleBusy, setSampleBusy] = React.useState<string | null>(null)

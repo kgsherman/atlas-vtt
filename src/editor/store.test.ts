@@ -2,7 +2,7 @@ import { applyPatches, type Patch } from "immer"
 import { describe, expect, it } from "vitest"
 
 import { createFloor, createLevel, createLight, createPillar, createProp, createToken, createWall } from "@/core/scene/factory"
-import { createHeightmap } from "@/core/scene/heightmap"
+import { createHeightmap, denseHeights, sampleCounts, writeHeights } from "@/core/scene/heightmap"
 import { wallOpenings } from "@/core/scene/queries"
 import type { ConnectorObject, DoorObject, FloorObject, LightObject, PropObject, Scene, WallObject } from "@/core/scene/types"
 import type { DmCommand } from "@/core/session/types"
@@ -483,6 +483,32 @@ describe("editor store: object edits", () => {
     expect(s.grid.depth).toBe(200)
     // width 10 at resolution 1 → 11 samples → chunk columns 0..1 only.
     expect(Object.keys(s.levels[level].heightmap!.chunks).sort()).toEqual(["0,0", "0,2"])
+  })
+
+  it("shrinking the grid zeroes heightmap padding, so old heights don't return when it grows", () => {
+    const store = makeStore()
+    const level = store.getState().activeLevelId
+    const grid = store.getState().scene.grid
+    const { samplesX, samplesZ } = sampleCounts(grid, 1)
+    store.getState().apply((d) => {
+      d.levels[level].heightmap = writeHeights(createHeightmap(1), d.grid, new Float32Array(samplesX * samplesZ).fill(3))
+    }, "Paint terrain")
+    // Within the ±50 ft margin, so the full-grid floor still validates.
+    const narrow = grid.width - 3
+    store.getState().updateGrid({ width: narrow })
+    expect(store.getState().scene.grid.width).toBe(narrow)
+    store.getState().updateGrid({ width: grid.width })
+    const after = store.getState().scene
+    const dense = denseHeights(after.levels[level].heightmap!, after.grid)
+    // Samples up to the narrow edge kept their height; the ones the shrink cut off read 0 after growing back.
+    expect(dense.heights[narrow]).toBe(3)
+    expect(dense.heights[narrow + 1]).toBe(0)
+    expect(dense.heights[dense.samplesX - 1]).toBe(0)
+    // Undo restores them (one undo step per grid edit).
+    store.getState().undo()
+    store.getState().undo()
+    const restored = store.getState().scene
+    expect(denseHeights(restored.levels[level].heightmap!, restored.grid).heights[narrow + 1]).toBe(3)
   })
 })
 

@@ -2,8 +2,10 @@ import * as THREE from "three"
 import { describe, expect, it } from "vitest"
 
 import { buildOcclusionWorld } from "@/core/occlusion"
-import { createFloor, createLevel, createLight, createScene, createToken, createWall } from "@/core/scene/factory"
-import type { Scene } from "@/core/scene/types"
+import { createConnector, createFloor, createLevel, createLight, createScene, createToken, createWall } from "@/core/scene/factory"
+import { SAMPLE_SCENES } from "@/core/scene/samples"
+import type { LightObject, Scene } from "@/core/scene/types"
+import { resolveLightWorldOrigin } from "@/core/vision"
 
 import { cullAndRankLights, cutawayPlaneY, linearColor, resolveLights, screenCoverage } from "./lights"
 import { LIGHT_FLAG_HI_ATLAS, LIGHT_FLAG_SOFT, LIGHT_FLAG_WIDE_PCF, LIGHT_VEC4S, packLight, packViewer, VIEWER_VEC4S } from "./uniforms"
@@ -84,6 +86,37 @@ describe("resolveLights", () => {
     expect(t.x).toBeCloseTo(60.8, 5)
     expect(world.containing(t, "light")).toEqual([])
     expect(byId.get(open.id)!.position).toEqual({ x: 30, y: open.position.y, z: 30 })
+  })
+
+  it("resolves the same origins as core/vision (ground index instead of per-light scans)", () => {
+    const check = (scene: Scene) => {
+      const world = buildOcclusionWorld(scene)
+      const lights = resolveLights(scene, world, { includeHidden: true })
+      expect(lights.length).toBeGreaterThan(0)
+      for (const l of lights) {
+        const o = scene.objects[l.id] as LightObject
+        expect(l.position).toEqual(resolveLightWorldOrigin(world, scene, o))
+      }
+    }
+    for (const sample of SAMPLE_SCENES) {
+      const scene = sample.build()
+      if (Object.values(scene.objects).some((o) => o.type === "light" && o.on)) check(scene)
+    }
+    // Lights on a stairs run (interpolated ground), carried by a token on the run, and on the upper level.
+    const { scene, ground, upper } = twoLevelScene()
+    const stairs = createConnector(ground, upper, { x: 20, z: 20, w: 10, d: 20 }, 0)
+    const token = createToken(ground, { x: 25, z: 32.5 })
+    scene.tokens[token.id] = token
+    const onRun = createLight(ground, "torch", { x: 22, z: 35 })
+    const carried = createLight(ground, "lantern", { x: 0, z: 0 }, { attachedTokenId: token.id, position: { x: 0.5, y: 4, z: 0 } })
+    const above = createLight(upper, "candle", { x: 5, z: 5 })
+    for (const o of [stairs, onRun, carried, above]) scene.objects[o.id] = o
+    // The run raises both lights above the level's flat ground.
+    const world = buildOcclusionWorld(scene)
+    const byId = new Map(resolveLights(scene, world, { includeHidden: true }).map((l) => [l.id, l]))
+    expect(byId.get(onRun.id)!.position.y).toBeGreaterThan(onRun.position.y + 1)
+    expect(byId.get(carried.id)!.position.y).toBeGreaterThan(4 + 1)
+    check(scene)
   })
 })
 
@@ -185,7 +218,7 @@ describe("uniform packing", () => {
     expect(lights[16 + 15]).toBe(0.5)
 
     const viewers = new Float32Array(8 * VIEWER_VEC4S * 4)
-    packViewer(viewers, 1, { eye: { x: 7, y: 8, z: 9 }, darkvision: 60, blindsight: 10, tile: { x: 1024, y: 0, size: 1024 }, capture: null, far: 500 })
-    expect(Array.from(viewers.subarray(12, 24))).toEqual([7, 8, 9, 60, 1024, 0, 1024, 10, 7, 8, 9, 500])
+    packViewer(viewers, 1, { eye: { x: 7, y: 8, z: 9 }, darkvision: 60, blindsight: 10, tile: { x: 1024, y: 0, size: 1024 }, capture: null, touch: 2.5 })
+    expect(Array.from(viewers.subarray(12, 24))).toEqual([7, 8, 9, 60, 1024, 0, 1024, 10, 7, 8, 9, 2.5])
   })
 })

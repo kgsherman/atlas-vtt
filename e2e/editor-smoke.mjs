@@ -10,6 +10,7 @@ import {
   clickWorld,
   dragWorld,
   editorSummary,
+  GPU,
   jsonDiff,
   openBrowser,
   outDir,
@@ -86,17 +87,43 @@ try {
     () => checks.ok(true, "Auto runs the start-up quality probe"),
     (e) => checks.fail("Auto runs the start-up quality probe", e.message)
   )
-  const gl = await page.evaluate(() => {
+  const gl = await page.evaluate(async () => {
     const probe = JSON.parse(localStorage.getItem("atlas:quality-probe:v2"))
+    const engine = window.__atlasEditor.engine
     const ctx = document
       .querySelector("canvas[data-slot=engine-canvas]")
       .getContext("webgl2")
+    // The tier of the next frame (adaptive quality needs seconds of slow frames before it steps down).
+    const running = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(null), 5000)
+      const off = engine.onFrame((stats) => {
+        clearTimeout(timer)
+        off()
+        resolve(stats.quality)
+      })
+    })
     return {
       probe: probe?.tier ?? null,
+      reason: probe?.reason ?? null,
+      ceiling: engine.getQualityCeiling(),
+      running,
       antialias: ctx?.getContextAttributes()?.antialias ?? null,
     }
   })
-  console.log(`   probe picked ${gl.probe}`)
+  console.log(`   probe picked ${gl.probe} (${gl.reason}) on ${GPU}`)
+  checks.ok(
+    gl.probe !== null && gl.ceiling === gl.probe && gl.running === gl.probe,
+    "the engine starts at the probed tier, which is its ceiling (not a default 'high')",
+    gl
+  )
+  // What the probe must pick on the test machines' GPUs (scripts/pw.mjs backends).
+  const expectedTier = { nvidia: "ultra", swiftshader: "low" }[GPU]
+  if (expectedTier)
+    checks.eq(
+      gl.probe,
+      expectedTier,
+      `the probe picks ${expectedTier} on ${GPU}`
+    )
   checks.ok(
     gl.antialias === false,
     "the WebGL context has no MSAA (tier MSAA comes from the post pipeline)",

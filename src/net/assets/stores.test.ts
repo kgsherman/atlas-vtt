@@ -5,7 +5,7 @@ import type { AtlasClient } from "../supabase"
 import { createAssetStore, createTileSource } from "./index"
 import { LOCAL_ASSET_STORE, localAssetKey } from "./localAssets"
 import { chunkPath } from "./chunks"
-import { assetPath, storageStatus } from "./supabaseAssets"
+import { assetPath, removeSessionTiles, storageStatus } from "./supabaseAssets"
 
 const SID = "0b0e9c1c-43b1-4e1b-9a53-0d1f5a0f0c11"
 const UID = "5f7e3c1a-2b4d-4c6e-8f10-1a2b3c4d5e6f"
@@ -225,6 +225,41 @@ describe("supabase asset store", () => {
     expect(objects.has(`session-tiles:${chunkPath(SID, P, "L1", 0, 0)}`)).toBe(false)
     expect(await assets.removeSessionTiles(SID)).toBe(2)
     expect([...objects.keys()].filter((k) => k.startsWith("session-tiles:"))).toEqual([])
+  })
+
+  it("retries a session's tile clean-up that Storage rate-limits, but not a refusal", async () => {
+    const objects = new Map<string, Blob>([[`session-tiles:${chunkPath(SID, UID, "L1", 0, 0)}`, new Blob([new Uint8Array([1])])]])
+    const { client } = fakeClient(objects)
+    const from = client.storage.from.bind(client.storage)
+    let failures: unknown[] = []
+    ;(client.storage as { from: unknown }).from = (bucket: string) => {
+      const b = from(bucket)
+      return {
+        ...b,
+        list: async (...args: Parameters<typeof b.list>) => (failures.length > 0 ? { data: null, error: failures.shift() } : b.list(...args)),
+      }
+    }
+    // Two 429s and a 503, then the listing works: the clean-up still removes the chunk.
+    failures = [
+      { status: 429, message: "Too Many Requests" },
+      { statusCode: "429", message: "rate limited" },
+      { status: 503, message: "unavailable" },
+    ]
+    expect(await removeSessionTiles(client, SID, [0, 0, 0, 0])).toBe(1)
+    expect(objects.size).toBe(0)
+    // More failures than retries: the last error is reported.
+    failures = [
+      { status: 429, message: "a" },
+      { status: 429, message: "b" },
+    ]
+    await expect(removeSessionTiles(client, SID, [0])).rejects.toMatchObject({ code: "unknown" })
+    // A permission refusal is not retried.
+    failures = [
+      { status: 403, message: "denied" },
+      { status: 403, message: "denied" },
+    ]
+    await expect(removeSessionTiles(client, SID, [0, 0])).rejects.toMatchObject({ code: "permission_denied" })
+    expect(failures).toHaveLength(1)
   })
 
   describe("chunk tile source", () => {

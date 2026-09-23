@@ -163,6 +163,38 @@ describe("vision clients", () => {
     }
   })
 
+  it("a probe applies only the moving token to the revision current when it runs (later changes stay)", async () => {
+    const { scene, aldric } = lantern()
+    const state = createGameState({ sessionId: "s", roomCode: "R", scene })
+    const at = { cell: { i: 23, j: 11 }, levelId: aldric.levelId }
+    // Built when the move was applied …
+    const step = sceneWithTokenAt(state.scene, aldric.id, at)
+    // … and posted after a later map edit (lighting and a wall near the step) reached the client.
+    const [, patches] = produceWithPatches(state.scene, (d: Scene) => {
+      d.environment.ambientLevel = "bright"
+      const w = createWall(aldric.levelId, { x: 110, z: 52.5 }, { x: 125, z: 52.5 })
+      d.objects[w.id] = w
+    })
+    const edited = reduceDm(state, { t: "apply-scene-patches", patches: patches as Patch[] })
+    const now = edited.state.scene
+    const change = { objects: edited.delta.objects, tokens: edited.delta.tokens, terrain: edited.delta.terrain, structure: edited.delta.structure }
+    const stepNow = sceneWithTokenAt(now, aldric.id, at)
+    const freshStep = createVisionEngine(stepNow)
+    const expectedStep = freshStep.compute([freshStep.viewerFor(stepNow.tokens[aldric.id])])
+    const freshNow = createVisionEngine(now)
+    const expectedNow = freshNow.compute([freshNow.viewerFor(now.tokens[aldric.id])])
+    for (const client of [createWorkerVisionClient(new FakeWorker()), createInThreadVisionClient()]) {
+      await client.setScene(state.scene, 1)
+      await client.update(now, change, 2)
+      const probe = await client.probe(step, { tokens: [aldric.id] }, [[aldric.id]])
+      expect(probe.stateSeq).toBe(2)
+      expect(probe.results[0]).toEqual(expectedStep)
+      // The client's revision (with the edit) is intact afterwards.
+      expect((await client.compute([aldric.id], 2)).result).toEqual(expectedNow)
+      client.dispose()
+    }
+  })
+
   it("probes wait for idle foreground work and run one at a time", async () => {
     const { scene, aldric } = lantern()
     const fake = new FakeWorker()

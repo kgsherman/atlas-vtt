@@ -25,6 +25,10 @@ uniform int uLightCount;
 uniform sampler2D uLightAtlas;
 // Ultra tier: 1024² tiles of the highest-priority lights (flag 2); a 1×1 placeholder otherwise.
 uniform sampler2D uLightAtlasHi;
+// Per-cell slot mask (lighting/lightMask.ts): bit i = slot i's dim disc reaches the cell. Grid: world XZ
+// of its corner, 1 / cell size, w = 1 when bound (0: every slot is tested).
+uniform highp usampler2D uLightMask;
+uniform vec4 uLightMaskGrid;
 
 // Ambient fill under cover / under open sky, sky exposure map (straight-down depth map).
 uniform vec3 uAmbient;
@@ -44,9 +48,12 @@ uniform vec4 uSunParams; // texel, depth bias, reversed depth (0/1), normal offs
 uniform vec4 uEnvLevels;
 
 // Viewers (line-of-sight refinement), 3 vec4 per slot:
-//   [0] eye.xyz, darkvision  [1] tile.xy, tile size (0 = no tile), blindsight  [2] capture origin.xyz, range
+//   [0] eye.xyz, darkvision  [1] tile.xy, tile size (0 = no tile), blindsight
+//   [2] capture origin.xyz, touch half-extent (the square around the eye over its own footprint cells)
 uniform vec4 uViewers[AT_MAX_VIEWERS * 3];
 uniform int uViewerCount;
+// 1 when uViewers holds every viewer; per-pixel tests that remove perception need all of them.
+uniform float uViewersAll;
 uniform sampler2D uViewerAtlas;
 
 // Vision: 0 = off, 1 = fog (player), 2 = preview (DM).
@@ -76,6 +83,13 @@ export const COMMON_FUNCTIONS_GLSL = /* glsl */ `
 // grey stays below a darkvision-lifted colour cell (AT_BRIGHT_FLOOR × albedo, raised to the grey's luma
 // for dark albedo, see atGradeColour); blindsight is darker.
 #define AT_DARKVISION_LEVEL 0.16
+// Darkvision raises a lit colour toward that grey by scaling it (hue kept) up to this gain; only the
+// rest is added as grey. Flat grey on dark, night-painted battlemaps read as a milky disc.
+#define AT_DV_MAX_GAIN 3.0
+// The darkvision lift fades out over the last AT_DV_FEATHER ft of its range (a look, not a rule), and
+// the monochrome senses' perception ends per pixel over the last AT_SENSE_EDGE ft (see world.ts).
+#define AT_DV_FEATHER 1.5
+#define AT_SENSE_EDGE 0.5
 #define AT_BLINDSIGHT_LEVEL 0.11
 #define AT_BLINDSIGHT_TINT vec3(0.02, 0.05, 0.09)
 #define AT_MEMORY_SCALE 0.17
@@ -311,6 +325,16 @@ float atPointShadow(vec4 l2, vec4 l3, vec3 p, vec3 n, bool cap) {
   return atShadowIn(uLightAtlas, l2, l3, p, n, cap);
 }
 
+// Slot bits of the point lights whose dim disc reaches p's cell (XZ, conservative: the loop still tests
+// the 3D distance); every bit without a mask, none outside its grid (no disc reaches there).
+uint atLightMaskAt(vec3 p) {
+  if (uLightMaskGrid.w < 0.5) return 0xFFFFFFFFu;
+  ivec2 size = textureSize(uLightMask, 0);
+  ivec2 c = ivec2(floor((p.xz - uLightMaskGrid.xy) * uLightMaskGrid.z));
+  if (c.x < 0 || c.y < 0 || c.x >= size.x || c.y >= size.y) return 0u;
+  return texelFetch(uLightMask, c, 0).r;
+}
+
 // Sum of point-light radiance at p (culled by dim radius and N·L before any shadow tap). "lit" returns
 // how surely some light grants at least dim light at p by the rules (static dim radius, not shadowed;
 // softened over the last 0.5 ft and by the shadow filter), for the perception refinement.
@@ -320,8 +344,11 @@ vec3 atPointLights(vec3 p, vec3 n, vec3 nb, bool shadows, bool cap, out float li
   vec3 sum = vec3(0.0);
   lit = 0.0;
   float specPow = 12.0 + 180.0 * gloss * gloss;
+  // Slots whose dim disc misses this cell skip the uniform fetches (the same result as d >= dim below).
+  uint mask = atLightMaskAt(p);
   for (int i = 0; i < AT_MAX_LIGHTS; i++) {
     if (i >= uLightCount) break;
+    if (((mask >> uint(i)) & 1u) == 0u) continue;
     vec4 l0 = uLights[i * 4];
     vec3 toL = l0.xyz - p;
     float d = length(toL);
@@ -508,6 +535,29 @@ bool atDarkvisionAt(vec3 p) {
   return false;
 }
 
+// Strongest sense range at p over the viewers: 1 closer than range − edge, 0 beyond the range (3D from
+// the eye, like the host's samples). slot 0 = darkvision, 1 = blindsight.
+float atSenseWeight(vec3 p, int slot, float edge) {
+  float best = 0.0;
+  for (int v = 0; v < AT_MAX_VIEWERS; v++) {
+    if (v >= uViewerCount) break;
+    float r = uViewers[v * 3 + slot].w;
+    if (r > 0.0) best = max(best, 1.0 - atSmoothstepSafe(r - edge, r, distance(uViewers[v * 3].xyz, p)));
+  }
+  return best;
+}
+
+// p lies over some viewer's own footprint cells, which it perceives by touch (grade >= 1) whatever its
+// senses (uViewers[3v + 2].w: half-extent of the square around the eye that covers them).
+bool atTouched(vec3 p) {
+  for (int v = 0; v < AT_MAX_VIEWERS; v++) {
+    if (v >= uViewerCount) break;
+    vec2 d = abs(p.xz - uViewers[v * 3].xz);
+    if (max(d.x, d.y) <= uViewers[v * 3 + 2].w) return true;
+  }
+  return false;
+}
+
 // GPU line of sight can veto perception right now: refinement on and every viewer has a captured tile.
 bool atLosReady() {
   if (uGpuRefine < 0.5 || uViewerCount <= 0) return false;
@@ -596,21 +646,29 @@ float atSenseShade(vec3 n) {
 }
 
 // Perceived colour by grade: 3 colour (dim lifted to bright for darkvision), 2 greyscale darkvision,
-// 1 blindsight (desaturated + tint).
-vec3 atGradeColour(float grade, vec3 albedo, vec3 light, bool darkvision, vec3 n) {
+// 1 blindsight (desaturated + tint). dv = darkvision weight at p (1 in range, fading to 0 over the last
+// AT_DV_FEATHER ft, so the lift has no hard arc at the range edge).
+vec3 atGradeColour(float grade, vec3 albedo, vec3 light, float dv, vec3 n) {
   vec3 lit = albedo * light;
   float tone = atSenseTone(albedo) * atSenseShade(n);
   if (grade > 2.5) {
     // Lift by the light the surface actually reflects (a blue moon barely lights brown dirt), so the
     // floor is the same for every hue.
     float received = atLuma(lit) / max(atLuma(albedo), 1e-3);
-    float lift = max((darkvision ? AT_BRIGHT_FLOOR : AT_DIM_FLOOR) - received, 0.0);
+    float lift = max(mix(AT_DIM_FLOOR, AT_BRIGHT_FLOOR, dv) - received, 0.0);
     vec3 c = lit + albedo * lift;
     // Darkvision: a lit surface never reads darker than the same surface in darkness (its grey). With
     // dark albedo (night-painted battlemaps) AT_BRIGHT_FLOOR × albedo falls below the tone-compressed grey,
-    // and the edge of a light would show dark colour next to brighter grey. The difference is added as
-    // grey (scaling the colour up would oversaturate dark paint).
-    if (darkvision) c += vec3(max(AT_DARKVISION_LEVEL * tone - atLuma(c), 0.0));
+    // and the edge of a light would show dark colour next to brighter grey. The colour is scaled toward
+    // the grey's luma (hue kept) up to AT_DV_MAX_GAIN, and only what that cannot reach is added as grey:
+    // adding all of it as flat grey washed painted night maps out into a milky disc.
+    float target = AT_DARKVISION_LEVEL * tone;
+    float l = atLuma(c);
+    if (dv > 0.0 && l < target) {
+      vec3 raised = c * min(target / max(l, 1e-4), AT_DV_MAX_GAIN);
+      raised += vec3(max(target - atLuma(raised), 0.0));
+      c = mix(c, raised, dv);
+    }
     return c;
   }
   if (grade > 1.5) return vec3(max(atLuma(lit), AT_DARKVISION_LEVEL * tone));

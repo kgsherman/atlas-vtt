@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 
-import { classifyRenderer, PREDICTED_BUDGET_MS, PROBE_CACHE_KEY, predictTierMs, probeQuality, tierForCost, tierPixels } from "./autoQuality"
+import { classifyRenderer, PREDICTED_BUDGET_MS, PROBE_CACHE_KEY, predictTierMs, probeQuality, rendererStrings, tierForCost, tierPixels } from "./autoQuality"
 
 class MemoryStorage {
   private readonly m = new Map<string, string>()
@@ -26,6 +26,26 @@ describe("renderer heuristics", () => {
     expect(classifyRenderer("ANGLE (Microsoft Corporation, D3D12 (NVIDIA GeForce RTX 5070 Ti), OpenGL 4.6)").cap).toBe("ultra")
     expect(classifyRenderer("ANGLE (AMD, AMD Radeon RX 7800 XT Direct3D11 vs_5_0 ps_5_0, D3D11)").cap).toBe("ultra")
     expect(classifyRenderer("Apple M2 Pro").cap).toBe("ultra")
+  })
+
+  it("reads RENDERER, and the debug extension only when RENDERER is masked", () => {
+    const fakeGl = (renderer: string, vendor: string, unmasked: [string, string] | null) => {
+      const params: Record<number, string> = { 0x1f01: renderer, 0x1f00: vendor }
+      if (unmasked) [params[0x9246], params[0x9245]] = unmasked
+      const getExtension = vi.fn(() => (unmasked ? { UNMASKED_RENDERER_WEBGL: 0x9246, UNMASKED_VENDOR_WEBGL: 0x9245 } : null))
+      const gl = { RENDERER: 0x1f01, VENDOR: 0x1f00, getParameter: (p: number) => params[p], getExtension }
+      return { gl: gl as unknown as Parameters<typeof rendererStrings>[0], getExtension }
+    }
+    // Chromium masks RENDERER: the GPU comes from WEBGL_debug_renderer_info.
+    const chromium = fakeGl("WebKit WebGL", "WebKit", ["ANGLE (NVIDIA GeForce RTX 5070 Ti)", "Google Inc. (NVIDIA)"])
+    expect(rendererStrings(chromium.gl)).toEqual({ renderer: "ANGLE (NVIDIA GeForce RTX 5070 Ti)", vendor: "Google Inc. (NVIDIA)" })
+    // Firefox reports the GPU in RENDERER and warns when the deprecated extension is read.
+    const ff = fakeGl("llvmpipe, or similar", "Mozilla", ["llvmpipe, or similar", "Mozilla"])
+    expect(rendererStrings(ff.gl)).toEqual({ renderer: "llvmpipe, or similar", vendor: "Mozilla" })
+    expect(ff.getExtension).not.toHaveBeenCalled()
+    expect(classifyRenderer(rendererStrings(ff.gl).renderer).software).toBe(true)
+    // Masked with no extension: keep what RENDERER says.
+    expect(rendererStrings(fakeGl("WebKit WebGL", "WebKit", null).gl)).toEqual({ renderer: "WebKit WebGL", vendor: "WebKit" })
   })
 })
 

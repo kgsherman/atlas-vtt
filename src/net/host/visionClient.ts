@@ -186,8 +186,13 @@ export function createInThreadVisionClient(): VisionClientExt {
       if (disposed) throw new Error("vision client disposed")
       const vc = toVisionChange(change)
       const tokenId = vc.tokens?.[0] ?? ""
+      // A diff, like the worker: applied to whatever revision is current when the probe runs, so the
+      // probe scene differs from it only in what `change` names (the engine restores exactly those).
+      // Handing over `scene` itself would also roll back everything else changed since the move
+      // (other tokens, a DM edit) without telling the engine.
+      const diff = diffForChange(scene as SceneLike, vc)
       const sets = viewerSets.map((ids) => [...ids])
-      return probeResult(await lane.probe(() => run({ id: nextId++, op: "probe", tokenId, change: vc, scene, viewerSets: sets })))
+      return probeResult(await lane.probe(() => run({ id: nextId++, op: "probe", tokenId, change: vc, diff, viewerSets: sets })))
     },
     dispose() {
       disposed = true

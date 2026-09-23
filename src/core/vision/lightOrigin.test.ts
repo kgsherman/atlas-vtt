@@ -7,7 +7,8 @@ import { describe, expect, it } from "vitest"
 
 import { buildOcclusionWorld } from "../occlusion"
 import { paintHeightmap } from "../occlusion/test-utils"
-import { createLight, createWall } from "../scene/factory"
+import { createConnector, createLight, createWall } from "../scene/factory"
+import { groundHeightAt, groundIndex } from "../scene/queries"
 import type { Scene, Token } from "../scene/types"
 import { createVisionEngine, resolveLightOrigin, resolveLightWorldOrigin, VisionEngineImpl } from "."
 import { add, addLevel, addToken, flat, withObject } from "./test-scenes"
@@ -111,6 +112,25 @@ describe("light origins inside blockers", () => {
     const world = buildOcclusionWorld(scene)
     const q = resolveLightOrigin(world, { x: 20.2, y: 5, z: 19.9 }, 0)
     expect(world.containing(q, "light")).toEqual([])
+  })
+
+  it("resolves the same origin with the scene's ground index (the renderer's per-light path)", () => {
+    const { scene, cellar, upper } = twoStoreys(true)
+    add(scene, createConnector(cellar, upper, { x: 5, z: 5, w: 5, d: 15 }, 0))
+    add(scene, createWall(cellar, { x: 20, z: 0 }, { x: 20, z: 30 }, { height: 9, thickness: 1 }))
+    const bearer = addToken(scene, cellar, 7.5, 17.5)
+    const lights = [
+      add(scene, createLight(upper, "custom", { x: 15, z: 15 }, { position: { x: 15, y: 0, z: 15 } })),
+      add(scene, createLight(upper, "torch", { x: 27.5, z: 12.5 })),
+      add(scene, createLight(cellar, "lantern", { x: 7.5, z: 12.5 }, { position: { x: 7.5, y: 9, z: 12.5 } })),
+      add(scene, createLight(cellar, "torch", { x: 20.1, z: 10 })),
+      add(scene, createLight(cellar, "torch", { x: 0, z: 0 }, { attachedTokenId: bearer.id, position: { x: 0.5, y: 4, z: 0 } })),
+    ]
+    const world = buildOcclusionWorld(scene)
+    const index = groundIndex(scene)
+    for (const l of lights) expect(resolveLightWorldOrigin(world, scene, l, index), l.id).toEqual(resolveLightWorldOrigin(world, scene, l))
+    // The carried light rides its bearer up the stairs.
+    expect(resolveLightWorldOrigin(world, scene, lights[4], index).y).toBeCloseTo(groundHeightAt(scene, cellar, { x: 7.5, z: 17.5 }) + 4, 9)
   })
 
   it("leaves origins in the open untouched", () => {

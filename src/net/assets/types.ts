@@ -41,15 +41,14 @@ export interface AssetStore {
   /**
    * Delete every image stored under a document id (a deleted scene's folder: pass the ids from
    * ScenesRepo.imageFoldersToFree, BEFORE removing the scene). Returns the number of objects removed.
-   * (Optional only so stand-in stores outside net/ keep compiling; both real stores implement it.)
    */
-  deleteSceneImages?(sceneId: Id): Promise<number>
+  deleteSceneImages(sceneId: Id): Promise<number>
   /**
    * Delete the caller's images that no saved scene version, no active session and (in this browser) no
    * editor draft references, among those older than `minAgeMs` (default 7 days; Supabase only — local
-   * mode has no age). Returns what was removed. (Optional like deleteSceneImages.)
+   * mode has no age). Returns what was removed.
    */
-  sweepUnreferencedImages?(opts?: { minAgeMs?: number }): Promise<{ removed: number; bytes: number }>
+  sweepUnreferencedImages(opts?: { minAgeMs?: number }): Promise<{ removed: number; bytes: number }>
 
   // ---- host side, during a session -------------------------------------------------------------
   /**
@@ -61,13 +60,6 @@ export interface AssetStore {
   deleteTileChunks(sessionId: string, userId: string, levelId: Id, chunks: Array<{ ci: number; cj: number }>): Promise<void>
   /** Delete every tile chunk of a session (the DM, after ending it). Returns the number removed. */
   removeSessionTiles(sessionId: string): Promise<number>
-  /**
-   * @deprecated The per-cell tile API (`player_tiles`, grant_tiles) was removed from the database and
-   * the stores; these remain optional only so stand-in stores that still list them type-check.
-   */
-  publishTiles?(sessionId: string, levelId: Id, tiles: Array<{ cell: Cell; blob: Blob }>): Promise<void>
-  /** @deprecated See publishTiles. */
-  grantTiles?(sessionId: string, hostEpoch: number, userId: string, levelId: Id, cells: Cell[]): Promise<void>
 }
 
 /** Player side: fetch the tile for an explored cell (null if not (yet) available). */

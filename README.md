@@ -85,7 +85,8 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
 
 ## Quick start
 
-Requirements: Node 22 (or 20.19+) and a WebGL2 browser. Chromium-based browsers are the tested target.
+Requirements: Node 22 (or 20.19+) and a WebGL2 browser. Chromium-based browsers are the tested target;
+Firefox passes a smoke test (`e2e/firefox-smoke.mjs`), and Safari is untested.
 
 ```bash
 npm install
@@ -131,9 +132,10 @@ with `?local=0`.
 | `npm run dev` | Vite dev server |
 | `npm run build` | Typecheck (`tsc -b`) and production build into `dist/` |
 | `npm run preview` | Serve the production build |
-| `npx tsc -b` | Typecheck only |
-| `npx vitest run` | Unit and integration tests |
-| `npx eslint .` | Lint |
+| `npm run typecheck` | Typecheck only (`tsc -b`: the root `tsconfig.json` only references the app and node projects, so a plain `tsc` checks nothing) |
+| `npm test` | Unit and integration tests (`vitest run`) |
+| `npm run lint` | ESLint |
+| `npm run format:check` | List files that differ from the Prettier config (see Conventions) |
 
 Dev-only pages: `/dev/render.html` is the renderer harness. `?mode=player&pipeline=1` renders exactly what
 a player is sent.
@@ -172,7 +174,8 @@ to a player goes through `src/core/session/filter.ts`.
 Target: 60 fps on a mid-range laptop with ~20 lights and ~15 tokens, while the DM's tab also runs the
 simulation. How it gets there:
 - One forward pass with lights in uniform arrays, so there are never any recompiles.
-- CPU light culling to 32 slots, with per-fragment early-outs.
+- CPU light culling to 32 slots, a per-cell mask so each fragment only visits the lights that reach it,
+  and per-fragment early-outs.
 - Cached shadow tiles with a per-frame update budget (4 tiles and 2 ms) and a priority queue.
 - Instanced occluder proxies instead of the visual meshes.
 - A pixel budget instead of the raw device pixel ratio.
@@ -184,18 +187,19 @@ budget.
 
 | GPU · tier | Scene | DM view: fps · GPU frame median / p95 | Player view: fps · GPU frame median / p95 |
 |---|---|---|---|
-| AMD Radeon iGPU · medium | The Crooked Lantern (4 levels, 15 lights) | 60 · 13.0 / 13.5 ms | 60 · 8.0 / 8.8 ms |
-| AMD Radeon iGPU · medium | Stress Test (20 lights, 15 tokens) | 60 · 8.4 / 9.0 ms | 60 · 7.0 / 8.0 ms |
-| AMD Radeon iGPU · medium | The Vineyard (3 battlemaps, 17 lights) | 60 · 5.7 / 6.8 ms | 60 · 9.6 / 10.4 ms |
-| NVIDIA RTX · ultra | The Crooked Lantern | 60 · 2.2 / 2.9 ms | 60 · 1.8 / 2.3 ms |
-| NVIDIA RTX · ultra | Stress Test | 60 · 2.4 / 2.9 ms | 60 · 1.8 / 2.2 ms |
-| NVIDIA RTX · ultra | The Vineyard | 60 · 2.1 / 2.6 ms | 60 · 1.9 / 2.5 ms |
+| AMD Radeon iGPU · medium | The Crooked Lantern (4 levels, 15 lights) | 60 · 11.8 / 12.7 ms | 60 · 7.8 / 8.8 ms |
+| AMD Radeon iGPU · medium | Stress Test (20 lights, 15 tokens) | 60 · 7.4 / 8.3 ms | 60 · 7.0 / 8.0 ms |
+| AMD Radeon iGPU · medium | The Vineyard (3 battlemaps, 17 lights) | 60 · 6.0 / 6.5 ms | 60 · 9.1 / 10.1 ms |
+| NVIDIA RTX · ultra | The Crooked Lantern | 60 · 2.3 / 2.9 ms | 60 · 1.8 / 2.3 ms |
+| NVIDIA RTX · ultra | Stress Test | 60 · 2.5 / 3.0 ms | 60 · 1.8 / 2.3 ms |
+| NVIDIA RTX · ultra | The Vineyard | 60 · 2.1 / 2.6 ms | 60 · 1.9 / 2.4 ms |
 
-Every view holds a steady 60 fps (the higher of two runs is shown). The tightest case is the Crooked Lantern
-DM view on the integrated GPU at medium, at ~81% of the 16.7 ms budget at p95; the Vineyard player view
-depends on where the token stands and has measured up to ~14.6 ms. The high tier costs ~21–23 ms on that
-GPU, so on such machines the start-up benchmark and adaptive quality keep medium. Details are in
-[`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
+Every view holds a steady 60 fps (the highest of three or four runs is shown). The AMD part is the
+small iGPU of a desktop Ryzen 7 9800X3D, below the laptop target's Iris Xe / GTX 1650 class, so it is a
+conservative stand-in. The tightest case is the Crooked Lantern DM view on it at medium, at ~76% of the
+16.7 ms budget at p95; the Vineyard player view depends on where the token stands and has measured up to
+~14.6 ms. The high tier costs ~21–23 ms on that GPU, so on such machines the start-up benchmark and adaptive
+quality keep medium. Details are in [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md).
 
 ## Testing
 
@@ -217,16 +221,17 @@ rolled back, and its final row reports `passed` / `failed`.
 
 ```bash
 npx vite --port 5173 &
-ATLAS_URL=http://127.0.0.1:5173 node e2e/editor-smoke.mjs         # quality probe, menus, labels, options bar at 1280 px, the tools, undo/redo, shortcuts, save, reload
+ATLAS_URL=http://127.0.0.1:5173 node e2e/editor-smoke.mjs         # quality probe (tier per GPU), menus, labels, options bar at 1280 px, the tools, undo/redo, shortcuts, save, reload
 ATLAS_URL=http://127.0.0.1:5173 node e2e/vineyard-build.mjs       # builds test_maps/vineyard.atlas.json from the battlemaps (see below)
 ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-local.mjs    # DM + 2 players in local mode: host menus, oracle-equal views, moves, doors, stairs, lock, reloads, leak scan
 ATLAS_SCENE=$PWD/test_maps/vineyard.atlas.json ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-local.mjs   # the same on the Vineyard
-ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-supabase.mjs # the same against the real backend (+ Realtime / table / Storage RLS checks, sub-cell chunk clipping)
+ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-supabase.mjs # the same against the real backend (+ Realtime / table / Storage RLS checks, no public channels, a kicked member's subscriptions, sub-cell chunk clipping)
 ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-latency.mjs  # move results on a 120×120 daylit field arrive well under the 5 s timeout
 ATLAS_URL=http://127.0.0.1:5173 node e2e/host-save-map.mjs        # "Save map to library" from a live session, including the conflict path
 ATLAS_URL=http://127.0.0.1:5173 node e2e/engine-leak.mjs          # editor ↔ library round trips release every WebGL context
 ATLAS_URL=http://127.0.0.1:5173 node e2e/perf.mjs                 # frame times per GPU / tier / scene
 ATLAS_URL=http://127.0.0.1:5173 node e2e/showcase.mjs             # regenerate docs/screenshots
+ATLAS_URL=http://127.0.0.1:5173 node e2e/firefox-smoke.mjs        # headless Firefox (npx playwright install firefox): library, editor at every tier, a local player view
 ```
 
 `e2e/vineyard-build.mjs` builds a large scene from three Forgotten Adventures battlemaps, and `perf.mjs` and
@@ -239,7 +244,8 @@ Environment variables for the scripts:
 - `ATLAS_OUT`: where screenshots and logs go.
 
 The browser launcher (`scripts/pw.mjs`) is set up for WSL2 (Mesa d3d12 GPU passthrough and a pinned
-headless-shell path), so adjust it for other machines.
+headless-shell path), so adjust it for other machines. Editing files under `src/` while a script runs
+hot-reloads its pages and can break the run; other files (docs, the e2e scripts) do not reload them.
 
 ## Conventions
 
@@ -248,4 +254,8 @@ headless-shell path), so adjust it for other machines.
   `SCENE_SCHEMA_VERSION` and adding a migration.
 - UI is composed from the shadcn components in `src/components/ui` (Base UI primitives, lucide icons),
   dark theme first.
-- Style: Prettier, with no semicolons, double quotes and 2-space indents.
+- Style: Prettier, with no semicolons, double quotes and 2-space indents. `.prettierrc` uses a 160-column
+  print width, and 80 for `src/components/ui` (shadcn-generated), `src/components/play`, `src/play`, `e2e`
+  and `scripts`, which are written that way. The tree is not uniformly formatted yet: `npm run format:check`
+  still lists ~170 files under `src` that no single width matches, so formatting is not part of `lint`.
+  Match the surrounding code rather than reformatting whole files.

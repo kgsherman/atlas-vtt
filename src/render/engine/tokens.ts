@@ -11,6 +11,7 @@
  */
 import * as THREE from "three"
 
+import { groundIndex } from "@/core/scene/queries"
 import type { Id, SceneLike, Token } from "@/core/scene/types"
 
 import { hexToLinear, scaleRgb, type RGB } from "../builders/color"
@@ -248,7 +249,8 @@ class LevelTokens {
     this.shadow = new GrowingInstances(this.root, tokenQuadGeometry(), shadowMaterial, true, (m) => {
       m.userData.levelId = levelId
       m.userData.slot = "token-shadow"
-      // Before the (transparent, fading) token meshes.
+      // Sorts before the token meshes while they fade (both transparent); at rest the tokens are
+      // opaque and their depth hides the blob under them, which looks the same.
       m.renderOrder = -1
       m.raycast = () => {}
     })
@@ -298,11 +300,18 @@ export class TokenLayer {
   private wasAnimating = false
   private initialised = false
 
-  /** `tokenMaterial`: the lighting system's instanced token material (made transparent for fades). */
+  /**
+   * `tokenMaterial`: the lighting system's instanced token material. Tokens are opaque at rest, so
+   * they sort into the opaque pass: `root` is a Group with renderOrder 0 and level groups use
+   * renderOrder = rank ≥ 1 (levelPlan.ts), so resting tokens draw before all level geometry. The
+   * material is transparent only while an appear / leave fade runs (`update`). The cost was draw
+   * order, not blending: tokens drawn after the Vineyard floor cost ~1.7 ms (medium) and ~2.9 ms
+   * (high) of GPU time on the AMD iGPU. Toggling `transparent` needs no recompile (three reads it
+   * per frame for list placement and blending; the token shader never reads the OPAQUE define).
+   */
   constructor(tokenMaterial: THREE.Material) {
     this.material = tokenMaterial
-    // Fades write alpha < 1 through aFade; blending needs the transparent pipeline.
-    tokenMaterial.transparent = true
+    tokenMaterial.transparent = false
     this.portraits.onChange = () => {
       // Bind the atlas once it exists (tokens without images keep sampling the 1×1 placeholder).
       const tu = (tokenMaterial as THREE.ShaderMaterial).uniforms
@@ -382,10 +391,12 @@ export class TokenLayer {
   syncScene(scene: SceneLike | null, now: number, animate: boolean): void {
     const present = new Set<Id>()
     if (scene) {
+      // Committed scenes only (never mutated in place), so the memoised GroundIndex is valid.
+      const ground = groundIndex(scene)
       for (const t of Object.values(scene.tokens) as Token[]) {
         if (!Object.hasOwn(scene.levels, t.levelId)) continue
         present.add(t.id)
-        const visual = tokenVisual(scene, t)
+        const visual = tokenVisual(scene, t, ground)
         const e = this.entries.get(t.id)
         if (e && e.leaveAt === null) {
           e.visual = visual
@@ -434,6 +445,8 @@ export class TokenLayer {
     // One more pass after a fade ends so the final (fully opaque) state is written.
     const settle = this.wasAnimating && !animating
     this.wasAnimating = animating
+    // Blend only while a fade runs (alpha < 1 through aFade); opaque at rest (constructor comment).
+    this.material.transparent = animating
     if (!this.dirty && !animating && !settle) return false
     this.dirty = false
     const { plan, view, overlays } = inputs
@@ -519,10 +532,11 @@ export class TokenLayer {
     const base: InstanceData = { matrices: [], colors: [] }
     const body: InstanceData = { matrices: [], colors: [] }
     if (scene) {
+      const ground = groundIndex(scene)
       for (const [id, g] of Object.entries(inputs.overlays.dragGhosts)) {
         if (!Object.hasOwn(scene.tokens, id) || !Object.hasOwn(scene.levels, g.levelId)) continue
         const t = scene.tokens[id]
-        const v = tokenVisual(scene, { ...t, levelId: g.levelId, position: g.position })
+        const v = tokenVisual(scene, { ...t, levelId: g.levelId, position: g.position }, ground)
         const tr = tokenTransforms(v)
         base.matrices.push(tr.base.clone())
         body.matrices.push(tr.body.clone())

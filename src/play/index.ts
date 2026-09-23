@@ -1,6 +1,6 @@
 /**
  * Play-mode controllers (ARCHITECTURE §8): token selection, drag-to-move with A* path previews and a
- * ruler, the Measure tool, ladder climbs, door clicks and the play keymap. Framework-free: the play
+ * ruler, the Measure tool, ladder and stairs climbs, door clicks and the play keymap. Framework-free: the play
  * pages (routes/PlayPage, routes/HostPage) feed DOM input in and push overlays to the engine.
  */
 export {
@@ -13,12 +13,19 @@ export {
   type PlayRole,
   type PlayTool,
 } from "./controller"
-export { MovePlanner, type PlannedMove, type PlannerOptions } from "./planner"
+export {
+  blindLandingOk,
+  MovePlanner,
+  runsBelowTop,
+  unexploredIn,
+  type PlannedMove,
+  type PlannerOptions,
+  type RunBelowTop,
+} from "./planner"
 export { MeasureTool } from "./measure"
-export { climbOptions, stairsUnder, type ClimbOption } from "./connectors"
+export { climbOptions, type ClimbOption } from "./connectors"
 export {
   doorAt,
-  doorCenter,
   footprintRect,
   tokensInReach,
   DOOR_PICK_RADIUS,
@@ -28,8 +35,6 @@ export {
   anchorForPoint,
   formatFeet,
   groundY,
-  legCells,
-  measureDistance,
   pathPoints,
   pathRuler,
   snapToCellCenter,

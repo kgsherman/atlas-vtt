@@ -15,6 +15,7 @@ import {
   hasGroundAt,
   levelCeilingY,
   lightEffectivelyHidden,
+  lightGroundY,
   lightLevelId,
   lightWorldPosition,
   nominalTokenEye,
@@ -319,6 +320,7 @@ describe("groundIndex", () => {
           const has = hasGroundAt(scene, levelId, p)
           expect(index.hasGroundAt(levelId, p), `${levelId} ${x},${z}`).toBe(has)
           expect(index.groundHeightAt(levelId, p), `${levelId} ${x},${z}`).toBe(groundHeightAt(scene, levelId, p))
+          expect(index.runAt(levelId, p), `${levelId} ${x},${z}`).toBe(connectorsAt(scene, levelId, p).find((c) => c.style !== "ladder"))
           if (has) ground++
         }
       }
@@ -328,6 +330,32 @@ describe("groundIndex", () => {
 
   it("gives the free functions' results", () => {
     expectSameAsFree(varied().scene)
+  })
+
+  it("gives the token and light helpers the same results as without it", () => {
+    const { scene, ground, upper, roof } = varied()
+    const index = groundIndex(scene)
+    let n = 0
+    for (const levelId of [ground.id, upper.id, roof.id]) {
+      for (let z = 1.25; z < 50; z += 2.5) {
+        for (let x = 1.25; x < 50; x += 2.5) {
+          const token = createToken(levelId, { x, z }, { eyeHeight: 5.5 })
+          scene.tokens[token.id] = token
+          const light = createLight(levelId, "torch", { x, z }, { position: { x, y: 4, z } })
+          const carried = createLight(levelId, "lantern", { x: 0, z: 0 }, { attachedTokenId: token.id, position: { x: 0.5, y: 3, z: -0.5 } })
+          for (const l of [light, carried]) {
+            expect(lightGroundY(scene, l, index)).toBe(lightGroundY(scene, l))
+            expect(lightWorldPosition(scene, l, index)).toEqual(lightWorldPosition(scene, l))
+          }
+          expect(nominalTokenEye(scene, token, index)).toEqual(nominalTokenEye(scene, token))
+          expect(tokenViewLevelId(scene, token, index)).toBe(tokenViewLevelId(scene, token))
+          if (tokenViewLevelId(scene, token) !== levelId) n++
+          delete scene.tokens[token.id]
+        }
+      }
+    }
+    // Some of those tokens stood high on a run (the view level switched).
+    expect(n).toBeGreaterThan(0)
   })
 
   it("is memoised per scene revision and rebuilt after immer edits to objects, levels or terrain", () => {

@@ -11,6 +11,8 @@ import { SCENE_LIMITS } from "@/core/scene/schema"
 import type { GridSettings, Heightmap, Id, Level, Scene } from "@/core/scene/types"
 import type { EditorStore } from "@/editor/store"
 
+import { fileNameWords, nameFromWords } from "./fileNames"
+
 /** Levels from the top storey down (the order a layer list shows them in). */
 export function levelsTopDown(scene: Pick<Scene, "levels">): Level[] {
   return sortedLevels(scene).reverse()
@@ -118,13 +120,7 @@ export function guessStoreyFromName(fileName: string): StoreyGuess | null {
 
 /** A readable level name from a file name when no storey keyword matches ("181-FA-Tavern-Night.png" → "Tavern Night"). */
 export function levelNameFromFile(fileName: string): string {
-  const base = fileName.replace(/\.[a-z0-9]+$/i, "")
-  const words = base
-    .split(/[\s_\-.]+/)
-    .filter((w) => w && !/^\d+$/.test(w) && !/^\d+x\d+$/i.test(w) && !/^(fa|nogrid|grid|gridless|day|night)$/i.test(w))
-    .flatMap((w) => w.replace(/([a-z])([A-Z])/g, "$1 $2").split(" "))
-  const name = words.slice(0, 4).join(" ").trim()
-  return name ? name[0].toUpperCase() + name.slice(1) : "Map"
+  return nameFromWords(fileNameWords(fileName)) ?? "Map"
 }
 
 /**

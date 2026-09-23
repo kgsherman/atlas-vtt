@@ -1,6 +1,8 @@
 /**
  * Tool previews (contracts.ts ToolPreview): every kind becomes a small Object3D of unlit,
- * translucent meshes/lines that owns its geometries and materials (disposePreview frees them).
+ * translucent meshes/lines that owns its geometries and materials (disposePreview frees them). Lines
+ * are anti-aliased screen-space segments (materials/aaLineMaterial) and ribbons fade their own edges:
+ * the canvas has no MSAA. An outline on each fill's border also covers the fill's aliased edge.
  *
  * Coordinates: `rect`, `segment`, `opening`, `brush` are ground-plane shapes on their level and are
  * placed on that level's ground. `point.position.y` is relative to the level ground at (x, z), like
@@ -16,6 +18,7 @@ import type { GroundSampler } from "../builders/ground"
 import { writeFrameBox, writePrism } from "../builders/shapes"
 import { MeshWriter } from "../builders/writer"
 import type { ToolPreview } from "../contracts"
+import { aaLineGeometry, createAALineMaterial, polylinePairs } from "../materials/aaLineMaterial"
 import { createEdgeAAMaterial, edgeGeometry } from "../materials/edgeAAMaterial"
 import { circlePoints, ribbonEdgeGeometry } from "./ribbon"
 
@@ -42,13 +45,12 @@ function fillMaterial(color: string, opacity = 0.28): THREE.MeshBasicMaterial {
   return new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, depthTest: false, side: THREE.DoubleSide, toneMapped: false })
 }
 
-function lineMaterial(color: string, opacity = 0.95): THREE.LineBasicMaterial {
-  return new THREE.LineBasicMaterial({ color, transparent: true, opacity, depthWrite: false, depthTest: false, toneMapped: false })
+function lineMaterial(color: string, opacity = 0.95): THREE.ShaderMaterial {
+  return createAALineMaterial(color, { opacity, width: 1.5 })
 }
 
-function lineFrom(points: readonly { x: number; y: number; z: number }[], material: THREE.LineBasicMaterial, loop = false): THREE.Line {
-  const g = new THREE.BufferGeometry().setFromPoints(points.map((p) => new THREE.Vector3(p.x, p.y, p.z)))
-  return loop ? new THREE.LineLoop(g, material) : new THREE.Line(g, material)
+function lineFrom(points: readonly { x: number; y: number; z: number }[], material: THREE.Material, loop = false): THREE.Mesh {
+  return new THREE.Mesh(aaLineGeometry(polylinePairs(points, loop)), material)
 }
 
 /** Ribbon with analytic edge anti-aliasing (the canvas has no MSAA); `width` is the nominal width. */
@@ -113,7 +115,9 @@ function wallBox(a: Vec2, b: Vec2, y0: number, y1: number, thickness: number, co
   const g = w.build()
   if (g) {
     root.add(new THREE.Mesh(g, fillMaterial(color, 0.3)))
-    root.add(new THREE.LineSegments(new THREE.EdgesGeometry(g, 20), lineMaterial(color)))
+    const edges = new THREE.EdgesGeometry(g, 20)
+    root.add(new THREE.Mesh(aaLineGeometry(edges.getAttribute("position").array), lineMaterial(color)))
+    edges.dispose()
   }
   // Centre line on the ground, visible even for zero-length drags.
   root.add(lineFrom([{ x: a.x, y: y0 + LIFT, z: a.z }, { x: b.x, y: y0 + LIFT, z: b.z }], lineMaterial(color)))

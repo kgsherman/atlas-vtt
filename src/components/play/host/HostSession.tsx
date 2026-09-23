@@ -96,6 +96,8 @@ export function HostSession({ sessionId }: { sessionId: string }) {
         repo: services.sessions,
         identity: services.identity,
         assets: services.assets,
+        // "Save map to library" (HostRunner.saveMapToLibrary) writes to the scene library.
+        scenes: services.scenes,
       })
       void r
         .start()
@@ -254,10 +256,7 @@ function HostConsole({
     () => createHostActions(runner, () => live.get().state),
     [runner, live]
   )
-  const saveMap = useSaveMap(
-    snap.sessionId,
-    React.useCallback(() => live.get().state.scene, [live])
-  )
+  const saveMap = useSaveMap(runner, snap)
   const [ending, setEnding] = React.useState(false)
   const focusToken = React.useCallback(
     (id: Id) => {
@@ -370,7 +369,6 @@ function HostConsole({
         camera,
         activeLevelId,
         view: editView,
-        onEdit: saveMap.markDirty,
       })
     )
     setMode("edit")
@@ -383,7 +381,6 @@ function HostConsole({
     camera,
     activeLevelId,
     editView,
-    saveMap.markDirty,
   ])
   const exitEdit = React.useCallback(() => {
     if (!editor) return

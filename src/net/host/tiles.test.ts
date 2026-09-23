@@ -1,13 +1,14 @@
 import { describe, expect, it, vi } from "vitest"
 
 import { createScene } from "@/core/scene/factory"
+import { backdropCellRange, playerBackdrop } from "@/core/session/backdrop"
 import type { Id, Scene } from "@/core/scene/types"
 import { createCellMask, encodeMask, setCell, setSubcells } from "@/core/vision/mask"
 import type { EncodedMask } from "@/core/vision/types"
 
 import type { ChunkEntry } from "../assets/chunks"
 import type { AssetStore } from "../assets/types"
-import { backdropCellRange, BackdropTiler, chunkRev, subcellClipRects, tileCrop, tilePxFor, type ChunkPart, type TileCodec, type TileImage } from "./tiles"
+import { BackdropTiler, chunkRev, subcellClipRects, tileCrop, type ChunkPart, type TileCodec, type TileImage } from "./tiles"
 
 const GRID = { cellSize: 5, width: 27, depth: 47 }
 
@@ -56,9 +57,25 @@ describe("tile geometry", () => {
     expect(backdropCellRange({ x: 0, z: 0, w: 0, d: 10 }, GRID)).toBeNull()
   })
 
-  it("tilePx is the stored pixels per cell (Forgotten Adventures maps: 140)", () => {
-    expect(tilePxFor({ x: 0, z: 0, w: 135, d: 235 }, 3780, 5)).toBe(140)
-    expect(tilePxFor({ x: 0, z: 0, w: 135, d: 235 }, 1890, 5)).toBe(70)
+  it("cuts tiles at the tile size the filter announces (playerBackdrop), and none where it announces no backdrop", () => {
+    const { scene, levelId } = backdropScene()
+    const { store } = fakeAssets("supabase")
+    const { t } = tiler(store, fakeCodec().codec)
+    for (const width of [3780, 1890, 1_000_000]) {
+      scene.assets!.map1.width = width
+      t.setScene(scene)
+      const announced = playerBackdrop(scene, levelId)!.tilePx
+      // Forgotten Adventures maps: 140 px per cell; 70 at half size; capped at 1024.
+      expect(announced).toBe(width === 3780 ? 140 : width === 1890 ? 70 : 1024)
+      expect(t.backdrops([levelId])?.[levelId].tilePx).toBe(announced)
+    }
+    // A tiny image (less than half a pixel per cell): no backdrop for players, so nothing to cut.
+    scene.assets!.map1.width = 10
+    expect(playerBackdrop(scene, levelId)).toBeNull()
+    t.setScene(scene)
+    expect(t.backdrops([levelId])).toBeUndefined()
+    expect(t.publishing).toBe(false)
+    t.dispose()
   })
 
   it("crops the image under a cell, placing partial cells inside the tile", () => {
@@ -106,6 +123,8 @@ function fakeAssets(mode: "supabase" | "local", opts: { fail?: (u: Upload) => un
       for (const c of chunks) deletes.push(`${uid}:${levelId}:${c.ci},${c.cj}`)
     },
     removeSessionTiles: async () => 0,
+    deleteSceneImages: async () => 0,
+    sweepUnreferencedImages: async () => ({ removed: 0, bytes: 0 }),
   }
   return { store, uploads, deletes }
 }

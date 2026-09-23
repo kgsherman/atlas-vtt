@@ -18,7 +18,7 @@ import { createStore, type StoreApi } from "zustand/vanilla"
 import type { SnapMode } from "@/core/grid/grid"
 import { createHistory, type HistoryOptions, type HistoryState } from "@/core/history"
 import { createLevel, createScene } from "@/core/scene/factory"
-import { chunkSamples, parseChunkKey, sampleCounts } from "@/core/scene/heightmap"
+import { cropHeightmapToGrid } from "@/core/scene/heightmap"
 import {
   copySelection as copyItems,
   deleteWithDependents,
@@ -849,16 +849,13 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
           if (partial.width !== undefined) d.grid.width = clampCells(partial.width)
           if (partial.depth !== undefined) d.grid.depth = clampCells(partial.depth)
           if (partial.diagonalRule !== undefined) d.grid.diagonalRule = partial.diagonalRule
-          // Drop heightmap chunks that fall outside the (possibly smaller) lattice.
+          // Restrict heightmaps to the (possibly smaller) lattice: chunks beyond it are dropped and the
+          // padding of boundary chunks is zeroed, so old heights can't come back if the grid grows again.
           for (const level of Object.values(d.levels)) {
             const hm = level.heightmap
             if (!hm) continue
-            const n = chunkSamples(hm.resolution)
-            const { samplesX, samplesZ } = sampleCounts(d.grid, hm.resolution)
-            for (const key of Object.keys(hm.chunks)) {
-              const { ci, cj } = parseChunkKey(key)
-              if (ci * n >= samplesX || cj * n >= samplesZ) delete hm.chunks[key]
-            }
+            const cropped = cropHeightmapToGrid(hm, d.grid)
+            if (cropped !== hm) level.heightmap = cropped
           }
         }, "Edit grid")
       },
@@ -1134,6 +1131,3 @@ export function editorViewState(state: Pick<EditorState, "view" | "activeLevelId
 export function currentSnapMode(state: Pick<EditorState, "snapMode" | "altHeld">, alt = false): SnapMode {
   return effectiveSnapMode(state.snapMode, alt || state.altHeld)
 }
-
-/** The app-wide editor store. Tests and embedded editors create their own with createEditorStore(). */
-export const editorStore: EditorStore = createEditorStore()

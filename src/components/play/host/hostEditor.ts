@@ -44,8 +44,6 @@ export function createHostEditor(
     camera: CameraKind
     activeLevelId: Id | null
     view?: HostEditorView
-    /** An edit reached the live session (the map now differs from the library scene). */
-    onEdit?: () => void
   }
 ): HostEditor {
   const store = createEditorStore({ scene })
@@ -66,9 +64,7 @@ export function createHostEditor(
         description: r?.error ?? "This tab is not hosting the session.",
       })
       resync()
-      return
     }
-    opts.onEdit?.()
   })
   store.getState().setPlaySink((cmd) => {
     const r = runner.dispatch(cmd)

@@ -155,12 +155,23 @@ void main() {
 }
 `
 
-function rendererStrings(gl: WebGL2RenderingContext): { renderer: string; vendor: string } {
+type RendererQuery = Pick<WebGL2RenderingContext, "getParameter" | "getExtension" | "RENDERER" | "VENDOR">
+
+/** RENDERER values that name no GPU: Chromium masks it ("WebKit WebGL") and exposes the GPU only through WEBGL_debug_renderer_info. */
+const MASKED_RENDERER = /^(webkit( webgl)?|mozilla)?$/i
+
+/**
+ * GPU renderer / vendor strings. RENDERER first: Firefox reports its (sanitised) GPU string there and has
+ * deprecated WEBGL_debug_renderer_info (reading it logs a warning), so the extension is queried only
+ * when RENDERER is masked.
+ */
+export function rendererStrings(gl: RendererQuery): { renderer: string; vendor: string } {
+  const renderer = String(gl.getParameter(gl.RENDERER) ?? "")
+  const vendor = String(gl.getParameter(gl.VENDOR) ?? "")
+  if (!MASKED_RENDERER.test(renderer.trim())) return { renderer, vendor }
   const dbg = gl.getExtension("WEBGL_debug_renderer_info")
-  return {
-    renderer: String(dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER)),
-    vendor: String(dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR)),
-  }
+  if (!dbg) return { renderer, vendor }
+  return { renderer: String(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)), vendor: String(gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL)) }
 }
 
 /** GPU renderer / vendor strings from a throwaway 1×1 WebGL2 context (released at once); null without WebGL2. */

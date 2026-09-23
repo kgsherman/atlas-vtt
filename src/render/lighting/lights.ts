@@ -6,9 +6,9 @@
 import * as THREE from "three"
 
 import type { OcclusionWorld } from "@/core/occlusion/types"
-import { adjacentLevels, levelById, lightEffectivelyHidden, lightLevelId, lightWorldPosition } from "@/core/scene/queries"
+import { adjacentLevels, groundIndex, levelById, lightEffectivelyHidden, lightLevelId, lightWorldPosition, type GroundIndex } from "@/core/scene/queries"
 import type { FlickerSettings, Id, LightObject, LightPreset, SceneLike, Vec3 } from "@/core/scene/types"
-import { resolveLightWorldOrigin } from "@/core/vision"
+import { resolveLightOrigin } from "@/core/vision"
 
 import { flickerSeed } from "./flicker"
 
@@ -64,16 +64,20 @@ export function linearColor(hex: string): [number, number, number] {
 /**
  * Lights that emit: `on`, and not effectively hidden unless `includeHidden` (the DM with vision "off"
  * sees hidden lights; previews and players never do). Sorted by id for determinism. Positions are pushed
- * out of the light blockers of `world` (resolveLightWorldOrigin), like the authoritative light field.
+ * out of the light blockers of `world` like the authoritative light field (core/vision
+ * resolveLightWorldOrigin), with the ground heights read from one `groundIndex(scene)` instead of a scan
+ * of every object per light (engine scenes are never mutated in place, so the memoised index is valid).
  */
 export function resolveLights(scene: SceneLike, world: OcclusionWorld, opts: { includeHidden: boolean }): ResolvedLight[] {
   const out: ResolvedLight[] = []
+  let ground: GroundIndex | null = null
   for (const o of Object.values(scene.objects)) {
     if (o.type !== "light" || !o.on) continue
     if (!opts.includeHidden && lightEffectivelyHidden(scene, o)) continue
     const dim = Math.max(0, o.dimRadius)
     if (!(dim > 0) || !(o.intensity > 0)) continue
-    const l = resolveLight(scene, world, o, dim)
+    ground ??= groundIndex(scene)
+    const l = resolveLight(scene, world, ground, o, dim)
     // Non-finite values would corrupt the packed uniform array (and three's array upload).
     if (!Number.isFinite(l.position.x + l.position.y + l.position.z + l.dim + l.bright + l.intensity)) continue
     out.push(l)
@@ -81,20 +85,32 @@ export function resolveLights(scene: SceneLike, world: OcclusionWorld, opts: { i
   return out.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 }
 
-/** Light origin as core/vision resolves it; the raw world position if that fails (degenerate documents). */
-function lightOrigin(world: OcclusionWorld, scene: SceneLike, o: LightObject): Vec3 {
+/**
+ * Light origin exactly as core/vision resolveLightWorldOrigin computes it (lightWorldPosition, pushed out
+ * of light blockers with slabs pushed toward the light's ground), reading ground heights from `ground`.
+ * The raw world position if that fails (degenerate documents).
+ */
+export function lightOrigin(world: OcclusionWorld, scene: SceneLike, ground: GroundIndex, o: LightObject): Vec3 {
   try {
-    return resolveLightWorldOrigin(world, scene, o)
+    const carrier = o.attachedTokenId && Object.hasOwn(scene.tokens, o.attachedTokenId) ? scene.tokens[o.attachedTokenId] : null
+    const at = carrier ? carrier.position : o.position
+    const g = ground.groundHeightAt(carrier ? carrier.levelId : o.levelId, at)
+    const p = carrier ? { x: at.x + o.position.x, y: g + o.position.y, z: at.z + o.position.z } : { x: at.x, y: g + o.position.y, z: at.z }
+    return resolveLightOrigin(world, p, g)
   } catch {
-    return lightWorldPosition(scene, o)
+    try {
+      return lightWorldPosition(scene, o)
+    } catch {
+      return { x: o.position.x, y: o.position.y, z: o.position.z }
+    }
   }
 }
 
-function resolveLight(scene: SceneLike, world: OcclusionWorld, o: LightObject, dim: number): ResolvedLight {
+function resolveLight(scene: SceneLike, world: OcclusionWorld, ground: GroundIndex, o: LightObject, dim: number): ResolvedLight {
   return {
     id: o.id,
     levelId: lightLevelId(scene, o),
-    position: lightOrigin(world, scene, o),
+    position: lightOrigin(world, scene, ground, o),
     color: linearColor(o.color),
     intensity: o.intensity,
     bright: Math.min(Math.max(0, o.brightRadius), dim),

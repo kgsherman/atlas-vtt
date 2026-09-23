@@ -6,6 +6,7 @@
 import * as THREE from "three"
 import { describe, expect, it } from "vitest"
 
+import { DARKVISION_MAX_GAIN } from "../lighting/lightModel"
 import { DIRECTIONAL_BIAS_FT } from "../lighting/system"
 import { createSharedUniforms } from "../lighting/uniforms"
 import { CAP_EPSILON, CAP_INSET, DISTANCE_EPSILON } from "../shadows/octahedral"
@@ -62,7 +63,7 @@ function checkDefinedBeforeUse(glsl: string, label: string): void {
   // Comments blanked to spaces (positions kept).
   const src = glsl.replace(/\/\/[^\n]*/g, (c) => " ".repeat(c.length))
   const defs = new Map<string, number>()
-  for (const m of src.matchAll(/\b(?:float|vec2|vec3|vec4|bool|int|void|ivec2)\s+(at\w+)\s*\(/g)) {
+  for (const m of src.matchAll(/\b(?:float|vec2|vec3|vec4|bool|int|uint|void|ivec2)\s+(at\w+)\s*\(/g)) {
     if (!defs.has(m[1])) defs.set(m[1], m.index)
   }
   for (const m of src.matchAll(/\b(at[A-Z]\w*)\s*\(/g)) {
@@ -158,6 +159,69 @@ describe("cutaway cap rule", () => {
     for (const line of uses) expect(line).toMatch(/\(cap && p\.y > uCutawayY \+ AT_CAP_INSET && l0\.y > uCutawayY\)/)
     // Nothing else in the shared functions reads it.
     expect(COMMON_FUNCTIONS_GLSL.split("\n").filter((line) => /\buCutawayY\b/.test(line) && !line.trim().startsWith("//"))).toEqual(uses)
+  })
+})
+
+describe("perception edges and darkvision (per pixel)", () => {
+  const world = createWorldMaterial(
+    { shared: createSharedUniforms(), levelUniform: () => ({ value: -1 }) },
+    { levelId: "l", variant: "opaque", instanced: false }
+  )
+  const code = (src: string) =>
+    src
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("//"))
+      .join("\n")
+
+  it("cuts darkvision / blindsight perception at the range per pixel, only with every viewer in a slot, never on touch", () => {
+    const frag = code(world.fragmentShader)
+    const cut = frag.split("\n").find((line) => /grade < 2\.5/.test(line) && /perceived \*=/.test(line))
+    expect(cut).toBeDefined()
+    expect(cut).toMatch(/uViewersAll > 0\.5/)
+    expect(cut).toMatch(/!atTouched\(p\)/)
+    expect(cut).toMatch(/atSenseWeight\(p, 1, AT_SENSE_EDGE\)/)
+    // Sense weights read darkvision from slot 0 (.w of [0]) and blindsight from slot 1 (.w of [1]).
+    expect(COMMON_FUNCTIONS_GLSL).toMatch(/float r = uViewers\[v \* 3 \+ slot\]\.w;/)
+    expect(COMMON_FUNCTIONS_GLSL).toMatch(/uViewers\[v \* 3 \+ 2\]\.w\) return true;/)
+  })
+
+  it("skips light slots the per-cell mask clears, before fetching their uniforms (all bits without a mask)", () => {
+    const body = code(COMMON_FUNCTIONS_GLSL)
+    const loop = body.slice(body.indexOf("vec3 atPointLights("))
+    const skip = loop.indexOf("if (((mask >> uint(i)) & 1u) == 0u) continue;")
+    expect(skip).toBeGreaterThan(0)
+    expect(skip).toBeLessThan(loop.indexOf("vec4 l0 = uLights[i * 4];"))
+    expect(body).toMatch(/if \(uLightMaskGrid\.w < 0\.5\) return 0xFFFFFFFFu;/)
+    expect(code(SHARED_UNIFORMS_GLSL)).toMatch(/uniform highp usampler2D uLightMask;/)
+    const shared = createSharedUniforms()
+    const t = shared.uLightMask.value as THREE.DataTexture
+    expect(t.internalFormat).toBe("R32UI")
+    expect(t.format).toBe(THREE.RedIntegerFormat)
+    expect(Array.from(t.image.data as Uint32Array)).toEqual([0xffffffff])
+    expect(shared.uLightMaskGrid.value.w).toBe(0)
+  })
+
+  it("raises darkvision colour by a capped gain before any grey, with the TypeScript mirror's constant", () => {
+    expect(COMMON_FUNCTIONS_GLSL).toMatch(new RegExp(`#define AT_DV_MAX_GAIN ${DARKVISION_MAX_GAIN.toFixed(1)}\\b`))
+    expect(COMMON_FUNCTIONS_GLSL).toMatch(/vec3 atGradeColour\(float grade, vec3 albedo, vec3 light, float dv, vec3 n\)/)
+    expect(COMMON_FUNCTIONS_GLSL).toMatch(/c \* min\(target \/ max\(l, 1e-4\), AT_DV_MAX_GAIN\)/)
+  })
+
+  it("moves glow sprites toward the camera (bounded) with a hollow core over the flame", () => {
+    const glow = createOverlayMaterial({ shared: createSharedUniforms(), layerOf: () => -1 }, { kind: "glow" })
+    const vert = code(glow.vertexShader)
+    expect(vert).toMatch(/#define AT_GLOW_PUSH 0\.6\b/)
+    expect(vert).toMatch(/centre\.xyz \+ toCamera \* min\(0\.5 \* size, AT_GLOW_PUSH\)/)
+    // Perception stays at the flame, not at the moved sprite.
+    expect(vert).toMatch(/vWorldPos = centre\.xyz;/)
+    expect(code(glow.fragmentShader)).toMatch(/g \*= atSmoothstepSafe\(0\.05, 0\.3, r\);/)
+  })
+
+  it("averages the fine noise band over two rotated lattices only when magnified", () => {
+    const body = code(DETAIL_GLSL)
+    expect(body).toMatch(/float mag = atMagnified\(/)
+    expect(body).toMatch(/if \(mag > 0\.0\) \{/)
+    expect(body).toMatch(/fine = mix\(fine, 0\.5 \+ \(fine \+ fine2 - 1\.0\) \* 0\.7071, mag\);/)
   })
 })
 

@@ -7,7 +7,7 @@ import { anchorPosition } from "../movement"
 import type { PathStep } from "../movement/types"
 import { TOKEN_COLORS } from "../scene/defaults"
 import { levelById } from "../scene/queries"
-import type { Id, LightObject, Scene, SceneObject, Token } from "../scene/types"
+import type { Id, Scene, Token } from "../scene/types"
 import { SUBCELLS, type VisibilityResult } from "../vision/types"
 import { GAME_STATE_VERSION, type GameState, type RequestResult, type SceneOrigin } from "./types"
 import { own } from "./util"
@@ -121,10 +121,6 @@ export function attachedLightIds(scene: Pick<Scene, "objects">, tokenId: Id): Id
     if (o.type === "light" && o.attachedTokenId === tokenId) out.push(o.id)
   }
   return out.sort()
-}
-
-export function isAttachedLight(o: SceneObject): o is LightObject {
-  return o.type === "light" && o.attachedTokenId !== null
 }
 
 /**

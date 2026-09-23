@@ -117,14 +117,21 @@ void main() {
   float explored = 1.0;
   float sunlit = 1.0;
   float grade = 3.0;
-  bool darkvision = false;
+  // Darkvision in range by the rules (per-pixel edge AT_SENSE_EDGE), and the weight of its colour lift.
+  float dvIn = 0.0;
+  float dvLift = 0.0;
   if (uVisionMode != 0) {
     vec4 m = atSurfaceMask(p, n, vSurf, uLevelLayer, grade);
     perceived = grade > 0.5 ? smoothstep(0.5, 1.0, m.r) : 0.0;
     explored = smoothstep(0.5, 1.0, m.g);
     sunlit = smoothstep(0.5, 1.0, m.b);
     if (perceived > 0.0) perceived *= atViewerLos(p, n, vSurf);
-    darkvision = atDarkvisionAt(p);
+    dvIn = atSenseWeight(p, 0, AT_SENSE_EDGE);
+    dvLift = dvIn > 0.0 ? atSenseWeight(p, 0, AT_DV_FEATHER) : 0.0;
+    // Darkvision (grade 2) and blindsight (grade 1) end at their range per pixel (only removes
+    // perception): the host's cells and sub-cells drew the range as a staircase. A viewer's own
+    // footprint stays perceived by touch.
+    if (perceived > 0.0 && grade < 2.5 && uViewersAll > 0.5 && !atTouched(p)) perceived *= grade > 1.5 ? dvIn : atSenseWeight(p, 1, AT_SENSE_EDGE);
   }
 
   vec3 col;
@@ -148,7 +155,7 @@ void main() {
     if (uVisionMode == 0) {
       col = atDmColour(albedo, light, max(lightsLit, atEnvLit(p, 1.0))) + spec;
     } else {
-      vec3 seen = atGradeColour(grade, albedo, light, darkvision, n);
+      vec3 seen = atGradeColour(grade, albedo, light, dvLift, n);
       if (grade > 2.5) seen += spec;
       vec3 unseen = uVisionMode == 1 ? atMemory(albedo) * (explored * atSenseShade(n)) : atPreviewDark(lit, albedo);
       // Per-pixel refinement of a colour cell on walkable surfaces (where the host samples): colour needs
@@ -157,7 +164,8 @@ void main() {
       if (grade > 2.5 && vSurf < 0.5) {
         float litHere = max(lightsLit, atEnvLit(p, sunGate));
         if (litHere < 1.0) {
-          vec3 low = darkvision ? atGradeColour(2.0, albedo, light, false, n) : atBlindsightAt(p) ? atGradeColour(1.0, albedo, light, false, n) : unseen;
+          vec3 low = atBlindsightAt(p) ? atGradeColour(1.0, albedo, light, 0.0, n) : unseen;
+          if (dvIn > 0.0) low = mix(low, atGradeColour(2.0, albedo, light, 0.0, n), dvIn);
           seen = mix(low, seen, litHere);
         }
       }

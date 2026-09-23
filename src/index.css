@@ -1,4 +1,7 @@
-@import "tailwindcss";
+/* Scan src/ (and the page shell) for classes, not the whole repo: a change to any scanned file that is not a
+   module (docs, e2e scripts) made the dev server reload every open page. */
+@import "tailwindcss" source(".");
+@source "../index.html";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/outfit";

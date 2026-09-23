@@ -3,11 +3,13 @@
 // have separate per-tab identities).
 //
 // DM opens a sample (or an .atlas.json) → starts a session → the host map's right-click menus (token,
-// door, light) work before anyone has joined → two players join by room code → the DM
+// door, light) work before anyone has joined → two players join by room code (host console and player
+// pages start at the tier the start-up quality probe picked) → the DM
 // assigns characters through the Players tab → players move (mouse drag and planner paths) → every
 // player's view must equal the authoritative oracle (fresh vision engine + filter) → a player opens a
 // door → the DM locks movement and a move is rejected → a player reloads and rejoins in the same state
-// → a player climbs the stairs by dragging past the top step and comes back with "Go down" → the DM's
+// → a player climbs the stairs by dragging from their foot past the top step (on the Vineyard onto a
+// landing the player has never seen, which the host validates) and comes back with "Go down" → the DM's
 // tab reloads (a new host run) and both players resume in the same state → no hidden token,
 // attached light, secret door, DM note, object name or asset id ever reached a player (every
 // BroadcastChannel frame the player tabs received, plus the stored player_views rows).
@@ -18,6 +20,7 @@ import fs from "node:fs"
 
 import {
   Checks,
+  GPU,
   jsonDiff,
   openBrowser,
   outDir,
@@ -233,6 +236,35 @@ try {
     { label: "both players linked" }
   )
   checks.ok(true, "the host links both players")
+  // "Auto" quality on the host console and the player page: the start-up probe (cached per GPU in this
+  // browser context) sets each engine's tier and ceiling; they used to start at a default "high".
+  const tiers = []
+  for (const [page, handle] of [
+    [dm, "__atlasHost"],
+    [A.page, "__atlasPlayer"],
+    [B.page, "__atlasPlayer"],
+  ]) {
+    await waitFor(page, (h) => window[h]?.engine != null, handle, {
+      label: `${handle} engine`,
+    })
+    tiers.push(
+      await page.evaluate(
+        (h) => ({
+          probe:
+            JSON.parse(localStorage.getItem("atlas:quality-probe:v2") ?? "null")
+              ?.tier ?? null,
+          ceiling: window[h].engine.getQualityCeiling(),
+        }),
+        handle
+      )
+    )
+  }
+  checks.ok(
+    tiers.every((t) => t.probe !== null && t.ceiling === t.probe) &&
+      (GPU !== "nvidia" || tiers.every((t) => t.ceiling === "ultra")),
+    `host console and player pages start at the probed tier (${tiers.map((t) => t.ceiling).join(", ")})`,
+    tiers
+  )
   if (menuToken) {
     await dm.bringToFront()
     await hostContextMenu(dm, menuToken)
@@ -593,38 +625,26 @@ try {
       )
       // Whether the player knows the upper storey's floor at the landing. Seen from the foot of the
       // stairs it depends on the stairwell (the Crooked Lantern's is visible; the Vineyard manor's
-      // upper slab hides it). A drop there climbs only onto known floor, so if it is unknown the token
-      // first walks up the run to the top step, where its view level switches to the upper storey.
-      const upperGround = (c) =>
-        B.page.evaluate(
-          async ({ level, c, cs }) => {
-            const { hasGroundAt } = await import("/src/core/scene/queries.ts")
-            const scene = window.__atlasPlayer.client.getSnapshot().scene
-            return (
-              !!scene.levels[level] &&
-              hasGroundAt(scene, level, {
-                x: (c.i + 0.5) * cs,
-                z: (c.j + 0.5) * cs,
-              })
-            )
-          },
-          { level: stairs.toLevelId, c, cs }
-        )
-      if (!(await upperGround(beyond))) {
-        const top = { i: beyond.i - fwd.i, j: beyond.j - fwd.j }
-        const toTop = await requestMoveTo(B.page, tokB.id, top)
-        const atTop = toTop.reqId ? await waitResult(B.page, toTop.reqId) : null
-        checks.ok(
-          atTop?.ok,
-          `the upper landing is not visible from the foot: ${B.name} walks up to the top step`,
-          atTop ?? toTop
-        )
-        await sleep(600)
-        checks.ok(
-          await upperGround(beyond),
-          `from the top step, the upper landing is known floor`
-        )
-      }
+      // upper slab hides it). An unexplored landing has no floor in the player's scene: the client plans
+      // up the run and across the top edge anyway ("blind landing") and the host, which knows the floor,
+      // validates the landing. Either way the drag from the foot must climb.
+      const upperKnown = await B.page.evaluate(
+        async ({ level, c, cs }) => {
+          const { hasGroundAt } = await import("/src/core/scene/queries.ts")
+          const scene = window.__atlasPlayer.client.getSnapshot().scene
+          return (
+            !!scene.levels[level] &&
+            hasGroundAt(scene, level, {
+              x: (c.i + 0.5) * cs,
+              z: (c.j + 0.5) * cs,
+            })
+          )
+        },
+        { level: stairs.toLevelId, c: beyond, cs }
+      )
+      console.log(
+        `  the upper landing is ${upperKnown ? "known floor" : "unexplored (a blind landing the host validates)"} seen from the foot of the stairs`
+      )
       await B.page.evaluate((id) => window.__atlasPlayer.select(id), tokB.id)
       await sleep(300)
       // Drag from the token (standing on the run's ground) to the landing, projected on the plane of
@@ -668,7 +688,7 @@ try {
       checks.ok(
         up.levelId === stairs.toLevelId &&
           JSON.stringify(cellOf(up.position, cs)) === JSON.stringify(beyond),
-        `the drag climbs to ${hs.scene.levels[stairs.toLevelId].name}`,
+        `the drag climbs to ${hs.scene.levels[stairs.toLevelId].name}${upperKnown ? "" : " onto the unexplored landing"}`,
         { levelId: up.levelId, cell: cellOf(up.position, cs) }
       )
       const goDown = B.page.getByRole("button", { name: /^Go down/ })
@@ -699,7 +719,7 @@ try {
       )
     }
   }
-  const movedAt = Date.now()
+  const movedAt = performance.now()
   for (const p of [A, B])
     checks.eq(
       await viewConverges(dm, p.page, p.uid),
@@ -727,11 +747,11 @@ try {
       },
       { sid: sessionId, tokenIds: [tokA.id, tokB.id] }
     )
-  const tSave = Date.now()
-  while (!(await saved()) && Date.now() - tSave < 8000) await sleep(200)
+  const tSave = performance.now()
+  while (!(await saved()) && performance.now() - tSave < 8000) await sleep(200)
   checks.ok(
     await saved(),
-    `the moves were saved within ${((Date.now() - movedAt) / 1000).toFixed(1)} s of their results`
+    `the moves were saved within ${((performance.now() - movedAt) / 1000).toFixed(1)} s of their results`
   )
   const beforeHost = {
     A: await playerView(A.page),

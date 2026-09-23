@@ -522,7 +522,8 @@ export function useSceneDocument({ store, services, routeId, wantsImport, naviga
       if (!(await confirmDiscard("Importing a scene"))) return
       setBusy(`Importing ${file.name}…`)
       try {
-        const { parsed, missing } = await importSceneFileWithAssets(await file.text(), assets)
+        // Never throws for the image store: a failure comes back as storeError (same scene and id).
+        const { parsed, missing, storeError } = await importSceneFileWithAssets(await file.text(), assets)
         if (!parsed.ok) {
           toast.error(parsed.error === "too-new" ? "This file needs a newer version of Atlas" : "This is not a valid Atlas scene", {
             description: parsed.error === "too-new" ? undefined : describeIssues(parsed.issues),
@@ -552,9 +553,14 @@ export function useSceneDocument({ store, services, routeId, wantsImport, naviga
         setLastSavedAt(summary.updatedAt)
         setMeta({ routeId: summary.id, status: "ready", error: null, libraryId: summary.id, summary, baseVersion: summary.latestVersion, viewingVersion: null, tooNewSchema: null })
         opts.current.navigate(paths.editor(summary.id))
-        toast.success(`Imported “${summary.name}”`, {
-          description: missing.length > 0 ? `${missing.length} map image(s) were not in the file.` : "Added to your library as a new scene.",
-        })
+        if (storeError !== undefined)
+          toast.warning(`Imported “${summary.name}” without some map images`, {
+            description: `Map images could not be stored: ${errorText(storeError)}`,
+          })
+        else
+          toast.success(`Imported “${summary.name}”`, {
+            description: missing.length > 0 ? `${missing.length} map image(s) were not in the file.` : "Added to your library as a new scene.",
+          })
       } catch (err) {
         toast.error("Import failed", { description: errorText(err) })
       } finally {

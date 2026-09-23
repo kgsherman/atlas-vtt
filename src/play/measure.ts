@@ -4,13 +4,13 @@
  * distance follows the grid's diagonal rule over the whole route. The ruler stays until the next
  * measurement or clear() (Escape / leaving the tool).
  */
+import { rulerDistance } from "@/core/grid/grid"
 import type { GridSettings, Id, SceneLike, Vec2 } from "@/core/scene/types"
 import type { RulerOverlay } from "@/render/contracts"
 
 import {
   formatFeet,
   groundY,
-  measureDistance,
   RULER_LIFT,
   samePoint,
   snapToCellCenter,
@@ -80,7 +80,7 @@ export class MeasureTool {
   }
 
   distance(grid: GridSettings): number {
-    return measureDistance(grid, this.route())
+    return rulerDistance(grid, this.route())
   }
 
   /** Ruler overlay (memoised per scene + ruler state). */
@@ -101,7 +101,7 @@ export class MeasureTool {
               y: groundY(scene, levelId, p) + RULER_LIFT,
               z: p.z,
             })),
-            label: formatFeet(measureDistance(scene.grid, route)),
+            label: formatFeet(rulerDistance(scene.grid, route)),
           }
     this.cached = { scene, value }
     return value

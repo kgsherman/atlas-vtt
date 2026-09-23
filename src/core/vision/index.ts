@@ -3,7 +3,7 @@
  * field, per-viewer line of sight, perception masks, token visibility and observation.
  */
 import type { OcclusionWorld } from "../occlusion/types"
-import { groundHeightAt, lightWorldPosition, tokenGroundY } from "../scene/queries"
+import { groundHeightAt, lightGroundY, lightWorldPosition, type GroundIndex } from "../scene/queries"
 import type { LightObject, SceneLike, Token, Vec3 } from "../scene/types"
 import { VisionEngineImpl } from "./engine"
 import { eyeAtGround, resolveLightOrigin, tokenPointsAtGround } from "./eye"
@@ -47,16 +47,16 @@ export function resolveViewerEye(
 /**
  * World-space light origin as vision uses it: lightWorldPosition (attached lights follow their
  * carrier) pushed out of containing light blockers, toward the light's own level for floor slabs
- * (resolveLightOrigin). Renderers should shadow from the same point.
+ * (resolveLightOrigin). Renderers should shadow from the same point. A caller resolving every light
+ * of an unchanging scene passes its `groundIndex(scene)` as `ground` (no O(objects) scan per light).
  */
 export function resolveLightWorldOrigin(
   world: OcclusionWorld,
   scene: Pick<SceneLike, "levels" | "grid" | "objects" | "tokens">,
-  light: LightObject
+  light: LightObject,
+  ground?: GroundIndex
 ): Vec3 {
-  const carrier = light.attachedTokenId && Object.hasOwn(scene.tokens, light.attachedTokenId) ? scene.tokens[light.attachedTokenId] : null
-  const ground = carrier ? tokenGroundY(scene, carrier) : groundHeightAt(scene, light.levelId, light.position)
-  return resolveLightOrigin(world, lightWorldPosition(scene, light), ground)
+  return resolveLightOrigin(world, lightWorldPosition(scene, light, ground), lightGroundY(scene, light, ground))
 }
 
 /** Token visibility test points (footprint centre/corners × feet/mid/head, capped below the ceiling). */

@@ -1,50 +1,28 @@
 /**
  * Measure tool (ruler): each click adds a waypoint, the pointer drags the live end. With snapping,
  * waypoints sit on cell centres and the distance follows the grid's diagonal rule over the whole
- * path (core/grid pathDistance); in free mode (Alt / snap "free") it is the euclidean length.
+ * path; in free mode (Alt / snap "free") it is the euclidean length (both core/grid rulerDistance, the
+ * rule of the play ruler too).
  * Right-click, Enter or a double-click freezes the ruler; the next click starts a new one; Escape
  * clears it.
  */
-import { cellCenter, cellOf, pathDistance } from "@/core/grid/grid"
+import { cellCenter, cellOf, rulerDistance } from "@/core/grid/grid"
 import { groundIndex } from "@/core/scene/queries"
-import type { Cell, GridSettings, Id, Vec2 } from "@/core/scene/types"
+import type { Id, Vec2 } from "@/core/scene/types"
 import type { RulerOverlay } from "@/render/contracts"
 
 import { createClickTracker, defaultNow, pointerSnapMode, samePoint, type ToolDeps } from "./shared"
 import type { Tool, ToolPointerEvent } from "./types"
 
-/** Cells of a king-move path from a (excluded) to b (included): diagonal steps first, then straight. */
-export function legCells(a: Cell, b: Cell): Cell[] {
-  const out: Cell[] = []
-  let i = a.i
-  let j = a.j
-  while (i !== b.i || j !== b.j) {
-    i += Math.sign(b.i - i)
-    j += Math.sign(b.j - j)
-    out.push({ i, j })
-  }
-  return out
-}
-
 /**
- * Length in feet of a ruler through `points`: euclidean on XZ when `free`, else the grid distance of
- * the cell path through the points' cells (the diagonal rule counts diagonals across all legs).
+ * "35 ft"; non-integer distances (euclidean diagonal rule, free measuring) keep one decimal. The same
+ * rule as the play ruler (play/geometry formatFeet), so the DM and players read the same text.
  */
-export function measureDistance(grid: GridSettings, points: readonly Vec2[], free: boolean): number {
-  if (points.length < 2) return 0
-  if (free) {
-    let total = 0
-    for (let k = 1; k < points.length; k++) total += Math.hypot(points[k].x - points[k - 1].x, points[k].z - points[k - 1].z)
-    return total
-  }
-  const cells: Cell[] = [cellOf(grid, points[0])]
-  for (let k = 1; k < points.length; k++) cells.push(...legCells(cells[cells.length - 1], cellOf(grid, points[k])))
-  return pathDistance(grid, cells)
-}
-
-export function formatFeet(feet: number, free: boolean): string {
-  const v = free ? Math.round(feet * 10) / 10 : Math.round(feet)
-  return `${v} ft`
+export function formatFeet(feet: number): string {
+  if (!Number.isFinite(feet)) return "—"
+  const rounded = Math.round(feet)
+  if (Math.abs(feet - rounded) < 0.05) return `${rounded} ft`
+  return `${(Math.round(feet * 10) / 10).toFixed(1)} ft`
 }
 
 export interface MeasureTool extends Tool {
@@ -150,7 +128,7 @@ export function createMeasureTool(deps: ToolDeps): MeasureTool {
 
     preview: () => null,
 
-    distance: () => measureDistance(store.getState().scene.grid, path(), free),
+    distance: () => rulerDistance(store.getState().scene.grid, path(), free),
 
     ruler() {
       const s = store.getState()
@@ -164,7 +142,7 @@ export function createMeasureTool(deps: ToolDeps): MeasureTool {
         value = {
           levelId: lid,
           points: pts.map((p) => ({ x: p.x, y: g ? g.groundHeightAt(lid, p) : 0, z: p.z })),
-          label: formatFeet(measureDistance(s.scene.grid, pts, free), free),
+          label: formatFeet(rulerDistance(s.scene.grid, pts, free)),
         }
       }
       cached = { scene: s.scene, value }

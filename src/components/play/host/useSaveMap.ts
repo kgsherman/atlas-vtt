@@ -1,12 +1,15 @@
 /**
- * "Save map to library" for the DM's host console: writes the live session's map (as it is now:
- * token positions, hidden tokens, doors and lights included) as a new version of the library scene
- * the session was started from. Earlier versions stay in version history.
+ * "Save map to library" for the DM's host console (ARCHITECTURE §6.2): HostRunner.saveMapToLibrary
+ * writes the live session's map (as it is now: token positions, hidden tokens, doors and lights
+ * included) as a new version of the library scene the session was started from — the game's origin,
+ * exposed as HostSnapshot.library. Earlier versions stay in version history.
  *
- * The library scene is found through the DM's session list (sessions.scene_id). Conflicts: after a
- * save here, later saves pass `baseVersion`; the first save treats a library scene updated after the
- * session started as changed elsewhere and asks before overwriting. "Dirty" (the map was edited in
- * Edit map since the last save) is remembered per session on this device.
+ * The origin records the library version the live map is based on, so a version saved meanwhile
+ * elsewhere (e.g. in the editor) is a version_conflict; the conflict toast offers "Overwrite" (force).
+ * Games saved before the origin was recorded have no base version: their first save treats a library
+ * scene updated after the session started as changed elsewhere and asks first. "Dirty" (the map was
+ * edited in Edit map since the session started or the last save) is the origin's flag, stored with the
+ * game, so it survives reloads and devices.
  */
 import * as React from "react"
 import { toast } from "sonner"
@@ -14,7 +17,7 @@ import { toast } from "sonner"
 import { useServices } from "@/app/services"
 import { userMessage } from "@/app/library"
 import { useConfirm } from "@/components/editor/context"
-import type { Scene } from "@/core/scene/types"
+import type { HostRunner, HostSnapshot } from "@/net/host"
 import { isNetError } from "@/net/supabase"
 
 export type LibraryLink =
@@ -29,7 +32,6 @@ export interface SaveMap {
   saving: boolean
   /** The map was edited (Edit map) since the session started or the last save to the library. */
   dirty: boolean
-  markDirty(): void
   /**
    * Save to the library. `confirm` (default true) asks first; `force` overwrites a library scene
    * changed elsewhere. Resolves true when saved.
@@ -37,33 +39,7 @@ export interface SaveMap {
   save(opts?: { confirm?: boolean; force?: boolean }): Promise<boolean>
 }
 
-interface Persisted {
-  dirty: boolean
-  savedVersion: number | null
-}
-
-const storageKey = (sessionId: string) => `atlas-host:library:${sessionId}`
-
-function readPersisted(sessionId: string): Persisted {
-  try {
-    const raw = localStorage.getItem(storageKey(sessionId))
-    const v = raw ? (JSON.parse(raw) as Partial<Persisted>) : null
-    return {
-      dirty: v?.dirty === true,
-      savedVersion: typeof v?.savedVersion === "number" ? v.savedVersion : null,
-    }
-  } catch {
-    return { dirty: false, savedVersion: null }
-  }
-}
-
-function writePersisted(sessionId: string, p: Persisted): void {
-  try {
-    localStorage.setItem(storageKey(sessionId), JSON.stringify(p))
-  } catch {
-    // Storage blocked: the flag lasts for this page only.
-  }
-}
+export type SaveMapRunner = Pick<HostRunner, "saveMapToLibrary">
 
 /** Whether the library scene changed after the session started (by its row's update time). */
 export function changedSinceStart(
@@ -76,66 +52,58 @@ export function changedSinceStart(
 }
 
 export function useSaveMap(
-  sessionId: string,
-  liveScene: () => Scene | null
+  runner: SaveMapRunner,
+  snap: Pick<HostSnapshot, "sessionId" | "library">
 ): SaveMap {
   const services = useServices()
   const confirm = useConfirm()
-  const [library, setLibrary] = React.useState<LibraryLink>({
-    status: "loading",
-  })
-  const [persisted, setPersisted] = React.useState(() =>
-    readPersisted(sessionId)
-  )
+  const origin = snap.library
+  const sceneId = origin?.sceneId ?? null
+  const [lookup, setLookup] = React.useState<{
+    sceneId: string
+    link: LibraryLink
+  } | null>(null)
   const [saving, setSaving] = React.useState(false)
-  const sessionStart = React.useRef<string | null>(null)
-  const persistedRef = React.useRef(persisted)
-  const liveRef = React.useRef(liveScene)
+  const originRef = React.useRef(origin)
   React.useEffect(() => {
-    persistedRef.current = persisted
-    liveRef.current = liveScene
+    originRef.current = origin
   })
 
-  const update = React.useCallback(
-    (p: Persisted) => {
-      persistedRef.current = p
-      writePersisted(sessionId, p)
-      setPersisted(p)
-    },
-    [sessionId]
-  )
-
+  // The library entry's name (and whether it still exists).
   React.useEffect(() => {
+    if (!sceneId) return
     let cancelled = false
-    void (async () => {
-      try {
-        const session = (await services.sessions.listMySessions()).find(
-          (s) => s.id === sessionId
-        )
-        sessionStart.current = session?.createdAt ?? null
-        const summary = session?.sceneId
-          ? await services.scenes.get(session.sceneId)
-          : null
+    services.scenes.get(sceneId).then(
+      (summary) => {
         if (cancelled) return
-        setLibrary(
-          summary
-            ? { status: "linked", sceneId: summary.id, name: summary.name }
-            : { status: "deleted" }
-        )
-      } catch (err) {
+        setLookup({
+          sceneId,
+          link: summary
+            ? { status: "linked", sceneId, name: summary.name }
+            : { status: "deleted" },
+        })
+      },
+      (err: unknown) => {
         if (!cancelled)
-          setLibrary({ status: "unavailable", error: userMessage(err) })
+          setLookup({
+            sceneId,
+            link: { status: "unavailable", error: userMessage(err) },
+          })
       }
-    })()
+    )
     return () => {
       cancelled = true
     }
-  }, [services, sessionId])
-
-  const markDirty = React.useCallback(() => {
-    if (!persistedRef.current.dirty)
-      update({ ...persistedRef.current, dirty: true })
-  }, [update])
+  }, [services, sceneId])
+  const library = React.useMemo<LibraryLink>(
+    () =>
+      !sceneId
+        ? { status: "deleted" }
+        : lookup && lookup.sceneId === sceneId
+          ? lookup.link
+          : { status: "loading" },
+    [sceneId, lookup]
+  )
 
   const saveRef = React.useRef<SaveMap["save"]>(async () => false)
   const save = React.useCallback<SaveMap["save"]>(
@@ -159,9 +127,6 @@ export function useSaveMap(
         })
         if (!ok) return false
       }
-      const scene = liveRef.current()
-      if (!scene) return false
-      setSaving(true)
       const conflict = () => {
         toast.error("The library map was changed since this session started", {
           description:
@@ -174,48 +139,38 @@ export function useSaveMap(
           },
         })
       }
+      setSaving(true)
       try {
-        const summary = await services.scenes.get(library.sceneId)
-        if (!summary) {
-          setLibrary({ status: "deleted" })
-          toast.error("The library scene was deleted", {
-            description: "There is nothing to save the map to.",
-          })
-          return false
-        }
-        let baseVersion: number | undefined
-        if (!opts.force) {
-          const saved = persistedRef.current.savedVersion
-          if (saved !== null) baseVersion = saved
-          else if (
-            sessionStart.current &&
-            changedSinceStart(summary.updatedAt, sessionStart.current)
+        if (!opts.force && originRef.current?.version === null) {
+          // No base version recorded (a game saved before the origin existed): compare update times.
+          const [summary, session] = await Promise.all([
+            services.scenes.get(library.sceneId),
+            services.sessions
+              .listMySessions()
+              .then((l) => l.find((s) => s.id === snap.sessionId) ?? null),
+          ])
+          if (
+            summary &&
+            session &&
+            changedSinceStart(summary.updatedAt, session.createdAt)
           ) {
             conflict()
             return false
-          } else baseVersion = summary.latestVersion
-        }
-        const doc: Scene = {
-          ...scene,
-          name: summary.name,
-          updatedAt: new Date().toISOString(),
-        }
-        const version = await services.scenes.saveVersion(
-          library.sceneId,
-          doc,
-          {
-            baseVersion,
-            name: summary.name,
           }
-        )
-        update({ dirty: false, savedVersion: version })
+        }
+        const version = await runner.saveMapToLibrary({ force: opts.force })
         toast.success(`Saved version ${version}`, {
-          description: `“${summary.name}” in your library now has the live map.`,
+          description: `“${library.name}” in your library now has the live map.`,
         })
         return true
       } catch (err) {
         if (isNetError(err, "version_conflict")) conflict()
-        else
+        else if (isNetError(err, "not_found")) {
+          setLookup({ sceneId: library.sceneId, link: { status: "deleted" } })
+          toast.error("The library scene was deleted", {
+            description: "There is nothing to save the map to.",
+          })
+        } else
           toast.error("Couldn't save the map", {
             description: userMessage(err),
           })
@@ -224,11 +179,11 @@ export function useSaveMap(
         setSaving(false)
       }
     },
-    [library, confirm, services, update]
+    [library, confirm, services, runner, snap.sessionId]
   )
   React.useEffect(() => {
     saveRef.current = save
   }, [save])
 
-  return { library, saving, dirty: persisted.dirty, markDirty, save }
+  return { library, saving, dirty: origin?.dirty ?? false, save }
 }

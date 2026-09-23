@@ -6,7 +6,7 @@
  */
 import * as THREE from "three"
 
-import { lightLevelId, lightWorldPosition } from "@/core/scene/queries"
+import { groundIndex, lightLevelId, lightWorldPosition } from "@/core/scene/queries"
 import type { Id, LightObject, LightPreset } from "@/core/scene/types"
 
 import type { BuildContext } from "./context"
@@ -107,9 +107,12 @@ export function buildFixturesBucket(ctx: BuildContext, levelId: Id): BucketBuild
   const lights = Object.values(scene.objects)
     .filter((o): o is LightObject => o.type === "light")
     .sort((a, b) => (a.id < b.id ? -1 : 1))
+  // One GroundIndex for every light (the scene is committed, never mutated in place): lightWorldPosition
+  // alone scans every object per light.
+  const index = groundIndex(scene)
   for (const light of lights) {
     if (lightLevelId(scene, light) !== levelId || !ctx.level(levelId)) continue
-    const p = lightWorldPosition(scene, light)
+    const p = lightWorldPosition(scene, light, index)
     const ground = ctx.sampler(levelId).heightAt(p.x, p.z)
     holders.begin(light.id)
     holders.material = light.preset === "candle" ? MAT.NONE : MAT.METAL

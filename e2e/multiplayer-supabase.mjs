@@ -3,8 +3,9 @@
 // library and starts a session; one player joins by room code; realtime runs over RLS-protected
 // private channels. Checks: the player's view equals the authoritative oracle, a drag move, the
 // movement lock, reload → same state, Realtime RLS refuses another user's topics and the host topic
-// for writes, table RLS hides the DM's rows, no secret in any websocket frame the player received, and
-// ending the session reaches the player. Cleans up: ends the session and deletes the scene copy
+// for writes, table RLS hides the DM's rows, no secret in any websocket frame the player received,
+// Realtime refuses public channels and a kicked member's host subscription stops receiving once its
+// client sends a new JWT, and ending the session reaches the player. Cleans up: ends the session and deletes the scene copy
 // (anonymous users cannot be deleted with the publishable key; they are listed at the end).
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-supabase.mjs
@@ -51,6 +52,17 @@ const cellOf = (pos, cs) => ({
   j: Math.floor(pos.z / cs),
 })
 
+/** Requests the backend refused with HTTP 403 (method and path), per page, for diagnostics. */
+const forbidden = []
+function record403(page, tag) {
+  page.on("response", (res) => {
+    if (res.status() === 403)
+      forbidden.push(
+        `${tag} ${res.request().method()} ${new URL(res.url()).pathname}`
+      )
+  })
+}
+
 /** Record every websocket frame (Supabase Realtime) and REST response a page receives, as text. */
 function captureSockets(page, sink) {
   // REST answers too (player_views rows, RPC results): everything data-bearing the player downloads.
@@ -83,6 +95,7 @@ try {
   })
   const dm = await dmCtx.newPage()
   watchPage(dm, "dm", logs)
+  record403(dm, "dm")
   await dm.goto(`${BASE}/?local=0`, { waitUntil: "domcontentloaded" })
   const dmIdentity = await dm.evaluate(async () => {
     const m = await import("/src/app/mode.ts")
@@ -118,7 +131,7 @@ try {
     viewport: { width: 1440, height: 900 },
   })
   plCtx.on("page", (page) => captureSockets(page, frames))
-  const tJoin = Date.now()
+  const tJoin = performance.now()
   const player = await joinGame(plCtx, {
     roomCode: h0.roomCode,
     name: "Morgana",
@@ -127,9 +140,10 @@ try {
   })
   const pl = player.page
   const uid = player.uid
+  record403(pl, "player")
   checks.ok(
     true,
-    `joined and live over Realtime in ${((Date.now() - tJoin) / 1000).toFixed(1)} s`
+    `joined and live over Realtime in ${((performance.now() - tJoin) / 1000).toFixed(1)} s`
   )
   await waitFor(
     dm,
@@ -165,7 +179,7 @@ try {
   if (Object.values(scene0.levels).some((l) => l.backdrop)) {
     // Map tiles: the host uploads this player's explored cells in 4×4-cell chunks to the private
     // session-tiles bucket (under the player's user id) and announces them; the player downloads its own.
-    const tTiles = Date.now()
+    const tTiles = performance.now()
     await waitFor(
       pl,
       () => {
@@ -186,7 +200,7 @@ try {
       () =>
         checks.ok(
           true,
-          `backdrop tiles arrive through Storage (per-player chunks) in ${((Date.now() - tTiles) / 1000).toFixed(1)} s`
+          `backdrop tiles arrive through Storage (per-player chunks) in ${((performance.now() - tTiles) / 1000).toFixed(1)} s`
         ),
       (e) =>
         checks.fail(
@@ -407,7 +421,8 @@ try {
     y: elev,
     z: (target.j + 0.5) * cs,
   })
-  const tMove = Date.now()
+  // A monotonic clock: Date.now() jumped backwards under WSL time sync and printed a negative latency.
+  const tMove = performance.now()
   await mouseDrag(pl, from, to)
   await waitFor(
     pl,
@@ -420,7 +435,7 @@ try {
   )
   checks.ok(
     true,
-    `move confirmed by the host through Realtime in ${Date.now() - tMove} ms (incl. drag gesture)`
+    `move confirmed by the host through Realtime in ${Math.round(performance.now() - tMove)} ms (incl. drag gesture)`
   )
   checks.eq(
     cellOf((await hostState(dm)).state.scene.tokens[pip.id].position, cs),
@@ -638,6 +653,204 @@ try {
     "the refused joins delivered no broadcast or presence data"
   )
 
+  checks.step("Realtime: no public channels; a kicked member's subscriptions")
+  // Channel confidentiality rests on a dashboard setting SQL cannot see ("Allow public access" off), and
+  // Realtime authorises a channel when it is joined. Two extra clients in the player's page, each with
+  // its own socket (the app's client would hand back its own channel for a topic):
+  //   - an outsider (publishable key, not signed in) tries public channels on the session's host topic
+  //     and on the player's view topic: the join must be refused, and even where the project allows
+  //     public channels they must not receive the private channels' broadcasts;
+  //   - a probe (a new anonymous user) joins the session as a member and subscribes to the host topic;
+  //     after the DM kicks it, the subscription must stop receiving broadcasts once its client sends a
+  //     new JWT (Realtime re-evaluates the policies then), and a new join must be refused.
+  const forbiddenBefore = forbidden.length
+  const rt = await pl.evaluate(
+    async ({ roomCode, sid, playerUid }) => {
+      const { createAtlasClient } = await import("/src/net/supabase.ts")
+      const { supabaseEnv } = await import("/src/net/env.ts")
+      const { createPrivateChannel, topics } =
+        await import("/src/net/channels.ts")
+      const client = (name) =>
+        createAtlasClient(supabaseEnv(), {
+          persistSession: false,
+          storageKey: `atlas-e2e-${name}-${crypto.randomUUID()}`,
+        })
+      const until = (ch, sink = [], timeout = 12000) =>
+        new Promise((resolve) => {
+          const timer = setTimeout(() => resolve("TIMEOUT"), timeout)
+          ch.subscribe((status) => {
+            sink.push(status)
+            if (
+              status === "SUBSCRIBED" ||
+              status === "CHANNEL_ERROR" ||
+              status === "TIMED_OUT"
+            ) {
+              clearTimeout(timer)
+              resolve(status)
+            }
+          })
+        })
+      const out = {}
+      // 1. Public channels, as an outsider.
+      const outsider = client("outsider")
+      const leaked = []
+      const publicJoins = {}
+      for (const [name, topic] of [
+        ["host", topics.host(sid)],
+        ["view", topics.view(sid, playerUid)],
+      ]) {
+        const ch = outsider.channel(topic, { config: { private: false } })
+        ch.on("broadcast", { event: "*" }, (m) =>
+          leaked.push({ topic: name, event: m.event })
+        )
+        publicJoins[name] = await until(ch)
+      }
+      out.publicJoins = publicJoins
+      // 2. The probe member's private host subscription.
+      const probe = client("probe")
+      const signIn = await probe.auth.signInAnonymously()
+      const uid = signIn.data.user?.id ?? null
+      await probe.realtime.setAuth()
+      const joined = await probe.rpc("join_session", {
+        p_room_code: roomCode,
+        p_display_name: "Realtime probe",
+      })
+      out.uid = uid
+      out.member = joined.error?.message ?? (joined.data === sid ? "ok" : "?")
+      const received = []
+      const statuses = []
+      const host = createPrivateChannel(probe, topics.host(sid))
+      host.on("broadcast", { event: "*" }, (m) =>
+        received.push({ at: performance.now(), t: m.payload?.t ?? m.event })
+      )
+      out.privateJoin = await until(host, statuses)
+      window.__atlasRealtimeProbe = {
+        outsider,
+        leaked,
+        probe,
+        host,
+        received,
+        statuses,
+      }
+      return out
+    },
+    { roomCode: h0.roomCode, sid: sessionId, playerUid: uid }
+  )
+  checks.ok(rt.member === "ok", "a second anonymous user joins as a member", rt)
+  checks.eq(rt.privateJoin, "SUBSCRIBED", "the member joins the host topic")
+  // The host broadcasts its status on lobby presence changes; trigger one directly. Also change the
+  // player's view (movement lock on / off) so its view topic carries patches.
+  const hostStatus = () =>
+    dm.evaluate(() => {
+      window.__atlasHost.runner.broadcastStatus()
+    })
+  const received = () =>
+    pl.evaluate(() => window.__atlasRealtimeProbe.received.length)
+  const settle = async (n0, ms = 4000) => {
+    const t0 = performance.now()
+    while (performance.now() - t0 < ms && (await received()) === n0)
+      await sleep(200)
+    await sleep(300)
+    return (await received()) - n0
+  }
+  let n = await received()
+  await hostStatus()
+  for (const locked of [true, false]) {
+    await dm.evaluate((locked) => {
+      window.__atlasHost.runner.dispatch({ t: "set-movement-locked", locked })
+    }, locked)
+    await waitFor(
+      pl,
+      (locked) =>
+        window.__atlasPlayer.client.getSnapshot().view.flags.movementLocked ===
+        locked,
+      locked,
+      { timeout: 15000, label: `movement lock ${locked} reaches the player` }
+    )
+  }
+  checks.ok(
+    (await settle(n)) > 0,
+    "positive control: the member's host subscription receives a status broadcast"
+  )
+  const leaked = await pl.evaluate(() => window.__atlasRealtimeProbe.leaked)
+  checks.eq(
+    leaked.slice(0, 5),
+    [],
+    `public channels on the host and view topics receive none of the session's broadcasts (joins: ${JSON.stringify(rt.publicJoins)})`
+  )
+  checks.ok(
+    rt.publicJoins.host !== "SUBSCRIBED" &&
+      rt.publicJoins.view !== "SUBSCRIBED",
+    "Realtime refuses public channels (dashboard: Realtime → Settings → Allow public access off)",
+    rt.publicJoins
+  )
+  // Kick the probe (not awaited in the page: the result is polled).
+  await dm.evaluate((uid) => {
+    window.__atlasKick = "pending"
+    window.__atlasHost.runner.kick(uid).then(
+      () => (window.__atlasKick = "ok"),
+      (e) => (window.__atlasKick = String(e?.message ?? e))
+    )
+  }, rt.uid)
+  await waitFor(dm, () => window.__atlasKick !== "pending", null, {
+    timeout: 15000,
+    label: "kick done",
+  }).catch(() => {})
+  const kick = await dm.evaluate(() => window.__atlasKick)
+  checks.eq(kick, "ok", "the DM kicks the member")
+  await sleep(1500)
+  n = await received()
+  await hostStatus()
+  const beforeRefresh = await settle(n, 3000)
+  console.log(
+    `   after the kick, before a new JWT: the open host subscription received ${beforeRefresh} broadcast(s) (Realtime caches authorisation per joined channel)`
+  )
+  const refreshed = await pl.evaluate(async () => {
+    const { probe } = window.__atlasRealtimeProbe
+    const r = await probe.auth.refreshSession()
+    await probe.realtime.setAuth(r.data.session?.access_token ?? null)
+    return r.error?.message ?? "ok"
+  })
+  await sleep(2000)
+  n = await received()
+  await hostStatus()
+  const afterRefresh = await settle(n, 4000)
+  const after = await pl.evaluate(async (sid) => {
+    const { outsider, probe, host, statuses } = window.__atlasRealtimeProbe
+    const { createPrivateChannel, topics } =
+      await import("/src/net/channels.ts")
+    const out = { hostState: host.state, statuses: [...statuses] }
+    await probe.removeChannel(host)
+    const again = createPrivateChannel(probe, topics.host(sid))
+    out.rejoin = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve("TIMEOUT"), 12000)
+      again.subscribe((status) => {
+        if (status !== "CLOSED") {
+          clearTimeout(timer)
+          resolve(status)
+        }
+      })
+    })
+    await probe.removeAllChannels()
+    await outsider.removeAllChannels()
+    await probe.auth.signOut().catch(() => {})
+    delete window.__atlasRealtimeProbe
+    return out
+  }, sessionId)
+  checks.ok(
+    refreshed === "ok" && afterRefresh === 0,
+    "once the kicked member's client sends a new JWT, its host subscription receives no more broadcasts",
+    { refreshed, afterRefresh, ...after }
+  )
+  checks.ok(
+    after.rejoin !== "SUBSCRIBED",
+    "the kicked member cannot join the host topic again",
+    after.rejoin
+  )
+  const refused = [...new Set(forbidden.slice(forbiddenBefore))]
+  if (refused.length > 0)
+    console.log(`   HTTP 403 during this step: ${refused.join(", ")}`)
+
   if (Object.values(scene0.levels).some((l) => l.backdrop)) {
     // Chunk traffic of the whole run (initial view, moves, reloads, host restart).
     const tiler = await dm.evaluate(
@@ -688,9 +901,9 @@ try {
         }
         return count(sid, 1)
       }, sessionId)
-    const tEnd = Date.now()
+    const tEnd = performance.now()
     let left = await leftover()
-    while (left > 0 && Date.now() - tEnd < 20000) {
+    while (left > 0 && performance.now() - tEnd < 20000) {
       await sleep(1000)
       left = await leftover()
     }
@@ -752,6 +965,10 @@ try {
       console.log(`  cleanup failed: ${err.message}`)
     }
   }
+  if (forbidden.length > 0)
+    console.log(
+      `  HTTP 403 responses: ${[...new Set(forbidden)].slice(0, 12).join(", ")}`
+    )
   const errors = seriousErrors(logs)
   if (rateLimited(logs) > 0)
     console.log(

@@ -60,11 +60,12 @@ describe("TokenLayer", () => {
     }
     const decor = meshes(layer.decor)
     expect(decor.find((m) => m.renderOrder === 8)!.count).toBe(1)
-    expect(material.transparent).toBe(true)
+    // Opaque at rest: tokens sort into the opaque pass and draw before level geometry.
+    expect(material.transparent).toBe(false)
   })
 
   it("fades tokens in and out over 150 ms", () => {
-    const { scene, ground, plan, layer } = setup()
+    const { scene, ground, plan, layer, material } = setup()
     layer.syncScene(scene, 0, false)
     layer.update({ scene, plan, view: DEFAULT_VIEW, overlays: overlays() }, 0)
     const d = createToken(ground, { x: 22.5, z: 22.5 })
@@ -77,14 +78,20 @@ describe("TokenLayer", () => {
     const fade = body.geometry.getAttribute("aFade").getX(k)
     expect(fade).toBeGreaterThan(0)
     expect(fade).toBeLessThan(1)
+    // Blending only while the fade runs.
+    expect(material.transparent).toBe(true)
     expect(layer.update(inputs, 1000 + TOKEN_FADE_MS + 1)).toBe(false)
     expect(body.geometry.getAttribute("aFade").getX(k)).toBe(1)
+    expect(material.transparent).toBe(false)
     // Removal keeps the token while it fades out, then drops it.
     layer.syncScene(scene, 2000, true)
     layer.update({ ...inputs, scene }, 2050)
     expect(body.count).toBe(3)
+    expect(material.transparent).toBe(true)
     layer.update({ ...inputs, scene }, 2000 + TOKEN_FADE_MS + 1)
     expect(body.count).toBe(2)
+    layer.update({ ...inputs, scene }, 2000 + TOKEN_FADE_MS + 20)
+    expect(material.transparent).toBe(false)
   })
 
   it("draws state rings and drag ghosts", () => {

@@ -24,8 +24,13 @@ is pre-compiled with `renderer.compileAsync` at load.
 ### 2. Light culling
 Every frame the CPU culls lights: off/hidden, dim sphere outside the camera frustum, or on a level hidden by the
 cutaway whose sphere does not reach the visible levels. Survivors are sorted by screen contribution and the top 32
-go into uniform slots. Per fragment, a light is skipped when `distance > dimRadius` or `N·L ≤ 0` **before** any
-shadow sample, so a fragment typically pays for ~4–6 lights, not 20.
+go into uniform slots. A per-cell slot mask (a small R32UI texture over XZ with 10 ft cells; bit i set where
+slot i's dim disc reaches the cell; rebuilt only when the slot list changes) lets each fragment skip the slots
+whose disc misses its cell before fetching their uniforms. Without it the loop ran a distance test (a uniform
+fetch and a `length`) for every slotted light: on the AMD iGPU below that dead-slot overhead was ~1.8 ms of a
+Crooked Lantern DM frame (15 slots, 1080p). For the remaining slots a light is skipped when
+`distance > dimRadius` or `N·L ≤ 0` **before** any shadow sample, so only the ~4–6 lights in range of a
+fragment pay for falloff, Lambert and shadow taps.
 
 ### 3. Shadow-map budgeting and static caching
 Point-light shadows are octahedral distance maps (one 512² tile per light in a 4096×2048 R32F atlas; one texture
@@ -46,7 +51,10 @@ rendering removes most acne without large biases.
 ### 5. Overdraw control
 In player view, level groups are ordered so the active level draws first and lower storeys are early-Z rejected
 under its floors. The world shader never discards or writes depth, so early-Z stays enabled. Levels above the
-cutaway are not drawn at all.
+cutaway are not drawn at all. Tokens are opaque at rest and transparent only while their 150 ms appear / leave
+fade runs, so they sort into the opaque queue and draw before the level geometry. When they were always
+transparent they drew after it, which cost ~1.7 ms (medium) and ~2.9 ms (high) of GPU time on the Vineyard
+player view on the AMD iGPU for a handful of small meshes.
 
 ### 6. Draw-call reduction
 Static geometry is merged per level per material; props, pillars and tokens are instanced. A typical scene draws
@@ -67,6 +75,16 @@ ceiling or the viewport changes. Before that rule the AMD host console oscillate
 for as long as it ran (the timer query reads ~10.6 ms at medium where a synchronised frame takes ~13.9 ms, so
 every "up" looked safe): tier changes at 2.6, 10.5, 13.5, 25.6, 28.6, 50.7 and 53.8 s, 130 frames over 20 ms
 and a 333 ms worst frame in 100 s.
+
+A step itself used to be a hitch: the new tier's shaders compiled in the frame that switched (high → ultra
+633 ms on the AMD iGPU, 983 ms on NVIDIA; medium → low 250 + 117 ms), and when the light atlas was
+re-allocated every shadowed light went dark and came back 4 per frame over 4–6 frames. Now an adaptive step
+compiles the next tier's programs in the background (`compileAsync`) and fills its new shadow atlases under
+their own tile budget while the old tier keeps rendering, then switches in one frame once both are ready
+(at most 1.5 s later), so no light drops out (ARCHITECTURE §4.5). On the WSL / ANGLE / Mesa d3d12 test
+machines compiles are not parallel, so the stall is smaller (two frames of ~170–480 ms were measured after
+the background compile landed) but not gone; a pixel-budget change (low ↔ medium) also resizes the canvas in
+the switching frame. Native drivers with parallel compilation are untested.
 
 The WebGL context has no MSAA on any tier; medium and above get MSAA from the post pipeline's scene target
 (medium: a lite post pass with a 2× MSAA scene target, resolve + Reinhard composite, no bloom or AO; 2×
@@ -90,13 +108,18 @@ A move's result waits only for the vision compute of its final position; the int
 into explored, so walked-past corridors are explored) run afterwards as low-priority probes whose exploration
 follows in the next patch (ARCHITECTURE §5.2). Before, every step queued a full compute ahead of the result:
 a 14-step move on a 120×120 daylit field took over 5 s and timed out as "DM not responding". Now
-(`e2e/multiplayer-latency.mjs`, same field, three runs): a 20-step move is answered in 320–616 ms and
-another player's concurrent 1-step move in 550–616 ms; before the change both timed out after 5 s.
+(`e2e/multiplayer-latency.mjs`, same field, five runs on 2026-09-23): a 20-step move is answered in
+309–616 ms and another player's concurrent 1-step move in 547–617 ms; before the change both timed out
+after 5 s.
 
 ### 9. Network
 Per-player patches are coalesced (≤ 10 Hz), only non-empty diffs are sent, heightmaps travel in 8×8-cell chunks,
-and big snapshots go through the database instead of the realtime socket (256 KB broadcast limit, ~100 msg/s on
-the free tier).
+and big snapshots go through the database instead of the realtime socket: the transport's size guard is 200 KB
+(`MAX_BROADCAST_BYTES`, headroom under Realtime's 256 KB message limit), and each client's sends go through
+one token bucket of ≈ 25 msg/s (burst 10), well under the free tier's ~100 msg/s. Per player, requests are
+limited to 8/s (burst 16), hellos (each may cost a full snapshot plus a tile table per backdrop level) to
+1/s (burst 4, coalesced), and `rate-limited` replies to 2/s, so one client cannot turn the DM's shared send
+bucket into replies (ARCHITECTURE §6.2).
 
 ### 10. Battlemap backdrops (memory and uploads)
 A Forgotten Adventures storey is ~25 MP (the Vineyard's are 3780×6580 px). Three rules keep that affordable:
@@ -132,7 +155,14 @@ A Forgotten Adventures storey is ~25 MP (the Vineyard's are 3780×6580 px). Thre
   chunk uploads for the first host run (first view of the Ground Floor plus 16 Second Floor cells, one
   short move), 89 re-uploads after the DM's reload, no upload failures and no 429 on the host's uploads;
   the browsers logged 0–7 HTTP 429s per run on Storage requests, all retried. One of two runs hit
-  transient Storage 502s and took over 60 s to composite the first view; the other took ~12 s.
+  transient Storage 502s and took over 60 s to composite the first view; the other took ~12 s. A run after
+  the wave-4 fixes: 105 uploads for the first host run, 74 after the DM's reload, of which 8 got HTTP 429
+  and were retried after backing off (all chunks arrived); the first view composited in 6.3 s. The two
+  final-verification runs: 105 uploads each for the first host run and 86 / 89 after the reload; the
+  first run's reload hit 10 HTTP 429s ("Too many connections issued to the database", retried, all
+  chunks arrived), the second none; the first view composited in 5.5 / 5.1 s. In the first run the
+  host's end-of-session chunk clean-up failed on the same 429, which is why it now retries (ARCHITECTURE
+  §9).
 
 ## Measurement
 `FrameStats` (engine) exposes fps, p95 frame time, draw calls, triangles, active lights, shadow tiles updated and
@@ -155,28 +185,55 @@ Frame times are measured end to end by `e2e/perf.mjs` (DM console and a player's
 one renderer at a time): the engine's own FrameStats over 5 s with vsync, plus `engine.benchmark(120)` — frames
 rendered back to back, each followed by a 1-pixel `readPixels`, so the time includes the GPU work.
 
-### Measured (2026-09-23, final verification, `e2e/perf.mjs`, 1920×1080, vsync, local mode)
+### Measured (2026-09-23, after the wave-4 fixes, `e2e/perf.mjs`, 1920×1080, vsync, local mode)
 
 GPU frame = back-to-back frames each synchronised with a 1-pixel `readPixels` (median / p95), i.e. the
-headroom against 16.7 ms. The AMD part is an integrated Radeon iGPU (the "mid-range laptop" proxy); NVIDIA is
-a desktop RTX card. Both were driven through Mesa's d3d12 driver under WSL2 (headless Chromium, `scripts/pw.mjs`).
+headroom against 16.7 ms. The AMD part is the 2-CU RDNA2 iGPU of a desktop Ryzen 7 9800X3D (renderer string
+"AMD Radeon(TM) Graphics"), driven through ANGLE → OpenGL → Mesa d3d12 under WSL2. It is below the Iris Xe /
+GTX 1650 reference class of the target, so it is a conservative stand-in for the mid-range laptop rather
+than an exact one. NVIDIA is a desktop RTX 5070 Ti, through the same d3d12 path (headless Chromium,
+`scripts/pw.mjs`).
 
 | GPU · tier | Scene | DM: fps · GPU median / p95 | Player: fps · GPU median / p95 |
 |---|---|---|---|
-| AMD iGPU · medium | The Crooked Lantern (4 levels, 15 lights) | 60 · 12.9–13.0 / 13.4–13.5 ms | 60 · 7.9–8.0 / 8.7–8.8 ms |
-| AMD iGPU · medium | Stress Test (20 lights, 15 tokens) | 60 · 8.2–8.4 / 9.0 ms | 60 · 6.9–7.0 / 7.9–8.0 ms |
-| AMD iGPU · medium | The Vineyard (3 battlemaps, 17 lights) | 60 · 5.7 / 6.8 ms | 60 · 9.6 / 10.4 ms |
-| NVIDIA RTX · ultra | The Crooked Lantern | 60 · 2.2 / 2.8–2.9 ms | 60 · 1.7–1.8 / 2.2–2.3 ms |
-| NVIDIA RTX · ultra | Stress Test | 60 · 2.3–2.4 / 2.8–2.9 ms | 60 · 1.7–1.8 / 2.1–2.2 ms |
-| NVIDIA RTX · ultra | The Vineyard | 60 · 2.1 / 2.5–2.6 ms | 60 · 1.8–1.9 / 2.4–2.5 ms |
+| AMD iGPU · medium | The Crooked Lantern (4 levels, 15 lights) | 60 · 11.6–11.8 / 12.3–12.7 ms | 60 · 7.7–7.8 / 8.4–8.8 ms |
+| AMD iGPU · medium | Stress Test (20 lights, 15 tokens) | 60 · 7.2–7.4 / 8.0–8.3 ms | 60 · 6.8–7.0 / 7.6–8.0 ms |
+| AMD iGPU · medium | The Vineyard (3 battlemaps, 17 lights) | 60 · 5.7–6.0 / 6.4–6.5 ms | 60 · 8.8–9.1 / 9.7–10.1 ms |
+| NVIDIA RTX · ultra | The Crooked Lantern | 60 · 2.2–2.3 / 2.9 ms | 60 · 1.7–1.8 / 2.2–2.3 ms |
+| NVIDIA RTX · ultra | Stress Test | 60 · 2.4–2.5 / 2.9–3.0 ms | 60 · 1.7–1.8 / 2.2–2.3 ms |
+| NVIDIA RTX · ultra | The Vineyard | 60 · 2.0–2.1 / 2.4–2.6 ms | 60 · 1.9 / 2.4 ms |
 
-Ranges are from two runs of the final tree (all 36 checks passed both times). The player's view depends on
-where their token stands: earlier runs, with Wren at another spot, measured the Vineyard player view at
-11.7–13.3 / 12.8–14.6 ms on the iGPU. Compared with the earlier medium tier (context MSAA), the Crooked Lantern
-DM view is ~0.5 ms cheaper and the other iGPU views 0.3–1 ms dearer (the lite post pass's resolve and
-composite). On the same iGPU the
-high tier costs 20.9 / 21.7 ms on the Crooked Lantern DM view (51 fps with vsync), so a mid-range laptop
-depends on the start-up benchmark (run on every route for "Auto") and adaptive quality settling on medium;
-the step-up rule of §7 keeps it there instead of retrying high every few seconds. The Vineyard scene is built from third-party battlemaps by
-`e2e/vineyard-build.mjs` and is not part of the repository.
+Measured on the tree after the wave-4 fixes (the per-cell light mask of §2, tokens opaque at rest): ranges span
+three runs of the full matrix (four for the AMD Crooked Lantern and Vineyard rows), two of them in the final
+verification; all 36 checks passed every time. Against the wave-3 tree (same script and machine), the iGPU's Crooked Lantern DM view is
+~1.1 ms cheaper (12.9–13.0 / 13.4–13.5 ms before), the Stress Test DM view ~1 ms (8.2–8.4 / 9.0 ms), and the
+Vineyard player view 0.5–0.8 ms (9.6 / 10.4 ms), less than the ~1.7 ms the token bisection predicted; the
+NVIDIA rows are unchanged within noise. The player's view depends on where their token stands: earlier
+runs, with Wren at another spot, measured the Vineyard player view at 11.7–13.3 / 12.8–14.6 ms on the iGPU.
+Compared with the earlier medium tier (context MSAA), the lite post pass's resolve and composite made the
+iGPU's views other than the Crooked Lantern DM view 0.3–1 ms dearer. On the same iGPU the high tier costs
+20.9 / 21.7 ms on the Crooked Lantern DM view (51 fps with vsync; measured after wave 3), so a mid-range
+laptop depends on the start-up benchmark (run on every route for "Auto") and adaptive quality settling on
+medium; the step-up rule of §7 keeps it there instead of retrying high every few seconds. The Vineyard scene
+is built from third-party battlemaps by `e2e/vineyard-build.mjs` and is not part of the repository.
+
+### Where the iGPU's medium frame goes
+
+Interleaved A/B bisection on the AMD iGPU (render harness, 1920×1080, minimum of 5–6 `engine.benchmark` runs
+each, 2026-09-23, measured before the lite post pass replaced context MSAA on medium, before the per-cell light
+mask of §2 and before tokens became opaque at rest):
+- Crooked Lantern DM view, 12.6 ms: point lights 6.4 ms, of which 3.2 ms are shadow taps and 1.8 ms the
+  dead-slot loop overhead (15 slots, §2); wide PCF (3×3 for the 8 strongest lights) 0.5 ms; procedural
+  surface detail 2.1 ms; 4× context MSAA ~1.7 ms (now a 2× post target, §7); lower storeys 0.2–0.3 ms
+  (early-Z works: drawing the cellar first costs 1.1 ms more); tokens and overlays ~0.3 ms; sky, sun and
+  ambient ~0.1 ms. Quartering the pixels saves 7.5 ms, so ~10 ms of the frame scales with pixels.
+- Vineyard player view, 11.3–13.3 ms: point lights 5.3 ms (2.5 ms shadow taps), GPU line-of-sight refinement
+  1.5 ms, always-transparent tokens 1.7–2.1 ms (now opaque at rest, §5), surface detail 0.3 ms (the backdrop
+  covers most surfaces).
+
+Of the savings this profile suggested, the per-cell light mask (§2, estimated ~1.5–1.8 ms) and opaque tokens
+(§5, ~1.7 ms on the Vineyard player view) are implemented. Not implemented: wide PCF for the 4 strongest
+lights instead of 8 (~0.3 ms, at a visible cost on the next 4), two noise taps for detail on medium and none
+on caps and faces under ~2 px (≤ 1 ms), and for larger wins a cached per-level shadow-visibility mask for
+walkable surfaces so floors skip the PCF taps.
 

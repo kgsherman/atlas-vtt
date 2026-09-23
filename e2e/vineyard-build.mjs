@@ -125,14 +125,14 @@ try {
     }
   }
   await shot(page, OUT, "01-import-dialog")
-  const t0 = Date.now()
+  const t0 = performance.now()
   await dialog
     .getByRole("button", { name: /Create scene from 3 images/ })
     .click()
   await dialog.waitFor({ state: "detached", timeout: 120000 })
   checks.ok(
     true,
-    `three maps imported, floors and walls traced (${((Date.now() - t0) / 1000).toFixed(1)} s)`
+    `three maps imported, floors and walls traced (${((performance.now() - t0) / 1000).toFixed(1)} s)`
   )
   await sleep(1500)
 

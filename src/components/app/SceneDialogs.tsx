@@ -176,7 +176,9 @@ function SharePanel({ scene, onChanged }: { scene: SceneSummary; onChanged(scene
   }
 
   const copy = async () => {
-    await copyText(url)
+    // copyText reports its own failure (toast) and never rejects; the guard keeps it that way.
+    const ok = await copyText(url).catch(() => false)
+    if (!ok) return
     setCopied(true)
     setTimeout(() => setCopied(false), 1600)
   }
@@ -225,7 +227,7 @@ function SharePanel({ scene, onChanged }: { scene: SceneSummary; onChanged(scene
           <InputGroup>
             <InputGroupInput readOnly value={url} onFocus={(e) => e.currentTarget.select()} className="font-mono text-[0.7rem]" />
             <InputGroupAddon align="inline-end">
-              <InputGroupButton onClick={copy} aria-label="Copy link">
+              <InputGroupButton onClick={() => void copy()} aria-label="Copy link">
                 {copied ? <CheckIcon /> : <CopyIcon />}
                 {copied ? "Copied" : "Copy"}
               </InputGroupButton>

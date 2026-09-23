@@ -4,17 +4,21 @@
  * Tile geometry (shared by the host that cuts tiles and the player that composites them): tile (i, j)
  * is the part of the level's backdrop image covering grid cell (i, j) — world
  * [i·s, (i+1)·s) × [j·s, (j+1)·s) — resampled to `tilePx` × `tilePx` (tilePx = stored px per cell,
- * PlayerBackdrop.tilePx). Parts of the cell outside the image are transparent. A player's per-level
- * canvas covers the backdrop rect at tilePx per cell, so tile (i, j) lands at
- * ((i·s − rect.x) / s · tilePx, (j·s − rect.z) / s · tilePx).
+ * PlayerBackdrop.tilePx from core/session/backdrop `playerBackdrop`, the one rule the filter, the host
+ * tiler and this module use). Parts of the cell outside the image are transparent. The cells a backdrop
+ * covers are core/session/backdrop `backdropCellRange`, again shared by host and player.
  *
  * Host side (sessions): net/host/tiles.ts uploads per-player chunks of explored sub-cells
  * (./chunks.ts). Player side: createTileSource fetches one tile (Supabase: cropped from the player's
  * own chunk once the host announced it; local mode: cropped from the locally stored image — dev only,
  * NOT a security boundary). The player client composites fetched tiles into per-level canvases for
  * Engine.setLevelImage / updateLevelImage (net/player/backdropCanvas.ts).
+ *
+ * Imports stay light (core/session/backdrop has no runtime imports beyond a tiny util): every route
+ * loads this module through the app services.
  */
-import type { Cell, GridSettings, Id, Rect, Scene } from "@/core/scene/types"
+import type { Cell, Id, Rect, Scene } from "@/core/scene/types"
+import { playerBackdrop } from "@/core/session/backdrop"
 
 import type { LocalStore } from "../localStore"
 import type { AtlasClient } from "../supabase"
@@ -28,35 +32,11 @@ import type { BackdropTileSource } from "./types"
 // Geometry (pure)
 // ---------------------------------------------------------------------------
 
-/** Grid cells a backdrop rect overlaps with positive area (clamped to the grid). */
-export function backdropCells(rect: Rect, grid: Pick<GridSettings, "cellSize" | "width" | "depth">): Cell[] {
-  const s = grid.cellSize
-  const eps = 1e-9
-  const i0 = Math.max(0, Math.floor(rect.x / s + eps))
-  const i1 = Math.min(grid.width - 1, Math.ceil((rect.x + rect.w) / s - eps) - 1)
-  const j0 = Math.max(0, Math.floor(rect.z / s + eps))
-  const j1 = Math.min(grid.depth - 1, Math.ceil((rect.z + rect.d) / s - eps) - 1)
-  const out: Cell[] = []
-  for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) out.push({ i, j })
-  return out
-}
-
 /** Source rect (image px, may extend beyond the image) of tile (i, j). */
 export function tileSourceRect(rect: Rect, image: { width: number; height: number }, cellSize: number, cell: Cell): { sx: number; sy: number; sw: number; sh: number } {
   const kx = image.width / rect.w
   const kz = image.height / rect.d
   return { sx: (cell.i * cellSize - rect.x) * kx, sy: (cell.j * cellSize - rect.z) * kz, sw: cellSize * kx, sh: cellSize * kz }
-}
-
-/** Where tile (i, j) goes on a player canvas covering `rect` at `tilePx` per cell (× scale). */
-export function tileDestRect(rect: Rect, cellSize: number, tilePx: number, cell: Cell, scale = 1): { dx: number; dy: number; size: number } {
-  const k = (tilePx / cellSize) * scale
-  return { dx: (cell.i * cellSize - rect.x) * k, dy: (cell.j * cellSize - rect.z) * k, size: tilePx * scale }
-}
-
-/** Canvas size for a backdrop at tilePx per cell (× scale). */
-export function backdropCanvasSize(rect: Rect, cellSize: number, tilePx: number, scale = 1): { width: number; height: number } {
-  return { width: Math.max(1, Math.round((rect.w / cellSize) * tilePx * scale)), height: Math.max(1, Math.round((rect.d / cellSize) * tilePx * scale)) }
 }
 
 // ---------------------------------------------------------------------------
@@ -88,24 +68,6 @@ export async function decodeImageBlob(blob: Blob | null): Promise<ImageBitmap | 
   } catch {
     return null
   }
-}
-
-/** Largest tile edge (core/session/filter MAX_BACKDROP_TILE_PX). */
-const MAX_TILE_PX = 1024
-
-/**
- * Tile edge length (stored px per cell) of a level's backdrop — the same rule as the player filter's
- * backdrop placement (core/session/filter), kept here so this module, which every route loads through
- * the app services, does not pull in the filter and everything it imports.
- */
-export function backdropTilePx(scene: Pick<Scene, "levels" | "assets" | "grid">, levelId: Id): number | null {
-  const level = Object.hasOwn(scene.levels, levelId) ? scene.levels[levelId] : undefined
-  const b = level?.backdrop
-  if (!b || !(b.rect.w > 0 && b.rect.d > 0)) return null
-  const asset = scene.assets && Object.hasOwn(scene.assets, b.assetId) ? scene.assets[b.assetId] : undefined
-  if (!asset) return null
-  const tilePx = Math.round((asset.width * scene.grid.cellSize) / b.rect.w)
-  return tilePx >= 1 ? Math.min(MAX_TILE_PX, tilePx) : null
 }
 
 // ---------------------------------------------------------------------------
@@ -300,15 +262,16 @@ export function createLocalTileSource(store: LocalStore, sessionId: string): Bac
       if (disposed) return null
       const sc = await scene()
       if (!sc || !Object.hasOwn(sc.levels, levelId)) return null
-      const b = sc.levels[levelId].backdrop
-      const tilePx = backdropTilePx(sc, levelId)
-      if (!b || tilePx === null) return null
-      const bmp = await image(sc.id, b.assetId)
+      const assetId = sc.levels[levelId].backdrop?.assetId
+      // The placement and tile size the player was sent (the same rule as the filter's).
+      const pb = playerBackdrop(sc, levelId)
+      if (!assetId || !pb) return null
+      const bmp = await image(sc.id, assetId)
       if (!bmp || disposed) return null
-      const canvas = makeCanvas(tilePx, tilePx)
+      const canvas = makeCanvas(pb.tilePx, pb.tilePx)
       const ctx = context2d(canvas)
       ctx.imageSmoothingQuality = "high"
-      if (!drawTile(ctx, bmp, bmp, b.rect, sc.grid.cellSize, tilePx, cell)) return null
+      if (!drawTile(ctx, bmp, bmp, pb.rect, sc.grid.cellSize, pb.tilePx, cell)) return null
       return createImageBitmap(canvas)
     },
     dispose() {

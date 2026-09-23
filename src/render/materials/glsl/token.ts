@@ -93,7 +93,7 @@ void main() {
   vec3 spec = vec3(0.0);
   float gloss = AT_TIER >= 2 ? 0.25 : 0.0;
   vec3 light = atFill(p, n, false) + atSunTerm(p, n, n, false, v, gloss, spec) * sunGate + atPointLights(p, n, n, true, false, lightsLit, v, gloss, spec);
-  vec3 col = uVisionMode == 0 ? atDmColour(albedo, light, max(lightsLit, atEnvLit(p, 1.0))) : atGradeColour(grade, albedo, light, atDarkvisionAt(p), n);
+  vec3 col = uVisionMode == 0 ? atDmColour(albedo, light, max(lightsLit, atEnvLit(p, 1.0))) : atGradeColour(grade, albedo, light, atSenseWeight(p, 0, AT_DV_FEATHER), n);
   if (grade > 2.5) col += spec * 0.5;
 
   // Rim light in the token's colour (greyscale for the monochrome senses), plus a faint self-lit floor.

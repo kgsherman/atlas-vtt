@@ -107,8 +107,8 @@ function safeAssetStore(mode: AppMode, create: () => AssetStore): AssetStore {
       putTileChunk: fail,
       deleteTileChunks: fail,
       removeSessionTiles: fail,
-      publishTiles: fail,
-      grantTiles: fail,
+      deleteSceneImages: fail,
+      sweepUnreferencedImages: fail,
     }
   }
 }

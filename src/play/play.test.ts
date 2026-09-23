@@ -5,6 +5,7 @@ import {
   add,
   addLevel,
   at,
+  check,
   flatScene,
   tokenAt,
 } from "@/core/movement/test-utils"
@@ -16,11 +17,14 @@ import {
   createGradeMask,
   decodeGrades,
   decodeMask,
+  encodeGrades,
+  encodeMask,
   raiseGrade,
+  setCell,
 } from "@/core/vision"
 import type { PickResult } from "@/render/contracts"
 
-import { climbOptions, stairsUnder } from "./connectors"
+import { climbOptions } from "./connectors"
 import {
   PlayController,
   type CommittedMove,
@@ -31,10 +35,9 @@ import { doorAt, tokensInReach } from "./doors"
 import {
   anchorForPoint,
   formatFeet,
-  legCells,
-  measureDistance,
   pathPoints,
   pathRuler,
+  straightRuler,
 } from "./geometry"
 import {
   isEmptyChange,
@@ -47,7 +50,12 @@ import {
 } from "./host"
 import { resolvePlayKey } from "./keys"
 import { MeasureTool } from "./measure"
-import { MovePlanner } from "./planner"
+import {
+  blindLandingOk,
+  MovePlanner,
+  runsBelowTop,
+  unexploredIn,
+} from "./planner"
 import {
   cycleToken,
   describeSenses,
@@ -101,30 +109,21 @@ describe("geometry", () => {
     })
   })
 
-  it("measures king-move routes with the diagonal rule", () => {
-    expect(legCells({ i: 0, j: 0 }, { i: 2, j: 1 })).toEqual([
-      { i: 1, j: 1 },
-      { i: 2, j: 1 },
-    ])
-    const grid = {
-      cellSize: 5,
-      width: 20,
-      depth: 20,
-      diagonalRule: "5-10-5" as const,
-    }
-    // Two diagonals (5 + 10) and one straight step.
-    expect(
-      measureDistance(grid, [
-        { x: 2.5, z: 2.5 },
-        { x: 17.5, z: 12.5 },
-      ])
-    ).toBe(20)
-    expect(
-      measureDistance({ ...grid, diagonalRule: "5-5-5" }, [
-        { x: 2.5, z: 2.5 },
-        { x: 17.5, z: 12.5 },
-      ])
-    ).toBe(15)
+  it("labels straight rulers with the grid distance (core rulerDistance)", () => {
+    const { scene, levelId } = flatScene()
+    const from = { x: 2.5, z: 2.5 }
+    const to = { x: 17.5, z: 12.5 }
+    const withRule = (diagonalRule: Scene["grid"]["diagonalRule"]) => ({
+      ...scene,
+      grid: { ...scene.grid, diagonalRule },
+    })
+    // Two diagonals (5 + 10 under 5-10-5) and one straight step.
+    expect(straightRuler(withRule("5-10-5"), levelId, from, to).label).toBe(
+      "20 ft"
+    )
+    expect(straightRuler(withRule("5-5-5"), levelId, from, to).label).toBe(
+      "15 ft"
+    )
   })
 
   it("builds rulers along token paths, collapsing in-place level switches", () => {
@@ -278,6 +277,21 @@ describe("MovePlanner", () => {
       expect(plan?.path?.every((st) => st.levelId === levelId)).toBe(true)
     })
 
+    it("goes up from the top step when the view has switched to the upper level", () => {
+      const { scene, levelId, upper } = setup()
+      const t = tokenAt(scene, levelId, { i: 2, j: 4 })
+      const planner = new MovePlanner()
+      planner.setScene(scene)
+      const plan = planner.plan(t.id, { i: 2, j: 5 }, upper.id)
+      expect(plan?.path).toEqual([at(2, 4, levelId), at(2, 5, upper.id)])
+      expect(runsBelowTop(scene, [upper.id], { i: 2, j: 5 }, 1)).toEqual([])
+      expect(
+        runsBelowTop(scene, [upper.id, levelId], { i: 2, j: 5 }, 1).map(
+          (r) => r.lower
+        )
+      ).toEqual([{ i: 2, j: 4 }])
+    })
+
     it("falls back to the lower level when the landing is walled off", () => {
       const { scene, levelId, upper } = setup()
       add(scene, createWall(upper.id, { x: 0, z: 25 }, { x: 50, z: 25 }))
@@ -288,6 +302,142 @@ describe("MovePlanner", () => {
       expect(plan?.path).not.toBeNull()
       expect(plan?.target.levelId).toBe(levelId)
       expect(plan?.path?.every((st) => st.levelId === levelId)).toBe(true)
+    })
+  })
+
+  describe("blind landings (upper storey the player has not explored)", () => {
+    // The player's scene: the upper level is a stub without floor (nothing explored up there).
+    const setup = (lowerBeyond = true) => {
+      const { scene, levelId } = flatScene(10, 10)
+      if (!lowerBeyond) {
+        // A stairwell against a wall: no lower floor beyond the top edge (z ≥ 25).
+        const floorId = Object.keys(scene.objects)[0]
+        const f = scene.objects[floorId]
+        if (f.type === "floor") f.rect = { ...f.rect, d: 25 }
+      }
+      const upper = addLevel(scene, { elevation: 10 }, false)
+      add(
+        scene,
+        createConnector(levelId, upper.id, { x: 10, z: 5, w: 5, d: 20 }, 0)
+      )
+      return { scene, levelId, upper }
+    }
+    const nothingUpstairs =
+      (upperId: Id) =>
+      (levelId: Id): boolean =>
+        levelId === upperId
+
+    it("plans up the run and across the top edge; the host validates the landing", () => {
+      const { scene, levelId, upper } = setup()
+      const t = tokenAt(scene, levelId, { i: 2, j: 0 })
+      const planner = new MovePlanner({
+        unexplored: nothingUpstairs(upper.id),
+      })
+      planner.setScene(scene)
+      const plan = planner.plan(t.id, { i: 2, j: 5 }, levelId)
+      expect(plan?.target).toEqual(at(2, 5, upper.id))
+      expect(plan?.path?.[0]).toEqual(at(2, 0, levelId))
+      expect(plan?.path?.slice(-2)).toEqual([
+        at(2, 4, levelId),
+        at(2, 5, upper.id),
+      ])
+      expect(plan?.distance).toBe(25)
+      // From the top step: just the crossing.
+      const top = tokenAt(scene, levelId, { i: 2, j: 4 })
+      expect(planner.plan(top.id, { i: 2, j: 5 }, levelId)?.path).toEqual([
+        at(2, 4, levelId),
+        at(2, 5, upper.id),
+      ])
+    })
+
+    it("climbs even without lower floor beyond the top edge", () => {
+      const { scene, levelId, upper } = setup(false)
+      const t = tokenAt(scene, levelId, { i: 2, j: 0 })
+      const blind = new MovePlanner({ unexplored: nothingUpstairs(upper.id) })
+      blind.setScene(scene)
+      expect(blind.plan(t.id, { i: 2, j: 5 }, levelId)?.target.levelId).toBe(
+        upper.id
+      )
+      // Without blind landings (the DM's complete scene) there is no floor there.
+      const dm = new MovePlanner()
+      dm.setScene(scene)
+      expect(dm.plan(t.id, { i: 2, j: 5 }, levelId)?.reason).toBe("no-ground")
+    })
+
+    it("stays on known ground when the landing was explored, or blind landings are off", () => {
+      const { scene, levelId } = setup()
+      const t = tokenAt(scene, levelId, { i: 2, j: 0 })
+      for (const planner of [
+        new MovePlanner(),
+        new MovePlanner({ unexplored: () => false }),
+      ]) {
+        planner.setScene(scene)
+        const plan = planner.plan(t.id, { i: 2, j: 5 }, levelId)
+        expect(plan?.target.levelId).toBe(levelId)
+        expect(plan?.path?.every((st) => st.levelId === levelId)).toBe(true)
+      }
+    })
+
+    it("does not cross a known wall on the landing", () => {
+      const { scene, levelId, upper } = setup()
+      add(scene, createWall(upper.id, { x: 0, z: 25 }, { x: 50, z: 25 }))
+      const t = tokenAt(scene, levelId, { i: 2, j: 0 })
+      const planner = new MovePlanner({
+        unexplored: nothingUpstairs(upper.id),
+      })
+      planner.setScene(scene)
+      const plan = planner.plan(t.id, { i: 2, j: 5 }, levelId)
+      expect(plan?.target.levelId).toBe(levelId)
+      expect(plan?.path?.every((st) => st.levelId === levelId)).toBe(true)
+    })
+
+    it("accepts only a missing landing floor as a client-side fault (climb buttons)", () => {
+      const { scene, levelId, upper } = setup()
+      const t = tokenAt(scene, levelId, { i: 2, j: 4 })
+      const [up] = climbOptions(scene, t)
+      expect(up.direction).toBe("up")
+      const v = check(scene, t, up.path)
+      expect(v).toMatchObject({ ok: false, reason: "no-ground", failedAt: 1 })
+      expect(blindLandingOk(v, up.path, 1, nothingUpstairs(upper.id))).toBe(
+        true
+      )
+      expect(blindLandingOk(v, up.path, 1, () => false)).toBe(false)
+      expect(blindLandingOk(v, up.path, 1)).toBe(false)
+      // A same-level step onto missing floor is never blind.
+      const flat = [at(2, 4, levelId), at(3, 4, levelId)]
+      expect(
+        blindLandingOk(
+          {
+            ok: false,
+            reason: "no-ground",
+            failedAt: 1,
+            legalSteps: 0,
+            distance: 0,
+          },
+          flat,
+          1,
+          () => true
+        )
+      ).toBe(false)
+    })
+
+    it("reads the player's explored masks", () => {
+      const { levelId } = flatScene(4, 4)
+      const explored = createCellMask(4, 4)
+      setCell(explored, 1 * 4 + 2)
+      const view = {
+        masks: {
+          [levelId]: {
+            perception: encodeGrades(createGradeMask(4, 4)),
+            explored: encodeMask(explored),
+            sunlit: encodeMask(createCellMask(4, 4)),
+          },
+        },
+      }
+      expect(unexploredIn(view, levelId, { i: 2, j: 1 })).toBe(false)
+      expect(unexploredIn(view, levelId, { i: 1, j: 1 })).toBe(true)
+      expect(unexploredIn(view, "other", { i: 2, j: 1 })).toBe(true)
+      expect(unexploredIn(null, levelId, { i: 2, j: 1 })).toBe(true)
     })
   })
 
@@ -422,27 +572,6 @@ describe("connectors", () => {
       const opts = climbOptions(scene, tokenAt(scene, levelId, { i: 4, j: 4 }))
       expect(opts.map((o) => o.style)).toEqual(["ladder"])
     })
-  })
-
-  it("finds stairs under a token", () => {
-    const { scene, levelId } = flatScene(10, 10)
-    const upper = addLevel(scene, { elevation: 10 })
-    add(
-      scene,
-      createConnector(
-        levelId,
-        upper.id,
-        { x: 10, z: 10, w: 10, d: 5 },
-        1,
-        "stairs"
-      )
-    )
-    expect(
-      stairsUnder(scene, tokenAt(scene, levelId, { i: 3, j: 2 }))
-    ).toHaveLength(1)
-    expect(
-      stairsUnder(scene, tokenAt(scene, levelId, { i: 5, j: 5 }))
-    ).toHaveLength(0)
   })
 })
 

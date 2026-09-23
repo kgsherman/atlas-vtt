@@ -17,9 +17,10 @@ import type { OverlayState, RulerOverlay, ToolPreview, ViewState } from "../cont
 import type { LevelPlanEntry } from "../engine/levelPlan"
 import { LAYER } from "../internal"
 import { GridOverlay } from "./grid"
-import { buildOutlines, disposeOutlines, type ObjectMeshRef } from "./highlight"
+import { buildOutlines, disposeOutlines, type ObjectMeshRef, type OutlineMesh } from "./highlight"
 import { TextLabel } from "./label"
 import { buildToolPreview, disposePreview } from "./previews"
+import { aaLineGeometry, createAALineMaterial, polylinePairs } from "../materials/aaLineMaterial"
 import { createEdgeAAMaterial, edgeGeometry } from "../materials/edgeAAMaterial"
 import { circlePoints, dashPolyline, discEdgeGeometry, mergeEdgeGeometry, pathStepPoints, ribbonEdgeGeometry, ringEdgeGeometry } from "./ribbon"
 
@@ -47,7 +48,7 @@ export interface OverlayHost {
   fade(): { x: number; z: number; radius: number }
 }
 
-type Outline = { line: THREE.LineSegments; attachTo: THREE.Object3D | null }
+type Outline = { line: OutlineMesh; attachTo: THREE.Object3D | null }
 
 /** Opacity of a light's bright / dim radius rings (editor helpers): faint unless selected, fainter when off. */
 export function lightRingOpacity(on: boolean, selected: boolean): [number, number] {
@@ -55,9 +56,6 @@ export function lightRingOpacity(on: boolean, selected: boolean): [number, numbe
   return selected ? [0.9 * k, 0.55 * k] : [0.35 * k, 0.16 * k]
 }
 
-function overlayLine(color: string, opacity = 1): THREE.LineBasicMaterial {
-  return new THREE.LineBasicMaterial({ color, transparent: true, opacity, depthTest: false, depthWrite: false, toneMapped: false })
-}
 
 function overlayFill(color: string, opacity = 1): THREE.MeshBasicMaterial {
   return new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthTest: false, depthWrite: false, side: THREE.DoubleSide, toneMapped: false })
@@ -81,14 +79,17 @@ export class OverlayManager {
   private readonly host: OverlayHost
   private state: OverlayState = { selectedIds: [], hoveredId: null, preview: null, ruler: null, pendingMoves: {}, dragGhosts: {} }
 
-  private readonly selectMat = overlayLine(SELECT_COLOR, 0.95)
-  private readonly hoverMat = overlayLine(HOVER_COLOR, 0.6)
-  private readonly hiddenMat = overlayLine(HIDDEN_COLOR, 0.7)
-  // Ribbons, dots and rings fade their own edges (the canvas has no MSAA; materials/edgeAAMaterial).
+  // Outlines and rings are anti-aliased screen-space lines, ribbons, dots and end rings fade their own
+  // edges (the canvas has no MSAA; materials/aaLineMaterial, materials/edgeAAMaterial).
+  private readonly selectMat = createAALineMaterial(SELECT_COLOR, { opacity: 0.95, width: 2 })
+  private readonly hoverMat = createAALineMaterial(HOVER_COLOR, { opacity: 0.6, width: 1.5 })
+  private readonly hiddenMat = createAALineMaterial(HIDDEN_COLOR, { opacity: 0.7, width: 1.5 })
   private readonly rulerMat = createEdgeAAMaterial(RULER_COLOR, { opacity: 0.95 })
   private readonly rulerDotMat = createEdgeAAMaterial("#fafafa", { opacity: 0.95 })
   private readonly pendingMat = createEdgeAAMaterial(PENDING_COLOR, { opacity: 0.85 })
   private readonly arrowMat = overlayFill(ARROW_COLOR, 0.55)
+  // Anti-aliased rim over the arrow's (aliased) fill edge.
+  private readonly arrowLineMat = createAALineMaterial(ARROW_COLOR, { opacity: 0.75, width: 1 })
 
   private outlines: Outline[] = []
   private outlinesDirty = true
@@ -202,7 +203,7 @@ export class OverlayManager {
     this.outlines = []
     const scene = this.host.scene()
     if (!scene) return
-    const add = (id: Id, mat: THREE.LineBasicMaterial) => {
+    const add = (id: Id, mat: THREE.Material) => {
       if (!Object.hasOwn(scene.objects, id)) return
       for (const o of buildOutlines(this.host.objectRefs(id), mat)) {
         ;(o.attachTo ?? this.root).add(o.line)
@@ -339,8 +340,8 @@ export class OverlayManager {
           [o.dimRadius, dim],
         ] as const) {
           if (!(radius > 0)) continue
-          const g = new THREE.BufferGeometry().setFromPoints(circlePoints(p.x, p.z, radius, 72, y).map((q) => new THREE.Vector3(q.x, q.y, q.z)))
-          const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color, transparent: true, opacity, depthTest: false, depthWrite: false, toneMapped: false }))
+          const g = aaLineGeometry(polylinePairs(circlePoints(p.x, p.z, radius, 72, y)))
+          const line = new THREE.Mesh(g, createAALineMaterial(color, { opacity, width: 1.5 }))
           line.userData.ownMaterial = true
           root.add(line)
         }
@@ -392,6 +393,8 @@ export class OverlayManager {
     g.applyMatrix4(m)
     const mesh = new THREE.Mesh(g, this.arrowMat)
     mesh.position.set(centre.x, y + 0.3, centre.z)
+    const rim = shape.getPoints().map((q) => new THREE.Vector3(q.x, q.y, 0).applyMatrix4(m))
+    mesh.add(new THREE.Mesh(aaLineGeometry(polylinePairs(rim, true)), this.arrowLineMat))
     return mesh
   }
 
@@ -415,6 +418,6 @@ export class OverlayManager {
       this.rulerLabel.dispose()
     }
     this.grid.dispose()
-    for (const m of [this.selectMat, this.hoverMat, this.hiddenMat, this.rulerMat, this.rulerDotMat, this.pendingMat, this.arrowMat]) m.dispose()
+    for (const m of [this.selectMat, this.hoverMat, this.hiddenMat, this.rulerMat, this.rulerDotMat, this.pendingMat, this.arrowMat, this.arrowLineMat]) m.dispose()
   }
 }

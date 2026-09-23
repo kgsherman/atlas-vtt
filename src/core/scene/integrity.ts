@@ -5,7 +5,7 @@
 import { MIN_WALL_LENGTH, PROP_LIBRARY } from "./defaults"
 import { newId } from "./factory"
 import {
-  groundHeightAt,
+  GroundIndex,
   lightLevelId,
   lightWorldPosition,
   openingSegment,
@@ -92,7 +92,9 @@ export function deleteWithDependents(draft: Scene, ids: Id[]): void {
     if ((o.type === "door" || o.type === "window") && objectIds.has(o.wallId)) objectIds.add(o.id)
   }
 
-  // Attached lights depend on their carrier, not on their stored levelId.
+  // Attached lights depend on their carrier, not on their stored levelId. Ground is read through an
+  // index per phase (before and after the deletions), not a scan of every object per light.
+  const groundBefore = lazyGround(draft)
   const detach: { id: Id; levelId: Id; world: { x: number; y: number; z: number } }[] = []
   const rehome: { id: Id; levelId: Id }[] = []
   for (const o of objects) {
@@ -105,7 +107,7 @@ export function deleteWithDependents(draft: Scene, ids: Id[]): void {
       } else {
         objectIds.delete(o.id)
         // Resolve against the scene BEFORE anything is removed.
-        detach.push({ id: o.id, levelId: carrier.levelId, world: lightWorldPosition(draft, o) })
+        detach.push({ id: o.id, levelId: carrier.levelId, world: lightWorldPosition(draft, o, groundBefore()) })
       }
     } else {
       objectIds.delete(o.id)
@@ -121,12 +123,14 @@ export function deleteWithDependents(draft: Scene, ids: Id[]): void {
     const light = draft.objects[id] as LightObject
     light.levelId = levelId
   }
-  // Ground is evaluated on the final document so lightWorldPosition() reproduces the old world point.
+  // Ground is evaluated on the final document so lightWorldPosition() reproduces the old world point
+  // (editing lights below changes nothing the index depends on: connectors, floors, levels, grid).
+  const groundAfter = lazyGround(draft)
   for (const { id, levelId, world } of detach) {
     const light = draft.objects[id] as LightObject
     light.attachedTokenId = null
     light.levelId = levelId
-    light.position = { x: world.x, y: world.y - groundHeightAt(draft, levelId, world), z: world.z }
+    light.position = { x: world.x, y: world.y - groundAfter().groundHeightAt(levelId, world), z: world.z }
   }
 }
 
@@ -156,8 +160,11 @@ function unionRects(a: Rect | null, b: Rect | null): Rect | null {
   return { x: x0, z: z0, w: Math.max(a.x + a.w, b.x + b.w) - x0, d: Math.max(a.z + a.d, b.z + b.d) - z0 }
 }
 
-/** XZ bounding rect of an object's footprint (lights: their resolved point). null if unresolvable. */
-export function objectBounds(scene: Scene, o: SceneObject): Rect | null {
+/**
+ * XZ bounding rect of an object's footprint (lights: their resolved point). null if unresolvable.
+ * `ground`: the scene's GroundIndex, for callers bounding many lights (see lightWorldPosition).
+ */
+export function objectBounds(scene: Scene, o: SceneObject, ground?: GroundIndex): Rect | null {
   switch (o.type) {
     case "floor":
     case "connector":
@@ -184,18 +191,34 @@ export function objectBounds(scene: Scene, o: SceneObject): Rect | null {
       return { x: o.position.x - ex, z: o.position.z - ez, w: 2 * ex, d: 2 * ez }
     }
     case "light": {
-      const p = lightWorldPosition(scene, o)
+      const p = lightWorldPosition(scene, o, ground)
       return { x: p.x, z: p.z, w: 0, d: 0 }
     }
   }
 }
 
+/**
+ * A GroundIndex of `scene` built on first use, for one call that reads (never changes) the scene:
+ * valid on drafts too, since it is dropped when the call returns.
+ */
+function lazyGround(scene: Scene): () => GroundIndex {
+  let index: GroundIndex | null = null
+  return () => (index ??= new GroundIndex(scene))
+}
+
 /** Union of the footprints of the given objects/tokens (unknown ids ignored); null if none. */
 export function selectionBounds(scene: Scene, ids: Id[]): Rect | null {
+  return boundsOf(scene, ids, lazyGround(scene))
+}
+
+/** selectionBounds; lights resolve their ground through `ground` (one index, not a scan of every object per light). */
+function boundsOf(scene: Scene, ids: Id[], ground: () => GroundIndex): Rect | null {
   let out: Rect | null = null
   for (const id of ids) {
-    if (hasOwn(scene.objects, id)) out = unionRects(out, objectBounds(scene, scene.objects[id]))
-    else if (hasOwn(scene.tokens, id)) out = unionRects(out, tokenRect(scene, scene.tokens[id]))
+    if (hasOwn(scene.objects, id)) {
+      const o = scene.objects[id]
+      out = unionRects(out, objectBounds(scene, o, o.type === "light" ? ground() : undefined))
+    } else if (hasOwn(scene.tokens, id)) out = unionRects(out, tokenRect(scene, scene.tokens[id]))
   }
   return out
 }
@@ -233,6 +256,7 @@ export function copySelection(scene: Scene, ids: Id[], opts: { sourceLevelId?: I
   }
 
   const copiedTokens = new Map(tokens.map((t) => [t.id, t]))
+  const ground = lazyGround(scene)
   for (const o of objects) {
     if (o.type !== "light" || !o.attachedTokenId) continue
     const carrier = copiedTokens.get(o.attachedTokenId)
@@ -244,9 +268,9 @@ export function copySelection(scene: Scene, ids: Id[], opts: { sourceLevelId?: I
     const src = scene.objects[o.id] as LightObject
     if (hasOwn(scene.tokens, o.attachedTokenId)) {
       const levelId = lightLevelId(scene, src)
-      const w = lightWorldPosition(scene, src)
+      const w = lightWorldPosition(scene, src, ground())
       o.levelId = levelId
-      o.position = { x: w.x, y: w.y - groundHeightAt(scene, levelId, w), z: w.z }
+      o.position = { x: w.x, y: w.y - ground().groundHeightAt(levelId, w), z: w.z }
     }
     o.attachedTokenId = null
   }
@@ -289,7 +313,7 @@ export function copySelection(scene: Scene, ids: Id[], opts: { sourceLevelId?: I
     openingCenters[o.id] = { x: (seg.a.x + seg.b.x) / 2, z: (seg.a.z + seg.b.z) / 2 }
   }
 
-  const bounds = selectionBounds(scene, [...objects.map((o) => o.id), ...tokens.map((t) => t.id)])
+  const bounds = boundsOf(scene, [...objects.map((o) => o.id), ...tokens.map((t) => t.id)], ground)
   const origin = bounds ? { x: bounds.x + bounds.w / 2, z: bounds.z + bounds.d / 2 } : { x: 0, z: 0 }
   return { kind: "atlas-clipboard", schemaVersion: scene.schemaVersion, sourceLevelId, origin, objects, tokens, levelOffsets, openingCenters }
 }

@@ -34,10 +34,10 @@ export type VisionRequest =
   | { id: number; op: "update"; tag: number; change: VisionChange; scene?: SceneLike; diff?: SceneDiff }
   | { id: number; op: "compute"; viewers: Id[] }
   /**
-   * Visibility of `viewerSets` (one result per set) on the current revision with `diff` applied (or on
-   * `scene`, in-thread), without adopting it. `change` lists what the diff changes.
+   * Visibility of `viewerSets` (one result per set) on the current revision with `diff` applied, without
+   * adopting it. `change` lists what the diff changes (the engine is told exactly that, both ways).
    */
-  | { id: number; op: "probe"; tokenId: Id; change: VisionChange; diff?: SceneDiff; scene?: SceneLike; viewerSets: Id[][] }
+  | { id: number; op: "probe"; tokenId: Id; change: VisionChange; diff: SceneDiff; viewerSets: Id[][] }
 
 export type VisionResponse =
   | { id: number; ok: true; tag: number; ms: number; result?: VisibilityResult; results?: VisibilityResult[] }
@@ -174,7 +174,7 @@ export class VisionWorkerCore {
           if (!this.engine || !this.scene) throw new Error("probe before setScene")
           const engine = this.engine
           const saved = this.scene
-          const step = req.scene ? visionScene(req.scene) : applySceneDiff(saved, req.diff ?? {})
+          const step = applySceneDiff(saved, req.diff)
           const change: VisionChange = { ...req.change }
           if (!change.tokens?.includes(req.tokenId)) change.tokens = [...(change.tokens ?? []), req.tokenId]
           engine.update(step, change)
