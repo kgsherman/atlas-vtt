@@ -355,8 +355,11 @@ vec3 atPointLights(vec3 p, vec3 n, vec3 nb, bool shadows, bool cap, out float li
   float specPow = 12.0 + 180.0 * gloss * gloss;
   // Slots whose dim disc misses this cell skip the uniform fetches (the same result as d >= dim below).
   uint mask = atLightMaskAt(p);
-  for (int i = 0; i < AT_MAX_LIGHTS; i++) {
-    if (i >= uLightCount) break;
+  // A uniform bound, not AT_MAX_LIGHTS + break: D3D's HLSL compiler (ANGLE on Windows) may unroll a
+  // constant-bound loop, 32 copies of both shadow filters. With the constant bound, each world program
+  // took ~2.4 s to compile on Firefox / D3D11 (serial: no parallel compile, see engine.ts).
+  int count = min(uLightCount, AT_MAX_LIGHTS);
+  for (int i = 0; i < count; i++) {
     if (((mask >> uint(i)) & 1u) == 0u) continue;
     vec4 l0 = uLights[i * 4];
     vec3 toL = l0.xyz - p;
@@ -491,8 +494,7 @@ vec4 atMaskSample(vec2 xz, int layer, out float grade) {
 int atNearestViewer(vec3 p) {
   int best = -1;
   float bestD = 1e30;
-  for (int v = 0; v < AT_MAX_VIEWERS; v++) {
-    if (v >= uViewerCount) break;
+  for (int v = 0; v < min(uViewerCount, AT_MAX_VIEWERS); v++) {
     vec3 dv = uViewers[v * 3].xyz - p;
     float d2 = dot(dv, dv);
     if (d2 < bestD) {
@@ -526,8 +528,7 @@ float atEnvLit(vec3 p, float sunGate) {
 
 // Some viewer with blindsight has p within range.
 bool atBlindsightAt(vec3 p) {
-  for (int v = 0; v < AT_MAX_VIEWERS; v++) {
-    if (v >= uViewerCount) break;
+  for (int v = 0; v < min(uViewerCount, AT_MAX_VIEWERS); v++) {
     float r = uViewers[v * 3 + 1].w;
     if (r > 0.0 && distance(uViewers[v * 3].xyz, p) <= r) return true;
   }
@@ -536,8 +537,7 @@ bool atBlindsightAt(vec3 p) {
 
 // Some viewer with darkvision has p within range ("dim is treated as bright").
 bool atDarkvisionAt(vec3 p) {
-  for (int v = 0; v < AT_MAX_VIEWERS; v++) {
-    if (v >= uViewerCount) break;
+  for (int v = 0; v < min(uViewerCount, AT_MAX_VIEWERS); v++) {
     vec4 v0 = uViewers[v * 3];
     if (v0.w > 0.0 && distance(v0.xyz, p) <= v0.w) return true;
   }
@@ -548,8 +548,7 @@ bool atDarkvisionAt(vec3 p) {
 // the eye, like the host's samples). slot 0 = darkvision, 1 = blindsight.
 float atSenseWeight(vec3 p, int slot, float edge) {
   float best = 0.0;
-  for (int v = 0; v < AT_MAX_VIEWERS; v++) {
-    if (v >= uViewerCount) break;
+  for (int v = 0; v < min(uViewerCount, AT_MAX_VIEWERS); v++) {
     float r = uViewers[v * 3 + slot].w;
     if (r > 0.0) best = max(best, 1.0 - atSmoothstepSafe(r - edge, r, distance(uViewers[v * 3].xyz, p)));
   }
@@ -559,8 +558,7 @@ float atSenseWeight(vec3 p, int slot, float edge) {
 // p lies over some viewer's own footprint cells, which it perceives by touch (grade >= 1) whatever its
 // senses (uViewers[3v + 2].w: half-extent of the square around the eye that covers them).
 bool atTouched(vec3 p) {
-  for (int v = 0; v < AT_MAX_VIEWERS; v++) {
-    if (v >= uViewerCount) break;
+  for (int v = 0; v < min(uViewerCount, AT_MAX_VIEWERS); v++) {
     vec2 d = abs(p.xz - uViewers[v * 3].xz);
     if (max(d.x, d.y) <= uViewers[v * 3 + 2].w) return true;
   }
@@ -570,8 +568,7 @@ bool atTouched(vec3 p) {
 // GPU line of sight can veto perception right now: refinement on and every viewer has a captured tile.
 bool atLosReady() {
   if (uGpuRefine < 0.5 || uViewerCount <= 0) return false;
-  for (int v = 0; v < AT_MAX_VIEWERS; v++) {
-    if (v >= uViewerCount) break;
+  for (int v = 0; v < min(uViewerCount, AT_MAX_VIEWERS); v++) {
     if (uViewers[v * 3 + 1].z < 0.5) return false;
   }
   return true;
@@ -615,8 +612,7 @@ vec4 atSurfaceMask(vec3 p, vec3 n, float surf, int layer, out float grade) {
 float atViewerLos(vec3 p, vec3 n, float surf) {
   if (uGpuRefine < 0.5 || uViewerCount <= 0) return 1.0;
   float best = 0.0;
-  for (int v = 0; v < AT_MAX_VIEWERS; v++) {
-    if (v >= uViewerCount) break;
+  for (int v = 0; v < min(uViewerCount, AT_MAX_VIEWERS); v++) {
     vec4 v1 = uViewers[v * 3 + 1];
     if (v1.z < 0.5) return 1.0;
     vec3 eye = uViewers[v * 3 + 2].xyz;

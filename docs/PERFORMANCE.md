@@ -23,7 +23,11 @@ is pre-compiled with `renderer.compileAsync` at load, and the engine draws nothi
 have landed (ARCHITECTURE §4.1 start-up hold): the first frame used to force every link synchronously (~2 s of
 blocked main thread on the Vineyard, ultra, RTX 5070 Ti through WSL; 1.1 s were still left when only the
 material variants were waited for, 0.4 s with the live scene compiled too, none once the capture programs
-and the first-use reflection were covered).
+and the first-use reflection were covered). The light and viewer loops take a uniform bound
+(`min(uLightCount, AT_MAX_LIGHTS)`), not the array size plus `break`: with a constant bound D3D's HLSL
+compiler (ANGLE on Windows) is free to unroll them, 32 copies of both shadow filters, and each lit world
+program took ~2.4 s to compile on Firefox / D3D11 (the token program ~0.9 s; measured with `?debugShaders=1`).
+Runtime cost of the dynamic bound: within noise (alternating A/B, NVIDIA ultra, Crooked Lantern and Stress Test).
 
 ### 2. Light culling
 Every frame the CPU culls lights: off/hidden, dim sphere outside the camera frustum, or on a level hidden by the
