@@ -109,6 +109,8 @@ async function ensureSessionOnce(client: AtlasClient): Promise<AtlasIdentity> {
     if (res.error) throw mapAuthError(res.error)
     user = res.data.user
     if (!user) throw new NetError("unknown", "anonymous sign-in returned no user")
+  } else if (user.is_anonymous) {
+    user = await refreshIfLinked(client, user)
   }
   return {
     userId: user.id,
@@ -117,6 +119,19 @@ async function ensureSessionOnce(client: AtlasClient): Promise<AtlasIdentity> {
     mode: "supabase",
     ...withAccount(accountFromUser(user)),
   }
+}
+
+/**
+ * A stored guest session may be stale: the server links the identity before redirecting back, so a
+ * link whose callback never completed here (or finished in another tab) leaves a permanent user behind
+ * a token that still says anonymous. Ask the server, and refresh the token so its claims match.
+ * Failures keep the stored user.
+ */
+async function refreshIfLinked(client: AtlasClient, user: User): Promise<User> {
+  const fresh = await client.auth.getUser()
+  if (fresh.error || !fresh.data.user || fresh.data.user.is_anonymous) return user
+  const refreshed = await client.auth.refreshSession()
+  return refreshed.data.user ?? fresh.data.user
 }
 
 function withAccount(account: AtlasAccount | undefined): { account?: AtlasAccount } {

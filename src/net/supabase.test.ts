@@ -1,9 +1,9 @@
 import { AuthApiError, AuthRetryableFetchError } from "@supabase/supabase-js"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 
-import { accountFromUser, localIdentity, mapAuthError, normalizeDisplayName, parseAuthCallback, setLocalDisplayName } from "./auth"
+import { accountFromUser, ensureSession, localIdentity, mapAuthError, normalizeDisplayName, parseAuthCallback, setLocalDisplayName } from "./auth"
 import { readSupabaseEnv } from "./env"
-import { describeNetError, NetError, SERVER_ERROR_CODES, toNetError, unwrap } from "./supabase"
+import { describeNetError, NetError, SERVER_ERROR_CODES, toNetError, unwrap, type AtlasClient } from "./supabase"
 
 describe("readSupabaseEnv", () => {
   const url = "https://iuhhuurcoaefoshuhaxe.supabase.co"
@@ -131,5 +131,50 @@ describe("permanent accounts", () => {
     expect(accountFromUser({ ...discord, is_anonymous: true })).toBeUndefined()
     const plainHttp = { ...discord, identities: [{ provider: "discord", identity_data: { avatar_url: "http://x.test/a.png" } }] }
     expect(accountFromUser(plainHttp)).toEqual({ provider: "discord", name: "Meta Name", avatarUrl: null })
+  })
+
+  describe("ensureSession with a stored guest session", () => {
+    const guest = { id: "u1", is_anonymous: true, user_metadata: {}, identities: [] }
+    const linked = {
+      id: "u1",
+      is_anonymous: false,
+      user_metadata: {},
+      identities: [{ provider: "discord", identity_data: { full_name: "Snoe", avatar_url: "https://cdn.discordapp.com/a.png" } }],
+    }
+
+    function fakeClient(serverUser: object | null, serverError: unknown = null) {
+      const refreshSession = vi.fn(async () => ({ data: { user: serverUser }, error: null }))
+      const profileQuery = { select: () => profileQuery, eq: () => profileQuery, maybeSingle: async () => ({ data: { display_name: "snoe" }, error: null }) }
+      const client = {
+        auth: {
+          getSession: async () => ({ data: { session: { user: guest } }, error: null }),
+          getUser: async () => ({ data: { user: serverUser }, error: serverError }),
+          refreshSession,
+          signInAnonymously: vi.fn(),
+        },
+        from: () => profileQuery,
+      }
+      return { client: client as unknown as AtlasClient, refreshSession }
+    }
+
+    it("picks up a link the server made but this browser never finished", async () => {
+      const { client, refreshSession } = fakeClient(linked)
+      const identity = await ensureSession(client)
+      expect(refreshSession).toHaveBeenCalledOnce()
+      expect(identity).toMatchObject({ userId: "u1", isAnonymous: false, displayName: "snoe", account: { provider: "discord", name: "Snoe" } })
+    })
+
+    it("keeps a real guest (and the stored user when the server can't be reached) without refreshing", async () => {
+      for (const [serverUser, serverError] of [
+        [guest, null],
+        [null, { message: "Failed to fetch" }],
+      ] as const) {
+        const { client, refreshSession } = fakeClient(serverUser, serverError)
+        const identity = await ensureSession(client)
+        expect(refreshSession).not.toHaveBeenCalled()
+        expect(identity.isAnonymous).toBe(true)
+        expect(identity.account).toBeUndefined()
+      }
+    })
   })
 })
