@@ -551,6 +551,7 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
       movementLocked: movementLockedFor(state, userId),
       sharedVision: state.sharedVision,
       enforceSpeed: state.enforceSpeed,
+      ...(state.freeMovement ? { freeMovement: true } : {}),
     },
   }
   if (Object.keys(backdrops).length > 0) view.backdrops = backdrops

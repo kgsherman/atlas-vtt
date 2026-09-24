@@ -213,6 +213,15 @@ describe("origin (the library scene the live map comes from)", () => {
   })
 })
 
+describe("freeMovement (players may move off the grid)", () => {
+  it("round-trips; states saved before the field still load", () => {
+    const state = playedState()
+    expect("freeMovement" in state).toBe(false)
+    for (const freeMovement of [true, false]) expect(parseGameStateJson(serializeGameState({ ...state, freeMovement }))?.freeMovement).toBe(freeMovement)
+    expect(parseGameState({ ...clone(state), freeMovement: "yes" })).toBeNull()
+  })
+})
+
 describe("freeAssets (the free asset categories a game loads)", () => {
   it("round-trips; states saved before the field still load; unknown categories are dropped", () => {
     const state = playedState()

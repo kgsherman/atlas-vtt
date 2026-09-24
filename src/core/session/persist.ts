@@ -138,6 +138,8 @@ const gameStateShape = z.strictObject({
     .optional(),
   // Optional too. Unknown categories (from a newer app) are dropped, not refused.
   freeAssets: z.array(z.string().max(64)).max(16).optional(),
+  // Optional too (absent: players are forced to the grid).
+  freeMovement: z.boolean().optional(),
 })
 
 export type ParseGameStateResult = { ok: true; state: GameState } | { ok: false; issues: string[] }
@@ -240,6 +242,7 @@ export function parseGameStateDetailed(json: unknown): ParseGameStateResult {
       seq: raw.seq,
       ...(raw.origin !== undefined ? { origin: raw.origin && { sceneId: raw.origin.sceneId, version: raw.origin.version, dirty: raw.origin.dirty } } : {}),
       ...(raw.freeAssets !== undefined ? { freeAssets: normalizeFreeAssetCategories(raw.freeAssets) } : {}),
+      ...(raw.freeMovement !== undefined ? { freeMovement: raw.freeMovement } : {}),
     },
   }
 }
@@ -283,5 +286,6 @@ export function serializeGameState(state: GameState): string {
   }
   if (state.origin !== undefined) ordered.origin = state.origin
   if (state.freeAssets !== undefined) ordered.freeAssets = state.freeAssets
+  if (state.freeMovement !== undefined) ordered.freeMovement = state.freeMovement
   return JSON.stringify(ordered)
 }

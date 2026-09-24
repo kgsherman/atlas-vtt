@@ -3,7 +3,12 @@
  * cursor, grid distances (diagonal rule) and ruler overlays for paths and measurements.
  */
 import { cellCenter, cellOf, rulerDistance } from "@/core/grid/grid"
-import { anchorPosition, measurePath, tokenAnchor } from "@/core/movement"
+import {
+  anchorPosition,
+  measurePath,
+  tokenAnchor,
+  type MotionPoint,
+} from "@/core/movement"
 import type { PathStep } from "@/core/movement/types"
 import { groundIndex, levelById } from "@/core/scene/queries"
 import type {
@@ -19,6 +24,66 @@ import type { RulerOverlay } from "@/render/contracts"
 
 /** Height above the ground the ruler line floats at (feet). */
 export const RULER_LIFT = 0.15
+/** Draped lines sample the ground about this often (feet). */
+const DRAPE_STEP = 0.5
+/** At most this many draped points per line (long lines sample more coarsely). */
+const MAX_DRAPE_POINTS = 1500
+
+/**
+ * World points along a route that follow the ground (heightmaps, slopes, stairs): each segment is
+ * sampled every DRAPE_STEP feet at its level's ground + RULER_LIFT. A level change (stairs top edge)
+ * switches level halfway along its segment.
+ */
+export function drapeRoute(
+  scene: Pick<SceneLike, "levels" | "grid" | "objects">,
+  route: readonly MotionPoint[]
+): Vec3[] {
+  const out: Vec3[] = []
+  if (route.length === 0) return out
+  let total = 0
+  for (let k = 1; k < route.length; k++)
+    total += Math.hypot(
+      route[k].position.x - route[k - 1].position.x,
+      route[k].position.z - route[k - 1].position.z
+    )
+  const step = Math.max(DRAPE_STEP, total / MAX_DRAPE_POINTS)
+  const at = (levelId: Id, x: number, z: number): Vec3 => ({
+    x,
+    y: groundY(scene, levelId, { x, z }) + RULER_LIFT,
+    z,
+  })
+  out.push(at(route[0].levelId, route[0].position.x, route[0].position.z))
+  for (let k = 1; k < route.length; k++) {
+    const a = route[k - 1]
+    const b = route[k]
+    const dx = b.position.x - a.position.x
+    const dz = b.position.z - a.position.z
+    const n = Math.max(1, Math.ceil(Math.hypot(dx, dz) / step))
+    for (let s = 1; s <= n; s++) {
+      const t = s / n
+      out.push(
+        at(
+          t < 0.5 ? a.levelId : b.levelId,
+          a.position.x + dx * t,
+          a.position.z + dz * t
+        )
+      )
+    }
+  }
+  return out
+}
+
+/** A token path as route points (footprint centres). */
+export function pathRoute(
+  scene: Pick<SceneLike, "grid">,
+  size: Token["size"],
+  path: readonly PathStep[]
+): MotionPoint[] {
+  return path.map((s) => ({
+    levelId: s.levelId,
+    position: anchorPosition(scene, size, s.cell),
+  }))
+}
 
 /** The anchor (min-corner footprint cell) that puts a token of `size` closest to `p`. */
 export function anchorForPoint(
@@ -81,7 +146,7 @@ export function pathPoints(
   return out
 }
 
-/** Ruler overlay along a token path; null for paths without movement. */
+/** Ruler overlay along a token path (a "path" line over the ground, dots at the steps); null for paths without movement. */
 export function pathRuler(
   scene: Pick<SceneLike, "levels" | "grid" | "objects">,
   size: Token["size"],
@@ -89,35 +154,56 @@ export function pathRuler(
   suffix?: string
 ): RulerOverlay | null {
   if (path.length < 2) return null
-  const points = pathPoints(scene, size, path)
+  const stops = pathPoints(scene, size, path)
   const feet = measurePath(scene, [...path])
   const label = suffix ? `${formatFeet(feet)} · ${suffix}` : formatFeet(feet)
+  const points = drapeRoute(scene, pathRoute(scene, size, path))
   return {
     levelId: path[path.length - 1].levelId,
     points: points.length >= 2 ? points : [...points, ...points],
     label,
+    kind: "path",
+    stops,
   }
 }
 
-/** Straight ruler between two ground points on one level (cell-snapped, grid distance). */
+/** Ruler overlay along a free route (gridless moves): a "path" line over the ground, `feet` in its label. */
+export function routeRuler(
+  scene: Pick<SceneLike, "levels" | "grid" | "objects">,
+  route: readonly MotionPoint[],
+  feet: number,
+  suffix?: string
+): RulerOverlay | null {
+  if (route.length < 2) return null
+  return {
+    levelId: route[route.length - 1].levelId,
+    points: drapeRoute(scene, route),
+    label: suffix ? `${formatFeet(feet)} · ${suffix}` : formatFeet(feet),
+    kind: "path",
+  }
+}
+
+/**
+ * Straight ruler between two ground points on one level (grid distance), draped over the ground. `kind`:
+ * a DM's placement ("path"), a move that cannot be made ("blocked").
+ */
 export function straightRuler(
   scene: Pick<SceneLike, "levels" | "grid" | "objects">,
   levelId: Id,
   from: Vec2,
   to: Vec2,
-  suffix?: string
+  suffix?: string,
+  kind: RulerOverlay["kind"] = "path"
 ): RulerOverlay {
   const feet = rulerDistance(scene.grid, [from, to])
-  const a = {
-    x: from.x,
-    y: groundY(scene, levelId, from) + RULER_LIFT,
-    z: from.z,
-  }
-  const b = { x: to.x, y: groundY(scene, levelId, to) + RULER_LIFT, z: to.z }
   return {
     levelId,
-    points: [a, b],
+    points: drapeRoute(scene, [
+      { levelId, position: from },
+      { levelId, position: to },
+    ]),
     label: suffix ? `${formatFeet(feet)} · ${suffix}` : formatFeet(feet),
+    kind,
   }
 }
 

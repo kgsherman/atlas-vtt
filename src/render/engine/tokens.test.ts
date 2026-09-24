@@ -40,6 +40,42 @@ const meshes = (root: THREE.Object3D) => {
 }
 
 describe("TokenLayer", () => {
+  it("walks moved tokens along the router's route and settles on the target", () => {
+    const { scene, ground, a, plan, layer } = setup()
+    const baseX = () => {
+      const base = meshes(layer.root).find((m) => m.userData.slot === "token" && m.count > 0 && (m.userData.tokenIds as string[]).includes(a.id))!
+      const ids = base.userData.tokenIds as string[]
+      const mat = new THREE.Matrix4()
+      base.getMatrixAt(ids.indexOf(a.id), mat)
+      return new THREE.Vector3().setFromMatrixPosition(mat)
+    }
+    const routes: unknown[] = []
+    layer.setRouter((id, from, to) => {
+      routes.push({ id, from, to })
+      return [from, { levelId: ground, position: { x: 2.5, z: 22.5 } }, to]
+    })
+    layer.syncScene(scene, 0, false)
+    layer.update({ scene, plan, view: DEFAULT_VIEW, overlays: overlays() }, 0)
+    const moved: Scene = { ...scene, tokens: { ...scene.tokens, [a.id]: { ...a, position: { x: 22.5, z: 22.5 } } } }
+    layer.syncScene(moved, 100, true)
+    expect(routes).toEqual([{ id: a.id, from: { levelId: ground, position: { x: 2.5, z: 2.5 } }, to: { levelId: ground, position: { x: 22.5, z: 22.5 } } }])
+    expect(layer.moving(a.id)).toBe(true)
+    // Still at the start, then down the first leg (x unchanged), then at the target.
+    expect(layer.update({ scene: moved, plan, view: DEFAULT_VIEW, overlays: overlays() }, 100)).toBe(true)
+    expect(baseX().x).toBeCloseTo(2.5)
+    layer.update({ scene: moved, plan, view: DEFAULT_VIEW, overlays: overlays() }, 500)
+    expect(baseX().x).toBeCloseTo(2.5)
+    expect(baseX().z).toBeGreaterThan(2.5)
+    layer.update({ scene: moved, plan, view: DEFAULT_VIEW, overlays: overlays() }, 10_000)
+    expect(baseX().x).toBeCloseTo(22.5)
+    expect(baseX().z).toBeCloseTo(22.5)
+    expect(layer.moving(a.id)).toBe(false)
+    // A full scene replacement (not animated) puts tokens in place at once.
+    layer.syncScene(scene, 20_000, false)
+    layer.update({ scene, plan, view: DEFAULT_VIEW, overlays: overlays() }, 20_000)
+    expect(baseX().x).toBeCloseTo(2.5)
+  })
+
   it("draws solid tokens per level and markers above the cutaway", () => {
     const { scene, ground, a, b, plan, layer, material } = setup()
     layer.syncScene(scene, 0, false)

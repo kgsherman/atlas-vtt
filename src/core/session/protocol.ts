@@ -15,6 +15,8 @@ export const PROTOCOL_LIMITS = {
   maxPathSteps: MAX_PATH_STEPS,
   /** |cell coordinate| accepted on the wire (grids are ≤ 200 cells; out-of-bounds is movement's call). */
   maxCellCoord: 1024,
+  /** |world coordinate| (feet) accepted on the wire for free points (grids are ≤ 200 cells of ≤ 10 ft). */
+  maxWorldCoord: 20_000,
   maxSeq: Number.MAX_SAFE_INTEGER,
 } as const
 
@@ -40,6 +42,8 @@ const pathStepSchema = z.strictObject({
   levelId: idSchema,
 })
 
+const worldCoord = z.number().min(-PROTOCOL_LIMITS.maxWorldCoord).max(PROTOCOL_LIMITS.maxWorldCoord)
+
 const helloSchema = z.strictObject({
   t: z.literal("hello"),
   nonce: tokenSchema,
@@ -55,6 +59,16 @@ const moveSchema = z.strictObject({
     .array(pathStepSchema)
     .min(1)
     .max(PROTOCOL_LIMITS.maxPathSteps + 1),
+  end: z.strictObject({ x: worldCoord, z: worldCoord }).optional(),
+})
+
+const jumpSchema = z.strictObject({
+  t: z.literal("jump"),
+  reqId: tokenSchema,
+  tokenId: idSchema,
+  levelId: idSchema,
+  x: worldCoord,
+  z: worldCoord,
 })
 
 const doorSchema = z.strictObject({
@@ -64,7 +78,7 @@ const doorSchema = z.strictObject({
   action: z.enum(["open", "close"]),
 })
 
-export const clientMessageSchema = z.discriminatedUnion("t", [helloSchema, moveSchema, doorSchema])
+export const clientMessageSchema = z.discriminatedUnion("t", [helloSchema, moveSchema, jumpSchema, doorSchema])
 
 /** Strict zod parse of an untrusted player message (limits enforced). null = drop silently. */
 export function parseClientMessage(raw: unknown): ClientToHost | null {

@@ -269,6 +269,19 @@ describe("OverlayManager", () => {
     m.set({ ruler: null, pendingMoves: {}, preview: null })
     m.update()
     expect(visibleMeshes()).toBe(baseline)
+    // Move paths: casing, line with arrowhead, step dots; blocked moves without dots.
+    const line = [{ x: 0, y: 0, z: 0 }, { x: 5, y: 0, z: 0 }, { x: 10, y: 0, z: 0 }]
+    m.set({ ruler: { levelId: lv, points: line, label: "10 ft", kind: "path", stops: line } })
+    m.update()
+    expect(visibleMeshes()).toBe(baseline + 3)
+    m.set({ ruler: { levelId: lv, points: line, label: "no path", kind: "blocked" } })
+    m.update()
+    expect(visibleMeshes()).toBe(baseline + 2)
+    // A ruler removed just before a scene change still goes.
+    m.set({ ruler: null })
+    m.sceneChanged()
+    m.update()
+    expect(visibleMeshes()).toBe(baseline)
   })
 
   it("draws the terrain overlay with a gizmo that follows the host's projection, and frees it when it goes", () => {

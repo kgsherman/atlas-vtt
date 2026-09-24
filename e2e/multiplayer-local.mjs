@@ -646,7 +646,8 @@ try {
         `  the upper landing is ${upperKnown ? "known floor" : "unexplored (a blind landing the host validates)"} seen from the foot of the stairs`
       )
       await B.page.evaluate((id) => window.__atlasPlayer.select(id), tokB.id)
-      await sleep(300)
+      // Moved tokens walk to their new position (at most 2.4 s): grab it where it stands.
+      await sleep(2600)
       // Drag from the token (standing on the run's ground) to the landing, projected on the plane of
       // the player's view level (where the drop is picked).
       const at = await B.page.evaluate(

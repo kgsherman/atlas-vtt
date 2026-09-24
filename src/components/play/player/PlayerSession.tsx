@@ -6,8 +6,11 @@
  *    change hints), vision "fog" with hostMasks = view.masks, viewers = view.visionTokenIds, cutaway at
  *    the selected token's view level (core tokenViewLevelId: its own level, or the upper room from the
  *    top of a stair run), top-down camera following the selected token;
- *  - input: PlayController (select, drag-to-move with A* preview + ruler, measure, door clicks) →
- *    requestMove / requestDoor; pending moves drawn dashed until the host answers;
+ *  - input: PlayController (select, drag-to-move or right-button move commands with A* preview +
+ *    ruler, Alt for gridless moves when the DM allows them, measure, door clicks) → requestMove /
+ *    requestDoor; a move with no path offers a jump (StrandedMove → requestJump); pending moves drawn
+ *    dashed until the host answers; moved tokens walk along the route sent, or the planner's guess
+ *    for moves this client did not make (tokenRouter);
  *  - results → toasts with friendly reasons.
  */
 import * as React from "react"
@@ -40,6 +43,8 @@ import {
   MovePlanner,
   PlayController,
   resolveSelection,
+  SentRoutes,
+  tokenRouter,
   tokensInReach,
   unexploredIn,
   cycleToken,
@@ -50,6 +55,7 @@ import { backdropTexelBudget } from "@/render"
 import type { Engine, Quality } from "@/render/contracts"
 
 import { usePlayCanvasInput, usePlayKeys, zoomCanvas } from "../input"
+import { StrandedMove } from "../StrandedMove"
 import {
   EndedScreen,
   ErrorScreenOverlay,
@@ -172,6 +178,7 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
           unexploredIn(live.get().snap.view, levelId, cell),
       })
   )
+  const [sentRoutes] = React.useState(() => new SentRoutes())
   const [controller] = React.useState(
     () =>
       new PlayController({
@@ -182,6 +189,7 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
         canDrag: (id) => live.get().controlled.includes(id),
         movementLocked: () =>
           live.get().snap.view?.flags.movementLocked ?? false,
+        freeMovement: () => live.get().snap.view?.flags.freeMovement ?? false,
         speedLimit: (id) => {
           const v = live.get().snap.view
           const t = v && Object.hasOwn(v.tokens, id) ? v.tokens[id] : null
@@ -194,13 +202,18 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
         planner,
         onSelect: (id) => setSelected(id),
         onMove: (m) => {
-          if (m.kind !== "path") return
+          if (m.kind === "place") return
           const hint = offlineHint(live.get().snap)
           if (hint) {
             toast.info(hint, { id: "move-offline" })
             return
           }
-          client.requestMove(m.tokenId, m.path)
+          if (m.kind === "jump") {
+            client.requestJump(m.tokenId, m.levelId, m.position)
+            return
+          }
+          sentRoutes.remember(m.tokenId, m.route)
+          client.requestMove(m.tokenId, m.path, m.end)
         },
         onDoor: (hit) => {
           const s = live.get()
@@ -406,12 +419,14 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
           client={client}
           snap={snap}
           planner={planner}
+          sentRoutes={sentRoutes}
           controller={controller}
           activeLevelId={activeLevelId}
           selectedId={selectedId}
           grid={grid}
           canvasRef={canvasRef}
         />
+        <StrandedMove controller={controller} />
         {view && scene ? (
           <PlayerHud
             snap={snap}
@@ -453,6 +468,7 @@ function PlayerBridge({
   client,
   snap,
   planner,
+  sentRoutes,
   controller,
   activeLevelId,
   selectedId,
@@ -462,6 +478,7 @@ function PlayerBridge({
   client: AtlasPlayerClient
   snap: PlayerClientSnapshot
   planner: MovePlanner
+  sentRoutes: SentRoutes
   controller: PlayController
   activeLevelId: Id | null
   selectedId: Id | null
@@ -484,12 +501,20 @@ function PlayerBridge({
         : null
     if (prev === scene) return
     const change = prev ? client.sceneChangeSince(prev) : null
+    // The planner first: moved tokens are routed (tokenRouter) while the engine takes the update.
+    planner.setScene(scene, change)
     if (change) engine.updateScene(scene, change)
     else engine.setScene(scene)
-    planner.setScene(scene, change)
     shown.current = { engine, scene }
     controller.sceneChanged()
   }, [engine, scene, client, planner, controller])
+
+  // Moved tokens walk: along the route this client sent, else the planner's guess.
+  React.useEffect(() => {
+    if (!engine) return
+    engine.setTokenRouter(tokenRouter(planner, sentRoutes))
+    return () => engine.setTokenRouter(null)
+  }, [engine, planner, sentRoutes])
 
   // View: fog of war from the host masks; cutaway at the selected token's view level.
   const hasView = snap.view !== null

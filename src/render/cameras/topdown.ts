@@ -234,6 +234,11 @@ export class TopDownCameraController implements CameraController {
     }
     const d = this.drag
     if (!d || d.pointerId !== e.pointerId) return
+    // A tool took the pointer (e.g. a right-button move command on a selected token): no pan.
+    if (!this.interactive) {
+      this.drag = null
+      return
+    }
     if (!d.moved && Math.hypot(e.clientX - d.x, e.clientY - d.y) < DRAG_THRESHOLD_PX) return
     d.moved = true
     const now = this.groundAt(e.clientX, e.clientY)

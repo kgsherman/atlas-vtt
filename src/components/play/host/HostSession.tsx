@@ -280,6 +280,7 @@ function HostConsole({
         canSelect: () => true,
         canDrag: () => live.get().hosting,
         movementLocked: () => false,
+        freeMovement: () => true,
         speedLimit: () => null,
         groundAt: (x, y, levelId) => {
           const g = live.get().engine?.pick(x, y, { levelId }).ground

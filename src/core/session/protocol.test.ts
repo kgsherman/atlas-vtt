@@ -10,6 +10,10 @@ describe("parseClientMessage", () => {
     expect(parseClientMessage({ t: "hello", nonce: "n-1", epoch: "e.1:x", lastSeq: 12 })).not.toBeNull()
     const move = { t: "move", reqId: "r1", tokenId: "tok_1", path: [step(1, 1), step(2, 1)] }
     expect(parseClientMessage(move)).toEqual(move)
+    const gridless = { ...move, end: { x: 8.25, z: 7 } }
+    expect(parseClientMessage(gridless)).toEqual(gridless)
+    const jump = { t: "jump", reqId: "r3", tokenId: "tok_1", levelId: "L1", x: 41.3, z: 8 }
+    expect(parseClientMessage(jump)).toEqual(jump)
     expect(parseClientMessage({ t: "door", reqId: "r2", doorId: "d-9", action: "open" })).toEqual({ t: "door", reqId: "r2", doorId: "d-9", action: "open" })
   })
 
@@ -18,6 +22,15 @@ describe("parseClientMessage", () => {
     expect(parseClientMessage({ t: "move", reqId: "r", tokenId: "t", path: [{ cell: { i: 0, j: 0, k: 1 }, levelId: "L" }] })).toBeNull()
     expect(parseClientMessage({ t: "move", reqId: "r", tokenId: "t", path: [{ ...step(0, 0), extra: true }] })).toBeNull()
     expect(parseClientMessage({ t: "hello", nonce: "n", epoch: null, lastSeq: null, admin: true })).toBeNull()
+    expect(parseClientMessage({ t: "move", reqId: "r", tokenId: "t", path: [step(0, 0)], end: { x: 1, z: 1, y: 0 } })).toBeNull()
+    expect(parseClientMessage({ t: "jump", reqId: "r", tokenId: "t", levelId: "L", x: 1, z: 1, userId: "u" })).toBeNull()
+  })
+
+  it("rejects non-finite and out-of-range free points", () => {
+    for (const x of [Number.NaN, Infinity, 1e9, "3"]) {
+      expect(parseClientMessage({ t: "jump", reqId: "r", tokenId: "t", levelId: "L", x, z: 1 })).toBeNull()
+      expect(parseClientMessage({ t: "move", reqId: "r", tokenId: "t", path: [step(0, 0)], end: { x, z: 1 } })).toBeNull()
+    }
   })
 
   it("rejects unknown message types and non-objects", () => {

@@ -3,7 +3,7 @@
  * subscribes to its snapshot and sends move/door requests.
  */
 import type { PathStep } from "@/core/movement/types"
-import type { Id, SceneLike } from "@/core/scene/types"
+import type { Id, SceneLike, Vec2 } from "@/core/scene/types"
 import type { PlayerView, RequestResult } from "@/core/session/types"
 import type { AtlasIdentity } from "../auth"
 import type { SessionsRepo } from "../sessionsRepo"
@@ -23,7 +23,7 @@ export type PlayerStatus =
 
 export interface PendingRequest {
   reqId: string
-  kind: "move" | "door"
+  kind: "move" | "jump" | "door"
   tokenId?: Id
   path?: PathStep[]
   doorId?: Id
@@ -64,7 +64,10 @@ export interface PlayerClient {
   getSnapshot(): PlayerSnapshot
   subscribe(listener: () => void): () => void
   /** Returns the reqId; the pending overlay clears when the result/patch arrives or after 5 s. */
-  requestMove(tokenId: Id, path: PathStep[]): string
+  /** `end`: the exact final point of a gridless move (PlayerView flags.freeMovement). */
+  requestMove(tokenId: Id, path: PathStep[], end?: Vec2 | null): string
+  /** Put a token at a point without walking there (when no path can be found). */
+  requestJump(tokenId: Id, levelId: Id, position: Vec2): string
   requestDoor(doorId: Id, action: "open" | "close"): string
 }
 

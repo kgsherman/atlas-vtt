@@ -1030,7 +1030,8 @@ export class HostRunnerImpl implements HostRunner {
     if (!state || !world || !Object.hasOwn(state.players, conn.userId)) return
     // Only for the token's owners: anyone else gets "not-owner" from reduceRequest, never a hint that
     // someone else's token is moving right now.
-    if (msg.t === "move" && ownsToken(state, conn.userId, msg.tokenId)) {
+    const moves = msg.t === "move" || msg.t === "jump"
+    if (moves && ownsToken(state, conn.userId, msg.tokenId)) {
       const busy = this.inFlightMoves.get(msg.tokenId)
       if (busy && this.now() - busy.at < this.t.inFlightMoveTimeoutMs) {
         this.pushResult(conn, { reqId: msg.reqId, ok: false, reason: "rate-limited" })
@@ -1044,7 +1045,7 @@ export class HostRunnerImpl implements HostRunner {
     })
     if (out.state !== state) {
       this.state = out.state
-      const move = msg.t === "move" && out.tokenId ? out.tokenId : null
+      const move = moves && out.tokenId ? out.tokenId : null
       // The final revision (and so the flush carrying the result) goes to the vision client first.
       this.applyDelta(out.delta, false, move !== null)
       this.markDirty(out.dirtyPlayers)
@@ -1054,7 +1055,7 @@ export class HostRunnerImpl implements HostRunner {
         if (out.visited.length > 1) this.stepPasses(out, gen)
       }
       // Token moves are saved soon: a reloaded host tab must not put tokens back where they were.
-      this.stateSaver?.request(msg.t === "move" ? "soon" : false)
+      this.stateSaver?.request(moves ? "soon" : false)
       this.notify()
     }
     this.pushResult(conn, out.result)

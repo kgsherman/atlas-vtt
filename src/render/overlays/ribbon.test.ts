@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest"
 import { createScene } from "@/core/scene/factory"
 
 import { createEdgeAAMaterial, edgeGeometry } from "../materials/edgeAAMaterial"
-import { circlePoints, dashPolyline, discEdgeGeometry, mergeEdgeGeometry, pathStepPoints, ribbonEdgeGeometry, ribbonPositions, ringEdgeGeometry, type EdgeGeometryData } from "./ribbon"
+import { arrowHeadEdgeGeometry, circlePoints, dashPolyline, discEdgeGeometry, mergeEdgeGeometry, pathStepPoints, ribbonEdgeGeometry, ribbonPositions, ringEdgeGeometry, trimPolylineEnd, type EdgeGeometryData } from "./ribbon"
 
 describe("overlay geometry", () => {
   it("builds upward-facing ribbons of the requested width", () => {
@@ -148,5 +148,35 @@ describe("anti-aliased overlay geometry", () => {
     expect(m.transparent).toBe(true)
     expect(m.depthTest).toBe(false)
     expect(m.uniforms.uOpacity.value).toBe(0.9)
+  })
+})
+
+describe("arrowheads and trimmed lines", () => {
+  it("builds a flat arrowhead pointing along the direction, edges at 1", () => {
+    const g = arrowHeadEdgeGeometry({ x: 10, y: 1, z: 0 }, { x: 1, z: 0 }, 2, 2)
+    expect(g.positions.length).toBe(9 * 3)
+    const xs = [...g.positions].filter((_, k) => k % 3 === 0)
+    expect(Math.max(...xs)).toBeCloseTo(10)
+    expect(Math.min(...xs)).toBeCloseTo(8)
+    expect([...g.positions].filter((_, k) => k % 3 === 1).every((y) => y === 1)).toBe(true)
+    expect(arrowHeadEdgeGeometry({ x: 0, y: 0, z: 0 }, { x: 0, z: 0 }, 2, 2).positions.length).toBe(0)
+  })
+
+  it("trims a polyline's end by a length", () => {
+    const line = [
+      { x: 0, y: 0, z: 0 },
+      { x: 10, y: 0, z: 0 },
+      { x: 10, y: 0, z: 1 },
+    ]
+    expect(trimPolylineEnd(line, 0.5)).toEqual([
+      { x: 0, y: 0, z: 0 },
+      { x: 10, y: 0, z: 0 },
+      { x: 10, y: 0, z: 0.5 },
+    ])
+    expect(trimPolylineEnd(line, 3)).toEqual([
+      { x: 0, y: 0, z: 0 },
+      { x: 8, y: 0, z: 0 },
+    ])
+    expect(trimPolylineEnd(line, 50)).toEqual([line[0], line[0]])
   })
 })

@@ -5,14 +5,22 @@
  * Moves: ownership is checked before anything is looked up (so players cannot probe for token ids),
  * then locks, then core/movement validates the path; the LEGAL PREFIX is applied ("bump into a wall").
  * Reasons that depend on the world (blocked, corner-cutting, connector rules, no-ground) are reported
- * as "blocked" unless every cell swept by the failing step is perceived by the player.
+ * as "blocked" unless every cell swept by the failing step is perceived by the player. A gridless move
+ * (`end`, only while GameState.freeMovement) ends at its exact point once the whole path is legal and the
+ * last step's centre reaches it (core/movement checkEnd); otherwise the token stops on the path's legal
+ * prefix as usual. Speed limits count the grid path (the end is within half a cell of its last centre).
+ *
+ * Jumps: the same ownership and lock checks, then core/movement checkJump at the target (snapped to an
+ * anchor unless freeMovement); an enforced speed limit counts the straight grid distance.
  *
  * Doors: the door must be in the player's current view and a controlled token on its level must be
  * within one cell of the door segment; movement must not be locked. Every failure is "cannot";
  * "locked" is only reported after those checks pass. Players can never unlock.
  */
 import { distancePointSegment2, segmentIntersection2 } from "../geometry/segment"
-import { anchorPosition, footprintCells, tokenAnchor, validateMove } from "../movement"
+import { rulerDistance } from "../grid/grid"
+import { anchorPosition, checkEnd, checkJump, footprintCells, tokenAnchor, validateMove } from "../movement"
+import { anchorOf } from "../movement/footprint"
 import type { MoveRejectReason, PathStep } from "../movement/types"
 import type { OcclusionWorld } from "../occlusion/types"
 import { levelById, openingSegment } from "../scene/queries"
@@ -73,16 +81,31 @@ function reduceMove(state: GameState, userId: string, msg: Extract<ClientToHost,
   const token = tokenExistsForPlayers(state, msg.tokenId)
   if (!token) return rejectOutcome(state, msg.reqId, "unknown-token", msg.tokenId)
   if (movementLockedFor(state, userId)) return rejectOutcome(state, msg.reqId, "movement-locked", msg.tokenId)
+  if (msg.end && !state.freeMovement) return rejectOutcome(state, msg.reqId, "invalid", msg.tokenId)
   const scene = state.scene
   const v = validateMove(scene, ctx.world, token, msg.path, { enforceSpeed: state.enforceSpeed })
   const result: RequestResult = { reqId: msg.reqId, ok: v.ok, applied: v.legalSteps }
   if (!v.ok) result.reason = maskReason(v.reason ?? "blocked", msg.path, v.failedAt, token, ctx)
-  if (v.legalSteps === 0) {
+  // Gridless end point: only after the whole path.
+  let end: Vec2 | null = null
+  if (v.ok && msg.end) {
+    const last = msg.path[msg.path.length - 1]
+    const from = msg.path.length > 1 ? anchorPosition(scene, token.size, last.cell) : token.position
+    const reason = checkEnd(scene, ctx.world, token, last, from, msg.end)
+    if (reason) {
+      result.ok = false
+      result.reason = maskReason(reason, [last, last], 1, token, ctx)
+    } else end = { x: msg.end.x, z: msg.end.z }
+  }
+  if (v.legalSteps === 0 && !end) {
     return { state, delta: emptyDelta(), dirtyPlayers: [], result, visited: [], tokenId: token.id }
   }
-  const visited = msg.path.slice(1, v.legalSteps + 1).map((s) => ({ cell: { i: s.cell.i, j: s.cell.j }, levelId: s.levelId }))
+  const visited = (v.legalSteps > 0 ? msg.path.slice(1, v.legalSteps + 1) : msg.path.slice(0, 1)).map((s) => ({
+    cell: { i: s.cell.i, j: s.cell.j },
+    levelId: s.levelId,
+  }))
   const last = visited[visited.length - 1]
-  const position = anchorPosition(scene, token.size, last.cell)
+  const position = end ?? anchorPosition(scene, token.size, last.cell)
   const moved: Token = { ...token, levelId: last.levelId, position }
   const next: GameState = { ...state, scene: { ...scene, tokens: { ...scene.tokens, [token.id]: moved } }, seq: state.seq + 1 }
   return {
@@ -91,6 +114,29 @@ function reduceMove(state: GameState, userId: string, msg: Extract<ClientToHost,
     dirtyPlayers: "all",
     result,
     visited,
+    tokenId: token.id,
+  }
+}
+
+function reduceJump(state: GameState, userId: string, msg: Extract<ClientToHost, { t: "jump" }>, ctx: RequestContext): RequestOutcome {
+  if (!ownsToken(state, userId, msg.tokenId)) return rejectOutcome(state, msg.reqId, "not-owner")
+  const token = tokenExistsForPlayers(state, msg.tokenId)
+  if (!token) return rejectOutcome(state, msg.reqId, "unknown-token", msg.tokenId)
+  if (movementLockedFor(state, userId)) return rejectOutcome(state, msg.reqId, "movement-locked", msg.tokenId)
+  const scene = state.scene
+  const target = state.freeMovement ? { x: msg.x, z: msg.z } : anchorPosition(scene, token.size, anchorOf(scene.grid, token.size, { x: msg.x, z: msg.z }))
+  const step: PathStep = { cell: anchorOf(scene.grid, token.size, target), levelId: msg.levelId }
+  const fail = (reason: MoveRejectReason) => rejectOutcome(state, msg.reqId, maskReason(reason, [step, step], 1, token, ctx), token.id)
+  if (state.enforceSpeed && rulerDistance(scene.grid, [token.position, target]) > token.speed + 1e-6) return fail("too-far")
+  const reason = checkJump(scene, ctx.world, token, msg.levelId, target)
+  if (reason) return fail(reason)
+  const moved: Token = { ...token, levelId: msg.levelId, position: target }
+  return {
+    state: { ...state, scene: { ...scene, tokens: { ...scene.tokens, [token.id]: moved } }, seq: state.seq + 1 },
+    delta: { objects: attachedLightIds(scene, token.id), tokens: [token.id], terrain: [], structure: false },
+    dirtyPlayers: "all",
+    result: { reqId: msg.reqId, ok: true, applied: 1 },
+    visited: [step],
     tokenId: token.id,
   }
 }
@@ -177,6 +223,8 @@ export function reduceRequest(state: GameState, userId: string, msg: Exclude<Cli
   switch (msg.t) {
     case "move":
       return reduceMove(state, userId, msg, ctx)
+    case "jump":
+      return reduceJump(state, userId, msg, ctx)
     case "door":
       return reduceDoor(state, userId, msg, ctx)
   }

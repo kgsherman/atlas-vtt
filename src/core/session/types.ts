@@ -17,6 +17,7 @@ import type {
   Scene,
   TerrainResolution,
   Token,
+  Vec2,
   VisionSettings,
   WallObject,
   WindowObject,
@@ -133,6 +134,8 @@ export interface PlayerView {
     movementLocked: boolean
     sharedVision: boolean
     enforceSpeed: boolean
+    /** Players may move off the grid (gridless moves and jumps). Absent = grid only. */
+    freeMovement?: boolean
   }
 }
 
@@ -191,6 +194,11 @@ export interface GameState {
    * what the host's asset pickers offer. DM-only; never sent to players. Absent = none.
    */
   freeAssets?: FreeAssetCategory[]
+  /**
+   * Players may move off the grid: gridless moves (`move.end`) and free jump points. Absent / false:
+   * players are forced to the grid (jumps snap to anchors, `end` is refused).
+   */
+  freeMovement?: boolean
 }
 
 // ===========================================================================
@@ -217,7 +225,13 @@ export interface RequestResult {
  */
 export type ClientToHost =
   | { t: "hello"; nonce: string; epoch: string | null; lastSeq: number | null }
-  | { t: "move"; reqId: string; tokenId: Id; path: PathStep[] }
+  /**
+   * Walk `path` (grid steps from the token's anchor). `end` (gridless moves, GameState.freeMovement):
+   * the exact final position, in the last step's anchor cell, reached from its centre.
+   */
+  | { t: "move"; reqId: string; tokenId: Id; path: PathStep[]; end?: Vec2 }
+  /** Put a token at a point without walking there (no path could be found). */
+  | { t: "jump"; reqId: string; tokenId: Id; levelId: Id; x: number; z: number }
   | { t: "door"; reqId: string; doorId: Id; action: "open" | "close" }
 
 /**
@@ -258,6 +272,7 @@ export type DmCommand =
   | { t: "set-movement-locked"; locked: boolean; userId?: string }
   | { t: "set-shared-vision"; enabled: boolean }
   | { t: "set-enforce-speed"; enabled: boolean }
+  | { t: "set-free-movement"; enabled: boolean }
   | { t: "assign-token"; tokenId: Id; userId: string; assigned: boolean }
   | { t: "reveal-object"; objectId: Id; userId?: string }
   /** Editor edits during a live session (immer patches against GameState.scene). */

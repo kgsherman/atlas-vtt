@@ -778,6 +778,21 @@ footprint needs ground (`hasGroundAt` at every footprint cell centre). The host 
 reported as `blocked`. Distances use `grid.diagonalRule`; speed only when the DM enforces it. Paths > 256 steps
 are rejected.
 
+**Gridless moves and jumps** (`core/movement/free.ts`). While the DM lets players off the grid
+(`GameState.freeMovement`, the host's "Snap players to the grid" switch off; `PlayerView.flags.freeMovement`),
+a `move` may carry `end`, the token's exact final point: once the whole path is legal, `checkEnd` requires
+`end` to anchor to the last step's cell, have ground, and be reached from that cell's centre (the token's own
+position for a path of just its start: a nudge within its cell) by a clear sweep; otherwise the token stops
+on the path as usual and the (masked) reason is reported. A `move` with `end` while players are forced to the
+grid is refused (`invalid`). Speed counts the grid path (the end is within half a cell of it). A `jump`
+(`{tokenId, levelId, x, z}`: offered when no path is found) puts the token there without walking:
+ownership and locks as for moves, the point snapped to an anchor unless free movement is on, an enforced
+speed limit on the straight grid distance, then `checkJump` (footprint on the grid and grounded, the token's
+disc overlapping no movement blocker, with no "already overlapping" exemption); world reasons are masked as
+for moves. `smoothPath` string-pulls a path into the polyline a gridless move is drawn and animated along
+(display only; pulled segments stay on one level, clear of blockers in the steps' vertical window, grounded
+throughout and away from connectors).
+
 ### 5.4 Observation & memory (`core/vision/observe.ts`, `core/session/memory.ts`)
 
 An object is **observed** now if:
@@ -883,7 +898,8 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
   was applied to; `pendingProbes` counts queued ones. Two lanes: probes wait until no setScene / update /
   compute is outstanding and run one at a time, so a foreground call waits for at most one probe and a
   flush never queues behind a long path's steps (§5.2 Moves).
-- Request rules: ≤ 8 req/s per player (burst 16), one in-flight move per token, paths ≤ 256 steps.
+- Request rules: ≤ 8 req/s per player (burst 16), one in-flight move (or jump) per token, paths ≤ 256 steps,
+  free points (`move.end`, `jump`) finite and within ±20 000 ft.
   Hellos have their own budget (1/s, burst 4; over-budget hellos are dropped and the client retries with
   backoff) and are coalesced, so at most one is queued per player (the latest nonce wins). A request refused
   by the limiter gets a `rate-limited` reply only within 2/s (burst 4); beyond that it is dropped silently, so
@@ -1301,8 +1317,24 @@ script checks that it is off.
 ## 8. Play mode
 
 - Player: select a controlled token; drag shows a path (A* over legal steps, core/movement) with ruler (feet,
-  diagonal rule); release sends `move`. The pending path is an overlay only; the token moves when the patch
-  arrives. Drags target the token's view level (`tokenViewLevelId`, §2), and a drag aimed at the cell just
+  diagonal rule); release sends `move`. RTS-style move commands do the same for the selected token without
+  grabbing it: hold the right button to preview the move to the pointer, release to commit, left-click or
+  Esc meanwhile to cancel (players' right-drag camera pan then needs no token selected, or the middle
+  button; the DM's right-click on a token still opens its menu). With Alt held, moves go off the grid: the
+  DM's drops land exactly under the pointer, and players' moves (only while the DM allows free movement,
+  §5.3) end exactly there along a string-pulled route. A move with no path is drawn in the error colour and,
+  released, is **stranded**: its line and ghost stay and a card at the target (`components/play/StrandedMove`)
+  offers "Jump there" (a `jump` request, §5.3), or explains that something the player knows of stands there.
+  The pending path is an overlay only; the token moves when the patch arrives, then **walks** there
+  (`render/engine/tokenMotion.ts`: constant speed with eased ends, ≤ 2.4 s, following the ground) along the
+  route from `Engine.setTokenRouter`: `play/routes.ts` `tokenRouter` uses the route this client sent the move
+  along (`SentRoutes`, up to where the host stopped it), else reconstructs one with the client's own planner
+  (`MovePlanner.route`: A* on what this client knows; nothing about the real path is sent). Without a route a
+  token glides straight up to 40 ft on one level, else jumps. Only the token's figure walks: vision, fog and
+  the lights a token carries take its new position at once. Tokens a player sees move (other players', the
+  DM's) and every move on the DM's screen are routed the same way. Move paths are drawn as bold lines on a
+  dark casing, draped over the ground (`drapeRoute`), with an arrowhead and dots at the grid steps
+  (`RulerOverlay.kind` "path" / "blocked"; the Measure tools keep the slim "measure" ruler). Drags target the token's view level (`tokenViewLevelId`, §2), and a drag aimed at the cell just
   beyond a stairs/ramp top edge prefers the run's upper level (falling back to the token's level if the upper
   one is unreachable), so a staircase inside a room with known floor beyond its top is climbed rather than
   walked around. A player's scene has floor only where the player explored, so an upper storey never seen
@@ -1322,7 +1354,8 @@ script checks that it is off.
 - Play keys: `usePlayKeys` registers `PLAY_COMMANDS` (host-only commands, level switching and vision preview,
   only for the DM). WASD / arrow panning is the top-down camera's own held-key input and is not remappable, so
   the dialog refuses those keys for play commands.
-- DM play controls: lock/unlock movement (global and per player), shared vision toggle, enforce speed, door and
+- DM play controls: lock/unlock movement (global and per player), shared vision toggle, enforce speed, snap
+  players to the grid (`set-free-movement`: off lets players move off the grid with Alt, §5.3), door and
   light toggles, sun/moon on/off (scene patch), move any token, hide/reveal tokens, reveal secret doors, assign
   tokens to players, preview any token's vision, kick players.
 - Free assets: "Start a game" (library and editor, `components/app/StartGameDialog`) chooses the free asset

@@ -11,7 +11,9 @@
  * pulsing selection / hover / pending rings and drag ghosts.
  *
  * Appear/disappear: 150 ms fade through the token material's per-instance `aFade` attribute (with
- * a slight scale-in). Instance data is recomputed only when inputs change or a fade is running.
+ * a slight scale-in). Moves: a token whose position changes walks there (engine/tokenMotion.ts) along
+ * the route the router gives (setRouter), following the ground. Instance data is recomputed only when
+ * inputs change or a fade or walk is running.
  */
 import * as THREE from "three"
 
@@ -30,16 +32,21 @@ import {
   type TokenVisual,
 } from "../builders/tokens"
 import { TOKEN_BASE_HEIGHT } from "../builders/tokens"
-import type { OverlayState, TokenModelSource, ViewState } from "../contracts"
+import type { OverlayState, TokenModelSource, TokenRouter, ViewState } from "../contracts"
 import { LAYER } from "../internal"
 import type { LevelPlanEntry } from "./levelPlan"
 import { PortraitAtlas } from "./portraits"
 import { chooseLod, TokenModelLibrary } from "./tokenModels"
+import { motionAt, planMotion, type TokenMotion } from "./tokenMotion"
 
 export const TOKEN_FADE_MS = 150
 
 interface Entry {
+  /** Where the token is drawn (its scene position, or a point along its walk). */
   visual: TokenVisual
+  /** Where the scene puts it. */
+  target: TokenVisual
+  motion: TokenMotion | null
   /** performance.now() when it appeared (null = present from the start). */
   appearAt: number | null
   /** When it left the scene (kept for the fade-out). */
@@ -374,6 +381,7 @@ export class TokenLayer {
   private dirty = true
   private wasAnimating = false
   private initialised = false
+  private router: TokenRouter | null = null
 
   /**
    * `tokenMaterial`: the lighting system's instanced token material. Tokens are opaque at rest, so
@@ -450,6 +458,16 @@ export class TokenLayer {
     this.ghostBody = new GrowingInstances(this.decor, tokenBodyGeometry(), ghostMat, false, decor(10))
   }
 
+  /** Routes moved tokens walk along (null: straight glides over short distances, else jumps). */
+  setRouter(router: TokenRouter | null): void {
+    this.router = router
+  }
+
+  /** A token is walking to its position. */
+  moving(tokenId: Id): boolean {
+    return this.entries.get(tokenId)?.motion != null
+  }
+
   /** Per frame: ring animation clock. */
   tick(timeSec: number): void {
     this.ringMaterial.uniforms.uTime.value = timeSec % 1000
@@ -484,7 +502,21 @@ export class TokenLayer {
         const visual = tokenVisual(scene, t, ground)
         const e = this.entries.get(t.id)
         if (e && e.leaveAt === null) {
-          e.visual = visual
+          const moved = e.target.levelId !== visual.levelId || e.target.x !== visual.x || e.target.z !== visual.z
+          if (moved) {
+            // Walk from where it is drawn now (possibly mid-walk).
+            const from = { levelId: e.visual.levelId, position: { x: e.visual.x, z: e.visual.z } }
+            const to = { levelId: visual.levelId, position: { x: visual.x, z: visual.z } }
+            let route = null
+            try {
+              route = animate && this.router ? this.router(t.id, from, to) : null
+            } catch (err) {
+              console.error("[atlas] token router failed", err)
+            }
+            e.motion = animate ? planMotion(from, to, route, now) : null
+          }
+          e.target = visual
+          e.visual = e.motion ? { ...visual, levelId: e.visual.levelId, x: e.visual.x, y: e.visual.y, z: e.visual.z } : visual
           e.hidden = t.hidden
           e.imageUrl = t.imageUrl ?? null
           if (e.model !== (t.model ?? null)) e.lod = undefined
@@ -492,6 +524,8 @@ export class TokenLayer {
         } else {
           this.entries.set(t.id, {
             visual,
+            target: visual,
+            motion: null,
             appearAt: animate && this.initialised ? now : null,
             leaveAt: null,
             hidden: t.hidden,
@@ -530,11 +564,25 @@ export class TokenLayer {
   /** Recompute instances when needed. Returns true while a fade is running. */
   update(inputs: TokenLayerInputs, now: number): boolean {
     let animating = false
+    let walking = false
+    const ground = inputs.scene ? groundIndex(inputs.scene) : null
     for (const [id, e] of this.entries) {
       if (e.leaveAt !== null && now - e.leaveAt >= TOKEN_FADE_MS) {
         this.entries.delete(id)
         this.dirty = true
+        continue
       } else if ((e.appearAt !== null && now - e.appearAt < TOKEN_FADE_MS) || e.leaveAt !== null) animating = true
+      if (e.motion) {
+        const p = motionAt(e.motion, now)
+        if (p.done || !ground || !inputs.scene || !Object.hasOwn(inputs.scene.levels, p.levelId)) {
+          e.motion = null
+          e.visual = e.target
+        } else {
+          e.visual = { ...e.target, levelId: p.levelId, x: p.x, z: p.z, y: ground.groundHeightAt(p.levelId, { x: p.x, z: p.z }) }
+          walking = true
+        }
+        this.dirty = true
+      }
     }
     // One more pass after a fade ends so the final (fully opaque) state is written.
     const settle = this.wasAnimating && !animating
@@ -665,7 +713,7 @@ export class TokenLayer {
     this.markers.set(markers)
     this.rings.set(rings)
     this.updateGhosts(inputs)
-    return animating
+    return animating || walking
   }
 
   /** The LOD a model token should draw now (hysteresis around its current one). */

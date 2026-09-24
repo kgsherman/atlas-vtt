@@ -43,7 +43,7 @@ import { sceneBounds, type Bounds3 } from "../cameras/fit"
 import { OrbitCameraController } from "../cameras/orbit"
 import { TopDownCameraController } from "../cameras/topdown"
 import type { CameraController } from "../cameras/types"
-import type { Engine, EngineLoadState, EngineOptions, FrameStats, OverlayState, PickOptions, PickResult, Quality, SceneChange, ViewState } from "../contracts"
+import type { Engine, EngineLoadState, EngineOptions, FrameStats, OverlayState, PickOptions, PickResult, Quality, SceneChange, TokenRouter, ViewState } from "../contracts"
 import { LAYER, type LightingSystem } from "../internal"
 import { createLightingSystem } from "../lighting/system"
 import { precompileScene, TIER_DEFINE } from "../materials/util"
@@ -1629,6 +1629,10 @@ export class AtlasEngine implements Engine {
   setCameraControlsEnabled(enabled: boolean): void {
     this.orbit.enabled = enabled
     this.topdown.enabled = enabled
+  }
+
+  setTokenRouter(router: TokenRouter | null): void {
+    this.tokens.setRouter(router)
   }
 
   // -------------------------------------------------------------------------

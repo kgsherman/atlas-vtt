@@ -784,6 +784,8 @@ describe("masks and flags", () => {
     s = reduceDm(s, { t: "set-enforce-speed", enabled: true }).state
     const view = filterForPlayer(s, "p1", synthVis(scene, {}))
     expect(view.flags).toEqual({ movementLocked: true, sharedVision: false, enforceSpeed: true })
+    s = reduceDm(s, { t: "set-free-movement", enabled: true }).state
+    expect(filterForPlayer(s, "p1", synthVis(scene, {})).flags.freeMovement).toBe(true)
   })
 
   it("never sends hidden objects even if a player remembers them", () => {

@@ -270,7 +270,7 @@ export const playerViewSchema = z.strictObject({
   backdrops: z.record(id, backdrop).optional(),
   controlledTokenIds: z.array(id),
   visionTokenIds: z.array(id),
-  flags: z.strictObject({ movementLocked: z.boolean(), sharedVision: z.boolean(), enforceSpeed: z.boolean() }),
+  flags: z.strictObject({ movementLocked: z.boolean(), sharedVision: z.boolean(), enforceSpeed: z.boolean(), freeMovement: z.boolean().optional() }),
 })
 
 /** Validate an untrusted PlayerView (e.g. a player_views row). null when it does not match exactly. */

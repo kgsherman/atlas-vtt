@@ -25,12 +25,26 @@ import { buildToolPreview, disposePreview } from "./previews"
 import { TerrainOverlayResources } from "./terrainOverlay"
 import { aaLineGeometry, createAALineMaterial, polylinePairs } from "../materials/aaLineMaterial"
 import { createEdgeAAMaterial, edgeGeometry } from "../materials/edgeAAMaterial"
-import { circlePoints, dashPolyline, discEdgeGeometry, mergeEdgeGeometry, pathStepPoints, ribbonEdgeGeometry, ringEdgeGeometry } from "./ribbon"
+import {
+  arrowHeadEdgeGeometry,
+  circlePoints,
+  dashPolyline,
+  discEdgeGeometry,
+  mergeEdgeGeometry,
+  pathStepPoints,
+  ribbonEdgeGeometry,
+  ringEdgeGeometry,
+  trimPolylineEnd,
+  type EdgeGeometryData,
+} from "./ribbon"
 
 const SELECT_COLOR = "#34d399"
 const HOVER_COLOR = "#a7f3d0"
 const HIDDEN_COLOR = "#a78bfa"
 const RULER_COLOR = "#fbbf24"
+const BLOCKED_COLOR = "#f87171"
+/** Dark casing under move paths (contrast on light maps) and the step dots inside them. */
+const CASING_COLOR = "#1c1917"
 const PENDING_COLOR = "#38bdf8"
 const ARROW_COLOR = "#38bdf8"
 
@@ -94,6 +108,11 @@ export class OverlayManager {
   private readonly hiddenMat = createAALineMaterial(HIDDEN_COLOR, { opacity: 0.7, width: 1.5 })
   private readonly rulerMat = createEdgeAAMaterial(RULER_COLOR, { opacity: 0.95 })
   private readonly rulerDotMat = createEdgeAAMaterial("#fafafa", { opacity: 0.95 })
+  // Move paths are opaque, so the overlapping pieces of a ribbon (joints, the arrowhead) blend as one.
+  private readonly pathMat = createEdgeAAMaterial(RULER_COLOR)
+  private readonly blockedMat = createEdgeAAMaterial(BLOCKED_COLOR)
+  private readonly casingMat = createEdgeAAMaterial(CASING_COLOR)
+  private readonly stopMat = createEdgeAAMaterial(CASING_COLOR, { opacity: 0.55 })
   private readonly pendingMat = createEdgeAAMaterial(PENDING_COLOR, { opacity: 0.85 })
   private readonly arrowMat = overlayFill(ARROW_COLOR, 0.55)
   // Anti-aliased rim over the arrow's (aliased) fill edge.
@@ -149,7 +168,8 @@ export class OverlayManager {
     this.outlinesDirty = true
     this.helpersDirty = true
     this.pendingDirty = true
-    this.rulerDirty = this.state.ruler !== null
+    // (Never clears a pending rebuild: a ruler removed just before a scene change must still go.)
+    if (this.state.ruler !== null) this.rulerDirty = true
   }
 
   /** View (mode, helpers, level plan, active level) changed. */
@@ -280,13 +300,16 @@ export class OverlayManager {
     }
     const root = new THREE.Object3D()
     const wpp = this.host.worldPerPixel()
-    // + half a pixel per side: the edge fade is centred on the nominal edge.
-    const width = Math.max(0.2, wpp * 3) + wpp
     const lifted = r.points.map((p) => ({ x: p.x, y: p.y + 0.12, z: p.z }))
-    if (lifted.length >= 2) root.add(new THREE.Mesh(edgeGeometry(ribbonEdgeGeometry(lifted, width)), this.rulerMat))
-    const dotRadius = Math.max(0.25, wpp * 4) + wpp / 2
-    const dots = mergeEdgeGeometry(lifted.map((p) => discEdgeGeometry(p.x, p.y + 0.01, p.z, dotRadius, 20)))
-    if (dots.positions.length > 0) root.add(new THREE.Mesh(edgeGeometry(dots), this.rulerDotMat))
+    if (r.kind === "path" || r.kind === "blocked") this.buildMovePath(root, r, lifted, wpp)
+    else {
+      // + half a pixel per side: the edge fade is centred on the nominal edge.
+      const width = Math.max(0.2, wpp * 3) + wpp
+      if (lifted.length >= 2) root.add(new THREE.Mesh(edgeGeometry(ribbonEdgeGeometry(lifted, width)), this.rulerMat))
+      const dotRadius = Math.max(0.25, wpp * 4) + wpp / 2
+      const dots = mergeEdgeGeometry(lifted.map((p) => discEdgeGeometry(p.x, p.y + 0.01, p.z, dotRadius, 20)))
+      if (dots.positions.length > 0) root.add(new THREE.Mesh(edgeGeometry(dots), this.rulerDotMat))
+    }
     // The label sprite lives directly under the overlay root (sprites share one geometry that must
     // never be disposed with the ruler tree).
     if (!this.rulerLabel) {
@@ -306,6 +329,51 @@ export class OverlayManager {
     })
     this.ruler = root
     this.root.add(root)
+  }
+
+  /**
+   * A token's move: a bold line on a dark casing ending in an arrowhead, with small dots at its stops;
+   * the error colour when the move cannot be made. Widths are in screen pixels (with world minimums).
+   */
+  private buildMovePath(root: THREE.Object3D, r: RulerOverlay, lifted: Vec3[], wpp: number): void {
+    if (lifted.length < 2) return
+    const width = Math.max(0.45, wpp * 6)
+    const casing = width + Math.max(0.2, wpp * 3)
+    const headLength = Math.max(1.6, wpp * 18)
+    const headWidth = Math.max(1.4, wpp * 17)
+    // Direction of the last stretch longer than the head (dense draped points have tiny segments).
+    const tip = lifted[lifted.length - 1]
+    let k = lifted.length - 2
+    while (k > 0 && Math.hypot(tip.x - lifted[k].x, tip.z - lifted[k].z) < headLength) k--
+    const dir = { x: tip.x - lifted[k].x, z: tip.z - lifted[k].z }
+    const total = lifted.reduce((s, p, n) => (n === 0 ? 0 : s + Math.hypot(p.x - lifted[n - 1].x, p.z - lifted[n - 1].z)), 0)
+    // Short moves shrink the head so some line stays visible.
+    const head = Math.min(headLength, total * 0.6)
+    const shaft = trimPolylineEnd(lifted, head * 0.8)
+    const aa = wpp // + half a pixel per side (edge fade centred on the nominal edge)
+    const dl = Math.hypot(dir.x, dir.z) || 1
+    // `ahead`: how far the head's tip is pushed forward (the casing shows around the tip too).
+    const shape = (w: number, headL: number, headW: number, lift: number, ahead: number): EdgeGeometryData => {
+      const up = (p: Vec3) => ({ x: p.x, y: p.y + lift, z: p.z })
+      const at = { x: tip.x + (dir.x / dl) * ahead, y: tip.y + lift, z: tip.z + (dir.z / dl) * ahead }
+      return mergeEdgeGeometry([
+        ribbonEdgeGeometry(shaft.map(up), w + aa),
+        arrowHeadEdgeGeometry(at, dir, headL, headW),
+        discEdgeGeometry(lifted[0].x, lifted[0].y + lift, lifted[0].z, (w + aa) / 2, 20),
+      ])
+    }
+    const ratio = head / headLength
+    const border = casing - width
+    // The casing's head: the main head grown by about `border` on every side (pushed forward and longer).
+    root.add(new THREE.Mesh(edgeGeometry(shape(casing, headLength * ratio + border * 3.2, headWidth * ratio + border * 3, 0, border * 1.2)), this.casingMat))
+    root.add(new THREE.Mesh(edgeGeometry(shape(width, headLength * ratio, headWidth * ratio, 0.01, 0)), r.kind === "blocked" ? this.blockedMat : this.pathMat))
+    // Step dots (not on the first point, nor under the arrowhead).
+    if (r.kind === "path" && r.stops && r.stops.length > 2) {
+      const radius = width * 0.3 + aa / 2
+      const dots = r.stops.slice(1, -1).map((p) => discEdgeGeometry(p.x, p.y + 0.12 + 0.02, p.z, radius, 12))
+      root.add(new THREE.Mesh(edgeGeometry(mergeEdgeGeometry(dots)), this.stopMat))
+    }
+    root.traverse((o) => (o.renderOrder = 14))
   }
 
   private rebuildPending(): void {
@@ -455,6 +523,6 @@ export class OverlayManager {
       this.rulerLabel.dispose()
     }
     this.grid.dispose()
-    for (const m of [this.selectMat, this.hoverMat, this.hiddenMat, this.rulerMat, this.rulerDotMat, this.pendingMat, this.arrowMat, this.arrowLineMat]) m.dispose()
+    for (const m of [this.selectMat, this.hoverMat, this.hiddenMat, this.rulerMat, this.rulerDotMat, this.pathMat, this.blockedMat, this.casingMat, this.stopMat, this.pendingMat, this.arrowMat, this.arrowLineMat]) m.dispose()
   }
 }

@@ -25,10 +25,10 @@
  *    after 5 s ("DM not responding").
  */
 import type { PathStep } from "@/core/movement/types"
-import type { Cell, Id, Level, SceneLike } from "@/core/scene/types"
+import type { Cell, Id, Level, SceneLike, Vec2 } from "@/core/scene/types"
 import { applyPatchOps } from "@/core/session/diff"
 import { parsePlayerView } from "@/core/session/playerViewSchema"
-import type { HostBroadcast, HostToClient, PatchOp, PlayerBackdrop, PlayerView, RejectReason, RequestResult } from "@/core/session/types"
+import type { ClientToHost, HostBroadcast, HostToClient, PatchOp, PlayerBackdrop, PlayerView, RejectReason, RequestResult } from "@/core/session/types"
 import { PROTOCOL_LIMITS } from "@/core/session/protocol"
 import { viewToScene } from "@/core/session/viewToScene"
 import type { Engine, SceneChange } from "@/render/contracts"
@@ -459,6 +459,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
     this.subscribe = this.subscribe.bind(this)
     this.requestMove = this.requestMove.bind(this)
     this.requestDoor = this.requestDoor.bind(this)
+    this.requestJump = this.requestJump.bind(this)
     this.sceneChangeSince = this.sceneChangeSince.bind(this)
     this.onBackdrop = this.onBackdrop.bind(this)
     this.backdropLayers = this.backdropLayers.bind(this)
@@ -1043,7 +1044,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
   // Requests
   // -------------------------------------------------------------------------
 
-  requestMove(tokenId: Id, path: PathStep[]): string {
+  requestMove(tokenId: Id, path: PathStep[], end?: Vec2 | null): string {
     const reqId = this.newRequestId()
     if (!Array.isArray(path) || path.length === 0) {
       this.pushResult({ reqId, ok: false, reason: "empty-path" }, "invalid")
@@ -1051,8 +1052,16 @@ class PlayerClientImpl implements AtlasPlayerClient {
       this.pushResult({ reqId, ok: false, reason: "path-too-long" }, "invalid")
     } else {
       const copy = path.map((s) => ({ cell: { i: s.cell.i, j: s.cell.j }, levelId: s.levelId }))
-      this.submit({ reqId, kind: "move", tokenId, path: copy, sentAt: 0 }, { t: "move", reqId, tokenId, path: copy })
+      const msg: ClientToHost = end ? { t: "move", reqId, tokenId, path: copy, end: { x: end.x, z: end.z } } : { t: "move", reqId, tokenId, path: copy }
+      this.submit({ reqId, kind: "move", tokenId, path: copy, sentAt: 0 }, msg)
     }
+    this.changed()
+    return reqId
+  }
+
+  requestJump(tokenId: Id, levelId: Id, position: Vec2): string {
+    const reqId = this.newRequestId()
+    this.submit({ reqId, kind: "jump", tokenId, sentAt: 0 }, { t: "jump", reqId, tokenId, levelId, x: position.x, z: position.z })
     this.changed()
     return reqId
   }

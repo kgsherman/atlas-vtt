@@ -139,7 +139,13 @@ export const PLAY_POINTER_HELP: {
 }[] = [
   { keys: "W A S D / Arrows", label: "Pan the camera" },
   { keys: "Wheel", label: "Zoom at the cursor" },
-  { keys: "Right-drag", label: "Pan" },
+  { keys: "Right-drag", label: "Pan (no token selected)" },
+  { keys: "Middle-drag", label: "Pan" },
+  {
+    keys: "Right-hold",
+    label: "Move the selected token: release to go, click or Esc to cancel",
+  },
+  { keys: "Alt + move", label: "Move off the grid (when allowed)" },
   {
     keys: "Right-click",
     label: "Token, door and light actions",

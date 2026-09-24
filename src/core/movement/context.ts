@@ -533,6 +533,24 @@ export class MoveContext {
     return false
   }
 
+  /**
+   * The token's disc standing at `p` overlaps a movement blocker on `levels` whose vertical extent
+   * overlaps [yLo, yHi]. Unlike sweepBlocked there is no "already overlapping" exemption: this judges a
+   * position the token arrives at without walking (a jump).
+   */
+  discBlocked(levels: readonly Id[], p: Vec2, yLo: number, yHi: number): boolean {
+    const h = this.sweepRadius
+    const bbox: Rect = { x: p.x - h, z: p.z - h, w: 2 * h, d: 2 * h }
+    for (const levelId of levels) {
+      for (const q of this.world.queryRect(levelId, bbox)) {
+        if (!q.blocks.movement) continue
+        const [y0, y1] = verticalRange(q, p, p, h)
+        if (y0 < yHi && y1 > yLo && footprintOverlapsCircle(q, p, h)) return true
+      }
+    }
+    return false
+  }
+
   /** The step from → to goes through an open doorway of the wall that `p` (one of its full-height pieces) belongs to. */
   private throughDoorway(p: OccluderPrimitive, from: Vec2, to: Vec2): boolean {
     const wallId = p.sourceId

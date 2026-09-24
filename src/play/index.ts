@@ -12,7 +12,9 @@ export {
   type PlayPointerEvent,
   type PlayRole,
   type PlayTool,
+  type StrandedMove,
 } from "./controller"
+export { SentRoutes, tokenRouter } from "./routes"
 export {
   blindLandingOk,
   MovePlanner,
@@ -33,10 +35,13 @@ export {
 } from "./doors"
 export {
   anchorForPoint,
+  drapeRoute,
   formatFeet,
   groundY,
   pathPoints,
+  pathRoute,
   pathRuler,
+  routeRuler,
   snapToCellCenter,
   straightRuler,
 } from "./geometry"

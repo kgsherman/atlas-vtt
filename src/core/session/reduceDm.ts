@@ -218,6 +218,9 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
     case "set-enforce-speed":
       if (state.enforceSpeed === cmd.enabled) return noop(state)
       return { state: { ...state, enforceSpeed: cmd.enabled, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: "all" }
+    case "set-free-movement":
+      if ((state.freeMovement ?? false) === cmd.enabled) return noop(state)
+      return { state: { ...state, freeMovement: cmd.enabled, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: "all" }
     case "assign-token": {
       if (!own(state.scene.tokens, cmd.tokenId)) return noop(state, "unknown token")
       const current = own(state.owners, cmd.tokenId) ?? []

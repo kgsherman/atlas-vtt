@@ -211,6 +211,59 @@ export function ringEdgeGeometry(cx: number, y: number, cz: number, inner: numbe
   return w.build()
 }
 
+/**
+ * Flat arrowhead with its tip at `tip`, pointing along `dir` (XZ), `length` long and `width` wide at
+ * its base: a fan from the centroid (edge coordinate 0 there, 1 on every side).
+ */
+export function arrowHeadEdgeGeometry(tip: Vec3, dir: { x: number; z: number }, length: number, width: number): EdgeGeometryData {
+  const w = new EdgeWriter()
+  const l = Math.hypot(dir.x, dir.z)
+  if (!(l > 1e-9) || !(length > 0) || !(width > 0)) return w.build()
+  const fx = dir.x / l
+  const fz = dir.z / l
+  const bx = tip.x - fx * length
+  const bz = tip.z - fz * length
+  const h = width / 2
+  const v = [
+    [tip.x, tip.z],
+    [bx - fz * h, bz + fx * h],
+    [bx + fz * h, bz - fx * h],
+  ]
+  const cx = (v[0][0] + v[1][0] + v[2][0]) / 3
+  const cz = (v[0][1] + v[1][1] + v[2][1]) / 3
+  for (let k = 0; k < 3; k++) {
+    const a = v[k]
+    const b = v[(k + 1) % 3]
+    w.v(cx, tip.y, cz, 0, 0)
+    w.v(a[0], tip.y, a[1], 1, 0)
+    w.v(b[0], tip.y, b[1], 1, 0)
+  }
+  return w.build()
+}
+
+/**
+ * The polyline without its last `length` (measured in XZ), for a line that ends at the base of an
+ * arrowhead. At least the first point and a point just past it are kept.
+ */
+export function trimPolylineEnd(points: readonly Vec3[], length: number): Vec3[] {
+  if (points.length < 2 || !(length > 0)) return [...points]
+  const out = [...points]
+  let left = length
+  while (out.length >= 2) {
+    const b = out[out.length - 1]
+    const a = out[out.length - 2]
+    const seg = Math.hypot(b.x - a.x, b.z - a.z)
+    if (seg > left) {
+      const f = (seg - left) / seg
+      out[out.length - 1] = { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f, z: a.z + (b.z - a.z) * f }
+      return out
+    }
+    left -= seg
+    out.pop()
+  }
+  return [points[0], points[0]]
+}
+
 /** Concatenate edge geometries (one draw call). */
 export function mergeEdgeGeometry(parts: readonly EdgeGeometryData[]): EdgeGeometryData {
   let np = 0

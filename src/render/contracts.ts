@@ -3,6 +3,7 @@
  * renderer ONLY through this interface (see docs/ARCHITECTURE.md §4).
  */
 import type { GizmoAxis, GizmoPart } from "@/core/geometry/gizmo"
+import type { MotionPoint } from "@/core/movement"
 import type { PathStep } from "@/core/movement/types"
 import type { BrushMode } from "@/core/scene/heightmapBrush"
 import type { TerrainElementMode, TerrainElementRef } from "@/core/scene/terrainShapes"
@@ -143,9 +144,24 @@ export type ToolPreview =
 
 export interface RulerOverlay {
   levelId: Id
+  /** The line (dense where it drapes over uneven ground). */
   points: Vec3[]
   label: string
+  /**
+   * "measure" (default): a slim line with a dot at every point. "path": a token's move, a bold line
+   * with an arrowhead and a dot at each of `stops`. "blocked": a move that cannot be made, in the error
+   * colour.
+   */
+  kind?: "measure" | "path" | "blocked"
+  /** Points marked with dots on "path" / "blocked" lines (e.g. the cells a grid move steps through). */
+  stops?: Vec3[]
 }
+
+/**
+ * Where a token moving from `from` to `to` walks (Engine.setTokenRouter): its route including both
+ * ends, or null for a straight glide (short moves on one level) or a jump.
+ */
+export type TokenRouter = (tokenId: Id, from: MotionPoint, to: MotionPoint) => MotionPoint[] | null
 
 export interface OverlayState {
   selectedIds: Id[]
@@ -290,6 +306,11 @@ export interface Engine {
   rotateCamera(quarterTurns: number): void
   /** Enable/disable the engine's own camera controls (tools may need exclusive pointer). */
   setCameraControlsEnabled(enabled: boolean): void
+  /**
+   * Tokens whose position changes walk there (constant speed, following the ground) along the routes
+   * this gives; null = straight glides over short distances on one level, jumps otherwise.
+   */
+  setTokenRouter(router: TokenRouter | null): void
 
   onFrame(cb: (stats: FrameStats) => void): () => void
   /**

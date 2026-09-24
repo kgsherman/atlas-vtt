@@ -119,6 +119,72 @@ describe("move requests", () => {
   })
 })
 
+describe("gridless moves and jumps", () => {
+  /** Open 10×6 field, a wall along x = 30; the PC stands in cell (2, 2). */
+  function field(freeMovement: boolean) {
+    const { scene, ground } = flatScene(10, 6)
+    add(scene, createWall(ground, { x: 30, z: 0 }, { x: 30, z: 30 }))
+    const pc = addToken(scene, ground, 12.5, 12.5)
+    let state = createGameState({ sessionId: "s", roomCode: "R", scene })
+    state = reduceDm(state, { t: "add-player", userId: "p1", displayName: "p1" }).state
+    state = reduceDm(state, { t: "assign-token", tokenId: pc.id, userId: "p1", assigned: true }).state
+    state = reduceDm(state, { t: "set-free-movement", enabled: freeMovement }).state
+    const ctx: RequestContext = { world: buildOcclusionWorld(scene), currentView: null, perceivedByPlayer: () => true }
+    return { state, ground, pc, ctx }
+  }
+
+  it("ends a gridless move at its exact point", () => {
+    const { state, ground, pc, ctx } = field(true)
+    const out = reduceRequest(state, "p1", { t: "move", reqId: "r", tokenId: pc.id, path: walk(ground, [[2, 2], [3, 2]]), end: { x: 16.2, z: 11.4 } }, ctx)
+    expect(out.result).toEqual({ reqId: "r", ok: true, applied: 1 })
+    expect(out.state.scene.tokens[pc.id].position).toEqual({ x: 16.2, z: 11.4 })
+    // Within the token's own cell.
+    const nudge = reduceRequest(state, "p1", { t: "move", reqId: "n", tokenId: pc.id, path: walk(ground, [[2, 2]]), end: { x: 11, z: 14 } }, ctx)
+    expect(nudge.result.ok).toBe(true)
+    expect(nudge.state.scene.tokens[pc.id].position).toEqual({ x: 11, z: 14 })
+    expect(nudge.visited).toEqual(walk(ground, [[2, 2]]))
+  })
+
+  it("stops on the last centre when the end is not reachable, and refuses ends while players snap to the grid", () => {
+    const { state, ground, pc, ctx } = field(true)
+    const path = walk(ground, [[2, 2], [3, 2], [4, 2], [5, 2]])
+    const out = reduceRequest(state, "p1", { t: "move", reqId: "r", tokenId: pc.id, path, end: { x: 29.9, z: 12.5 } }, ctx)
+    expect(out.result).toEqual({ reqId: "r", ok: false, applied: 3, reason: "blocked" })
+    expect(out.state.scene.tokens[pc.id].position).toEqual({ x: 27.5, z: 12.5 })
+    const snapped = field(false)
+    const gridPath = walk(snapped.ground, [[2, 2], [3, 2]])
+    const refused = reduceRequest(snapped.state, "p1", { t: "move", reqId: "r", tokenId: snapped.pc.id, path: gridPath, end: { x: 16, z: 12.5 } }, snapped.ctx)
+    expect(refused.result).toEqual({ reqId: "r", ok: false, reason: "invalid" })
+    expect(refused.state).toBe(snapped.state)
+  })
+
+  it("jumps over walls, snapping to the grid unless free movement is on", () => {
+    const free = field(true)
+    const out = reduceRequest(free.state, "p1", { t: "jump", reqId: "j", tokenId: free.pc.id, levelId: free.ground, x: 41.3, z: 8.2 }, free.ctx)
+    expect(out.result).toEqual({ reqId: "j", ok: true, applied: 1 })
+    expect(out.state.scene.tokens[free.pc.id].position).toEqual({ x: 41.3, z: 8.2 })
+    expect(out.delta.tokens).toEqual([free.pc.id])
+    const grid = field(false)
+    const snapped = reduceRequest(grid.state, "p1", { t: "jump", reqId: "j", tokenId: grid.pc.id, levelId: grid.ground, x: 41.3, z: 8.2 }, grid.ctx)
+    expect(snapped.state.scene.tokens[grid.pc.id].position).toEqual({ x: 42.5, z: 7.5 })
+  })
+
+  it("refuses jumps into blockers (masked when unseen), too far, locked or for tokens not owned", () => {
+    const { state, ground, pc, ctx } = field(true)
+    const jump = (s: GameState, uid: string, x: number, c: RequestContext = ctx) =>
+      reduceRequest(s, uid, { t: "jump", reqId: "j", tokenId: pc.id, levelId: ground, x, z: 12.5 }, c)
+    expect(jump(state, "p1", 30.5).result).toEqual({ reqId: "j", ok: false, reason: "blocked" })
+    expect(jump(state, "p2", 40).result.reason).toBe("not-owner")
+    expect(jump(state, "p1", 70).result.reason).toBe("out-of-bounds")
+    const speedy = reduceDm(state, { t: "set-enforce-speed", enabled: true }).state
+    expect(jump(speedy, "p1", 47.5).result.reason).toBe("too-far")
+    const locked = reduceDm(state, { t: "set-movement-locked", locked: true }).state
+    expect(jump(locked, "p1", 40).result.reason).toBe("movement-locked")
+    // Setting the rule to its current value is a no-op.
+    expect(reduceDm(state, { t: "set-free-movement", enabled: true }).state).toBe(state)
+  })
+})
+
 describe("door requests", () => {
   /** Bright field; wall along z = 25 with a door centred at x = 27.5 (x 25.5–29.5). */
   function doorField(state: "open" | "closed" | "locked" = "closed") {

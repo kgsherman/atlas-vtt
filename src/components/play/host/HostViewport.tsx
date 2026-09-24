@@ -3,7 +3,8 @@
  * authoritative GameState.scene. Scene revisions are applied incrementally (identity diff of immer
  * revisions); level backdrops come from the asset store; "preview vision" darkens what the previewed
  * tokens cannot perceive (masks from HostRunner.previewVisibility); input goes to the play controller
- * (select, drag-to-place, measure, door clicks) or, in edit mode, to the editor controller.
+ * (select, drag-to-place, measure, door clicks) or, in edit mode, to the editor controller. Moved
+ * tokens walk along routes a planner reconstructs (tokenRouter; the DM's own placements too).
  */
 import * as React from "react"
 import { toast } from "sonner"
@@ -24,6 +25,8 @@ import {
   previewSeenTokens,
   sceneChangeBetween,
   isEmptyChange,
+  MovePlanner,
+  tokenRouter,
   type PlayController,
 } from "@/play"
 import type {
@@ -150,6 +153,13 @@ function HostBridge({
   }, [canvas, onCanvas])
 
   // ---- scene ---------------------------------------------------------------------------------------
+  // Routes of moved tokens (animation only): kept on the same revisions as the engine, updated first.
+  const [planner] = React.useState(() => new MovePlanner())
+  React.useEffect(() => {
+    if (!engine) return
+    engine.setTokenRouter(tokenRouter(planner))
+    return () => engine.setTokenRouter(null)
+  }, [engine, planner])
   const shown = React.useRef<{ engine: Engine; scene: Scene } | null>(null)
   React.useLayoutEffect(() => {
     if (!engine) return
@@ -159,6 +169,7 @@ function HostBridge({
         : null
     if (prev === scene) return
     const change = sceneChangeBetween(prev, scene)
+    planner.setScene(scene, change)
     if (!change) {
       engine.setScene(scene)
       if (!prev) engine.frameScene()
@@ -167,7 +178,7 @@ function HostBridge({
     }
     shown.current = { engine, scene }
     controller.sceneChanged()
-  }, [engine, scene, controller])
+  }, [engine, scene, controller, planner])
 
   // ---- preview vision (masks from the host's vision worker) -----------------------------------------
   const [previewMasks, setPreviewMasks] = React.useState<{

@@ -7,9 +7,15 @@ import {
   at,
   check,
   flatScene,
+  paintHeightmap,
   tokenAt,
 } from "@/core/movement/test-utils"
-import { createConnector, createDoor, createWall } from "@/core/scene/factory"
+import {
+  createConnector,
+  createDoor,
+  createProp,
+  createWall,
+} from "@/core/scene/factory"
 import type { Id, Scene, TerrainShape } from "@/core/scene/types"
 import type { VisibilityResult } from "@/core/vision/types"
 import {
@@ -34,6 +40,7 @@ import {
 import { doorAt, tokensInReach } from "./doors"
 import {
   anchorForPoint,
+  drapeRoute,
   formatFeet,
   pathPoints,
   pathRuler,
@@ -50,6 +57,7 @@ import {
   setTokensHiddenPatches,
 } from "./host"
 import { MeasureTool } from "./measure"
+import { SentRoutes, tokenRouter } from "./routes"
 import {
   blindLandingOk,
   MovePlanner,
@@ -136,6 +144,64 @@ describe("geometry", () => {
     const ruler = pathRuler(scene, "medium", path, "note")
     expect(ruler?.label).toBe("5 ft · note")
     expect(ruler?.levelId).toBe(upper.id)
+  })
+})
+
+describe("move routes", () => {
+  it("drapes lines over the ground and switches level halfway across a level change", () => {
+    const { scene, levelId } = flatScene()
+    paintHeightmap(scene, levelId, (x) => (x > 10 ? 2 : 0))
+    const pts = drapeRoute(scene, [
+      { levelId, position: { x: 2.5, z: 2.5 } },
+      { levelId, position: { x: 17.5, z: 2.5 } },
+    ])
+    expect(pts.length).toBeGreaterThan(20)
+    expect(pts[0].y).toBeCloseTo(0.15)
+    expect(pts[pts.length - 1].y).toBeCloseTo(2.15)
+    const upper = addLevel(scene, { elevation: 10 })
+    const up = drapeRoute(scene, [
+      { levelId, position: { x: 2.5, z: 2.5 } },
+      { levelId: upper.id, position: { x: 2.5, z: 7.5 } },
+    ])
+    expect(up[1].y).toBeLessThan(5)
+    expect(up[up.length - 1].y).toBeGreaterThan(9)
+  })
+
+  it("reuses the route a move was sent along, up to where the host stopped it, once", () => {
+    let now = 0
+    const sent = new SentRoutes(() => now)
+    const L = "L"
+    const p = (x: number) => ({ levelId: L, position: { x, z: 2.5 } })
+    sent.remember("t", [p(2.5), p(7.5), p(12.5), p(17.5)])
+    expect(sent.take("t", p(3), p(12.5))).toEqual([p(3), p(7.5), p(12.5)])
+    expect(sent.take("t", p(3), p(12.5))).toBeNull()
+    sent.remember("t", [p(2.5), p(7.5)])
+    expect(sent.take("t", p(2.5), p(30))).toBeNull()
+    now = 60_000
+    expect(sent.take("t", p(2.5), p(7.5))).toBeNull()
+  })
+
+  it("reconstructs routes of moves this client did not send (the planner, around walls)", () => {
+    const { scene, levelId } = flatScene(10, 10)
+    add(scene, createWall(levelId, { x: 10, z: 0 }, { x: 10, z: 30 }))
+    const t = tokenAt(scene, levelId, { i: 3, j: 0 })
+    const planner = new MovePlanner()
+    planner.setScene(scene)
+    const route = tokenRouter(planner)(
+      t.id,
+      { levelId, position: { x: 2.5, z: 2.5 } },
+      { levelId, position: { x: 17.5, z: 2.5 } }
+    )
+    expect(route).not.toBeNull()
+    expect(route!.length).toBeGreaterThan(3)
+    expect(route![0].position).toEqual({ x: 2.5, z: 2.5 })
+    expect(route![route!.length - 1].position).toEqual({ x: 17.5, z: 2.5 })
+    // Off the grid: pulled, ending exactly there.
+    const free = planner.route(t.id, { levelId, position: { x: 17, z: 40 } }, { levelId, position: { x: 31.2, z: 44.4 } })
+    expect(free).toEqual([
+      { levelId, position: { x: 17, z: 40 } },
+      { levelId, position: { x: 31.2, z: 44.4 } },
+    ])
   })
 })
 
@@ -741,7 +807,7 @@ function controllerFixture(
   role: "player" | "dm",
   scene: Scene,
   levelId: Id,
-  opts: { locked?: boolean; speed?: number | null } = {}
+  opts: { locked?: boolean; speed?: number | null; free?: boolean } = {}
 ) {
   const planner = new MovePlanner()
   planner.setScene(scene)
@@ -757,6 +823,7 @@ function controllerFixture(
     canSelect: () => true,
     canDrag: () => true,
     movementLocked: () => opts.locked ?? false,
+    freeMovement: () => opts.free ?? false,
     speedLimit: () => opts.speed ?? null,
     groundAt: (x, y) => ({ x: x / 10, z: y / 10 }),
     planner: role === "player" ? planner : null,
@@ -768,6 +835,7 @@ function controllerFixture(
   }
   return {
     controller: new PlayController(host),
+    planner,
     moves,
     hints,
     doors,
@@ -896,6 +964,157 @@ describe("PlayController", () => {
     expect(f.controller.measuredFeet()).toBe(30)
     f.controller.cancel()
     expect(f.controller.overlays().ruler).toBeNull()
+  })
+
+  it("runs right-button move commands: preview while held, commit on release", () => {
+    const { scene, levelId } = flatScene(10, 10)
+    const t = tokenAt(scene, levelId, { i: 1, j: 1 })
+    const f = controllerFixture("player", scene, levelId)
+    const c = f.controller
+    // Nothing selected: the right button is left to the page (camera pan).
+    expect(c.pointerDown(ev(0, 0, pick({ x: 22.5, z: 7.5 }), { button: 2 }))).toBe(false)
+    c.setSelected(t.id)
+    expect(c.pointerDown(ev(0, 0, pick({ x: 22.5, z: 7.5 }), { button: 2 }))).toBe(true)
+    expect(c.commanding).toBe(true)
+    expect(f.camera).toHaveBeenLastCalledWith(false)
+    expect(c.overlays().ruler).toMatchObject({ label: "15 ft", kind: "path" })
+    c.pointerMove(ev(10, 0, pick({ x: 27.5, z: 7.5 })))
+    expect(c.overlays().dragGhosts[t.id]?.position).toEqual({ x: 27.5, z: 7.5 })
+    expect(c.pointerUp(ev(10, 0, pick({ x: 27.5, z: 7.5 }), { button: 2 }))).toBe(true)
+    expect(f.moves).toHaveLength(1)
+    const m = f.moves[0]
+    expect(m.kind === "path" && m.path[m.path.length - 1]).toEqual(at(5, 1, levelId))
+    expect(m.kind === "path" && m.route[m.route.length - 1].position).toEqual({ x: 27.5, z: 7.5 })
+    expect(c.commanding).toBe(false)
+    expect(f.camera).toHaveBeenLastCalledWith(true)
+  })
+
+  it("cancels a move command on a left click (which does nothing else) or Esc", () => {
+    const { scene, levelId } = flatScene(10, 10)
+    const wall = add(scene, createWall(levelId, { x: 0, z: 25 }, { x: 50, z: 25 }))
+    add(scene, createDoor(wall, 22.5, { width: 5 }))
+    const t = tokenAt(scene, levelId, { i: 1, j: 1 })
+    const f = controllerFixture("player", scene, levelId)
+    const c = f.controller
+    c.setSelected(t.id)
+    c.pointerDown(ev(0, 0, pick({ x: 22.5, z: 7.5 }), { button: 2 }))
+    // A left press on a door while the right button is held: cancels, no door toggle.
+    expect(c.pointerDown(ev(0, 0, pick({ x: 22.5, z: 25.5 })))).toBe(true)
+    expect(c.overlays().ruler).toBeNull()
+    c.pointerUp(ev(0, 0, pick({ x: 22.5, z: 25.5 })))
+    expect(c.pointerUp(ev(0, 0, pick({ x: 22.5, z: 7.5 }), { button: 2 }))).toBe(false)
+    expect(f.doors).toEqual([])
+    expect(f.moves).toEqual([])
+    c.pointerDown(ev(0, 0, pick({ x: 22.5, z: 7.5 }), { button: 2 }))
+    c.cancel()
+    c.pointerUp(ev(0, 0, pick({ x: 22.5, z: 7.5 }), { button: 2 }))
+    expect(f.moves).toEqual([])
+  })
+
+  it("leaves the DM's right-click on a token to its menu and refuses commands while locked", () => {
+    const { scene, levelId } = flatScene(10, 10)
+    const t = tokenAt(scene, levelId, { i: 1, j: 1 })
+    const other = tokenAt(scene, levelId, { i: 4, j: 4 })
+    const dm = controllerFixture("dm", scene, levelId)
+    dm.controller.setSelected(t.id)
+    expect(dm.controller.pointerDown(ev(225, 225, pick({ x: 22.5, z: 22.5 }, { tokenId: other.id }), { button: 2 }))).toBe(false)
+    expect(dm.controller.pointerDown(ev(325, 75, pick(null), { button: 2 }))).toBe(true)
+    dm.controller.pointerUp(ev(325, 75, pick(null), { button: 2 }))
+    expect(dm.moves).toEqual([{ kind: "place", tokenId: t.id, levelId, position: { x: 32.5, z: 7.5 } }])
+    const locked = controllerFixture("player", scene, levelId, { locked: true })
+    locked.controller.setSelected(t.id)
+    expect(locked.controller.pointerDown(ev(0, 0, pick({ x: 22.5, z: 7.5 }), { button: 2 }))).toBe(false)
+    expect(locked.hints).toEqual(["Movement is locked by the DM"])
+  })
+
+  it("strands a move with no path: error line, then a jump or a dismissal", () => {
+    const { scene, levelId } = flatScene(10, 10)
+    // A closed box around cells (6..8, 6..8).
+    for (const [a, b] of [
+      [{ x: 30, z: 30 }, { x: 45, z: 30 }],
+      [{ x: 45, z: 30 }, { x: 45, z: 45 }],
+      [{ x: 45, z: 45 }, { x: 30, z: 45 }],
+      [{ x: 30, z: 45 }, { x: 30, z: 30 }],
+    ])
+      add(scene, createWall(levelId, a, b))
+    const t = tokenAt(scene, levelId, { i: 1, j: 1 })
+    const f = controllerFixture("player", scene, levelId)
+    const c = f.controller
+    c.setSelected(t.id)
+    c.pointerDown(ev(0, 0, pick({ x: 37.5, z: 37.5 }), { button: 2 }))
+    expect(c.overlays().ruler).toMatchObject({ kind: "blocked" })
+    expect(c.overlays().ruler?.label).toContain("no path")
+    c.pointerUp(ev(0, 0, pick({ x: 37.5, z: 37.5 }), { button: 2 }))
+    expect(f.moves).toEqual([])
+    expect(c.getStranded()).toMatchObject({ tokenId: t.id, levelId, position: { x: 37.5, z: 37.5 }, reason: "unreachable", blocked: false })
+    // The line and ghost stay.
+    expect(c.overlays().ruler).toMatchObject({ kind: "blocked" })
+    expect(c.overlays().dragGhosts[t.id]).toEqual({ levelId, position: { x: 37.5, z: 37.5 } })
+    c.jumpStranded()
+    expect(f.moves).toEqual([{ kind: "jump", tokenId: t.id, levelId, position: { x: 37.5, z: 37.5 } }])
+    expect(c.getStranded()).toBeNull()
+    expect(c.overlays().ruler).toBeNull()
+    // A left drag strands too; a click elsewhere dismisses it, so does the token moving.
+    c.pointerDown(ev(0, 0, pick({ x: 7.5, z: 7.5 }, { tokenId: t.id })))
+    c.pointerMove(ev(100, 0, pick({ x: 37.5, z: 37.5 })))
+    c.pointerUp(ev(100, 0, pick({ x: 37.5, z: 37.5 })))
+    expect(c.getStranded()).not.toBeNull()
+    c.pointerDown(ev(0, 0, pick({ x: 12, z: 12 })))
+    expect(c.getStranded()).toBeNull()
+    c.pointerUp(ev(0, 0, pick({ x: 12, z: 12 })))
+    c.pointerDown(ev(0, 0, pick({ x: 37.5, z: 37.5 }), { button: 2 }))
+    c.pointerUp(ev(0, 0, pick({ x: 37.5, z: 37.5 }), { button: 2 }))
+    expect(c.getStranded()).not.toBeNull()
+    t.position = { x: 12.5, z: 7.5 }
+    c.sceneChanged()
+    expect(c.getStranded()).toBeNull()
+    // Onto a crate: no jump is offered.
+    add(scene, createProp(levelId, "crate", { x: 7.5, y: 0, z: 37.5 }))
+    f.planner.setScene({ ...scene, objects: { ...scene.objects } })
+    c.pointerDown(ev(0, 0, pick({ x: 7.5, z: 37.5 }), { button: 2 }))
+    c.pointerUp(ev(0, 0, pick({ x: 7.5, z: 37.5 }), { button: 2 }))
+    expect(c.getStranded()?.blocked).toBe(true)
+    c.jumpStranded()
+    expect(f.moves).toHaveLength(1)
+  })
+
+  it("moves off the grid with Alt only when allowed (players) and always for the DM", () => {
+    const { scene, levelId } = flatScene(10, 10)
+    const t = tokenAt(scene, levelId, { i: 1, j: 1 })
+    const run = (f: ReturnType<typeof controllerFixture>, alt: boolean) => {
+      f.controller.setSelected(t.id)
+      f.controller.pointerDown(ev(231, 88, pick({ x: 23.1, z: 8.8 }), { button: 2, alt }))
+      f.controller.pointerUp(ev(231, 88, pick({ x: 23.1, z: 8.8 }), { button: 2, alt }))
+      return f.moves[f.moves.length - 1]
+    }
+    const snapped = run(controllerFixture("player", scene, levelId), true)
+    expect(snapped).toMatchObject({ kind: "path", end: null })
+    const free = run(controllerFixture("player", scene, levelId, { free: true }), true)
+    expect(free).toMatchObject({ kind: "path", end: { x: 23.1, z: 8.8 } })
+    // A straight line in the open: the route is pulled to its two ends.
+    expect(free.kind === "path" && free.route.map((p) => p.position)).toEqual([
+      { x: 7.5, z: 7.5 },
+      { x: 23.1, z: 8.8 },
+    ])
+    expect(run(controllerFixture("player", scene, levelId, { free: true }), false)).toMatchObject({ end: null })
+    expect(run(controllerFixture("dm", scene, levelId), true)).toEqual({ kind: "place", tokenId: t.id, levelId, position: { x: 23.1, z: 8.8 } })
+    expect(run(controllerFixture("dm", scene, levelId), false)).toMatchObject({ position: { x: 22.5, z: 7.5 } })
+  })
+
+  it("nudges a token within its own cell off the grid, and follows Alt pressed mid-command", () => {
+    const { scene, levelId } = flatScene(10, 10)
+    const t = tokenAt(scene, levelId, { i: 1, j: 1 })
+    const f = controllerFixture("player", scene, levelId, { free: true })
+    const c = f.controller
+    c.setSelected(t.id)
+    c.pointerDown(ev(0, 0, pick({ x: 8.5, z: 6 }), { button: 2 }))
+    expect(c.overlays().ruler).toBeNull()
+    c.setAlt(true)
+    expect(c.overlays().dragGhosts[t.id]?.position).toEqual({ x: 8.5, z: 6 })
+    c.pointerUp(ev(0, 0, pick({ x: 8.5, z: 6 }), { button: 2, alt: true }))
+    expect(f.moves).toEqual([
+      expect.objectContaining({ kind: "path", path: [at(1, 1, levelId)], end: { x: 8.5, z: 6 } }),
+    ])
   })
 
   it("keeps overlay identity while nothing changes and notifies listeners", () => {

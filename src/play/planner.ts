@@ -24,9 +24,12 @@ import {
   findPath,
   footprintCells,
   MAX_PATH_STEPS,
+  smoothPath,
   tokenAnchor,
   validateMove,
+  type MotionPoint,
 } from "@/core/movement"
+import { anchorOf } from "@/core/movement/footprint"
 import {
   connectorSpan,
   footprintAlong,
@@ -75,6 +78,8 @@ export interface PlannerOptions {
 }
 
 const DEFAULT_NODE_LIMIT = 12_000
+/** Node budget for reconstructing routes of moves seen (animation only). */
+const ROUTE_NODE_LIMIT = 6_000
 
 export class MovePlanner {
   private scene: SceneLike | null = null
@@ -331,6 +336,50 @@ export class MovePlanner {
       ),
       levelId: token.levelId,
     }
+  }
+
+  /**
+   * A plausible route for a token seen moving from `from` to `to` (Engine.setTokenRouter: animating a
+   * move whose path this client did not send): A* over this client's scene, through footprint centres,
+   * or string-pulled (core smoothPath) when `to` is off the grid. null when no route is found.
+   */
+  route(tokenId: Id, from: MotionPoint, to: MotionPoint): MotionPoint[] | null {
+    const scene = this.scene
+    const token = this.token(tokenId)
+    const world = this.occlusion()
+    if (
+      !scene ||
+      !token ||
+      !world ||
+      !levelById(scene, from.levelId) ||
+      !levelById(scene, to.levelId)
+    )
+      return null
+    const walker: Token = {
+      ...token,
+      levelId: from.levelId,
+      position: { ...from.position },
+    }
+    const cell = anchorOf(scene.grid, token.size, to.position)
+    const path = findPath(
+      scene,
+      world,
+      walker,
+      { cell, levelId: to.levelId },
+      { maxSteps: this.maxSteps, nodeLimit: ROUTE_NODE_LIMIT }
+    )
+    if (!path) return null
+    const centre = anchorPosition(scene, token.size, cell)
+    const onGrid =
+      Math.abs(centre.x - to.position.x) < 1e-3 &&
+      Math.abs(centre.z - to.position.z) < 1e-3
+    if (!onGrid) return smoothPath(scene, world, walker, path, to.position)
+    const out: MotionPoint[] = path.map((s) => ({
+      levelId: s.levelId,
+      position: anchorPosition(scene, token.size, s.cell),
+    }))
+    out[0] = { levelId: from.levelId, position: { ...from.position } }
+    return out
   }
 
   /** Validate an explicit path (ladder climbs, re-sends). */

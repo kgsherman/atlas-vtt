@@ -14,6 +14,7 @@ import {
   Eye,
   EyeOff,
   Footprints,
+  Grid3x3,
   Layers,
   Link2,
   Lock,
@@ -808,6 +809,13 @@ function TableTab({ state, actions }: SessionPanelProps) {
           description="A move may not exceed the token's walking speed."
           checked={state.enforceSpeed}
           onChange={(v) => actions.setEnforceSpeed(v)}
+        />
+        <ToggleRow
+          icon={<Grid3x3 />}
+          title="Snap players to the grid"
+          description="Off: players can hold Alt to move tokens off the grid."
+          checked={!(state.freeMovement ?? false)}
+          onChange={(v) => actions.setFreeMovement(!v)}
         />
       </FieldGroup>
       <Separator />

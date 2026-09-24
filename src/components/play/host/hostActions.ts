@@ -27,6 +27,7 @@ export interface HostActions {
   setMovementLocked(locked: boolean, userId?: string): void
   setSharedVision(enabled: boolean): void
   setEnforceSpeed(enabled: boolean): void
+  setFreeMovement(enabled: boolean): void
   assign(tokenId: Id, userId: string, assigned: boolean): void
   revealDoor(doorId: Id, userId?: string): void
   setTokensHidden(tokenIds: Id[], hidden: boolean): void
@@ -109,6 +110,12 @@ export function createHostActions(
       dispatch(
         { t: "set-enforce-speed", enabled },
         "Couldn't change the speed rule"
+      )
+    },
+    setFreeMovement(enabled) {
+      dispatch(
+        { t: "set-free-movement", enabled },
+        "Couldn't change the grid rule"
       )
     },
     assign(tokenId, userId, assigned) {
