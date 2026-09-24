@@ -271,6 +271,8 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
     if (turnKey && turnActive)
       toast.success(`Your turn, ${turnActive.name || "adventurer"}!`, {
         id: "your-turn",
+        // Clear of the chat dock (bottom-right) and the turn order (top-centre).
+        position: "top-right",
       })
     // turnActive changes with every view; the key says when the turn did.
     // eslint-disable-next-line react-hooks/exhaustive-deps
