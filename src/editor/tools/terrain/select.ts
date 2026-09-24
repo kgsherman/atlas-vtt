@@ -45,6 +45,8 @@ import {
   cyclePick,
   edgeHits,
   elementKey,
+  elementMovesByShape,
+  elementsCentroid,
   elementsInScreenRect,
   elementVerticesByShape,
   faceHits,
@@ -59,7 +61,6 @@ import {
   shapesInScreenRect,
   snapHeight,
   vertexHits,
-  verticesCentroid,
   type ClickCycle,
   type ElementHit,
   type Ray,
@@ -126,6 +127,8 @@ interface Drag {
   levelId: Id
   /** Element drag (advanced mode): only these top vertices move; null = whole shapes. */
   indices: Map<Id, number[]> | null
+  /** Element drag: vertices that move horizontally only, and whether the base moves (selected bottom edges). */
+  lower: Map<Id, { flat: number[]; base: boolean }>
   /** Document versions of the shapes the drag may change. */
   originals: Map<Id, TerrainShape>
   /** World point grabbed (its height is the drag plane). */
@@ -257,7 +260,7 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
     if (shapes.length === 0) return null
     if (editMode(s)) {
       const byId = new Map(shapes.map((sh) => [sh.id, sh]))
-      return verticesCentroid(byId, elementVerticesByShape(rec, sel.elements), a.level.elevation)
+      return elementsCentroid(byId, sel.elements, a.level.elevation)
     }
     const b = shapesBounds(shapes)
     if (!b) return null
@@ -306,7 +309,7 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
     }
     const cursor = canvasOf(e)
     if (!cursor || !deps.project) return []
-    return mode === "vertex" ? vertexHits(shapes, level.elevation, deps.project, cursor) : edgeHits(shapes, level.elevation, deps.project, cursor)
+    return mode === "vertex" ? vertexHits(shapes, level.elevation, deps.project, cursor) : edgeHits(shapes, level.elevation, deps.project, cursor, undefined, "all")
   }
 
   const shapeCandidates = (e: ToolPointerEvent, ray: Ray, shapes: readonly TerrainShape[], level: Level) => {
@@ -383,10 +386,12 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
     for (const sh of selectedShapes(sel, rec)) originals.set(sh.id, sh)
     if (originals.size === 0) return null
     let indices: Map<Id, number[]> | null = null
+    let lower = new Map<Id, { flat: number[]; base: boolean }>()
     let anchor: Vec2
     let edgeSnap = true
     if (editMode(s)) {
       indices = elementVerticesByShape(rec, sel.elements)
+      lower = elementMovesByShape(rec, sel.elements)
       if (indices.size === 0) return null
       let first: Vec3 | undefined
       if (p.target.kind === "element") {
@@ -418,6 +423,7 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
       kind: "drag",
       levelId: a.levelId,
       indices,
+      lower,
       originals,
       grab: { ...p.target.point },
       anchor,
@@ -502,7 +508,9 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
       let next: TerrainShape | null
       const ks = d.indices ? d.indices.get(id) : null
       if (d.indices && !ks) continue
+      const low = d.lower.get(id)
       if (d.rotate) next = rotateShape(orig, d.rotate.pivot, angle, ks ?? null)
+      else if (ks && low) next = translateVertices(orig, ks.filter((k) => !low.flat.includes(k)), delta, low)
       else if (ks) next = translateVertices(orig, ks, delta)
       else next = translateShape(orig, delta)
       if (!next || !shapeInExtent(next, grid)) return null
@@ -733,7 +741,12 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
       const sel = activeSelection(s)
       const g = gizmoHit(e)
       if (g) {
-        gesture = { kind: "pending", levelId: a.levelId, target: { kind: "gizmo", part: g.part, point: g.at }, down: e, recycle: null }
+        // A click (no drag) on the gizmo in the advanced mode picks the element under it, like a click there:
+        // the gizmo sits on the selection and would otherwise hide what lies under it.
+        const hits = editMode(s) ? elementCandidates(e, ray, selectedShapes(sel, levelShapes(a.level)), a.level) : []
+        const at = canvasOf(e) ?? { x: e.clientX, y: e.clientY }
+        const recycle: Recycle | null = hits.length > 0 ? { kind: "element", at, hits } : null
+        gesture = { kind: "pending", levelId: a.levelId, target: { kind: "gizmo", part: g.part, point: g.at }, down: e, recycle }
       } else if (editMode(s)) {
         pressElement(e, ray, a.levelId, a.level, sel!)
       } else {

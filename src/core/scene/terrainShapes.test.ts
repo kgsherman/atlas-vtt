@@ -48,6 +48,8 @@ import {
   rotateShapeQuarter,
   shapeBounds,
   shapeEdgeEnds,
+  shapeEdgePart,
+  shapeEdgeSegment,
   shapeTopAt,
   signedArea,
   TERRAIN_SHAPE_MAX_POINTS,
@@ -1609,5 +1611,46 @@ describe("inner edges and points (loop cuts)", () => {
     expect(writeTerrain(level, grid, { upsert: [plain] })).toBe(true)
     expect(level.terrainEdits!.shapes.b).not.toHaveProperty("innerPoints")
     expect(level.terrainEdits!.shapes.b).not.toHaveProperty("innerEdges")
+  })
+})
+
+describe("side and bottom edges", () => {
+  it("follow the top edges: side edge T + k under vertex k, bottom edge T + n + k under outline edge k", () => {
+    // A ramp rising along +Z: its low edge (0 → 1) lies on the base.
+    const r = rampShape("r", { x: 0, z: 0, w: 10, d: 10 }, 0, 1, 4, 0)
+    expect(shapeEdgePart(r, 3)).toEqual({ part: "top", ends: [3, 0] })
+    expect(shapeEdgePart(r, 6)).toEqual({ part: "side", vertex: 2 })
+    expect(shapeEdgePart(r, 9)).toEqual({ part: "bottom", ends: [1, 2] })
+    expect(shapeEdgePart(r, 12)).toBeNull()
+    expect(elementVertexIndices(r, { shapeId: "r", kind: "edge", index: 6 })).toEqual([2])
+    expect(elementVertexIndices(r, { shapeId: "r", kind: "edge", index: 11 })).toEqual([3, 0])
+    expect(shapeEdgeSegment(r, 6)).toEqual([
+      { x: 10, y: 5, z: 10 },
+      { x: 10, y: 1, z: 10 },
+    ])
+    // Degenerate: the side edges of the low corners, and the bottom edge under the low top edge.
+    expect(shapeEdgeSegment(r, 4)).toBeNull()
+    expect(shapeEdgeSegment(r, 8)).toBeNull()
+    expect(shapeEdgeSegment(r, 10)).toEqual([
+      { x: 10, y: 1, z: 10 },
+      { x: 0, y: 1, z: 10 },
+    ])
+    // With a cut the side and bottom edges come after the inner edge.
+    const cut = loopCut(blockShape("b", { x: 0, z: 0, w: 20, d: 10 }, 0, 4, 0), 0, [0.5])!.shape
+    expect(shapeEdgePart(cut, 6)).toEqual({ part: "top", ends: [1, 4] })
+    expect(shapeEdgePart(cut, 7)).toEqual({ part: "side", vertex: 0 })
+    expect(shapeEdgePart(cut, 13)).toEqual({ part: "bottom", ends: [0, 1] })
+  })
+
+  it("translateVertices moves flat vertices sideways only, and the base with `base`", () => {
+    const b = blockShape("b", { x: 0, z: 0, w: 10, d: 10 }, 0, 4, 0)
+    const moved = translateVertices(b, [0], { x: 1, y: 2, z: 0 }, { flat: [1], base: true })!
+    expect(moved.points.map((p) => [p.x, p.y])).toEqual([
+      [1, 6],
+      [11, 4],
+      [10, 4],
+      [0, 4],
+    ])
+    expect(moved.base).toBe(2)
   })
 })

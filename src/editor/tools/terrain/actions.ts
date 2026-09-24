@@ -10,6 +10,7 @@ import {
   dissolveVertices,
   nextShapeOrder,
   removeInnerEdges,
+  shapeEdgePart,
   rotateShapeQuarter,
   translateShape,
   translateVertices,
@@ -98,27 +99,38 @@ export function createShapeActions(ctx: TerrainToolContext): ShapeActions {
       }
       const upsert: TerrainShape[] = []
       let collapsed = false
+      let cornered = false
       for (const sh of selected(sel, rec)) {
         const ks = sel.elements.filter((x) => x.shapeId === sh.id && x.kind === mode).map((x) => x.index as number)
         if (ks.length === 0) continue
-        // Edge mode: selected inner edges (loop cuts) are removed, selected outline edges collapsed.
+        // Edge mode: selected inner edges (loop cuts) are removed, selected outline edges and the bottom edges
+        // under them collapsed, and the corners under selected side edges dissolved.
         const n = sh.points.length
-        const inner = mode === "edge" ? ks.filter((k) => k >= n).map((k) => k - n) : []
-        const outline = mode === "edge" ? ks.filter((k) => k < n) : ks
+        const parts = mode === "edge" ? ks.map((k) => ({ k, e: shapeEdgePart(sh, k) })) : []
+        const inner = parts.filter((p) => p.e?.part === "top" && p.k >= n).map((p) => p.k - n)
+        const outline =
+          mode === "edge" ? [...new Set(parts.flatMap((p) => (p.e?.part === "bottom" ? [p.e.ends[0]] : p.e?.part === "top" && p.k < n ? [p.k] : [])))] : ks
+        const corners = parts.flatMap((p) => (p.e?.part === "side" ? [p.e.vertex] : []))
+        if (corners.length > 0 && outline.length > 0) {
+          ctx.notify("Delete side edges on their own (they remove their corner)")
+          return
+        }
         const trimmed = inner.length > 0 ? removeInnerEdges(sh, inner) : sh
-        const next = !trimmed ? null : mode === "vertex" ? dissolveVertices(sh, ks) : outline.length > 0 ? collapseEdges(trimmed, outline) : trimmed
+        const dissolved = trimmed && corners.length > 0 ? dissolveVertices(trimmed, corners) : trimmed
+        const next = mode === "vertex" ? dissolveVertices(sh, ks) : !dissolved ? null : outline.length > 0 ? collapseEdges(trimmed!, outline) : dissolved
         if (!next || !shapeInExtent(next, s.scene.grid)) {
-          ctx.notify(n - new Set(outline).size < 3 ? NEED_THREE_VERTICES : "That would make the shape cross itself")
+          ctx.notify(n - new Set([...outline, ...corners]).size < 3 ? NEED_THREE_VERTICES : "That would make the shape cross itself")
           return
         }
         collapsed ||= outline.length > 0
+        cornered ||= corners.length > 0
         upsert.push(next)
       }
       if (upsert.length === 0) {
         ctx.notify(mode === "vertex" ? "Select vertices to dissolve" : "Select edges to collapse")
         return
       }
-      const label = mode === "vertex" ? "Dissolve terrain vertices" : collapsed ? "Collapse terrain edges" : "Remove terrain loop cuts"
+      const label = mode === "vertex" || cornered ? "Dissolve terrain vertices" : collapsed ? "Collapse terrain edges" : "Remove terrain loop cuts"
       if (edit(a.levelId, { upsert }, label)) {
         const now = activeSelection(store.getState())
         if (now) select({ ...now, elements: [] })

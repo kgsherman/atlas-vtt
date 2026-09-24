@@ -14,9 +14,11 @@ import {
   elementVertexIndices,
   isValidTerrainShape,
   rayHitShape,
+  shapeAllEdgeCount,
   shapeBounds,
   shapeEdgeCount,
-  shapeEdgeEnds,
+  shapeEdgePart,
+  shapeEdgeSegment,
   topFaces,
   topVertexCount,
   topVertices,
@@ -334,22 +336,30 @@ export function vertexHits(
   return out.sort((a, b) => a.distance - b.distance)
 }
 
-/** Top edges of `shapes` (outline and inner edges; `outlineOnly`: outline only) within `radiusPx` of the cursor on screen, nearest first. */
+/** Side and bottom edges rank this much (CSS px) behind top edges at the same screen distance (a low shape's bottom edges lie close under its top edges). */
+const LOWER_EDGE_BIAS_PX = 2
+
+/**
+ * Edges of `shapes` within `radiusPx` of the cursor on screen, nearest first: `scope` "all" (top outline and
+ * inner edges, side and bottom edges; top edges win ties), "top" (outline and inner) or "outline".
+ */
 export function edgeHits(
   shapes: readonly TerrainShape[],
   elevation: number,
   project: Projector,
   cursor: ScreenPoint,
   radiusPx = ELEMENT_PICK_PX,
-  outlineOnly = false
+  scope: "all" | "top" | "outline" = "top"
 ): ElementHit[] {
-  const out: ElementHit[] = []
+  const out: (ElementHit & { rank: number })[] = []
   for (const s of shapes) {
-    const count = outlineOnly ? s.points.length : shapeEdgeCount(s)
+    const top = shapeEdgeCount(s)
+    const count = scope === "outline" ? s.points.length : scope === "top" ? top : shapeAllEdgeCount(s)
     for (let k = 0; k < count; k++) {
-      const [i, j] = shapeEdgeEnds(s, k)!
-      const a = vertexWorld(s, i, elevation)
-      const b = vertexWorld(s, j, elevation)
+      const seg = shapeEdgeSegment(s, k)
+      if (!seg) continue
+      const a = { x: seg[0].x, y: elevation + seg[0].y, z: seg[0].z }
+      const b = { x: seg[1].x, y: elevation + seg[1].y, z: seg[1].z }
       const pa = projectPoint(project, a)
       const pb = projectPoint(project, b)
       if (!pa || !pb) continue
@@ -360,10 +370,10 @@ export function edgeHits(
       const len2 = ex * ex + ey * ey
       const t = len2 > 0 ? Math.max(0, Math.min(1, ((cursor.x - pa.x) * ex + (cursor.y - pa.y) * ey) / len2)) : 0.5
       const point = { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t }
-      out.push({ ref: { shapeId: s.id, kind: "edge", index: k }, distance: dist, point })
+      out.push({ ref: { shapeId: s.id, kind: "edge", index: k }, distance: dist, point, rank: dist + (k < top ? 0 : LOWER_EDGE_BIAS_PX) })
     }
   }
-  return out.sort((a, b) => a.distance - b.distance)
+  return out.sort((a, b) => a.rank - b.rank).map(({ ref, distance, point }) => ({ ref, distance, point }))
 }
 
 /** The face of each shape the ray hits first (top or side k), nearest first (buried hits last, see shapeHits). */
@@ -397,7 +407,7 @@ function projectedInside(project: Projector, p: Vec3, r: ScreenRect): boolean {
 }
 
 /**
- * Elements of `mode` whose projection lies inside the screen rect: vertices by position, edges (outline and inner) with both
+ * Elements of `mode` whose projection lies inside the screen rect: vertices by position, edges (top, side, bottom) with both
  * ends inside, side faces with their four corners inside, the top face with every top vertex inside.
  */
 export function elementsInScreenRect(
@@ -414,9 +424,9 @@ export function elementsInScreenRect(
     if (mode === "vertex") {
       for (let k = 0; k < top.length; k++) if (top[k]) out.push({ shapeId: s.id, kind: "vertex", index: k })
     } else if (mode === "edge") {
-      for (let k = 0, m = shapeEdgeCount(s); k < m; k++) {
-        const [i, j] = shapeEdgeEnds(s, k)!
-        if (top[i] && top[j]) out.push({ shapeId: s.id, kind: "edge", index: k })
+      for (let k = 0, m = shapeAllEdgeCount(s); k < m; k++) {
+        const seg = shapeEdgeSegment(s, k)
+        if (seg && seg.every((p) => projectedInside(project, { x: p.x, y: elevation + p.y, z: p.z }, r))) out.push({ shapeId: s.id, kind: "edge", index: k })
       }
     } else {
       const base = s.points.map((p) => projectedInside(project, { x: p.x, y: elevation + s.base, z: p.z }, r))
@@ -510,6 +520,67 @@ export function elementVerticesByShape(shapes: Readonly<Record<Id, TerrainShape>
   return out
 }
 
+/**
+ * How the elements move each shape's vertices (a drag in the advanced mode): `full` vertices move by the
+ * whole delta, `flat` ones (only under selected bottom edges) horizontally, and `base` says whether the
+ * base moves with the vertical part (a bottom edge is selected; the base is one height for the shape).
+ */
+export function elementMovesByShape(
+  shapes: Readonly<Record<Id, TerrainShape>>,
+  elements: readonly TerrainElementRef[]
+): Map<Id, { flat: number[]; base: boolean }> {
+  const out = new Map<Id, { flat: number[]; base: boolean }>()
+  const byShape = elementVerticesByShape(
+    shapes,
+    elements.filter((e) => !isBottomEdge(shapes, e))
+  )
+  for (const e of elements) {
+    if (!isBottomEdge(shapes, e)) continue
+    const entry = out.get(e.shapeId) ?? { flat: [], base: true }
+    const full = new Set(byShape.get(e.shapeId) ?? [])
+    for (const k of elementVertexIndices(shapes[e.shapeId], e)) if (!full.has(k) && !entry.flat.includes(k)) entry.flat.push(k)
+    out.set(e.shapeId, entry)
+  }
+  return out
+}
+
+const isBottomEdge = (shapes: Readonly<Record<Id, TerrainShape>>, e: TerrainElementRef) =>
+  e.kind === "edge" && Object.hasOwn(shapes, e.shapeId) && shapeEdgePart(shapes[e.shapeId], e.index)?.part === "bottom"
+
+/**
+ * Mean world position of the elements' points (the advanced mode's gizmo): top vertices, plus the base
+ * corners of side and bottom edges. Null for none.
+ */
+export function elementsCentroid(shapes: ReadonlyMap<Id, TerrainShape>, elements: readonly TerrainElementRef[], elevation: number): Vec3 | null {
+  const seen = new Set<string>()
+  let x = 0
+  let y = 0
+  let z = 0
+  let n = 0
+  const add = (key: string, p: Vec3) => {
+    if (seen.has(key)) return
+    seen.add(key)
+    x += p.x
+    y += p.y
+    z += p.z
+    n++
+  }
+  for (const e of elements) {
+    const s = shapes.get(e.shapeId)
+    if (!s) continue
+    const part = e.kind === "edge" ? shapeEdgePart(s, e.index) : null
+    const verts = topVertices(s)
+    if (part && part.part !== "top") {
+      const low = part.part === "side" ? [part.vertex] : part.ends
+      if (part.part === "side") add(`${s.id}:t${part.vertex}`, verts[part.vertex])
+      for (const k of low) add(`${s.id}:b${k}`, { x: verts[k].x, y: s.base, z: verts[k].z })
+      continue
+    }
+    for (const k of elementVertexIndices(s, e)) add(`${s.id}:t${k}`, verts[k])
+  }
+  return n > 0 ? { x: x / n, y: elevation + y / n, z: z / n } : null
+}
+
 /** Every element of `mode` of the shapes (select all in the advanced mode). */
 export function allElements(shapes: readonly TerrainShape[], mode: TerrainElementMode): TerrainElementRef[] {
   const out: TerrainElementRef[] = []
@@ -519,7 +590,11 @@ export function allElements(shapes: readonly TerrainShape[], mode: TerrainElemen
       if (!s.innerEdges?.length) out.push({ shapeId: s.id, kind: "face", index: "top" })
       else topFaces(s).forEach((_, fi) => out.push({ shapeId: s.id, kind: "face", index: s.points.length + fi }))
     }
-    const count = mode === "edge" ? shapeEdgeCount(s) : mode === "vertex" ? topVertexCount(s) : s.points.length
+    if (mode === "edge") {
+      for (let k = 0, m = shapeAllEdgeCount(s); k < m; k++) if (shapeEdgeSegment(s, k)) out.push({ shapeId: s.id, kind: "edge", index: k })
+      continue
+    }
+    const count = mode === "vertex" ? topVertexCount(s) : s.points.length
     for (let k = 0; k < count; k++) out.push(mode === "face" ? { shapeId: s.id, kind: "face", index: k } : { shapeId: s.id, kind: mode, index: k })
   }
   return out

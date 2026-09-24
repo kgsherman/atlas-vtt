@@ -37,10 +37,12 @@ import type { GridSettings, Heightmap, Id, Level, Rect, TerrainEdits, TerrainSha
 export type TerrainElementMode = "vertex" | "edge" | "face"
 
 /**
- * An element of a terrain shape. Vertex k = top vertex k; edge k < n = top outline edge (k → k+1 mod n),
- * edge n + c = inner edge c (`innerEdges[c]`, a loop cut); face "top" = the whole top surface, face n + f =
- * top face f of a cut top (`topFaces(shape)[f]`), face k < n = the side
- * quad under top edge k. Every element maps to a set of top-vertex indices (see `elementVertexIndices`).
+ * An element of a terrain shape. Vertex k = top vertex k. Edges, T = n + inner edge count: edge k < n = top
+ * outline edge (k → k+1 mod n), edge n + c = inner edge c (`innerEdges[c]`, a loop cut), edge T + k = the
+ * side (vertical) edge under footprint vertex k, edge T + n + k = the bottom edge under outline edge k (see
+ * shapeEdgePart). Face "top" = the whole top surface, face n + f = top face f of a cut top
+ * (`topFaces(shape)[f]`), face k < n = the side quad under top edge k. Every element maps to a set of
+ * top-vertex indices (see `elementVertexIndices`).
  */
 export type TerrainElementRef = { shapeId: Id; kind: "vertex" | "edge"; index: number } | { shapeId: Id; kind: "face"; index: number | "top" }
 
@@ -559,7 +561,49 @@ export function shapeEdgeCount(shape: Pick<TerrainShape, "points" | "innerEdges"
   return shape.points.length + (shape.innerEdges?.length ?? 0)
 }
 
-/** The two top vertex indices of edge element `k` (outline k → [k, k+1 mod n], inner n + c → innerEdges[c]); null when out of range. */
+/**
+ * What edge element `k` is: a top edge (outline or inner, its two top vertices), a side edge (the vertical
+ * edge under footprint vertex `vertex`, from its top down to the base) or a bottom edge (along the base
+ * under outline edge ends[0] → ends[1]). Null when out of range.
+ */
+export function shapeEdgePart(
+  shape: Pick<TerrainShape, "points" | "innerEdges">,
+  k: number
+): { part: "top" | "bottom"; ends: [number, number] } | { part: "side"; vertex: number } | null {
+  if (!Number.isInteger(k) || k < 0) return null
+  const n = shape.points.length
+  const top = shapeEdgeCount(shape)
+  if (k < top) {
+    const ends = shapeEdgeEnds(shape, k)
+    return ends ? { part: "top", ends } : null
+  }
+  if (k < top + n) return { part: "side", vertex: k - top }
+  if (k < top + 2 * n) return { part: "bottom", ends: [k - top - n, (k - top - n + 1) % n] }
+  return null
+}
+
+/**
+ * The segment of edge element `k` (y relative to the elevation, like the points), or null when out of
+ * range or degenerate: a side edge whose top lies on the base, a bottom edge whose top edge lies on the base
+ * (it is that top edge), like the prism's drawn edges.
+ */
+export function shapeEdgeSegment(shape: TerrainShape, k: number): [Vec3, Vec3] | null {
+  const e = shapeEdgePart(shape, k)
+  if (!e) return null
+  const verts = topVertices(shape)
+  const onBase = (i: number) => Math.abs(verts[i].y - shape.base) <= 1e-6
+  const low = (i: number): Vec3 => ({ x: verts[i].x, y: shape.base, z: verts[i].z })
+  if (e.part === "top") return [verts[e.ends[0]], verts[e.ends[1]]]
+  if (e.part === "side") return onBase(e.vertex) ? null : [verts[e.vertex], low(e.vertex)]
+  return onBase(e.ends[0]) && onBase(e.ends[1]) ? null : [low(e.ends[0]), low(e.ends[1])]
+}
+
+/** Every edge element of a shape: top edges (outline, inner), then side edges, then bottom edges. */
+export function shapeAllEdgeCount(shape: Pick<TerrainShape, "points" | "innerEdges">): number {
+  return shapeEdgeCount(shape) + 2 * shape.points.length
+}
+
+/** The two top vertex indices of top edge element `k` (outline k → [k, k+1 mod n], inner n + c → innerEdges[c]); null otherwise. */
 export function shapeEdgeEnds(shape: Pick<TerrainShape, "points" | "innerEdges">, k: number): [number, number] | null {
   const n = shape.points.length
   if (!Number.isInteger(k) || k < 0) return null
@@ -1421,8 +1465,8 @@ export function polygonShape(id: Id, footprint: readonly Vec2[], y0: number, hei
 // ---------------------------------------------------------------------------
 
 /**
- * Top vertex indices (into topVertices) of an element: vertex k → [k]; edge k → its two ends
- * (shapeEdgeEnds); side face k < n → [k, k+1 mod n]; face n + f → top face f's vertices (topFaces);
+ * Top vertex indices (into topVertices) of an element: vertex k → [k]; top and bottom edges → their two
+ * ends, a side edge → its footprint vertex (shapeEdgePart); side face k < n → [k, k+1 mod n]; face n + f → top face f's vertices (topFaces);
  * face "top" → all. [] when out of range.
  */
 export function elementVertexIndices(shape: TerrainShape, ref: TerrainElementRef): number[] {
@@ -1431,7 +1475,10 @@ export function elementVertexIndices(shape: TerrainShape, ref: TerrainElementRef
   if (ref.kind === "face" && ref.index === "top") return Array.from({ length: count }, (_, k) => k)
   const k = ref.index
   if (typeof k !== "number" || !Number.isInteger(k) || k < 0) return []
-  if (ref.kind === "edge") return shapeEdgeEnds(shape, k) ?? []
+  if (ref.kind === "edge") {
+    const e = shapeEdgePart(shape, k)
+    return !e ? [] : e.part === "side" ? [e.vertex] : [...e.ends]
+  }
   if (ref.kind === "vertex") return k < count ? [k] : []
   if (k < n) return [k, (k + 1) % n]
   return topFaces(shape)[k - n]?.slice() ?? []
@@ -1572,13 +1619,23 @@ export function loopCut(shape: TerrainShape, edge: number, ts: readonly number[]
 }
 
 /**
- * Move the given top vertices by `delta` (y moves those tops only; the base stays). Null when the result
- * is invalid: not simple, flipped orientation, heights out of range, a broken top graph.
+ * Move the given top vertices by `delta` (y moves those tops only), `opts.flat` ones horizontally only
+ * (bottom edges), and the base by delta.y with `opts.base` (bottom edges: the base is one height for the
+ * whole shape). Null when the result is invalid: not simple, flipped orientation, heights out of range, a
+ * broken top graph.
  */
-export function translateVertices(shape: TerrainShape, indices: readonly number[], delta: Vec3): TerrainShape | null {
+export function translateVertices(
+  shape: TerrainShape,
+  indices: readonly number[],
+  delta: Vec3,
+  opts: { flat?: readonly number[]; base?: boolean } = {}
+): TerrainShape | null {
   const set = new Set(indices)
-  const verts = topVertices(shape).map((p, k) => (set.has(k) ? { x: p.x + delta.x, y: p.y + delta.y, z: p.z + delta.z } : { ...p }))
-  return withTop(shape, verts)
+  const flat = new Set(opts.flat ?? [])
+  const verts = topVertices(shape).map((p, k) =>
+    set.has(k) ? { x: p.x + delta.x, y: p.y + delta.y, z: p.z + delta.z } : flat.has(k) ? { x: p.x + delta.x, y: p.y, z: p.z + delta.z } : { ...p }
+  )
+  return withTop(shape, verts, opts.base ? shape.base + delta.y : shape.base)
 }
 
 /** Move the whole shape (tops and base). Null when the result is invalid (e.g. heights out of range). */

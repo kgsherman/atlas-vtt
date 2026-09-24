@@ -150,7 +150,8 @@ describe("terrain math: hit testing", () => {
     const p = (x: number, y: number, z: number) => cam.project({ x, y, z })
     const r = screenRect({ x: p(20, 5, 10).x - 5, y: p(20, 5, 10).y - 5 }, { x: p(20, 5, 20).x + 5, y: p(20, 5, 20).y + 5 })
     expect(elementsInScreenRect([a], 0, cam.project, r, "vertex").map((x) => x.index)).toEqual([1, 2])
-    expect(elementsInScreenRect([a], 0, cam.project, r, "edge").map((x) => x.index)).toEqual([1])
+    // Top edge 1 and the side edge under its first corner (edge 4 + 1: its foot projects into the box too).
+    expect(elementsInScreenRect([a], 0, cam.project, r, "edge").map((x) => x.index)).toEqual([1, 5])
     const all = screenRect({ x: 0, y: 0 }, { x: cam.width, y: cam.height })
     expect(elementsInScreenRect([a], 0, cam.project, all, "face").map((x) => x.index)).toEqual(["top", 0, 1, 2, 3])
     expect(shapesInScreenRect([a, pit], 0, cam.project, r)).toEqual([])
@@ -194,7 +195,8 @@ describe("terrain math: elements and edits", () => {
     ])
     expect([...byShape]).toEqual([["a", [0, 1, 3]]])
     expect(allElements([a], "face")).toHaveLength(5)
-    expect(allElements([a], "edge").map((e) => e.index)).toEqual([0, 1, 2, 3])
+    // Top edges 0–3, side edges 4–7, bottom edges 8–11.
+    expect(allElements([a], "edge").map((e) => e.index)).toEqual(Array.from({ length: 12 }, (_, k) => k))
     expect(shapesPivot([a], grid, "center")).toEqual({ x: 15, z: 15 })
     expect(shapesPivot([blockShape("c", { x: 10, z: 10, w: 5, d: 10 }, 0, 1, 0)], grid, "vertex")).toEqual({ x: 15, z: 15 })
     expect(shapesPivot([blockShape("c", { x: 10, z: 10, w: 5, d: 10 }, 0, 1, 0)], grid, "free")).toEqual({ x: 12.5, z: 15 })
@@ -221,14 +223,15 @@ describe("terrain math: elements and edits", () => {
   it("treats inner edges (loop cuts) as edges n + c: picking, lists, rects; collapses re-index them", () => {
     // 20 × 10 block cut at x 20: points (10,10) (20,10) (30,10) (30,20) (20,20) (10,20), inner edge 6 = [1, 4].
     const cut = loopCut(blockShape("a", { x: 10, z: 10, w: 20, d: 10 }, 0, 5, 0), 0, [0.5])!.shape
-    expect(allElements([cut], "edge").map((e) => e.index)).toEqual([0, 1, 2, 3, 4, 5, 6])
+    // 6 outline edges, the inner edge, 6 side and 6 bottom edges.
+    expect(allElements([cut], "edge").map((e) => e.index)).toEqual(Array.from({ length: 19 }, (_, k) => k))
     const cam = orthoCamera({ tilt: 0, scale: 10 })
     const mid = cam.project({ x: 20, y: 5, z: 15 })
     expect(edgeHits([cut], 0, cam.project, { x: mid.x + 2, y: mid.y })[0].ref).toEqual({ shapeId: "a", kind: "edge", index: 6 })
     // Outline edges only (the loop cut tool's fallback).
-    expect(edgeHits([cut], 0, cam.project, { x: mid.x + 2, y: mid.y }, 8, true)).toEqual([])
+    expect(edgeHits([cut], 0, cam.project, { x: mid.x + 2, y: mid.y }, 8, "outline")).toEqual([])
     const all = screenRect({ x: 0, y: 0 }, { x: cam.width, y: cam.height })
-    expect(elementsInScreenRect([cut], 0, cam.project, all, "edge").map((x) => x.index)).toEqual([0, 1, 2, 3, 4, 5, 6])
+    expect(elementsInScreenRect([cut], 0, cam.project, all, "edge").map((x) => x.index)).toEqual(Array.from({ length: 19 }, (_, k) => k))
     expect(elementVerticesByShape({ a: cut }, [{ shapeId: "a", kind: "edge", index: 6 }]).get("a")).toEqual([1, 4])
     // Collapsing the outline edges 2 and 3 (vertices 2, 3, 4 merge) re-indexes the inner edge's far end.
     const collapsed = collapseEdges(cut, [2, 3])!

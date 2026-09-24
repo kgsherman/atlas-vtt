@@ -336,6 +336,14 @@ to the elevation; `base`, the other end of the prism's sides in the editor, not 
   a vertex on every crossed edge (outline edges get them in the footprint, inner edges are split at new
   interior vertices), joined by new inner edges across each face; heights are interpolated along the
   edges, so planar faces keep their form; returns the shape and the new edges' element indices.
+- Side and bottom edges are edge elements too, after the top edges (T = n + inner edge count): T + k is the
+  vertical edge under footprint vertex k, T + n + k the bottom edge under outline edge k (`shapeEdgePart`,
+  `shapeAllEdgeCount`, `shapeEdgeSegment`: null for zero-length ones, a side edge whose top is on the base
+  or a bottom edge under a top edge lying on the base, like the prism's drawn edges). They stand for the
+  data that exists: a side edge is its corner (moved sideways; Y lifts that corner's top only), a bottom
+  edge is its two corners, moved sideways, with Y moving the base, one height for the whole shape
+  (`translateVertices` `flat` / `base`; editor `elementMovesByShape`). The advanced mode's gizmo sits at
+  the elements' points (`elementsCentroid`: side and bottom edges count their base corners).
 - Factories: `blockShape`, `rampShape` (dir 0 = +Z, 1 = +X, 2 = −Z, 3 = −X ascending; low edge y0, high
   edge y0 + height), `cylinderShape` (a 3..64-gon inscribed in the circle), `polygonShape` (a flat top
   over a drawn footprint, stored canonical); base y0, op carve when the height is negative. Factories do not
@@ -603,7 +611,9 @@ Per level, the engine expands `HostLevelMasks` into R8 layers of `DataArrayTextu
     projected horizontal axis (`gizmoRing`: a unit circle mesh scaled per frame; hidden when its ellipse's
     short axis is under 0.2 × its long axis, i.e. seen nearly edge-on), hit within 7 px of its projected
     polyline (`ringDistancePx`, after the arrows; in the vertex and edge modes a vertex or edge nearer the
-    cursor than the ring takes the press instead, since the ring runs across the shapes). The value label ("+7.5 ft · Add") keeps a constant
+    cursor than the ring takes the press instead, since the ring runs across the shapes; a click without a
+    drag on any gizmo part picks the element under it, like a click there, so the gizmo never hides what lies
+    under it; edge picking ranks side and bottom edges 2 px behind top edges). The value label ("+7.5 ft · Add") keeps a constant
     pixel size (placement: §7). The brush ring is the brush preview's. The select sub-tool's marquee
     (`TerrainOverlay.marquee`, canvas CSS px, the frame the tool tests vertices and shapes in) is a
     screen-space rect drawn by its own small shader over everything else.
@@ -1386,9 +1396,10 @@ authoritative, and a player receives only what filter.ts lets through.
     stays), a plain click selects it alone, while a plain click on an edited shape away from its elements
     clears the element selection even with another shape under it (hover shows no shape there); a marquee
     selects elements and Mod+A all of the current kind; a drag on a selected element moves the selection
-    (one vertex: absolute edge snapping; else by anchor), Y moves top heights only; a move that would make a
+    (one vertex: absolute edge snapping; else by anchor), Y moves top heights only (bottom edges: the base); a move that would make a
     shape invalid (not simple, flipped) is refused and the drag keeps its last valid state. Delete dissolves
-    vertices or collapses edges (a shape keeps ≥ 3 vertices; selected inner edges are removed instead); face
+    vertices or collapses edges (a shape keeps ≥ 3 vertices; selected inner edges are removed instead,
+    bottom edges collapse the top edge above them, side edges dissolve their corner); face
     mode deletes nothing (hint). The gizmo
     appears only with elements selected (at their centroid) and never when read-only.
   - Escape order in Select: gesture → elements → advanced mode → shape selection → false. In the other

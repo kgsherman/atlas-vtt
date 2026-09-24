@@ -722,6 +722,50 @@ describe("terrain select: advanced mode", () => {
     expect(t.store.getState().terrainSelection?.elements).toEqual([{ shapeId: c, kind: "edge", index: 1 }])
   })
 
+  it("side and bottom edges: picked, moved (sideways; Y lifts a side edge's top, a bottom edge's base) and deleted", () => {
+    const t = terrainHarness({ sub: "select", camera: perspectiveCamera({ tilt: 40, distance: 90, target: { x: 30, y: 0, z: 30 } }) })
+    const { tool, store } = t
+    // A 20 × 20 block, 10 ft tall, standing on a base at 0: corner k's side edge is edge 4 + k, the bottom
+    // edge under top edge k is 8 + k.
+    const id = t.add(blockShape("box", { x: 20, z: 20, w: 20, d: 20 }, 0, 10, 0))
+    click(t, t.at(30, 10, 30))
+    act(t, { type: "terrain-advanced" }, "Tab")
+    act(t, { type: "terrain-element", element: "edge" }, "2")
+    const sel = () => store.getState().terrainSelection?.elements
+    // Halfway down the near-right corner (40, 40): its side edge.
+    const side = t.at(40, 5, 40)
+    click(t, side)
+    expect(sel()).toEqual([{ shapeId: id, kind: "edge", index: 6 }])
+    // Its highlight runs from the top corner down to the base.
+    expect(t.overlay().elements?.selected).toEqual([{ shapeId: id, kind: "edge", index: 6 }])
+    // Along the near bottom edge (z 40, under top edge 2).
+    const bottom = t.at(30, 0, 40)
+    click(t, bottom)
+    expect(sel()).toEqual([{ shapeId: id, kind: "edge", index: 10 }])
+    // Dragged down with the Y arrow the bottom edge lowers the base (one height for the shape); the top stays.
+    const at = { x: 30, y: 0, z: 40 }
+    const arrow = onArrow(t, at, "y")
+    tool.onPointerDown!(arrow)
+    tool.onPointerMove!(raised(t, arrow, at, -3))
+    tool.onPointerUp!(raised(t, arrow, at, -3))
+    expect(t.shape(id).base).toBe(-3)
+    expect(t.shape(id).points.every((p) => p.y === 10)).toBe(true)
+    // The side edge dragged up lifts its corner's top only.
+    click(t, t.at(40, 5, 40))
+    expect(sel()).toEqual([{ shapeId: id, kind: "edge", index: 6 }])
+    const sideAt = { x: 40, y: 3.5, z: 40 }
+    const lift = onArrow(t, sideAt, "y")
+    tool.onPointerDown!(lift)
+    tool.onPointerMove!(raised(t, lift, sideAt, 2))
+    tool.onPointerUp!(raised(t, lift, sideAt, 2))
+    expect(t.shape(id).points.map((p) => p.y)).toEqual([10, 10, 12, 10])
+    expect(t.shape(id).base).toBe(-3)
+    // Delete on a side edge dissolves its corner.
+    expect(act(t, { type: "delete" }, "Delete")).toBe(true)
+    expect(t.shape(id).points).toHaveLength(3)
+    expect(store.getState().history.undoLabel).toBe("Dissolve terrain vertices")
+  })
+
   it("faces of a cut top are picked, box selected and moved one by one", () => {
     const t = advanced()
     const { a, store, levelId } = t
@@ -816,14 +860,18 @@ describe("terrain select: advanced mode", () => {
       [40, 45],
       [10, 45],
     ])
-    // Repeated clicks still cycle through the overlapping elements.
+    // Repeated clicks still cycle through the overlapping elements: the two top edges first, then the side
+    // and bottom edges at that corner (they rank after top edges), then round again.
     const corner = t.at(10.4, 5, 44.8)
-    click(t, corner)
-    expect(sel()).toEqual([{ shapeId: big, kind: "edge", index: 2 }])
-    click(t, corner)
-    expect(sel()).toEqual([{ shapeId: big, kind: "edge", index: 3 }])
-    click(t, corner)
-    expect(sel()).toEqual([{ shapeId: big, kind: "edge", index: 2 }])
+    const picks: number[] = []
+    for (let k = 0; k < 6; k++) {
+      click(t, corner)
+      picks.push(sel()![0].index as number)
+    }
+    expect(picks.slice(0, 2)).toEqual([2, 3])
+    const round = picks.indexOf(2, 1)
+    expect(round).toBeGreaterThan(2)
+    expect(picks.slice(2, round).every((k) => k >= 4)).toBe(true)
   })
 
   it("a press on a visible unselected vertex drags it, not a selected one within reach", () => {

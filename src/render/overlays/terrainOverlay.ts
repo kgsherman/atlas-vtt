@@ -37,8 +37,8 @@ import * as THREE from "three"
 
 import { gizmoHandles, gizmoRing, GIZMO_RING_SEGMENTS, ringPoint, type GizmoAxis, type Projector } from "@/core/geometry/gizmo"
 import {
-  shapeEdgeCount,
-  shapeEdgeEnds,
+  shapeAllEdgeCount,
+  shapeEdgeSegment,
   shapeTopTriangleFaces,
   shapeTopTriangles,
   signedArea,
@@ -322,13 +322,11 @@ function writeOutward(
   return o + 9
 }
 
-/** Top edge element k of a shape (outline or inner edge; segment pair, [] out of range). */
+/** Edge element k of a shape (top, side or bottom edge; segment pair, [] out of range or degenerate). */
 function topEdgePair(shape: TerrainShape, elevation: number, k: number): number[] {
-  const ends = shapeEdgeEnds(shape, k)
-  if (!ends) return []
-  const verts = topVertices(shape)
-  const a = verts[ends[0]]
-  const b = verts[ends[1]]
+  const seg = shapeEdgeSegment(shape, k)
+  if (!seg) return []
+  const [a, b] = seg
   return [a.x, elevation + a.y, a.z, b.x, elevation + b.y, b.z]
 }
 
@@ -844,7 +842,7 @@ function addElements(
         outlines.push(...faceOutline(shape, elevation, ref.index))
         continue
       }
-      const count = ref.kind === "edge" ? shapeEdgeCount(shape) : ref.kind === "vertex" ? topVertexCount(shape) : n
+      const count = ref.kind === "edge" ? shapeAllEdgeCount(shape) : ref.kind === "vertex" ? topVertexCount(shape) : n
       if (!(Number.isInteger(ref.index) && ref.index >= 0 && ref.index < count)) continue
       if (ref.kind === "vertex") {
         const v = topVertices(shape)[ref.index]
