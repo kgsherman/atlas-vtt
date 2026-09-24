@@ -607,6 +607,48 @@ describe("level builders", () => {
     expectWindingMatchesNormals(b.geometry)
   })
 
+  it("smooth-shades terrain tops with the lattice normals, before and after a preview update", () => {
+    const { scene, lv } = terrainScene((x, z) => 3 * Math.sin(x / 7) * Math.cos(z / 5), 12)
+    const built = () => {
+      const b = buildLevel(new BuildContext(scene), lv).floors.meshes[0]
+      if (b.kind !== "merged" || !b.terrainOffsets || !b.terrainRows) throw new Error("no terrain mesh")
+      return b as typeof b & { terrainOffsets: Float32Array; terrainRows: Int32Array }
+    }
+    /** Top vertices by lattice sample: every copy of a sample carries the same normal, normalAt's. */
+    const expectSmoothTops = (b: ReturnType<typeof built>, g: GroundSampler) => {
+      const pos = b.geometry.getAttribute("position")
+      const nrm = b.geometry.getAttribute("normal")
+      let tops = 0
+      for (let k = 0; k < pos.count; k++) {
+        const t = k - (k % 3)
+        if (b.terrainOffsets[t] !== 0 || b.terrainOffsets[t + 1] !== 0 || b.terrainOffsets[t + 2] !== 0) continue
+        const n = g.normalAt(Math.round(pos.getX(k) / g.spacing), Math.round(pos.getZ(k) / g.spacing))
+        expect(nrm.getX(k)).toBeCloseTo(n[0], 5)
+        expect(nrm.getY(k)).toBeCloseTo(n[1], 5)
+        expect(nrm.getZ(k)).toBeCloseTo(n[2], 5)
+        tops++
+      }
+      expect(tops).toBeGreaterThan(0)
+      expectWindingMatchesNormals(b.geometry)
+    }
+    const b = built()
+    expectSmoothTops(b, new BuildContext(scene).sampler(lv))
+    // A preview that raises a block of samples: normals just outside the block change too.
+    const heights = denseHeights(scene.levels[lv].heightmap!, scene.grid).heights.slice()
+    const g0 = new BuildContext(scene).sampler(lv)
+    const dirty = { x: 20, z: 20, w: 10, d: 10 }
+    for (let j = 0; j < g0.samplesZ; j++) {
+      for (let i = 0; i < g0.samplesX; i++) {
+        const x = i * g0.spacing
+        const z = j * g0.spacing
+        if (x >= dirty.x && x <= dirty.x + dirty.w && z >= dirty.z && z <= dirty.z + dirty.d) heights[j * g0.samplesX + i] += 4
+      }
+    }
+    const g = GroundSampler.fromDense(scene.levels[lv], scene.grid, heights)!
+    expect(updateTerrainGeometry(b.geometry, b.terrainOffsets, g, dirty, b.terrainRows)).toBeGreaterThan(0)
+    expectSmoothTops(b, g)
+  })
+
   it("updates terrain previews through the row table exactly like a full scan, at a cost that follows the dirty rect", () => {
     const scene = createScene({ width: 60, depth: 60, groundFloor: false })
     const lv = groundLevelId(scene)

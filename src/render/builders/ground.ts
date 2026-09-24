@@ -118,6 +118,22 @@ export class GroundSampler {
     return h[sz * this.samplesX + sx]
   }
 
+  /**
+   * Smooth unit normal at lattice sample (sx, sz) from central differences of the heights (0 outside the
+   * lattice, as sample()). Terrain tops are shaded with it: the face normals of the triangle split would
+   * light each triangle flat, which a low point light turns into a pattern of lit and dark triangles.
+   */
+  normalAt(sx: number, sz: number, out: [number, number, number] = [0, 1, 0]): [number, number, number] {
+    const k = 0.5 / this.spacing
+    const gx = (this.sample(sx + 1, sz) - this.sample(sx - 1, sz)) * k
+    const gz = (this.sample(sx, sz + 1) - this.sample(sx, sz - 1)) * k
+    const inv = 1 / Math.sqrt(gx * gx + 1 + gz * gz)
+    out[0] = -gx * inv
+    out[1] = inv
+    out[2] = -gz * inv
+    return out
+  }
+
   /** World Y at (x, z); equals core/scene levelGround(). */
   heightAt(x: number, z: number): number {
     if (!this.heights) return this.elevation

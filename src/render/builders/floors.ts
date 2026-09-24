@@ -3,7 +3,8 @@
  * subdivided per grid cell (subtle per-cell tint so the grid reads even without the overlay).
  * Levels with a heightmap: one lattice mesh per floor over the lattice cells whose centre lies in
  * the floor's effective rects (same cells as the core/occlusion heightfield), top displaced by the
- * terrain with the heightmap's triangle split, bottom = top − thickness, skirts on the boundary.
+ * terrain with the heightmap's triangle split and smooth-shaded (lattice normals), bottom = top − thickness,
+ * skirts on the boundary.
  *
  * Terrain meshes carry a per-vertex Y offset from the ground and a per-lattice-row triangle table so
  * the terrain preview (heightmap brush, terrain shapes) can move the vertices of a dirty rect in place
@@ -134,6 +135,12 @@ class TerrainWriter {
       this.offsets.push3(oa, ob, oc)
     }
   }
+  /** Top triangle (offsets 0) with the lattice's smooth normals; wound to face up. */
+  top(a: V3, na: V3, b: V3, nb: V3, c: V3, nc: V3, color: RGB): void {
+    if (faceNormal(a, b, c)[1] < 0) this.w.triangleSmooth(a, na, c, nc, b, nb, color, SURF.WALKABLE)
+    else this.w.triangleSmooth(a, na, b, nb, c, nc, color, SURF.WALKABLE)
+    this.offsets.push3(0, 0, 0)
+  }
 }
 
 function writeTerrainSlab(tw: TerrainWriter, ctx: BuildContext, floor: FloorObject, ground: GroundSampler, th: number): void {
@@ -174,9 +181,11 @@ function writeTerrainSlab(tw: TerrainWriter, ctx: BuildContext, floor: FloorObje
       const t10 = p(sx + 1, sz, 0)
       const t01 = p(sx, sz + 1, 0)
       const t11 = p(sx + 1, sz + 1, 0)
-      // Heightmap split: triangles (00, 10, 11) and (00, 01, 11).
-      tw.tri(t00, 0, t10, 0, t11, 0, [0, 1, 0], color, SURF.WALKABLE)
-      tw.tri(t00, 0, t01, 0, t11, 0, [0, 1, 0], color, SURF.WALKABLE)
+      // Heightmap split: triangles (00, 10, 11) and (00, 01, 11), smooth-shaded.
+      const n00 = ground.normalAt(sx, sz)
+      const n11 = ground.normalAt(sx + 1, sz + 1)
+      tw.top(t00, n00, t10, ground.normalAt(sx + 1, sz), t11, n11, color)
+      tw.top(t00, n00, t01, ground.normalAt(sx, sz + 1), t11, n11, color)
       const b00 = p(sx, sz, -th)
       const b10 = p(sx + 1, sz, -th)
       const b01 = p(sx, sz + 1, -th)
@@ -241,11 +250,13 @@ export function buildFloorsBucket(ctx: BuildContext, levelId: Id): BucketBuild {
 
 const _box = new THREE.Box3()
 const _sphere = new THREE.Sphere()
+const _n: [number, number, number] = [0, 1, 0]
 
 /**
  * Move terrain vertices in place to follow `ground` (terrain preview): only triangles with a vertex
- * inside `dirty` (grown by one lattice spacing; null = everywhere) are touched, their flat normals
- * recomputed. Every vertex of a terrain mesh sits on a lattice sample, so heights are read from the
+ * inside `dirty` (grown by 1.5 lattice spacings, since a top vertex's smooth normal reads its neighbours;
+ * null = everywhere) are touched and their normals recomputed (tops: GroundSampler.normalAt; bottoms and
+ * skirts: flat). Every vertex of a terrain mesh sits on a lattice sample, so heights are read from the
  * lattice directly. With `rows` (MergedBuild.terrainRows) only the lattice rows around `dirty` are
  * visited, and in each row only the cells around it (triangles of a row are in ascending x of their
  * first vertex), so the cost follows the dirty rect, not the mesh. Each attribute gets ONE upload range:
@@ -271,10 +282,12 @@ export function updateTerrainGeometry(
   const nrm = geometry.getAttribute("normal") as THREE.BufferAttribute
   const P = pos.array as Float32Array
   const N = nrm.array as Float32Array
-  const x0 = dirty ? dirty.x - s : -Infinity
-  const z0 = dirty ? dirty.z - s : -Infinity
-  const x1 = dirty ? dirty.x + dirty.w + s : Infinity
-  const z1 = dirty ? dirty.z + dirty.d + s : Infinity
+  // Tops' normals read the neighbour samples: 1.5 spacings reach every vertex one sample away (with slack).
+  const m = 1.5 * s
+  const x0 = dirty ? dirty.x - m : -Infinity
+  const z0 = dirty ? dirty.z - m : -Infinity
+  const x1 = dirty ? dirty.x + dirty.w + m : Infinity
+  const z1 = dirty ? dirty.z + dirty.d + m : Infinity
   const inv = 1 / s
   const SX = ground.samplesX
   const SZ = ground.samplesZ
@@ -307,6 +320,19 @@ export function updateTerrainGeometry(
         if (y > maxY) maxY = y
         if (P[q + 2] < minZ) minZ = P[q + 2]
         if (P[q + 2] > maxZ) maxZ = P[q + 2]
+      }
+      if (offsets[t * 3] === 0 && offsets[t * 3 + 1] === 0 && offsets[t * 3 + 2] === 0) {
+        // Top triangle: the lattice's smooth normals (ground.normalAt).
+        for (let v = 0; v < 9; v += 3) {
+          ground.normalAt(Math.round(P[k + v] * inv), Math.round(P[k + v + 2] * inv), _n)
+          N[k + v] = _n[0]
+          N[k + v + 1] = _n[1]
+          N[k + v + 2] = _n[2]
+        }
+        if (k < upFirst) upFirst = k
+        if (k + 9 > upLast) upLast = k + 9
+        count++
+        continue
       }
       const ux = P[k + 3] - P[k]
       const uy = P[k + 4] - P[k + 1]
