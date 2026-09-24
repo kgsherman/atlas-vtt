@@ -1,17 +1,18 @@
 /**
- * Loop cut sub-tool (Blender's Ctrl+R, for terrain shapes): hovering a shape previews a cut across its top,
- * from the side under the pointer to the opposite side of that top face (core/scene/terrainShapes
- * loopCutOpposite: faces with an even number of sides whose opposite side is on the outline); a click
- * makes it, one undo step. The new vertices sit on the two sides, joined by an inner edge the top is split
- * along (TerrainShape.innerEdges), so raising that edge makes a ridge; the shape keeps its form until then.
+ * Loop cut sub-tool (Blender's Ctrl+R, for terrain shapes): hovering a shape previews a cut across its top
+ * through the edge nearest the pointer, following the edge ring (core/scene/terrainShapes loopCutRing: each
+ * top face crossed to its opposite side, on through earlier cuts, until the outline on both ends); a click
+ * makes it, one undo step. New vertices sit on every crossed edge (interior ones where earlier cuts are
+ * crossed), joined by new inner edges the top is split along (TerrainShape.innerEdges / innerPoints), so
+ * raising them makes ridges; the shape keeps its form until then.
  *
- * Over a shape's top the side nearest the pointer inside the face under it is cut; over a side face, that
- * side; otherwise an outline edge near the pointer on screen. One cut follows the pointer along the side,
+ * Over a shape's top the edge (outline or inner) of the face under the pointer nearest to it is cut
+ * through; over a side face, that side; otherwise an edge near the pointer on screen. One cut follows the pointer along the side,
  * snapped to eighths (Alt or free snapping: free); with more cuts (options bar, [ / ]) they are evenly
  * spaced. After the cut the new inner edges are selected in the advanced edge mode, ready to move (Q).
  */
 import { pointInPolygon } from "@/core/geometry/polygon"
-import { loopCut, loopCutOpposite, TERRAIN_SHAPE_MAX_POINTS, topFaces } from "@/core/scene/terrainShapes"
+import { loopCut, loopCutRing, shapeEdgeEnds, TERRAIN_SHAPE_MAX_POINTS, topFaces, topVertexCount, topVertices } from "@/core/scene/terrainShapes"
 import type { Id, TerrainShape, Vec2, Vec3 } from "@/core/scene/types"
 
 import { TERRAIN_LOOP_CUTS_MAX } from "../../settings"
@@ -22,9 +23,9 @@ import { activeLevel, buriedTolerance, canvasOf, levelShapes, NO_PARTS, rayOf, s
 interface Hover {
   levelId: Id
   shapeId: Id
-  /** Outline edge under the pointer. */
+  /** Edge element under the pointer (outline k < n, inner n + c). */
   edge: number
-  /** Pointer position along the edge (0..1 from its first vertex), unsnapped. */
+  /** Pointer position along the edge (0..1 from its first end, shapeEdgeEnds order), unsnapped. */
   t: number
 }
 
@@ -66,7 +67,7 @@ export function createLoopCutSubTool(ctx: TerrainToolContext): SubTool {
     const s = store.getState()
     if (!Object.hasOwn(s.scene.levels, h.levelId)) return null
     const shape = levelShapes(s.scene.levels[h.levelId])[h.shapeId]
-    return shape && h.edge < shape.points.length ? shape : null
+    return shape && shapeEdgeEnds(shape, h.edge) ? shape : null
   }
 
   const planOf = (h: Hover): Plan | null => {
@@ -78,8 +79,10 @@ export function createLoopCutSubTool(ctx: TerrainToolContext): SubTool {
     const result = loopCut(shape, h.edge, ts)
     let reason: string | null = null
     if (!result) {
-      if (loopCutOpposite(shape, h.edge) === null) reason = "No loop here: the face has an odd number of sides, or the loop would cross a loop cut"
-      else if (shape.points.length + 2 * ts.length > TERRAIN_SHAPE_MAX_POINTS) reason = `Too many vertices: a shape has at most ${TERRAIN_SHAPE_MAX_POINTS}`
+      const ring = loopCutRing(shape, h.edge)
+      if (!ring) reason = "No loop here: it would reach a face with an odd number of sides"
+      else if (topVertexCount(shape) + ring.length * ts.length > TERRAIN_SHAPE_MAX_POINTS)
+        reason = `Too many vertices: a shape has at most ${TERRAIN_SHAPE_MAX_POINTS}`
       else reason = "This cut would leave the shape"
     }
     const plan = { shape, ts, result, reason }
@@ -109,7 +112,7 @@ export function createLoopCutSubTool(ctx: TerrainToolContext): SubTool {
     }
     const cursor = canvasOf(e)
     if (deps.project && cursor) {
-      const [h] = edgeHits(shapes, elevation, deps.project, cursor, undefined, true)
+      const [h] = edgeHits(shapes, elevation, deps.project, cursor)
       if (h) {
         const shape = record[h.ref.shapeId]
         return { levelId: a.levelId, shapeId: shape.id, edge: h.ref.index as number, t: paramOn(shape, h.ref.index as number, h.point) }
@@ -192,36 +195,33 @@ export function createLoopCutSubTool(ctx: TerrainToolContext): SubTool {
       const elevation = s.scene.levels[hover.levelId].elevation
       const { shape } = plan
       const w = (p: Vec3): Vec3 => ({ x: p.x, y: elevation + p.y, z: p.z })
+      const verts = topVertices(shape)
+      const along = ([u, v]: readonly [number, number], t: number) => lerp(verts[u], verts[v], t)
+      const [u, v] = shapeEdgeEnds(shape, hover.edge)!
       let segments: [Vec3, Vec3][]
       if (plan.result) {
         const next = plan.result.shape
+        const nv = topVertices(next)
         const n = next.points.length
-        // Each segment from the hovered side (where the label goes) across.
-        const off = (p: Vec3) => distanceToEdge(shape, hover!.edge, p)
         segments = plan.result.edges.map((k) => {
-          const [a, b] = next.innerEdges![k - n].map((i) => next.points[i])
-          return off(a) <= off(b) ? [w(a), w(b)] : [w(b), w(a)]
+          const [a, b] = next.innerEdges![k - n]
+          return [w(nv[a]), w(nv[b])]
         })
       } else {
-        // Where it would go: across to the opposite side, or the hovered side alone.
-        const n = shape.points.length
-        const along = (k: number, t: number) => lerp(shape.points[k], shape.points[(k + 1) % n], t)
-        const opp = loopCutOpposite(shape, hover.edge)
-        segments =
-          opp === null
-            ? [[w(shape.points[hover.edge]), w(shape.points[(hover.edge + 1) % n])]]
-            : plan.ts.map((t): [Vec3, Vec3] => [w(along(hover!.edge, t)), w(along(opp, 1 - t))])
+        // Where it would go along the ring, or the hovered edge alone.
+        const ring = loopCutRing(shape, hover.edge)
+        segments = ring
+          ? plan.ts.flatMap((t) => ring.slice(1).map((e, i): [Vec3, Vec3] => [w(along(ring[i], t)), w(along(e, t))]))
+          : [[w(verts[u]), w(verts[v])]]
       }
-      const a = shape.points[hover.edge]
-      const b = shape.points[(hover.edge + 1) % shape.points.length]
-      const len = Math.hypot(b.x - a.x, b.z - a.z)
+      const len = Math.hypot(verts[v].x - verts[u].x, verts[v].z - verts[u].z)
       const t = plan.ts[0]
       const text = !plan.result ? "Can't cut here" : plan.ts.length > 1 ? `${plan.ts.length} cuts` : `${formatFeet(t * len)} | ${formatFeet((1 - t) * len)} ft`
       return {
         ...NO_PARTS,
         hoverShapeId: shape.id,
         cuts: { segments, valid: plan.result !== null },
-        label: { at: segments[0][0], text },
+        label: { at: w(along([u, v], t)), text },
       }
     },
 
@@ -246,11 +246,12 @@ export function createLoopCutSubTool(ctx: TerrainToolContext): SubTool {
 
 const lerp = (a: Vec3, b: Vec3, t: number): Vec3 => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t })
 
-/** Position (0..1) of `p`'s projection onto outline edge `edge` (x, z). */
+/** Position (0..1) of `p`'s projection onto edge element `edge` (x, z), from its first end. */
 function paramOn(shape: TerrainShape, edge: number, p: Vec2): number {
-  const n = shape.points.length
-  const a = shape.points[edge]
-  const b = shape.points[(edge + 1) % n]
+  const [u, v] = shapeEdgeEnds(shape, edge)!
+  const verts = topVertices(shape)
+  const a = verts[u]
+  const b = verts[v]
   const ex = b.x - a.x
   const ez = b.z - a.z
   const len2 = ex * ex + ez * ez
@@ -258,33 +259,34 @@ function paramOn(shape: TerrainShape, edge: number, p: Vec2): number {
 }
 
 /**
- * The outline side of the top face under `p` nearest to it, preferring sides a loop cut can start from;
- * any outline edge when no face contains `p`. Null for an empty shape.
+ * The edge element of the top face under `p` nearest to it (outline or inner), preferring edges a loop can
+ * run through; any outline edge when no face contains `p`. Null for an empty shape.
  */
 function sideNear(shape: TerrainShape, p: Vec2): number | null {
   const n = shape.points.length
-  const faces = topFaces(n, shape.innerEdges)
-  const face = faces.find((f) =>
+  const verts = topVertices(shape)
+  const face = topFaces(shape).find((f) =>
     pointInPolygon(
       p,
-      f.map((k) => shape.points[k])
+      f.map((k) => verts[k])
     )
   )
-  const sides: number[] = []
-  if (face) {
-    for (let i = 0; i < face.length; i++) {
-      const u = face[i]
-      if (face[(i + 1) % face.length] === (u + 1) % n) sides.push(u)
-    }
-  } else for (let k = 0; k < n; k++) sides.push(k)
+  const inner = shape.innerEdges ?? []
+  const edgeOf = (a: number, b: number): number => {
+    if (a < n && b === (a + 1) % n) return a
+    const lo = Math.min(a, b)
+    const hi = Math.max(a, b)
+    return n + inner.findIndex(([x, y]) => x === lo && y === hi)
+  }
+  const sides = face ? face.map((a, i) => edgeOf(a, face[(i + 1) % face.length])).filter((k) => k >= 0) : Array.from({ length: n }, (_, k) => k)
   if (sides.length === 0) return null
-  const cuttable = sides.filter((k) => loopCutOpposite(shape, k) !== null)
+  const cuttable = sides.filter((k) => loopCutRing(shape, k) !== null)
   const pool = cuttable.length > 0 ? cuttable : sides
   let best = pool[0]
   let bestD = Infinity
   for (const k of pool) {
-    const t = paramOn(shape, k, p)
-    const q = lerp(shape.points[k], shape.points[(k + 1) % n], t)
+    const [u, v] = shapeEdgeEnds(shape, k)!
+    const q = lerp(verts[u], verts[v], paramOn(shape, k, p))
     const d = Math.hypot(q.x - p.x, q.z - p.z)
     if (d < bestD) {
       bestD = d
@@ -292,10 +294,4 @@ function sideNear(shape: TerrainShape, p: Vec2): number | null {
     }
   }
   return best
-}
-
-/** Distance (x, z) from `p` to outline edge `edge`. */
-function distanceToEdge(shape: TerrainShape, edge: number, p: Vec2): number {
-  const q = lerp(shape.points[edge], shape.points[(edge + 1) % shape.points.length], paramOn(shape, edge, p))
-  return Math.hypot(q.x - p.x, q.z - p.z)
 }

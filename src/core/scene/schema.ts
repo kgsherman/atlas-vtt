@@ -20,7 +20,7 @@ import { MAX_TERRAIN_HEIGHT } from "./heightmapBrush"
 import { validateReferences } from "./integrity"
 import { migrateToCurrent } from "./migrations"
 import { signedArea } from "./polygon"
-import { innerEdgesValid } from "./terrainShapes"
+import { TERRAIN_SHAPE_MAX_INNER_EDGES, topGraphValid } from "./terrainShapes"
 import { TOKEN_MODEL_REF_RE } from "./tokenModel"
 import { tokenConditionsSchema, tokenHpSchema } from "./tokenStatus"
 import { SCENE_SCHEMA_VERSION, TERRAIN_RESOLUTIONS, type GridSettings, type Scene } from "./types"
@@ -237,14 +237,20 @@ const terrainShapeSchema = z
     order: z.int().min(0).max(1_000_000),
     points: z.array(z.strictObject({ x: num, y: terrainY, z: num })).min(3).max(SCENE_LIMITS.maxTerrainShapePoints),
     base: terrainY,
-    innerEdges: z
-      .array(z.tuple([z.int().min(0), z.int().min(0)]))
+    innerPoints: z
+      .array(z.strictObject({ x: num, y: terrainY, z: num }))
       .max(SCENE_LIMITS.maxTerrainShapePoints - 3)
       .optional(),
+    innerEdges: z.array(z.tuple([z.int().min(0), z.int().min(0)])).max(TERRAIN_SHAPE_MAX_INNER_EDGES).optional(),
   })
   .refine((s) => signedArea(s.points) > MIN_SHAPE_AREA, { message: "footprint must have a positive (canonical) signed area", path: ["points"] })
-  .refine((s) => innerEdgesValid(s.points, s.innerEdges), {
-    message: "inner edges must be ascending pairs of non-adjacent vertices, each a diagonal inside the footprint, none crossing",
+  .refine((s) => s.points.length + (s.innerPoints?.length ?? 0) <= SCENE_LIMITS.maxTerrainShapePoints, {
+    message: `a shape has at most ${SCENE_LIMITS.maxTerrainShapePoints} top vertices (points and inner points)`,
+    path: ["innerPoints"],
+  })
+  .refine((s) => topGraphValid(s.points, s.innerPoints, s.innerEdges), {
+    message:
+      "inner edges must be ascending pairs of top vertices, not outline edges, inside the footprint, none crossing, cutting the top into simple faces; inner points must lie inside on them",
     path: ["innerEdges"],
   })
 
@@ -566,7 +572,8 @@ export function terrainSizeIssue(terrainEdits: unknown): string | null {
   if (shapes.length > maxTerrainShapesPerLevel) return `expected at most ${maxTerrainShapesPerLevel} terrain shapes, got ${shapes.length}`
   let points = 0
   for (const shape of shapes) {
-    const n = isRecord(shape) && Array.isArray(shape.points) ? shape.points.length : 0
+    const count = (v: unknown) => (Array.isArray(v) ? v.length : 0)
+    const n = isRecord(shape) ? count(shape.points) + count(shape.innerPoints) : 0
     if (n > maxTerrainShapePoints) return `expected at most ${maxTerrainShapePoints} points per terrain shape, got ${n}`
     points += n
   }

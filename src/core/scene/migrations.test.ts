@@ -73,8 +73,8 @@ function v1Doc(): Record<string, any> {
 
 describe("migrateToCurrent", () => {
   it("has one migration per version step", () => {
-    expect(SCENE_SCHEMA_VERSION).toBe(6)
-    expect(Object.keys(MIGRATIONS)).toEqual(["1", "2", "3", "4", "5"])
+    expect(SCENE_SCHEMA_VERSION).toBe(7)
+    expect(Object.keys(MIGRATIONS)).toEqual(["1", "2", "3", "4", "5", "6"])
   })
 
   it("migrates v1 documents (no token models) to v2 unchanged", () => {
@@ -261,5 +261,14 @@ describe("v5 → v6 (token hit points and conditions)", () => {
       Object.assign(doc.tokens[tokenId], bad)
       expect(parseScene(doc).ok, JSON.stringify(bad)).toBe(false)
     }
+  })
+})
+
+describe("v6 → v7 (terrain shape inner points)", () => {
+  it("leaves v6 documents unchanged", () => {
+    const v6: Record<string, any> = { ...(MIGRATIONS[2](v1Doc()) as Record<string, any>), schemaVersion: 6 }
+    expect(MIGRATIONS[6](structuredClone(v6))).toEqual(v6)
+    const res = parseScene(v6)
+    expect(res.ok && res.migratedFrom).toBe(6)
   })
 })

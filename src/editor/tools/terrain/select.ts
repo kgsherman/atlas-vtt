@@ -35,7 +35,7 @@ import {
   type HeightFollowState,
   type ScreenPoint,
 } from "@/core/geometry/gizmo"
-import { elementVertexIndices, rotateShape, translateShape, translateVertices, type TerrainElementRef } from "@/core/scene/terrainShapes"
+import { elementVertexIndices, rotateShape, topVertices, translateShape, translateVertices, type TerrainElementRef } from "@/core/scene/terrainShapes"
 import type { Id, Level, Rect, TerrainShape, Vec2, Vec3 } from "@/core/scene/types"
 
 import type { TerrainSelection } from "../../store"
@@ -264,7 +264,7 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
     let y = 0
     let n = 0
     for (const sh of shapes) {
-      for (const p of sh.points) {
+      for (const p of topVertices(sh)) {
         y += p.y
         n++
       }
@@ -379,11 +379,11 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
       if (p.target.kind === "element") {
         const ref = p.target.ref
         const k = Object.hasOwn(rec, ref.shapeId) ? elementVertexIndices(rec[ref.shapeId], ref)[0] : undefined
-        if (k !== undefined) first = rec[ref.shapeId].points[k]
+        if (k !== undefined) first = topVertices(rec[ref.shapeId])[k]
       }
       if (!first) {
         const [id, ks] = [...indices][0]
-        first = rec[id].points[ks[0]]
+        first = topVertices(rec[id])[ks[0]]
       }
       anchor = { x: first.x, z: first.z }
     } else {

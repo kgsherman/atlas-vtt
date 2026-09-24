@@ -15,7 +15,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { compareShapeOrder, type TerrainEdit } from "@/core/scene/terrainShapes"
+import { compareShapeOrder, topVertexCount, type TerrainEdit } from "@/core/scene/terrainShapes"
 import type { Id, TerrainShape, TerrainShapeOp } from "@/core/scene/types"
 
 import { useEditorActions, useEditorContext, useEditorShallow, useEditorState } from "../context"
@@ -198,7 +198,7 @@ function SingleShape({ shape, levelId }: { shape: TerrainShape; levelId: Id }) {
               {SHAPE_KIND_LABELS[shape.kind]}
             </Badge>
             <OpBadge op={shape.op} />
-            {plural(shape.points.length, "vertex", "vertices")}
+            {plural(topVertexCount(shape), "vertex", "vertices")}
             {shape.innerEdges?.length ? ` · ${plural(shape.innerEdges.length, "loop cut")}` : ""}
           </>
         }

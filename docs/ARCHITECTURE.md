@@ -198,12 +198,13 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
 
 ## 3. Scene document & versioning
 
-- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 6` (v2 added the
+- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 7` (v2 added the
   optional `Token.model`, the v1 → v2 migration is the identity; v3: terrain shapes, `Level.terrainEdits`,
   `WallObject.followTerrain`; v4 widened enums only, heightmap resolutions 8 and 16 and the `polygon` shape
   kind, so the v3 → v4 migration is the identity and older apps open v4 documents read-only as too-new; v5
   added the optional `TerrainShape.innerEdges` (loop cuts), again an identity migration; v6 added the
-  optional `Token.hp` and `Token.conditions`, the v5 → v6 migration is the identity).
+  optional `Token.hp` and `Token.conditions`, the v5 → v6 migration is the identity; v7 added the optional
+  `TerrainShape.innerPoints`, interior top vertices where loop cuts cross, again an identity migration).
 - `Token.hp` / `Token.conditions` (optional; `core/scene/tokenStatus.ts`): hit points `{current, max,
   temp}` (integers, 1 ≤ max ≤ 99 999, 0 ≤ current ≤ max, temp ≥ 0: `tokenHpSchema`; absent = not tracked)
   and conditions from a fixed catalog (`TOKEN_CONDITIONS`: the SRD's fourteen, exhaustion, concentrating,
@@ -233,7 +234,7 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
   - terrain edits (below): ≤ 1000 shapes per level, 3..64 points per shape, ≤ 16000 points per level
     (`maxTerrainShapesPerLevel`, `maxTerrainShapePoints`, `maxTerrainPointsPerLevel`, counted on the raw input
     by `terrainSizeIssue`); strict shapes (kind / op enums, integer `order` 0..1e6, `name` ≤ 2k, points and
-    `base` y within ±500 ft, canonical signed area > 1e-6 ft², `innerEdges` valid by `innerEdgesValid`);
+    `base` y within ±500 ft, canonical signed area > 1e-6 ft², `innerPoints` / `innerEdges` valid by `topGraphValid`, ≤ 64 top vertices in all);
     record key == shape id (`validateReferences`;
     ids are level-scoped, not claimed scene-wide); `baseChunks` keys and payloads like heightmap chunks at
     the level's resolution, plus `""`; `terrainEdits` requires a heightmap; shape points within the extent
@@ -278,7 +279,7 @@ to the elevation; `base`, the other end of the prism's sides in the editor, not 
 - Bake (`bakeRegion`; deterministic: + − × ÷, sqrt for edge lengths and `Math.fround` only, so a
   whole-level rebake reproduces an incrementally written heightmap bit for bit): shapes apply in ascending
   (order, id) (plain string compare), add → max(terrain, top), carve → min(terrain, top). A shape's top is
-  its footprint split along its inner edges (`topFaces`) and each part triangulated by `triangulateFootprint`
+  its footprint cut into faces by its inner edges (`topFaces`) and each face triangulated by `triangulateFootprint`
   (`shapeTopTriangles`; own ear clipping, robust for 3..64 vertices
   including collinear and repeated points; zero-area ears dropped; an ear whose diagonal passes within
   `VERTEX_EPS` (1e-6 ft) of another remaining vertex, away from its ends, is clipped only when no other ear
@@ -308,18 +309,26 @@ to the elevation; `base`, the other end of the prism's sides in the editor, not 
   `dissolveVertices`, `collapseEdge`, `removeInnerEdges`, `loopCut`: null instead of an invalid shape) are pure; every document write of
   terrain goes through the editor store's terrain actions (§7). `hasPaintedBase(level)`: the base is non-zero
   somewhere (reads chunk keys only, by the invariant; nothing is decoded).
-- Inner edges (loop cuts): `innerEdges` holds pairs [a, b] of point indices, a < b, ascending, never
-  adjacent, each a proper diagonal inside the footprint (no other vertex within 1e-6 ft, crossing no outline
-  edge, midpoint inside), none crossing another, at most n − 3 (`innerEdgesValid`). The top is split along
-  them before it is triangulated, so a raised inner edge is a crisp ridge. Edge element k < n is outline
-  edge k, n + c is inner edge c (`shapeEdgeEnds`, `shapeEdgeCount`; picking, box selection, select all and
-  the element display include them). Edits that re-index vertices re-index them (`withVertexMap`,
-  `remapInnerEdges`: an edge losing an end, merging its ends or becoming an outline edge is dropped).
-  `loopCutOpposite(shape, k)`: the side of the top face holding outline edge k opposite it (the face has an
-  even number of sides m and the side m/2 further round is on the outline; otherwise null, since a loop
-  through an inner edge would need a vertex inside the top). `loopCut(shape, k, ts)`: for each t a vertex on
-  edge k at t and one on the opposite edge at 1 − t (heights interpolated, so a planar face keeps its
-  form), joined by a new inner edge; returns the shape and the new edges' element indices.
+- The top graph (loop cuts): `innerPoints` are interior top vertices (x, z strictly inside the footprint);
+  top vertex k is `points[k]` for k < n, `innerPoints[k − n]` after (`topVertices`, `topVertexCount`; vertex
+  elements index this list). `innerEdges` holds pairs [a, b] of top vertex indices, a < b, ascending,
+  never an outline edge. `topGraphValid`: no vertex within 1e-6 ft of another or of an edge it does not
+  end, no crossings, edges inside the footprint, every interior point on an edge, and the planar faces
+  (`topFaces`: a half-edge walk with the edges around each vertex sorted by angle, keeping the face on the
+  left) all simple, covering the footprint exactly once with a single unbounded face, so dangling, spiky
+  or detached edges are refused. The top is triangulated face by face, so raised inner edges are crisp
+  ridges and a raised crossing a peak. Edge element k < n is outline edge k, n + c is inner edge c
+  (`shapeEdgeEnds`, `shapeEdgeCount`; picking, box selection, select all and the element display include
+  them, and interior vertex dots). Edits that re-index vertices re-index them (`withVertexMap`,
+  `remapInnerEdges`: an edge losing an end, merging its ends or becoming an outline edge is dropped, then
+  interior vertices on fewer than two edges go, repeatedly). `loopCutRing(shape, e)`: Blender's edge ring
+  through edge element e, walked both ways: each top face (an even number of sides m) is crossed from the
+  side it is entered by to the side m/2 further round and on into the next face across that side, until
+  the outline; the crossed edges are oriented so one parameter t along every one is a parallel cut; null
+  at a face with an odd number of sides or when the ring meets itself. `loopCut(shape, e, ts)`: for each t
+  a vertex on every crossed edge (outline edges get them in the footprint, inner edges are split at new
+  interior vertices), joined by new inner edges across each face; heights are interpolated along the
+  edges, so planar faces keep their form; returns the shape and the new edges' element indices.
 - Factories: `blockShape`, `rampShape` (dir 0 = +Z, 1 = +X, 2 = −Z, 3 = −X ascending; low edge y0, high
   edge y0 + height), `cylinderShape` (a 3..64-gon inscribed in the circle), `polygonShape` (a flat top
   over a drawn footprint, stored canonical); base y0, op carve when the height is negative. Factories do not
@@ -1299,9 +1308,10 @@ authoritative, and a player receives only what filter.ts lets through.
     `components/editor/CursorKeys`, mounted in the editor and host viewports: rows of mouse input and keymap
     commands shown with their current keys, placed by writing a transform on pointer moves, flipped left
     near the right edge, hidden off the canvas).
-  - Loop cut (`terrain/loopcut.ts`, Shift+C): hovering a shape picks a side (over the top: the outline side
-    of the top face under the pointer nearest to it, preferring cuttable sides; over a side face: that side;
-    else an outline edge near the pointer on screen) and previews the cut (`TerrainOverlay.cuts`, element
+  - Loop cut (`terrain/loopcut.ts`, Shift+C): hovering a shape picks an edge (over the top: the edge, outline
+    or inner, of the top face under the pointer nearest to it, preferring edges a ring runs through; over a
+    side face: that side; else an edge near the pointer on screen) and previews the cut along its ring, so a
+    second cut crosses the first (left to right, then top to bottom) (`TerrainOverlay.cuts`, element
     colour, red with a reason in the hint where there is no loop, too many vertices or the cut would leave
     the shape) with a label ("5 | 15 ft", or "3 cuts"). One cut follows the pointer along the side, snapped
     to eighths (Alt / free snapping: free); `loopCuts` (options bar "Cuts", 1..16; [ / ] step it while the
