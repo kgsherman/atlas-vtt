@@ -7,7 +7,7 @@ import * as React from "react"
 import { useStore } from "zustand"
 import { createStore } from "zustand/vanilla"
 
-import { EDITOR_COMMANDS } from "@/editor/shortcuts"
+import { EDITOR_COMMANDS, isEditorCameraKey } from "@/editor/shortcuts"
 import { hotkeyLabel } from "@/lib/hotkeys"
 import { compactOverrides, keysOf, type Command, type KeyOverrides } from "@/lib/keymap"
 import { PLAY_COMMANDS } from "@/play"
@@ -30,10 +30,23 @@ function parse(raw: string | null): Remaps {
       const v = data[s]
       return v && typeof v === "object" ? compactOverrides(KEYMAPS[s], v as KeyOverrides) : {}
     }
-    return { editor: scope("editor"), play: scope("play") }
+    return { editor: withoutCameraKeys(scope("editor")), play: scope("play") }
   } catch {
     return empty
   }
+}
+
+/**
+ * Remaps saved before W A S D panned the editor camera may still bind them: those keys are dropped, and a
+ * command left with none of its remapped keys goes back to its defaults.
+ */
+function withoutCameraKeys(overrides: KeyOverrides): KeyOverrides {
+  const out: Record<string, readonly Hotkey[]> = {}
+  for (const [id, keys] of Object.entries(overrides)) {
+    const kept = keys.filter((k) => !isEditorCameraKey(k))
+    if (kept.length > 0 || keys.length === 0) out[id] = kept
+  }
+  return compactOverrides(EDITOR_COMMANDS, out)
 }
 
 function read(): Remaps {
@@ -54,7 +67,7 @@ if (typeof window !== "undefined") {
 
 /** Replace a keymap's overrides (only differences from the defaults are kept) and save them. */
 export function setKeyOverrides(scope: KeymapScope, overrides: KeyOverrides): void {
-  const next = { ...keymapStore.getState(), [scope]: compactOverrides(KEYMAPS[scope], overrides) }
+  const next = { ...keymapStore.getState(), [scope]: scope === "editor" ? withoutCameraKeys(overrides) : compactOverrides(KEYMAPS[scope], overrides) }
   keymapStore.setState(next, true)
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: VERSION, ...next }))

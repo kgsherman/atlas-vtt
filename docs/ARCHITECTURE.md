@@ -458,6 +458,7 @@ Per level, the engine expands `HostLevelMasks` into R8 layers of `DataArrayTextu
 ### 4.5 Cameras & quality
 
 - Editor: perspective orbit (near 0.5 ft, far = 4× scene diagonal), focus on selection, optional top view.
+  Held WASD pans either camera along the ground relative to the view.
   The top view never follows the selection: dragging or editing a selected token must not move the camera
   (the ground point under the cursor would shift and the drag would run away).
 - Player: orthographic, tilt 0–35° (default 15°), pan/zoom, rotate by 90°. Only the player and dm-play views
@@ -1262,7 +1263,9 @@ script checks that it is off.
   E block → ramp → cylinder (from another tool it re-enters the last creation sub-tool), Tab advanced mode,
   1 / 2 / 3 element kind, X / Y / Z axis constraint (all but Q and Shift+B without auto-repeat); Enter confirms a
   shape's height (`confirm`). Alt for free placement comes from the library's key-state tracker. Map views turn off the theme provider's "D" hotkey
-  (`useSuppressThemeHotkey`), because D is a tool and a pan key there. Menus, tooltips and hints show the
+  (`useSuppressThemeHotkey`), because D pans the camera there. W A S D are the cameras' own held-key pan
+  input in every map view (the editor keeps arrows for nudges), so the dialog refuses them for editor commands
+  and saved editor remaps drop them. Menus, tooltips and hints show the
   current keys (`useCommandLabel`, `CommandKbd`).
 
 ---

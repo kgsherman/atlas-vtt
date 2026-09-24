@@ -40,7 +40,7 @@ describe("editor controller", () => {
   it("routes pointer events to the active tool and switches tools by key", () => {
     const { store, controller } = setup()
     expect(controller.activeTool().id).toBe("select")
-    expect(pressKey(controller, "w")).toBe(true)
+    expect(pressKey(controller, "c")).toBe(true)
     expect(store.getState().tool).toBe("wall")
     expect(controller.activeTool().id).toBe("wall")
     controller.pointerDown(at(50, 50, { clientX: 0 }))

@@ -13,7 +13,7 @@ import { Kbd, KbdGroup } from "@/components/ui/kbd"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { EDITOR_COMMAND_GROUPS, EDITOR_POINTER_HELP } from "@/editor/shortcuts"
+import { EDITOR_COMMAND_GROUPS, EDITOR_POINTER_HELP, isEditorCameraKey } from "@/editor/shortcuts"
 import { hotkeyLabel, hotkeyParts } from "@/lib/hotkeys"
 import { assignKey, commandUsing, conflictsOf, keysOf, removeKey, resetCommand, type Command } from "@/lib/keymap"
 import { cn } from "@/lib/utils"
@@ -74,6 +74,7 @@ function rejectReason(scope: KeymapScope, hotkey: Hotkey): string | null {
   const parsed = parseHotkey(hotkey)
   const plain = !parsed.ctrl && !parsed.alt && !parsed.meta
   if (scope === "play" && plain && parsed.key !== undefined && CAMERA_KEYS.includes(parsed.key)) return `${hotkeyLabel(hotkey)} pans the camera in play.`
+  if (scope === "editor" && isEditorCameraKey(hotkey)) return `${hotkeyLabel(hotkey)} pans the camera in the editor.`
   return null
 }
 

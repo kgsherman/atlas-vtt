@@ -1,7 +1,8 @@
 /**
  * Editor camera: perspective orbit around a target (three's OrbitControls). Left button is left to
  * the editor tools; right-drag orbits, middle-drag pans parallel to the ground, the wheel dollies
- * toward the cursor. Two-finger touch pans/zooms. near = 0.5 ft, far = 4 × scene diagonal.
+ * toward the cursor, held WASD pans along the ground relative to the view (arrow keys are left to the
+ * editor's nudges). Two-finger touch pans/zooms. near = 0.5 ft, far = 4 × scene diagonal.
  */
 import * as THREE from "three"
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js"
@@ -9,6 +10,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js"
 import type { Vec3 } from "@/core/scene/types"
 
 import { angleDelta, boundsCenter, boundsDiagonal, damp, perspectiveFitBoxDistance, perspectiveFitDistance, type Bounds3 } from "./fit"
+import { HeldPanKeys } from "./panKeys"
 import type { CameraController } from "./types"
 
 const FOV = 50
@@ -24,6 +26,12 @@ export class OrbitCameraController implements CameraController {
   private goalDistance: number | null = null
   private goalAzimuth: number | null = null
   private cssHeight = 1
+  private readonly panKeys = new HeldPanKeys()
+  private readonly keyListeners: [string, EventListener][] = [
+    ["keydown", (e) => this.panKeys.keyDown(e as KeyboardEvent, this.controls.enabled)],
+    ["keyup", (e) => this.panKeys.keyUp(e as KeyboardEvent)],
+    ["blur", () => this.panKeys.clear()],
+  ]
   /** Where OrbitControls registered its capture-phase key listeners (the document while attached). */
   private readonly keyRoot: Node
 
@@ -48,6 +56,8 @@ export class OrbitCameraController implements CameraController {
       this.goalDistance = null
       this.goalAzimuth = null
     })
+    this.panKeys.arrows = false
+    for (const [type, fn] of this.keyListeners) window.addEventListener(type, fn)
     this.syncEnabled()
     c.update()
   }
@@ -72,6 +82,7 @@ export class OrbitCameraController implements CameraController {
 
   private syncEnabled(): void {
     this.controls.enabled = this._enabled && this._active
+    if (!this.controls.enabled) this.panKeys.clear()
   }
 
   setViewport(cssWidth: number, cssHeight: number): void {
@@ -90,6 +101,21 @@ export class OrbitCameraController implements CameraController {
 
   update(dt: number): void {
     const c = this.controls
+    const pan = c.enabled ? this.panKeys.direction() : null
+    if (pan) {
+      // Along the ground, relative to the view's azimuth: W moves away from the camera, D to its right.
+      // Speed scales with the distance, so the view crosses about its own height per second.
+      const theta = new THREE.Spherical().setFromVector3(this.camera.position.clone().sub(c.target)).theta
+      const speed = this.camera.position.distanceTo(c.target) * 0.9 * dt
+      const move = new THREE.Vector3(
+        Math.cos(theta) * pan.x - Math.sin(theta) * pan.y,
+        0,
+        -Math.sin(theta) * pan.x - Math.cos(theta) * pan.y
+      ).multiplyScalar(speed)
+      c.target.add(move)
+      this.camera.position.add(move)
+      this.goalTarget = null
+    }
     if (this.goalTarget || this.goalDistance !== null || this.goalAzimuth !== null) {
       const offset = this.camera.position.clone().sub(c.target)
       const sph = new THREE.Spherical().setFromVector3(offset)
@@ -211,6 +237,8 @@ export class OrbitCameraController implements CameraController {
   }
 
   dispose(): void {
+    for (const [type, fn] of this.keyListeners) window.removeEventListener(type, fn)
+    this.panKeys.clear()
     this.controls.dispose()
     // three's OrbitControls.disconnect() removes its capture-phase key listeners from
     // domElement.getRootNode(), which is no longer the document once the canvas has been detached, and

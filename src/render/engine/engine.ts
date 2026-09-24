@@ -734,7 +734,7 @@ export class AtlasEngine implements Engine {
       for (const lv of this.levels.values()) lv.setDoorMarkersVisible(next.camera === "topdown")
     }
     this.topdown.tilt = next.tilt
-    this.topdown.keyboardPan = next.mode !== "editor"
+    this.topdown.panKeys.arrows = next.mode !== "editor"
     this.replan()
     if (next.activeLevelId !== prev.activeLevelId && this.scene) this.lookAtActiveLevel(false)
     if (next.vision !== prev.vision && this.scene) this.applyBackground(this.scene)

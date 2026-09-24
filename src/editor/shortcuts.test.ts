@@ -6,7 +6,7 @@ import { conflictsOf } from "@/lib/keymap"
 
 import { createScene } from "@/core/scene/factory"
 
-import { EDITOR_COMMAND_GROUPS, EDITOR_COMMANDS, editorBindings, runShortcut, terrainSubFor, type ShortcutAction } from "./shortcuts"
+import { EDITOR_COMMAND_GROUPS, EDITOR_COMMANDS, editorBindings, isEditorCameraKey, runShortcut, terrainSubFor, type ShortcutAction } from "./shortcuts"
 import { makeStore } from "./test-utils"
 
 /** What a key press runs, matched by TanStack Hotkeys as in the app (Linux: Mod = Ctrl). */
@@ -22,10 +22,10 @@ describe("editor keymap", () => {
     const tools = {
       v: "select",
       f: "floor",
-      w: "wall",
-      d: "door",
+      c: "wall",
+      i: "door",
       n: "window",
-      s: "connector",
+      u: "connector",
       p: "pillar",
       o: "prop",
       l: "light",
@@ -37,8 +37,8 @@ describe("editor keymap", () => {
       expect(resolve(k)).toEqual({ type: "tool", tool })
       expect(resolve(k.toUpperCase())).toEqual({ type: "tool", tool })
     }
-    expect(resolve("w", { alt: true })).toBeNull()
-    expect(resolve("W", { shift: true })).toBeNull()
+    expect(resolve("c", { alt: true })).toBeNull()
+    expect(resolve("C", { shift: true })).toBeNull()
   })
 
   it("maps editing and view keys", () => {
@@ -113,10 +113,19 @@ describe("editor keymap", () => {
     expect(conflictsOf(EDITOR_COMMANDS, {})).toEqual([])
   })
 
+  it("leaves W A S D to the camera", () => {
+    for (const k of ["w", "a", "s", "d"]) {
+      expect(resolve(k)).toBeNull()
+      expect(resolve(k.toUpperCase(), { shift: true })).toBeNull()
+    }
+    for (const k of ["W", "A", "Shift+S", "D"] as const) expect(isEditorCameraKey(k)).toBe(true)
+    for (const k of ["Mod+S", "Alt+W", "Q", "ArrowUp"] as const) expect(isEditorCameraKey(k)).toBe(false)
+  })
+
   it("applies remaps (and unbinding)", () => {
-    const bindings = editorBindings({ "tool.wall": ["Shift+W"], undo: [] })
-    expect(bindings.some((b) => b.hotkey === "W")).toBe(false)
-    expect(bindings.find((b) => b.hotkey === "Shift+W")?.action).toEqual({ type: "tool", tool: "wall" })
+    const bindings = editorBindings({ "tool.wall": ["Shift+C"], undo: [] })
+    expect(bindings.some((b) => b.hotkey === "C")).toBe(false)
+    expect(bindings.find((b) => b.hotkey === "Shift+C")?.action).toEqual({ type: "tool", tool: "wall" })
     expect(bindings.some((b) => b.action.type === "undo")).toBe(false)
   })
 })

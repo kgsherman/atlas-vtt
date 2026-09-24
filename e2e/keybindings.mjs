@@ -1,5 +1,5 @@
 // Keyboard shortcuts and key remapping (local mode): the theme's "D" hotkey works on the home page but
-// not on the map views (D is the door tool / pans right) → the editor's "?" opens the Keyboard shortcuts
+// not on the map views (D pans right there; W A S D pan the editor camera and select no tool) → the editor's "?" opens the Keyboard shortcuts
 // dialog → recording a key (Escape cancels without closing the dialog, a key taken from another command
 // moves, browser-reserved keys are refused, Enter records without re-triggering the button) → the remapped
 // keys drive the editor and survive a reload → reset → the play tab refuses camera keys → in a session, the
@@ -57,9 +57,20 @@ try {
     label: "editor",
   })
   await page.mouse.click(700, 450)
-  await page.keyboard.press("d")
-  checks.eq(await tool(page), "door", "D selects the door tool in the editor")
+  // Screen x of a fixed ground point: panning right moves it left.
+  const originX = () =>
+    page.evaluate(
+      () => window.__atlasEditor.engine.project({ x: 0, y: 0, z: 0 }).x
+    )
+  const before = await originX()
+  await page.keyboard.down("d")
+  await sleep(1200)
+  await page.keyboard.up("d")
+  checks.eq(await tool(page), "select", "D selects no tool in the editor")
   checks.eq(await theme(page), t0, "and does not toggle the theme")
+  checks.ok((await originX()) < before - 5, "holding D pans the camera right")
+  await page.keyboard.press("i")
+  checks.eq(await tool(page), "door", "I selects the door tool")
   await page.keyboard.press("v")
 
   checks.step("Keyboard shortcuts dialog")
@@ -67,7 +78,7 @@ try {
   const dialog = page.getByRole("dialog", { name: "Keyboard shortcuts" })
   await dialog.waitFor({ timeout: 5000 })
   checks.ok(true, "? opens the dialog")
-  await dialog.getByRole("button", { name: "Change W" }).click()
+  await dialog.getByRole("button", { name: "Change C", exact: true }).click()
   checks.ok(
     /Press the new key for “Wall”/.test(await status(dialog)),
     "clicking a key starts recording"
@@ -78,7 +89,15 @@ try {
     await dialog.isVisible(),
     "Escape cancels recording without closing the dialog"
   )
-  await dialog.getByRole("button", { name: "Change W" }).click()
+  await dialog.getByRole("button", { name: "Change C", exact: true }).click()
+  await page.keyboard.press("w")
+  await sleep(150)
+  checks.ok(
+    /pans the camera in the editor/.test(await status(dialog)),
+    "editor commands refuse W A S D"
+  )
+  await page.keyboard.press("Escape")
+  await dialog.getByRole("button", { name: "Change C", exact: true }).click()
   await page.keyboard.press("q")
   await sleep(300)
   checks.ok(
@@ -121,8 +140,8 @@ try {
 
   checks.step("Remapped keys")
   await page.mouse.click(700, 450)
-  await page.keyboard.press("w")
-  checks.eq(await tool(page), "select", "W no longer selects the wall tool")
+  await page.keyboard.press("c")
+  checks.eq(await tool(page), "select", "C no longer selects the wall tool")
   await page.keyboard.press("q")
   checks.eq(await tool(page), "wall", "Q does")
   await page.keyboard.press("v")
@@ -151,8 +170,8 @@ try {
     .click()
   await sleep(150)
   checks.ok(
-    await dialog.getByRole("button", { name: "Change W" }).isVisible(),
-    "reset all brings W back"
+    await dialog.getByRole("button", { name: "Change C", exact: true }).isVisible(),
+    "reset all brings C back"
   )
   await dialog.getByRole("tab", { name: "Play" }).click()
   await dialog.getByRole("button", { name: "Change Q" }).click()

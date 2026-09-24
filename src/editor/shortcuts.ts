@@ -6,10 +6,13 @@
  * then runs the action with runShortcut(). Tool-only actions (confirm, the terrain tool's advanced
  * mode / element / axis keys) do nothing in runShortcut, so an unused key keeps its browser default.
  *
+ * W A S D are not in the keymap: they pan the camera (the engine's cameras track them as held keys, by
+ * position, Shift included), so no editor command may use them (EDITOR_CAMERA_KEYS).
+ *
  * Arrow nudges move one cell (or one foot) along world axes: ArrowUp = −Z, ArrowDown = +Z,
  * ArrowLeft = −X, ArrowRight = +X (screen directions in the default top-down orientation).
  */
-import type { Hotkey } from "@tanstack/hotkeys"
+import { parseHotkey, type Hotkey } from "@tanstack/hotkeys"
 
 import type { SnapMode } from "@/core/grid/grid"
 import type { Id, Vec2 } from "@/core/scene/types"
@@ -71,10 +74,10 @@ export interface EditorBinding {
 const TOOLS: [ToolId, string, Hotkey][] = [
   ["select", "Select", "V"],
   ["floor", "Floor", "F"],
-  ["wall", "Wall", "W"],
-  ["door", "Door", "D"],
+  ["wall", "Wall", "C"],
+  ["door", "Door", "I"],
   ["window", "Window", "N"],
-  ["connector", "Stairs / ladder / ramp", "S"],
+  ["connector", "Stairs / ladder / ramp", "U"],
   ["pillar", "Pillar", "P"],
   ["prop", "Prop", "O"],
   ["light", "Light", "L"],
@@ -82,6 +85,15 @@ const TOOLS: [ToolId, string, Hotkey][] = [
   ["token", "Token", "K"],
   ["measure", "Measure", "M"],
 ]
+
+/** Keys the editor camera pans on, with or without Shift: editor commands may not use them. */
+export const EDITOR_CAMERA_KEYS: readonly string[] = ["W", "A", "S", "D"]
+
+/** Whether `hotkey` is a camera pan key (no Ctrl / Alt / Meta; Shift doesn't matter). */
+export function isEditorCameraKey(hotkey: Hotkey): boolean {
+  const p = parseHotkey(hotkey)
+  return !p.ctrl && !p.alt && !p.meta && p.key !== undefined && EDITOR_CAMERA_KEYS.includes(p.key.toUpperCase())
+}
 
 /** Brush radius multiplier per brush step. */
 export const BRUSH_STEP = 1.25
@@ -186,6 +198,7 @@ export const EDITOR_POINTER_HELP: { keys: string; label: string }[] = [
   { keys: "Shift (wall tool)", label: "Constrain to 45°" },
   { keys: "Right-drag", label: "Orbit the camera" },
   { keys: "Middle-drag", label: "Pan" },
+  { keys: "W A S D (hold)", label: "Pan along the ground" },
   { keys: "Wheel", label: "Zoom toward the cursor" },
   { keys: "Right-click / Double-click", label: "Finish walls / rulers" },
   { keys: "Drag, then move and click (terrain)", label: "Block / ramp / cylinder: draw the base, then set the height" },

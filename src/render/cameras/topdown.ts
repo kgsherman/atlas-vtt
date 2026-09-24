@@ -22,28 +22,12 @@ import {
   zoomAboutPoint,
   type Bounds3,
 } from "./fit"
+import { HeldPanKeys } from "./panKeys"
 import type { CameraController } from "./types"
 
 const LAMBDA = 12
 const MIN_VIEW_HEIGHT = 12
 const DRAG_THRESHOLD_PX = 4
-const PAN_KEYS: Record<string, [number, number]> = {
-  KeyW: [0, 1],
-  ArrowUp: [0, 1],
-  KeyS: [0, -1],
-  ArrowDown: [0, -1],
-  KeyA: [-1, 0],
-  ArrowLeft: [-1, 0],
-  KeyD: [1, 0],
-  ArrowRight: [1, 0],
-}
-
-function isEditableTarget(t: EventTarget | null): boolean {
-  if (!(t instanceof HTMLElement)) return false
-  const tag = t.tagName
-  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t.isContentEditable
-}
-
 export class TopDownCameraController implements CameraController {
   readonly kind = "topdown" as const
   readonly camera: THREE.OrthographicCamera
@@ -51,8 +35,8 @@ export class TopDownCameraController implements CameraController {
   active = false
   /** Tilt from vertical (radians), from ViewState.tilt. */
   tilt = (15 * Math.PI) / 180
-  /** WASD / arrow-key panning (off in the editor, where letter keys select tools). */
-  keyboardPan = true
+  /** Held WASD / arrow keys pan; set `panKeys.arrows = false` where arrows nudge (the editor). */
+  readonly panKeys = new HeldPanKeys()
 
   private readonly dom: HTMLElement
   private target = new THREE.Vector3(60, 0, 60)
@@ -64,7 +48,6 @@ export class TopDownCameraController implements CameraController {
   private cssWidth = 1
   private cssHeight = 1
   private bounds: Bounds3 = { min: { x: 0, y: 0, z: 0 }, max: { x: 200, y: 10, z: 150 } }
-  private readonly keys = new Set<string>()
   private drag: { pointerId: number; ground: THREE.Vector3; x: number; y: number; moved: boolean } | null = null
   private suppressContextMenu = false
   private touches = new Map<number, { x: number; y: number }>()
@@ -83,7 +66,7 @@ export class TopDownCameraController implements CameraController {
     this.listen(domElement, "contextmenu", this.onContextMenu as EventListener)
     this.listen(window, "keydown", this.onKeyDown as EventListener)
     this.listen(window, "keyup", this.onKeyUp as EventListener)
-    this.listen(window, "blur", () => this.keys.clear())
+    this.listen(window, "blur", () => this.panKeys.clear())
     this.applyCamera()
   }
 
@@ -120,24 +103,13 @@ export class TopDownCameraController implements CameraController {
   }
 
   update(dt: number): void {
-    if (this.interactive && this.keyboardPan && this.keys.size > 0) {
-      let dx = 0
-      let dy = 0
-      for (const k of this.keys) {
-        const v = PAN_KEYS[k]
-        if (v) {
-          dx += v[0]
-          dy += v[1]
-        }
-      }
-      if (dx !== 0 || dy !== 0) {
-        const { right, up } = groundAxes(this.goalYaw)
-        const speed = this.goalViewHeight * 0.9 * dt
-        const l = Math.hypot(dx, dy)
-        this.goal.x += ((right.x * dx + up.x * dy) / l) * speed
-        this.goal.z += ((right.z * dx + up.z * dy) / l) * speed
-        this.clampGoal()
-      }
+    const dir = this.interactive ? this.panKeys.direction() : null
+    if (dir) {
+      const { right, up } = groundAxes(this.goalYaw)
+      const speed = this.goalViewHeight * 0.9 * dt
+      this.goal.x += (right.x * dir.x + up.x * dir.y) * speed
+      this.goal.z += (right.z * dir.x + up.z * dir.y) * speed
+      this.clampGoal()
     }
     this.target.set(damp(this.target.x, this.goal.x, LAMBDA, dt), damp(this.target.y, this.goal.y, LAMBDA, dt), damp(this.target.z, this.goal.z, LAMBDA, dt))
     this.viewHeight = damp(this.viewHeight, this.goalViewHeight, LAMBDA, dt)
@@ -323,18 +295,13 @@ export class TopDownCameraController implements CameraController {
     this.clampGoal()
   }
 
-  private onKeyDown = (e: KeyboardEvent): void => {
-    if (!this.interactive || !this.keyboardPan || e.ctrlKey || e.metaKey || e.altKey || isEditableTarget(e.target)) return
-    if (PAN_KEYS[e.code]) this.keys.add(e.code)
-  }
+  private onKeyDown = (e: KeyboardEvent): void => this.panKeys.keyDown(e, this.interactive)
 
-  private onKeyUp = (e: KeyboardEvent): void => {
-    this.keys.delete(e.code)
-  }
+  private onKeyUp = (e: KeyboardEvent): void => this.panKeys.keyUp(e)
 
   dispose(): void {
     for (const [t, type, fn, opts] of this.listeners) t.removeEventListener(type, fn, opts)
     this.listeners.length = 0
-    this.keys.clear()
+    this.panKeys.clear()
   }
 }

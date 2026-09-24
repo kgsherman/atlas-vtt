@@ -51,7 +51,7 @@ afterEach(() => {
 describe("useEditorHotkeys", () => {
   it("runs bound keys and prevents their default", () => {
     render()
-    expect(press("w").defaultPrevented).toBe(true)
+    expect(press("c").defaultPrevented).toBe(true)
     expect(controller.store.getState().tool).toBe("wall")
   })
 
@@ -77,7 +77,7 @@ describe("useEditorHotkeys", () => {
     render()
     const button = document.body.appendChild(document.createElement("button"))
     expect(press("PageUp", {}, button).defaultPrevented).toBe(false)
-    expect(press("w", {}, button).defaultPrevented).toBe(true)
+    expect(press("c", {}, button).defaultPrevented).toBe(true)
   })
 
   it("passes an unused Escape to the page", () => {
@@ -132,10 +132,22 @@ describe("useEditorHotkeys", () => {
 
   it("follows remaps live", () => {
     render()
-    act(() => setKeyOverrides("editor", { "tool.wall": ["Shift+W"] }))
-    press("w")
+    act(() => setKeyOverrides("editor", { "tool.wall": ["Shift+C"] }))
+    press("c")
     expect(controller.store.getState().tool).toBe("select")
-    press("W", { shiftKey: true })
+    press("C", { shiftKey: true })
     expect(controller.store.getState().tool).toBe("wall")
+  })
+
+  it("never binds the camera's pan keys", () => {
+    render()
+    act(() => setKeyOverrides("editor", { "tool.wall": ["W"], "tool.door": ["Shift+D", "J"] }))
+    press("w")
+    press("D", { shiftKey: true })
+    expect(controller.store.getState().tool).toBe("select")
+    press("c")
+    expect(controller.store.getState().tool).toBe("wall")
+    press("j")
+    expect(controller.store.getState().tool).toBe("door")
   })
 })
