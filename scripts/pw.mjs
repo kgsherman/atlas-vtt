@@ -3,12 +3,15 @@
 //   const browser = await launchBrowser("nvidia")   // "nvidia" | "amd" | "swiftshader"
 // GPU backends go through Mesa's d3d12 driver (WSL). The installed Playwright expects a newer browser
 // revision than is cached, so we point at the cached headless shell explicitly.
+// Elsewhere, ATLAS_CHROMIUM names the browser executable (e.g. a Playwright-managed Chromium), and
+// ATLAS_GPU=swiftshader picks software WebGL.
 import { createRequire } from "node:module"
 
-const require = createRequire("/home/kevin/js/atlas-vtt/package.json")
+const require = createRequire(new URL("../package.json", import.meta.url))
 const { chromium } = require("playwright")
 
 export const HEADLESS_SHELL =
+  process.env.ATLAS_CHROMIUM ??
   "/home/kevin/.cache/ms-playwright/chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell"
 
 const gpuArgs = [

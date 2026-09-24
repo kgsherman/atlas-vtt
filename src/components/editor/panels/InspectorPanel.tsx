@@ -33,7 +33,9 @@ import type { ObjectUpdate, TokenUpdate } from "@/editor/store"
 import { normalizeAngle } from "@/editor/transform"
 
 import { tokenModelAsset, tokenModelChoices, useFreeAssets } from "@/app/freeAssets"
+import { ConditionChips, ConditionMenu } from "@/components/play/table/health"
 import { freeTokenModelRef } from "@/core/scene/tokenModel"
+import { HP_LIMITS, withMaxHp, type TokenHp, type TokenStatusChange } from "@/core/scene/tokenStatus"
 
 import { FreeAssetScopeContext, useEditorActions, useEditorContext, useEditorShallow, useEditorState } from "../context"
 import { ColorInput, FieldPair, FieldRow, Hint, NotesInput, NumberInput, PanelSection, Segmented, SelectInput, SliderInput, SwitchField, TextInput, type Option } from "../fields"
@@ -584,6 +586,7 @@ function TokenFields({ t }: { t: Token }) {
           <NumberInput value={t.speed} min={0} max={10000} step={5} unit="ft" disabled={readOnly} onCommit={(speed) => update({ speed })} />
         </FieldRow>
       </PanelSection>
+      <TokenHealthFields t={t} readOnly={readOnly} />
       <PanelSection title="Senses">
         <FieldRow label="Darkvision" hint="Sees in darkness (in greyscale) within this range.">
           <NumberInput value={v.darkvision} min={0} max={10000} step={5} unit="ft" disabled={readOnly} onCommit={(darkvision) => update({ vision: { ...v, darkvision } })} />
@@ -602,6 +605,57 @@ function TokenFields({ t }: { t: Token }) {
         </div>
       </PanelSection>
     </>
+  )
+}
+
+/**
+ * Hit points (empty max: not tracked) and conditions. During a live session these are play actions
+ * (store.changeTokenStatus / setTokenHp): applied by the host to the token as it holds it, with no undo
+ * entry, so they never overwrite what players changed meanwhile.
+ */
+function TokenHealthFields({ t, readOnly }: { t: Token; readOnly: boolean }) {
+  const { store } = useEditorContext()
+  const hp = t.hp
+  const conditions = t.conditions ?? []
+  const change = (c: TokenStatusChange) => store.getState().changeTokenStatus(t.id, c)
+  const setHp = (next: TokenHp | null) => store.getState().setTokenHp(t.id, next)
+  return (
+    <PanelSection
+      title="Health"
+      action={
+        hp && !readOnly ? (
+          <Button size="xs" variant="ghost" onClick={() => setHp(null)}>
+            Stop tracking
+          </Button>
+        ) : null
+      }
+    >
+      <FieldRow label="Max HP" hint="Hit points at full health. Setting it starts tracking them; Stop tracking removes them.">
+        <NumberInput
+          value={hp?.max ?? null}
+          min={1}
+          max={HP_LIMITS.max}
+          precision={0}
+          placeholder="Not tracked"
+          disabled={readOnly}
+          onCommit={(max) => (hp ? change({ hp: { kind: "max", max } }) : setHp(withMaxHp(null, max)))}
+        />
+      </FieldRow>
+      {hp ? (
+        <FieldRow label="Current / temp" hint="Current hit points, and temporary hit points (spent first).">
+          <FieldPair>
+            <NumberInput value={hp.current} min={0} max={hp.max} precision={0} disabled={readOnly} onCommit={(current) => change({ hp: { kind: "set", current } })} aria-label="Current hit points" />
+            <NumberInput prefix="+" value={hp.temp} min={0} max={HP_LIMITS.max} precision={0} disabled={readOnly} onCommit={(temp) => change({ hp: { kind: "set", temp } })} aria-label="Temporary hit points" />
+          </FieldPair>
+        </FieldRow>
+      ) : null}
+      <FieldRow label="Conditions">
+        <div className="flex flex-col items-start gap-1.5">
+          <ConditionChips conditions={conditions} onRemove={readOnly ? undefined : (c) => change({ conditions: { remove: [c] } })} />
+          <ConditionMenu conditions={conditions} disabled={readOnly} onChange={(c) => change({ conditions: c })} />
+        </div>
+      </FieldRow>
+    </PanelSection>
   )
 }
 

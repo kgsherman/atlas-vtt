@@ -23,7 +23,9 @@ src/
     vision/             Authoritative visibility: light field, per-viewer LOS, perception masks, observation
     movement/           Move validation (walls/doors/windows/props, connectors), ruler measurement
     history/            Undo/redo over immer patches with transactions
-    session/            GameState reducer, request validation, memory, filter, diff/apply, viewToScene
+    dice/               Dice notation, unbiased rolls, roll result schema (§6.5)
+    session/            GameState reducer, request validation, memory, filter, diff/apply, viewToScene, table and
+                        token status (§6.5)
   render/               three.js (WebGL2). Knows nothing about React or the network.
     engine/             Renderer, frame loop, resize, adaptive quality, stats
     builders/           Scene → visual meshes per level (floors, terrain, walls w/ openings, doors, props, tokens…)
@@ -46,7 +48,8 @@ src/
     player/             Player client (sync rules, requests), backdrop compositor
   app/                  Service wiring (Supabase or local mode), router + lazy routes, library, scene digests
   lib/                  keymap (pure: remappable command tables, overrides), hotkeys (TanStack Hotkeys wrapper, key labels), utils
-  components/           React + shadcn UI (app shell, editor panels, play HUD, host console, lobby)
+  components/           React + shadcn UI (app shell, editor panels, play HUD, host console, lobby; play/table: chat,
+                        dice, turn order, map markers)
   routes/               Page-level components (home, editor, host, play, join, shared scene)
   dev/                  Dev-only render harness (`dev/render.html`) and the Vineyard build helpers
   integration/          Cross-module consistency tests (render ↔ occlusion, vision ↔ movement, host → player, editor → session)
@@ -195,11 +198,17 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
 
 ## 3. Scene document & versioning
 
-- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 5` (v2 added the
+- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 6` (v2 added the
   optional `Token.model`, the v1 → v2 migration is the identity; v3: terrain shapes, `Level.terrainEdits`,
   `WallObject.followTerrain`; v4 widened enums only, heightmap resolutions 8 and 16 and the `polygon` shape
   kind, so the v3 → v4 migration is the identity and older apps open v4 documents read-only as too-new; v5
-  added the optional `TerrainShape.innerEdges` (loop cuts), again an identity migration).
+  added the optional `TerrainShape.innerEdges` (loop cuts), again an identity migration; v6 added the
+  optional `Token.hp` and `Token.conditions`, the v5 → v6 migration is the identity).
+- `Token.hp` / `Token.conditions` (optional; `core/scene/tokenStatus.ts`): hit points `{current, max,
+  temp}` (integers, 1 ≤ max ≤ 99 999, 0 ≤ current ≤ max, temp ≥ 0: `tokenHpSchema`; absent = not tracked)
+  and conditions from a fixed catalog (`TOKEN_CONDITIONS`: the SRD's fourteen, exhaustion, concentrating,
+  dead), each once and in catalog order (`tokenConditionsSchema`; absent = none). They are set in the editor
+  and in play (§6.5); what players are sent of them is the filter's call.
 - `Token.model` (optional): the 3D figure the token is drawn with, a reference `free:<assetId>` into the
   free asset catalog (category `token-models`, §6.4; `core/scene/tokenModel.ts`). The schema accepts only
   that form (`^free:[a-z0-9][a-z0-9-]{0,63}$`), never a URL, so a document cannot make clients fetch an
@@ -842,7 +851,7 @@ exists (or became hidden) are deleted. Everything else is unchanged — DM edits
 | Topic                        | INSERT (send)                          | SELECT (receive)          | Carries |
 |------------------------------|----------------------------------------|---------------------------|---------|
 | `session:{sid}:req:{uid}`    | that player (active member), broadcast | DM + that player (active) | ClientToHost |
-| `session:{sid}:view:{uid}`   | DM, broadcast                          | that player (active) + DM | HostToClient (incl. `tiles` chunk announcements, §9) |
+| `session:{sid}:view:{uid}`   | DM, broadcast                          | that player (active) + DM | HostToClient (incl. `tiles` chunk announcements, §9, and pings, §6.5) |
 | `session:{sid}:host`         | DM, broadcast + presence               | active members + DM       | HostBroadcast; DM presence = host online |
 | `session:{sid}:lobby`        | active members, presence only          | active members + DM       | who's online (display only) |
 
@@ -898,12 +907,15 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
   - **tokens**: controlled + vision tokens always; others only while in `visibleTokenIds`; never hidden. Other
     players' tokens get `label` only; `name/eyeHeight/vision/speed` only for controlled/vision tokens.
     `model` (a `free:<id>` reference, §3) is sent with every token sent: it is what the token looks like.
+    Health (§6.5): exact `hp` only for controlled/vision tokens, others at most their band as `health`
+    (none while `hideWounds`); `conditions` with every token sent.
   - **levels**: known levels (any explored cell) + stubs (`known:false`, `name:null`) for levels referenced by a
     sent connector or own token, copied field by field (`playerLevel`), so `terrainEdits` never reaches a
     player (tests check that the serialised view contains neither `terrainEdits` nor `baseChunks`, and that
     a shape edit in a live session reaches players as heightmap chunk diffs only).
     **terrain**: the baked heightmap's chunks overlapping explored cells, samples touching no explored cell
     zeroed. **masks**: perception (current), explored (persistent), sunlit (current ∧ perceived).
+  - **table**: chat log and combat as the player may see them (§6.5 "Filter").
   - Wire schema (`playerViewSchema.ts`): walls' `followTerrain` defaults to true (views and saved games from
     before v2), `terrainProfile` is optional, ≤ 4096 finite numbers; remembered walls (`memoryObjectSchema`)
     never hold a profile. `viewToScene` copies both (missing `followTerrain` → true).
@@ -1108,6 +1120,105 @@ per IP). Realtime keeps a topic's public and private channels apart (a public su
 receives none of its private broadcasts, checked by `e2e/multiplayer-supabase.mjs`), so the public-access
 switch guards the project's Realtime quota and future channels rather than today's session data; the same
 script checks that it is off.
+
+### 6.5 The table: chat, dice, combat, health, pings (`core/dice`, `core/session/table.ts`, `tokenStatus.ts`)
+
+What a group needs around the map, built on the same rules as everything else: the DM's tab is
+authoritative, and a player receives only what filter.ts lets through.
+
+- **Dice** (`core/dice`): notation `NdM`, `d%`, keep / drop (`kh`, `kl`, `dh`, `dl`, `k`), exploding `!`
+  (≤ 50 extra dice per roll), `adv` / `dis` (2d20kh1 / 2d20kl1), constants and signs, then an optional label
+  ("1d20+5 to hit"). Limits (`DICE_LIMITS`): 100 dice, 1000 sides, 12 terms, constants ≤ 10 000. Rolls are
+  made **by the host** with `cryptoDiceRng` (crypto.getRandomValues, rejection sampling: unbiased): a player
+  sends a formula, never a result, so nobody can pick their own numbers. A `RollResult` keeps every die, the
+  dropped ones and the total; `naturalD20` finds the kept die of single-d20 rolls (natural 20 / 1).
+- **State**: `GameState.table = {log, combat}` (optional: games saved before it load without one). The log
+  keeps the newest `TABLE_LIMITS.maxLog` (200) messages `{id, at, kind: chat | roll | system, from, name,
+  color, to, text, roll?}`: `from` is the sender's user id (null: the DM or a system notice), `name` / `color`
+  are copied when sent, `at` is the host's wall clock made strictly increasing along the log. `to` is the
+  **audience**: `"all"`, or the players besides the sender who may read it (`[]`: the DM only). Players talk
+  to everyone or whisper to the DM; the DM also whispers to chosen players or keeps a secret note / roll.
+  `combat = {round, activeId, entries}`, entries `{id, tokenId | null (a custom entry: a lair action…), name,
+  initiative, modifier, hidden}` in turn order (`sortCombat`: initiative high → low, unrolled last, then
+  bonus, then as added). `load-scene` ends combat; `rebind-player` (guest merge) moves a player's messages
+  and whispers to the new id; `parseGameState` drops entries whose token is gone.
+- **Requests** (`ClientToHost`, strict zod, the sender is the topic's `{uid}`): `say {text ≤ 1000 UTF-16
+  units, to: all | dm}`, `roll {formula ≤ 200, to}`, `initiative {tokenId, bonus}` (an integer within ±20;
+  only for a token the player owns whose entry is visible and has no initiative yet: the host rolls
+  `1d20 + bonus`, a formula it writes itself, stores the bonus as the entry's tie-break modifier and posts a
+  public "Initiative" roll, so the bonus is on show like at a real table; a second roll is refused until the
+  DM clears the value), `end-turn {entryId}` (only while that entry acts and is a token the player owns, so a
+  late or repeated click cannot end the next turn; advances like the DM's Next turn). Reduced by
+  `reduceTableRequest` with a `TableContext` (`now`, `newId`, `rng`) from the host. Refusals: `bad-formula`,
+  `cannot`, `not-owner`, `invalid`. `say` / `roll` have their own rate on top of the request rate
+  (`TABLE_RATE` 2/s, burst 6), so one player cannot flush the shared log at once.
+- **DM commands**: `table-post` (the host builds the message: `dmSayCommand`, `dmRollCommand` roll on the
+  DM's tab, which is the host), `table-clear-log`, `combat-start` / `-end` (with a `TableStamp` for their
+  notices), `-add` (tokens already in are skipped), `-remove` (`removeEntries`: if the acting entry leaves,
+  the next one acts, wrapping into a new round with its notice like Next turn), `-update` (initiative,
+  bonus, hidden, a custom name; re-sorted), `-turn` (±1; wrapping posts "Round N"), `-set-active`. A map
+  edit that deletes tokens removes their entries too (`pruneCombat`, in `apply-scene-patches`; a round it
+  starts posts no notice, since reducers make no ids). A hidden token joins as an ordinary entry: the filter
+  never sends a token a player cannot see, so its entry appears for them once it is revealed and in view;
+  the entry's own `hidden` flag is the DM's way to keep a visible creature out of the order.
+  `npcInitiativeCommand` rolls 1d20 + bonus for every unrolled entry no player controls. Table commands mark
+  players dirty but never the vision (empty delta).
+- **Filter** (`filterForPlayer` → `playerTable`, THE path): `PlayerView.table = {log, combat}`, absent
+  when there is nothing to show. Log: the newest `maxViewLog` (60) messages the player may read (`canRead`:
+  their own, public ones, whispers to them), keyed by id, each built field by field: `{id, at, kind, name,
+  color, mine, dm, whisper, text, roll?}` (the roll copied term by term): **no user id** of anyone. Wire
+  objects are cached per (message, reader), so an idle flush compares by identity. Combat: an entry is sent
+  only when the DM has not hidden it and it is a custom entry or its token is in this view (controlled,
+  seen through, or visible now; never a hidden token), named like the view's tokens (the DM name only for
+  tokens the player controls or sees through, else the label); `activeId` only when the acting entry is one
+  of those, else null (someone unseen acts). The order therefore never reveals a creature the player cannot
+  see. Diff granularity: `table/log/{id}` and `table/combat` (a new message is one op). Views with the table
+  still pass the strict `playerViewSchema`; `sceneChangeFromOps` treats table ops as "no scene change".
+- **Health and conditions** (`Token.hp`, `Token.conditions`, §3; `core/scene/tokenStatus.ts`,
+  `core/session/tokenStatus.ts`): damage spends temporary hit points first and stops at 0; healing stops at
+  max; the coarse **band** is `down` (0), `bloodied` (at most half), `wounded` (below max) or `unhurt`
+  (temporary hit points do not count). The DM's `set-token-status {tokenId, hp?: TokenHp | null (stop
+  tracking), conditions?}` is clamped and normalized (`clampHp`, `normalizeConditions`), a play action like a
+  move: empty delta, every player dirty, `origin.dirty` untouched (the map-save prompt does not nag about
+  it). Changes made in play are **relative** (`HpChange`: damage, heal, temp (the higher value is kept),
+  and for the DM max and `set` (a typed value: only the fields given change); `ConditionChange`: conditions to
+  add and remove), applied to the token as the host holds it when they arrive (`applyHpChange`,
+  `applyConditionChange`), so a change made meanwhile (the DM's damage while a player adds temporary hit
+  points, two quick ticks before the first result is back) is never overwritten. The DM's UI sends
+  `change-token-status {tokenId, hp?: HpChange, conditions?: ConditionChange}` (`HostActions.
+  changeTokenStatus`; the reducer applies it; hit points only when tracked); only starting / stopping
+  tracking uses `set-token-status`. The live "Edit map" inspector does the same through the editor's play
+  sink (`store.changeTokenStatus` / `setTokenHp`): play actions with no undo entry, since undoing would
+  write a stale value over players' changes; the standalone editor edits them like any field. A player's
+  request `token-status {tokenId, hp?: {kind: damage | heal | temp, amount: 1 … 99 999},
+  conditions?: {add?, remove?}}` (strict zod: at least one change) is accepted only for a token they own
+  (`not-owner`) that players can see (`unknown-token`), and hit points only while the DM tracks them
+  (`cannot`); `max` is the DM's alone (the player cannot send it). `GameState.hideWounds` (saved with the
+  game; `set-hide-wounds`) turns the bands off.
+  **Filter** (`playerToken`): exact `hp` only for tokens the player controls or sees through with shared
+  vision (the same "full" set that gets a token's name and senses); every other sent token gets at most its
+  band as `health` (none while wounds are hidden); conditions go with every token the player is sent, since
+  they show on the token. A hidden or unseen token is never sent, so neither is its health.
+  **UI**: health bars under tokens (exact, or the band's colour) and condition icons at their top-right on
+  both maps (`TokenBadges`, placed like the turn marker); the hit point editor (damage / heal / temporary,
+  Enter damages and Shift + Enter heals; the DM also sets max and starts or stops tracking) and condition
+  chips on the DM's token card and on the player's character card; a Conditions submenu in the DM's token
+  menu; health bars in the turn strip and the Combat tab; "Show wounds to players" in the Table tab; the
+  editor's token inspector sets max, current and temporary hit points and conditions.
+- **Pings** (ephemeral, never stored): a player's `ping {levelId, x, z}` (1/s, burst 3, never answered) is
+  dropped unless the level is known in the view last sent to them (so pings cannot probe for levels), then
+  fanned out as `HostToClient {t: "ping", epoch, ping}` outside the seq order to every other linked player
+  for whom `pingForPlayer` (filter.ts) allows it: only on levels they know. The sender's name and colour come
+  from `GameState.players`, never the payload. `HostRunner.ping(levelId, point, {focus})` sends the DM's
+  (`focus`: clients centre their cameras on it) and `onPing` reports every ping to the DM's UI. Clients
+  accept pings of the current wire epoch only, validated by `playerPingSchema`; their own ping is drawn at once.
+- **UI** (`components/play/table`): the chat & dice dock (both roles; Enter opens it; `/r`, `/gr` private
+  roll, `/w` whisper, `/dm`, bare formulas like `2d6+3`; quick dice; the audience is remembered), the turn
+  strip at the top (DM: previous / next; players: roll initiative with a remembered bonus, End turn), the
+  host's Combat tab and token menu entries, a turning ring on the acting token (`Engine.tokenDrawnAt` follows
+  it mid-walk) and ping rings, placed with `Engine.project` every frame. Pings: hold the left button still
+  for `LONG_PRESS_MS` (450 ms) on the map, not on a token you can drag (`PlayController`); the DM's Shift +
+  hold is a "look here" ping.
 
 ---
 
@@ -1378,13 +1489,16 @@ script checks that it is off.
 - The play-mode Measure tool (players and DM) and the editor's Measure tool share one rule, `rulerDistance`
   (`core/grid`): the king-move cells through the waypoints' cells (`legCells`, diagonals first), priced with
   the grid's diagonal rule over the whole route (`pathDistance`), or the euclidean length in free mode.
+- The table (§6.5): Enter opens the chat & dice dock; holding the left button still on the map (move tool,
+  not on a token you can drag) pings the spot, and the DM's Shift + hold makes every player look there.
 - Play keys: `usePlayKeys` registers `PLAY_COMMANDS` (host-only commands, level switching and vision preview,
   only for the DM). WASD / arrow panning is the top-down camera's own held-key input and is not remappable, so
   the dialog refuses those keys for play commands.
 - DM play controls: lock/unlock movement (global and per player), shared vision toggle, enforce speed, snap
   players to the grid (`set-free-movement`: off lets players move off the grid with Alt, §5.3), door and
   light toggles, sun/moon on/off (scene patch), move any token, hide/reveal tokens, reveal secret doors, assign
-  tokens to players, preview any token's vision, kick players.
+  tokens to players, preview any token's vision, kick players, and run combat (§6.5: the Combat tab, the
+  turn strip, "Add to combat" in the token menus).
 - Free assets: "Start a game" (library and editor, `components/app/StartGameDialog`) chooses the free asset
   categories the game loads (remembered per browser); they reach `GameState.freeAssets` through the seed
   (§6.4) and are DM-only (never sent). The host console's Assets tab switches categories
@@ -1655,6 +1769,44 @@ drawn vertex; a wall aimed on floorless terrain from a low camera lands where ai
 of block, ramp and cylinder creation, move, vertex editing with the gizmo and baking outside the tool,
 without console errors. The perf-script table above was not re-run for this feature.
 
+**The table: chat, dice, combat and pings (2026-09-24)** (§6.5). Chat with whispers, host-rolled dice,
+an initiative tracker and pings for the DM and players, filtered like everything else. Unit tests: the
+dice grammar, limits, keep / drop / explode and the crypto RNG's uniformity (chi-square); the table
+reducers (audiences, bounded log with increasing times, turn order and rounds, initiative and end-turn
+authorisation, DM builders); the filter (no user id in any view, whispers only to their readers, hidden
+and unseen combatants never sent, the acting entry masked); strict view and saved-game schemas; one diff op
+per message; host runner integration over LocalTransport (readers, the chat rate, pings only to players
+who know the level and never back to the sender, combat through requests, the table across a host
+restart); the player client (requests, result kinds, pings in and out); long-press pings in
+`PlayController`; the chat model (slash commands, whispers by name). The same-browser lock test now uses an
+in-memory Web Locks fake where the runtime lacks `navigator.locks` (Node 22), so it passes on every
+supported Node. Final verification (2026-09-24): `tsc -b` 0 errors, `eslint .` clean, `npx vitest run`
+148 files / 1921 tests pass (4 live Supabase files skipped); on a Vite dev server in headless Chromium with
+SwiftShader (`ATLAS_CHROMIUM` + `ATLAS_GPU=swiftshader`): `table-local` 27/27 (new), `multiplayer-local`
+54/54, `keybindings` 33/33, `host-save-map` 12/12. `editor-smoke` fails the same three wall / door steps
+on this branch and on `master` there (SwiftShader only; not a regression). The Supabase scripts and the
+GPU runs were not repeated.
+
+**Token health and conditions (2026-09-24)** (§3, §6.5). Hit points, temporary hit points and conditions
+on tokens (scene v6: v5 on its branch, renumbered at the merge after the loop cuts' v5), editable by the DM
+(token card, token menu, editor) and by players for their own characters, with bands for everyone else. Unit tests: damage / healing / max changes / bands and condition
+normalization; the v5 → v6 migration; the filter (exact numbers only for controlled and shared tokens,
+bands otherwise, none when wounds are hidden, conditions for whoever sees the token, strict view schema);
+the DM command (clamping, a play action) and the player request (own tokens only, hit points only when
+tracked, max stays the DM's), wire and saved-game schemas; the token menu's Conditions submenu. A review
+found that player changes carried absolute values built from the player's last view, so two quick changes,
+or a player's change racing the DM's, lost one of them; changes are now relative and applied on the host
+(regression tests: two stale condition ticks both count, the DM's damage survives a player's temporary hit
+points, two quick damage entries both land; the client's wire shape). A second review found the same loss
+through the live "Edit map" inspector, whose health fields were undoable edits of whole values: they are now
+play actions (`change-token-status` through the play sink; test: the store sends commands and records no
+undo step in a live session, and edits with undo standalone). Final
+verification (2026-09-24, after both reviews' fixes): `tsc -b` 0 errors, `eslint .` clean, `npx vitest run`
+1943 tests pass (4 live Supabase files skipped); `table-local` 35/35 on SwiftShader, with a step where the DM tracks a character's
+hit points from the token card, the player takes damage and goes prone from the character card, players see
+only a creature's band (and none once wounds are hidden), and the leak scan also looks for that creature's
+hit points in every frame and stored view.
+
 **Terrain review fixes (2026-09-23)**, each with a regression test that fails on the previous code:
 - Document: "Apply to terrain" bakes the downward closure, so the terrain no longer changes (§3, §7);
   footprints with a vertex on an ear's diagonal are triangulated whole (§3); follow walls no longer sink
@@ -1732,6 +1884,19 @@ Known gaps and deliberate limits:
   reaching far past the grid) is sent without one and stands on the client's clipped terrain.
 - `terrainProfile` is sent even where the client's clipped ground would reproduce it (173–475 bytes per
   view, about 2%, on the Crooked Lantern); leaving redundant profiles out is a possible optimisation.
+
+**The table (chat, dice, combat, pings)**
+
+- The log keeps the newest 200 messages (the DM's) and a player's view the newest 60 they may read; older
+  ones are dropped for good. Message times are the DM's clock.
+- A combatant a player cannot see right now is left out of their order entirely (no "unknown" placeholder,
+  which would itself reveal it). They can still notice that time passes while nobody they see acts.
+- Pings are best-effort: a player whose link is down while one is sent never gets it. They are not
+  stored, so a reload shows none.
+- "Roll for NPCs" writes the values into the tracker without log messages. Table actions are not part of
+  the editor's undo history.
+- The log and combat belong to the game (`session_state`), not the map: "Save map to library" does not
+  keep them, and a new game starts with neither.
 
 **Terrain editing and walls on terrain**
 

@@ -40,6 +40,8 @@ export const MIGRATIONS: Readonly<Record<number, Migration>> = Object.freeze({
   3: (doc: unknown) => doc,
   // v5 added the optional TerrainShape.innerEdges (loop cuts); v4 documents are valid v5 documents.
   4: (doc: unknown) => doc,
+  // v6 added the optional Token.hp and Token.conditions; v5 documents are valid v6 documents.
+  5: (doc: unknown) => doc,
 })
 
 export type MigrateResult =

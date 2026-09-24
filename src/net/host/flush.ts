@@ -49,6 +49,15 @@ export const REQUEST_RATE = { ratePerSecond: 8, burst: 16 } as const
  */
 export const HELLO_RATE = { ratePerSecond: 1, burst: 4 } as const
 
+/**
+ * Chat messages and rolls per player, within REQUEST_RATE (each posts to the shared table log, which
+ * keeps its newest TABLE_LIMITS.maxLog messages: a flood must not push everyone else's out at once).
+ */
+export const TABLE_RATE = { ratePerSecond: 2, burst: 6 } as const
+
+/** Pings per player (their own budget: they are fanned out to every player, and never answered). */
+export const PING_RATE = { ratePerSecond: 1, burst: 3 } as const
+
 /** "rate-limited" replies per player; over-budget requests beyond this are dropped silently. */
 export const REJECT_REPLY_RATE = { ratePerSecond: 2, burst: 4 } as const
 

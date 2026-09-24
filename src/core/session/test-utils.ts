@@ -10,9 +10,10 @@ import { applyPatchOps, diffViews } from "./diff"
 import { filterForPlayer } from "./filter"
 import { updateKnowledge } from "./memory"
 import { reduceDm } from "./reduceDm"
-import { reduceRequest } from "./reduceRequest"
+import { reduceRequest, type StateRequest } from "./reduceRequest"
+import type { TableContext } from "./table"
 import { createGameState, perceivedCellLookup, sceneWithTokenAt, viewerTokenIds, type ReduceResult, type RequestOutcome, type SceneDelta } from "./state"
-import type { ClientToHost, DmCommand, GameState, PatchOp, PlayerView } from "./types"
+import type { DmCommand, GameState, PatchOp, PlayerView } from "./types"
 
 export class TestHost {
   state: GameState
@@ -68,11 +69,12 @@ export class TestHost {
   }
 
   /** A player request through reduceRequest, with per-step knowledge passes for applied moves. */
-  request(uid: string, msg: Exclude<ClientToHost, { t: "hello" }>): RequestOutcome {
+  request(uid: string, msg: StateRequest, table?: TableContext): RequestOutcome {
     const out = reduceRequest(this.state, uid, msg, {
       world: this.engine.world,
       currentView: this.sent.get(uid) ?? null,
       perceivedByPlayer: perceivedCellLookup(this.lastVis.get(uid) ?? this.vis(uid)),
+      ...(table ? { table } : {}),
     })
     this.state = out.state
     if (out.tokenId && out.visited.length > 1) {

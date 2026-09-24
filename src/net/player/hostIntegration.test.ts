@@ -123,7 +123,7 @@ describe("player client ↔ real host runner", () => {
     await waitFor(() => client.getSnapshot().status === "host-offline", "host offline")
     expect(client.getSnapshot().view).not.toBeNull()
     const blocked = client.requestMove(tokenId, [{ cell: { i: 4, j: 3 }, levelId: ground }])
-    expect(client.getSnapshot().results.at(-1)).toEqual({ reqId: blocked, ok: false, local: "host-offline" })
+    expect(client.getSnapshot().results.at(-1)).toEqual({ reqId: blocked, ok: false, local: "host-offline", kind: "move" })
 
     // The DM comes back (new host run, new wire epoch).
     const epochBefore = client.getSnapshot().epoch

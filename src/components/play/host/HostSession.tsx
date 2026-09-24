@@ -2,7 +2,9 @@
  * The DM's host console (ARCHITECTURE §6.2, §8): one HostRunner per session (the authoritative host),
  * the live map in "dm-play" (everything visible, optional vision preview of any token), direct
  * manipulation (select, drag to move, door clicks, right-click menus), the session panel (room code,
- * players, tokens, table rules) and "Edit map" — the full editor tools against the live scene.
+ * players, tokens, combat, table rules), the table (chat & dice dock, initiative order, turn ring,
+ * pings: a long press, Shift for "everyone look here") and "Edit map" — the full editor tools against
+ * the live scene.
  */
 import * as React from "react"
 import { toast } from "sonner"
@@ -28,15 +30,31 @@ import {
 } from "@/components/editor/ViewportOverlays"
 import { useSuppressThemeHotkey } from "@/components/theme-provider"
 import { Button } from "@/components/ui/button"
+import { footprintCells } from "@/core/movement/footprint"
 import { sortedLevels } from "@/core/scene/queries"
 import type { Id } from "@/core/scene/types"
-import type { GameState } from "@/core/session/types"
+import type { GameState, TableAudience } from "@/core/session/types"
 import { createHostRunner, type HostRunnerImpl } from "@/net/host"
 import { cycleToken, PlayController, type PlayTool } from "@/play"
 import type { CameraKind, Engine, FrameStats } from "@/render/contracts"
 
 import { CameraDock, HudPanel, ShortcutsButton, ToolSwitch } from "../hud"
 import { usePlayKeys, zoomCanvas } from "../input"
+import { ChatDock } from "../table/ChatDock"
+import {
+  dmAudiences,
+  entriesFromState,
+  type Audience,
+} from "../table/chatModel"
+import { dmTurnOrder, levelShown } from "../table/combatModel"
+import { dmBadgeTokens, useStableBadges } from "../table/healthModel"
+import {
+  PingLayer,
+  TokenBadges,
+  TurnMarker,
+  type MapPing,
+} from "../table/MapMarkers"
+import { TurnStrip } from "../table/TurnStrip"
 import {
   BlockingScreen,
   EndedScreen,
@@ -313,6 +331,10 @@ function HostConsole({
         onHint: (m) => toast.info(m, { id: "host-hint" }),
         setCameraControls: (enabled) =>
           live.get().engine?.setCameraControlsEnabled(enabled),
+        onPing: (levelId, point, shift) => {
+          if (live.get().hosting)
+            actions.ping(levelId, { x: point.x, z: point.z }, shift)
+        },
       })
   )
   React.useEffect(
@@ -423,6 +445,8 @@ function HostConsole({
   })
 
   // ---- keyboard (play mode) --------------------------------------------------------------------------
+  /** Bumped by the Enter shortcut: opens the chat dock and focuses its input. */
+  const [chatFocus, setChatFocus] = React.useState(0)
   usePlayKeys(
     (action) => {
       const e = live.get().engine
@@ -477,9 +501,46 @@ function HostConsole({
         case "preview-vision":
           togglePreview()
           return
+        case "chat":
+          setChatFocus((n) => n + 1)
+          return
       }
     },
     { enabled: mode === "play", host: true }
+  )
+
+  // ---- the table ---------------------------------------------------------------------------------------
+  // Rebuilt only when the table (or who plays) changes, not on every token step.
+  const table = state.table
+  const tablePlayersRec = state.players
+  const chatEntries = React.useMemo(
+    () => entriesFromState({ table, players: tablePlayersRec }),
+    [table, tablePlayersRec]
+  )
+  const tablePlayers = React.useMemo(
+    () =>
+      Object.values(state.players)
+        .map((p) => ({ userId: p.userId, name: p.displayName }))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    [state.players]
+  )
+  const audiences = React.useMemo(
+    () => dmAudiences(tablePlayers),
+    [tablePlayers]
+  )
+  const toOf = (a: Audience): TableAudience =>
+    a.kind === "all" ? "all" : a.kind === "player" ? [a.userId] : []
+  const tokens = state.scene.tokens
+  const turn = React.useMemo(
+    () => dmTurnOrder({ table, scene: { tokens } }),
+    [table, tokens]
+  )
+  const turnActive = turn?.entries.find((e) => e.id === turn.activeId) ?? null
+  const badges = useStableBadges(dmBadgeTokens(state.scene))
+  const subscribePings = React.useCallback(
+    (cb: (p: MapPing) => void) =>
+      runner.onPing((ev) => cb({ ...ev.ping, mine: ev.from === null })),
+    [runner]
   )
 
   // ---- session actions -------------------------------------------------------------------------------
@@ -570,6 +631,17 @@ function HostConsole({
                       />
                     </div>
                     <div className="flex min-w-0 flex-1 flex-col items-center gap-2">
+                      {turn ? (
+                        <TurnStrip
+                          role="dm"
+                          round={turn.round}
+                          activeId={turn.activeId}
+                          entries={turn.entries}
+                          onStep={(d) => actions.stepTurn(d)}
+                          onFocus={focusToken}
+                          disabled={!hosting}
+                        />
+                      ) : null}
                       {activePreview ? (
                         <PreviewBanner
                           scene={scene}
@@ -620,9 +692,55 @@ function HostConsole({
                     <HudPanel className="p-1">
                       <ShortcutsButton host />
                     </HudPanel>
+                    <ChatDock
+                      role="dm"
+                      storageKey="atlas-host:chat"
+                      entries={chatEntries}
+                      audiences={audiences}
+                      players={tablePlayers}
+                      onSay={(text, a) => actions.say(text, toOf(a))}
+                      onRoll={(formula, a) => {
+                        const error = actions.roll(formula, toOf(a))
+                        if (error) toast.error(error, { id: "dm-roll" })
+                      }}
+                      disabledReason={
+                        hosting ? null : "This tab is not hosting the session."
+                      }
+                      focusSignal={chatFocus}
+                    />
                   </div>
                 </div>
               )}
+              {!editor ? (
+                <TokenBadges
+                  tokens={badges}
+                  showOn={(levelId) =>
+                    levelShown(scene, activeLevelId, levelId)
+                  }
+                />
+              ) : null}
+              {!editor &&
+              turn?.activeTokenId &&
+              Object.hasOwn(scene.tokens, turn.activeTokenId) ? (
+                <TurnMarker
+                  tokenId={turn.activeTokenId}
+                  radiusFt={
+                    (footprintCells(scene.tokens[turn.activeTokenId].size) *
+                      scene.grid.cellSize) /
+                    2
+                  }
+                  label={turnActive?.name ?? ""}
+                  mine={false}
+                  showOn={(levelId) =>
+                    levelShown(scene, activeLevelId, levelId)
+                  }
+                />
+              ) : null}
+              <PingLayer
+                subscribe={subscribePings}
+                scene={scene}
+                onFocus={(p) => engine?.focus(p)}
+              />
             </HostViewport>
             {snap.status === "ended" ? (
               <BlockingScreen
@@ -654,6 +772,7 @@ function HostConsole({
               onPreviewToken={previewToken}
               onKick={(uid) => runner.kick(uid)}
               onTakeOver={() => void runner.takeOver()}
+              activeLevelId={activeLevelId}
             />
           )
         ) : null}

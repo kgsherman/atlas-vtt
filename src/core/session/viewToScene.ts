@@ -130,6 +130,8 @@ export function tokenFromPlayer(t: PlayerToken, controlled: boolean): Token {
     imageUrl: t.imageUrl,
     ...(t.model !== undefined ? { model: t.model } : {}),
     hidden: false,
+    ...(t.hp ? { hp: { current: t.hp.current, max: t.hp.max, temp: t.hp.temp } } : {}),
+    ...(t.conditions ? { conditions: [...t.conditions] } : {}),
   }
 }
 

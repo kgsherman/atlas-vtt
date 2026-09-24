@@ -65,6 +65,28 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
   in the session until the DM chooses **Save map to library**, which saves them (with the current token,
   door and light state) as a new version of the library scene, after a conflict check.
 
+**At the table**
+- Chat and dice for the DM and every player (Enter opens the dock). Type `/r 1d20+5 to hit`, a bare
+  `2d6+3`, or click a quick die (d4 to d%, advantage, disadvantage). Notation covers keep / drop (`4d6dl1`,
+  `2d20kh1`), exploding dice (`6d6!`) and labels. Roll cards show every die, with dropped dice struck
+  through and natural 20s and 1s called out.
+- Dice are rolled by the DM's tab (the host) with an unbiased cryptographic RNG. Players send a formula,
+  never a result, so nobody can pick their numbers.
+- Whispers: players can whisper to the DM (`/w`), and the DM can whisper to one player (`/w Name …`) or
+  roll in secret (`/gr`). A whisper never leaves the DM's tab for anyone else.
+- Initiative tracker: the DM starts combat with the party or everyone on a level, adds tokens from their
+  menu, rolls for NPCs, edits values in place and steps the turns. The order shows at the top of every
+  screen with a ring on the acting token. Players roll initiative for their own characters and end their
+  own turn. A player sees only the combatants they can see: a creature out of sight, or one the DM hides,
+  is never sent to them.
+- Hit points and conditions: the DM tracks hit points (with temporary hit points) and conditions like
+  prone, poisoned or concentrating from the token card, the token's right-click menu or the editor.
+  Players update their own characters from their character card. Tokens show a health bar and condition
+  icons on the map. Players see exact numbers only for their own characters. For other creatures they see
+  whether they are wounded, bloodied or down, and the DM can switch that off.
+- Pings: hold the left button on the map to point at a spot. The DM's Shift + hold also centres every
+  player's view on it.
+
 **Multiplayer**
 - The DM hosts a session and players join with an 8-character room code. No accounts are needed: the app
   signs everyone in as an anonymous guest. A guest can create a permanent account with Discord (from the
@@ -261,6 +283,7 @@ ATLAS_SCENE=$PWD/test_maps/vineyard.atlas.json ATLAS_URL=http://127.0.0.1:5173 n
 ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-supabase.mjs # the same against the real backend (+ Realtime / table / Storage RLS checks, no public channels, a kicked member's subscriptions, sub-cell chunk clipping)
 ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-latency.mjs  # move results on a 120×120 daylit field arrive well under the 5 s timeout
 ATLAS_URL=http://127.0.0.1:5173 node e2e/host-save-map.mjs        # "Save map to library" from a live session, including the conflict path
+ATLAS_URL=http://127.0.0.1:5173 node e2e/table-local.mjs         # DM + 2 players in local mode: chat, whispers, host-rolled dice, combat (hidden and unseen combatants never sent), initiative and turns, hit points and conditions (bands only for others), pings, reload, leak scan
 ATLAS_URL=http://127.0.0.1:5173 node e2e/free-assets.mjs          # start a game with token models, put one on a token, a player downloads and draws it (ATLAS_FREE_ASSETS_DIR serves a local build)
 ATLAS_URL=http://127.0.0.1:5173 node e2e/engine-leak.mjs          # editor ↔ library round trips release every WebGL context
 ATLAS_URL=http://127.0.0.1:5173 node e2e/perf.mjs                 # frame times per GPU / tier / scene
@@ -276,10 +299,13 @@ Environment variables for the scripts:
 - `ATLAS_URL`: the dev server.
 - `ATLAS_GPU`: `nvidia`, `amd` or `swiftshader`.
 - `ATLAS_OUT`: where screenshots and logs go.
+- `ATLAS_CHROMIUM`: the Chromium executable (default: the pinned WSL2 headless shell).
 
 The browser launcher (`scripts/pw.mjs`) is set up for WSL2 (Mesa d3d12 GPU passthrough and a pinned
-headless-shell path), so adjust it for other machines. Editing files under `src/` while a script runs
-hot-reloads its pages and can break the run; other files (docs, the e2e scripts) do not reload them.
+headless-shell path). Elsewhere, point `ATLAS_CHROMIUM` at a Chromium executable and use
+`ATLAS_GPU=swiftshader` (software WebGL), e.g. `ATLAS_CHROMIUM=/opt/pw-browsers/chromium ATLAS_GPU=swiftshader`.
+Editing files under `src/` while a script runs hot-reloads its pages and can break the run; other files
+(docs, the e2e scripts) do not reload them.
 
 ## Conventions
 

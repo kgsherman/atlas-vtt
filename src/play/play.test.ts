@@ -32,6 +32,7 @@ import type { PickResult } from "@/render/contracts"
 
 import { climbOptions } from "./connectors"
 import {
+  LONG_PRESS_MS,
   PlayController,
   type CommittedMove,
   type PlayControllerHost,
@@ -1130,5 +1131,74 @@ describe("PlayController", () => {
     expect(f.controller.overlays()).not.toBe(a)
     f.controller.pointerMove(ev(0, 0, pick({ x: 7, z: 7 }, { tokenId: t.id })))
     expect(f.controller.overlays().hoveredId).toBe(t.id)
+  })
+})
+
+describe("PlayController: long-press pings", () => {
+  /** A fixture whose long-press timer the test fires by hand. */
+  function pinging(role: "player" | "dm") {
+    const { scene, levelId } = flatScene(10, 10)
+    const f = controllerFixture(role, scene, levelId)
+    const pings: { levelId: Id; point: { x: number; y: number; z: number }; shift: boolean }[] = []
+    const timers: { fn: () => void; ms: number; cancelled: boolean }[] = []
+    const host = (f.controller as unknown as { host: PlayControllerHost }).host
+    host.onPing = (lvl, point, shift) => pings.push({ levelId: lvl, point, shift })
+    host.setTimer = (fn, ms) => {
+      const t = { fn, ms, cancelled: false }
+      timers.push(t)
+      return () => {
+        t.cancelled = true
+      }
+    }
+    const fire = () => {
+      for (const t of timers.splice(0)) if (!t.cancelled) t.fn()
+    }
+    return { ...f, scene, levelId, pings, timers, fire }
+  }
+
+  it("a still press on the ground pings it; its release does nothing else", () => {
+    const f = pinging("dm")
+    const t = tokenAt(f.scene, f.levelId, { i: 1, j: 1 })
+    f.controller.setSelected(t.id)
+    f.controller.pointerDown(ev(300, 300, pick({ x: 30, z: 30 }), { shift: true }))
+    expect(f.timers.map((x) => x.ms)).toEqual([LONG_PRESS_MS])
+    f.controller.pointerMove(ev(302, 301, pick({ x: 30.2, z: 30.1 })))
+    f.fire()
+    expect(f.pings).toEqual([{ levelId: f.levelId, point: { x: 30, y: 0, z: 30 }, shift: true }])
+    // The release neither deselects (DM) nor clicks a door.
+    expect(f.controller.pointerUp(ev(302, 301, pick({ x: 30.2, z: 30.1 })))).toBe(true)
+    expect(f.selections).toEqual([])
+    // The next click behaves normally again.
+    f.controller.pointerDown(ev(300, 300, pick({ x: 30, z: 30 })))
+    f.controller.pointerUp(ev(300, 300, pick({ x: 30, z: 30 })))
+    expect(f.selections).toEqual([null])
+  })
+
+  it("moving, releasing early, dragging a token or measuring never pings", () => {
+    const f = pinging("player")
+    // Moved away.
+    f.controller.pointerDown(ev(100, 100, pick({ x: 10, z: 10 })))
+    f.controller.pointerMove(ev(120, 100, pick({ x: 12, z: 10 })))
+    f.fire()
+    f.controller.pointerUp(ev(120, 100, pick({ x: 12, z: 10 })))
+    // Released first.
+    f.controller.pointerDown(ev(100, 100, pick({ x: 10, z: 10 })))
+    f.controller.pointerUp(ev(100, 100, pick({ x: 10, z: 10 })))
+    f.fire()
+    // A press on a token the player can drag.
+    const t = tokenAt(f.scene, f.levelId, { i: 1, j: 1 })
+    f.controller.pointerDown(ev(75, 75, pick({ x: 7.5, z: 7.5 }, { tokenId: t.id })))
+    f.fire()
+    f.controller.pointerUp(ev(75, 75, pick({ x: 7.5, z: 7.5 })))
+    // Nothing under the pointer.
+    f.controller.pointerDown(ev(5, 5, pick(null)))
+    f.fire()
+    f.controller.pointerUp(ev(5, 5, pick(null)))
+    // Measuring.
+    f.controller.setTool("measure")
+    f.controller.pointerDown(ev(100, 100, pick({ x: 10, z: 10 })))
+    f.fire()
+    f.controller.pointerUp(ev(100, 100, pick({ x: 10, z: 10 })))
+    expect(f.pings).toEqual([])
   })
 })

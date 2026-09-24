@@ -18,6 +18,7 @@ export type PlayKeyAction =
   | { type: "level"; delta: 1 | -1 }
   | { type: "cancel" }
   | { type: "preview-vision" }
+  | { type: "chat" }
 
 export interface PlayCommand extends Command {
   action: PlayKeyAction
@@ -93,6 +94,12 @@ export const PLAY_COMMANDS: PlayCommand[] = [
     action: { type: "toggle-grid" },
   },
   {
+    id: "chat",
+    label: "Chat & dice",
+    keys: ["Enter"],
+    action: { type: "chat" },
+  },
+  {
     id: "cancel",
     label: "Cancel / clear the ruler",
     keys: ["Escape"],
@@ -146,6 +153,12 @@ export const PLAY_POINTER_HELP: {
     label: "Move the selected token: release to go, click or Esc to cancel",
   },
   { keys: "Alt + move", label: "Move off the grid (when allowed)" },
+  { keys: "Hold left click", label: "Ping the spot for the table" },
+  {
+    keys: "Shift + hold left click",
+    label: "Ping and centre everyone's view on it",
+    hostOnly: true,
+  },
   {
     keys: "Right-click",
     label: "Token, door and light actions",

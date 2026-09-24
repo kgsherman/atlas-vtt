@@ -1,5 +1,7 @@
 import type { Patch } from "immer"
 
+import type { RollResult } from "../dice/dice"
+import type { ConditionChange, HealthBand, HpAmountChange, HpChange, TokenCondition, TokenHp } from "../scene/tokenStatus"
 import type { MoveRejectReason, PathStep } from "../movement/types"
 import type {
   ConnectorObject,
@@ -67,6 +69,12 @@ export type PlayerToken = Pick<Token, "id" | "levelId" | "position" | "size" | "
   eyeHeight?: number
   vision?: VisionSettings
   speed?: number
+  /** Exact hit points: only for tokens the player controls or sees through. */
+  hp?: TokenHp
+  /** Other tokens with hit points: the coarse band, unless the DM hides wounds (GameState.hideWounds). */
+  health?: HealthBand
+  /** Conditions shown on the token (every player who sees it sees them). */
+  conditions?: TokenCondition[]
 }
 
 export interface PlayerLevel {
@@ -107,6 +115,64 @@ export interface PlayerLevelMasks {
   sunlit: EncodedMask
 }
 
+/**
+ * A table message as one player may read it (built by filter.ts `playerTable`): never its sender's or
+ * recipients' user ids.
+ */
+export interface PlayerTableMessage {
+  id: Id
+  /** Host time (ms since the epoch); messages are ordered by it (ties: id). */
+  at: number
+  kind: TableMessageKind
+  /** The sender's name and colour when it was sent ("DM" for the DM, "" for system notices). */
+  name: string
+  color: string
+  /** Sent by this player. */
+  mine: boolean
+  /** Sent by the DM. */
+  dm: boolean
+  /** Not public: between this player and the DM. */
+  whisper: boolean
+  /** Chat text, a roll's label, or a system notice. */
+  text: string
+  roll?: RollResult
+}
+
+/** A combatant a player may see: not hidden by the DM, and a custom entry or a token in their view. */
+export interface PlayerCombatEntry {
+  id: Id
+  /** The token (always one in PlayerView.tokens), or null for a custom entry (a lair action…). */
+  tokenId: Id | null
+  /** Custom entries: their name. Tokens: the name the player may see (`name` if full, else `label`, else ""). */
+  name: string
+  initiative: number | null
+}
+
+export interface PlayerCombat {
+  round: number
+  /** The acting entry when it is one of `entries`; null before the first turn or while someone unseen acts. */
+  activeId: Id | null
+  /** In turn order. */
+  entries: PlayerCombatEntry[]
+}
+
+export interface PlayerTable {
+  /** The newest TABLE_LIMITS.maxViewLog messages this player may read, keyed by id (order by `at`, then id). */
+  log: Record<Id, PlayerTableMessage>
+  combat: PlayerCombat | null
+}
+
+/** A map ping as one player receives it (filter.ts `pingForPlayer`): only on levels the player knows. */
+export interface PlayerPing {
+  levelId: Id
+  x: number
+  z: number
+  name: string
+  color: string
+  /** The DM asks everyone to look here (clients centre the camera on it). */
+  focus: boolean
+}
+
 export const PLAYER_VIEW_VERSION = 1 as const
 
 export interface PlayerView {
@@ -137,6 +203,8 @@ export interface PlayerView {
     /** Players may move off the grid (gridless moves and jumps). Absent = grid only. */
     freeMovement?: boolean
   }
+  /** Chat, dice and the initiative order as this player may see them (absent: nothing to show). */
+  table?: PlayerTable
 }
 
 // ===========================================================================
@@ -149,6 +217,57 @@ export interface SessionPlayer {
   color: string
   /** Per-player movement lock (in addition to the global lock). */
   movementLocked: boolean
+}
+
+export type TableMessageKind = "chat" | "roll" | "system"
+
+/** Who may read a table message besides its sender and the DM: everyone, or these players ([] = the DM only). */
+export type TableAudience = "all" | string[]
+
+export interface TableMessage {
+  id: Id
+  /** Host time (ms since the epoch), strictly increasing along the log. */
+  at: number
+  kind: TableMessageKind
+  /** The sender's user id; null = the DM (or the table, for system notices). */
+  from: string | null
+  /** The sender's name and colour when it was sent. */
+  name: string
+  color: string
+  to: TableAudience
+  /** Chat text, a roll's label, or a system notice. */
+  text: string
+  /** Rolled by the host (players never supply results). */
+  roll?: RollResult
+}
+
+export interface CombatEntry {
+  id: Id
+  /** The token acting on this turn; null = a custom entry (a lair action, a trap…). */
+  tokenId: Id | null
+  /** Custom entries' name ("" for token entries, which use their token's). */
+  name: string
+  initiative: number | null
+  /** Added to the d20 when the DM rolls initiative for the entry. */
+  modifier: number
+  /** Kept from players (e.g. an ambusher), whatever they see of its token. */
+  hidden: boolean
+}
+
+export interface Combat {
+  /** ≥ 1. */
+  round: number
+  /** The acting entry; null before the first turn. */
+  activeId: Id | null
+  /** Turn order: initiative high → low, unrolled entries last (core/session/table sortCombat). */
+  entries: CombatEntry[]
+}
+
+/** Chat, dice rolls and the initiative tracker of a game (ARCHITECTURE §6.5). */
+export interface TableState {
+  /** Newest last, at most TABLE_LIMITS.maxLog. */
+  log: TableMessage[]
+  combat: Combat | null
 }
 
 export const GAME_STATE_VERSION = 1 as const
@@ -199,6 +318,10 @@ export interface GameState {
    * players are forced to the grid (jumps snap to anchors, `end` is refused).
    */
   freeMovement?: boolean
+  /** Chat log and initiative tracker (absent: nothing said or rolled yet, no combat). */
+  table?: TableState
+  /** Players get no health band of creatures they do not control (absent / false: they do). */
+  hideWounds?: boolean
 }
 
 // ===========================================================================
@@ -209,7 +332,9 @@ export interface GameState {
 export type PatchOp = { op: "set"; path: string[]; value: unknown } | { op: "del"; path: string[] }
 
 export type DoorRejectReason = "cannot" | "locked"
-export type RejectReason = MoveRejectReason | DoorRejectReason | "rate-limited" | "invalid"
+/** Table requests: "bad-formula" (the host could not read the dice); "cannot" (not your turn, not in combat…). */
+export type TableRejectReason = "bad-formula" | "cannot"
+export type RejectReason = MoveRejectReason | DoorRejectReason | TableRejectReason | "rate-limited" | "invalid"
 
 export interface RequestResult {
   reqId: string
@@ -233,6 +358,25 @@ export type ClientToHost =
   /** Put a token at a point without walking there (no path could be found). */
   | { t: "jump"; reqId: string; tokenId: Id; levelId: Id; x: number; z: number }
   | { t: "door"; reqId: string; doorId: Id; action: "open" | "close" }
+  /** Chat: to everyone, or a whisper to the DM. */
+  | { t: "say"; reqId: string; text: string; to: "all" | "dm" }
+  /** Roll dice ("1d20+5 to hit": formula, then an optional label); the host rolls. */
+  | { t: "roll"; reqId: string; formula: string; to: "all" | "dm" }
+  /**
+   * Roll initiative for one of the player's tokens in combat that has none yet: the host rolls 1d20 +
+   * `bonus` (an integer within ±TABLE_LIMITS.maxInitiativeBonus, shown on the roll), once.
+   */
+  | { t: "initiative"; reqId: string; tokenId: Id; bonus: number }
+  /** End the turn of `entryId` (only while it acts and is a token the player controls). */
+  | { t: "end-turn"; reqId: string; entryId: Id }
+  /** Point at a spot (ephemeral: no result, never stored). Only on levels the player knows. */
+  | { t: "ping"; levelId: Id; x: number; z: number }
+  /**
+   * Change one of the player's own tokens: damage, healing or temporary hit points (only when the DM
+   * tracks its hit points; max stays the DM's), and/or conditions to add and remove. Relative: the host
+   * applies it to the token as it is then, so a change made meanwhile is never overwritten.
+   */
+  | { t: "token-status"; reqId: string; tokenId: Id; hp?: HpAmountChange; conditions?: { add?: TokenCondition[]; remove?: TokenCondition[] } }
 
 /**
  * host → player on topic `session:{sid}:view:{uid}`. `epoch` changes on every host start;
@@ -255,6 +399,8 @@ export type HostToClient =
    */
   | { t: "tiles"; epoch: string; levelId: Id; chunks: Array<TileChunkEntry>; reset?: boolean }
   | { t: "kicked"; reason: string }
+  /** Someone pointed at a spot (filter.ts pingForPlayer). Outside the seq order, best-effort. */
+  | { t: "ping"; epoch: string; ping: PlayerPing }
 
 /** One `{t: "tiles"}` chunk entry: [ci, cj, cellMask] or [ci, cj, cellMask, content rev]. */
 export type TileChunkEntry = [number, number, number] | [number, number, number, number]
@@ -287,3 +433,38 @@ export type DmCommand =
   | { t: "reset-fog"; userId?: string }
   /** Choose the free asset categories loaded into the game (GameState.freeAssets). */
   | { t: "set-free-assets"; categories: FreeAssetCategory[] }
+  /** A token's hit points (null: stop tracking them) and/or conditions. A play action, like a move. */
+  | { t: "set-token-status"; tokenId: Id; hp?: TokenHp | null; conditions?: TokenCondition[] }
+  /**
+   * A relative change (core/scene/tokenStatus.ts): applied to the token as the host holds it, so a
+   * player's change made meanwhile is never overwritten. Hit points only when tracked.
+   */
+  | { t: "change-token-status"; tokenId: Id; hp?: HpChange; conditions?: ConditionChange }
+  /** Hide (or show) the health band of creatures players do not control. */
+  | { t: "set-hide-wounds"; hidden: boolean }
+  /** Add a message to the table log (the host builds it: id, time, the DM's name, a host-side roll). */
+  | { t: "table-post"; message: TableMessage }
+  /** Forget the table log (combat stays). */
+  | { t: "table-clear-log" }
+  /**
+   * Start combat with these entries (replacing any combat), round 1, nobody acting yet. `stamp`: id and
+   * time of the "Combat started" notice.
+   */
+  | { t: "combat-start"; entries: CombatEntry[]; stamp: TableStamp }
+  | { t: "combat-end"; stamp: TableStamp }
+  /** Add entries (tokens already in combat are skipped). */
+  | { t: "combat-add"; entries: CombatEntry[] }
+  /** Remove an entry; when it was acting, the turn passes on (a new round posts a notice with `stamp`). */
+  | { t: "combat-remove"; entryId: Id; stamp: TableStamp }
+  /** Change entries (initiative, modifier, hidden, a custom entry's name); the order is re-sorted. */
+  | { t: "combat-update"; updates: { entryId: Id; patch: Partial<Pick<CombatEntry, "initiative" | "modifier" | "hidden" | "name">> }[] }
+  /** Next (1) or previous (-1) turn; a new round posts a notice with `stamp`. */
+  | { t: "combat-turn"; delta: 1 | -1; stamp: TableStamp }
+  /** Make an entry the acting one (null: nobody). */
+  | { t: "combat-set-active"; entryId: Id | null }
+
+/** Id and host time for a message a command may post (reducers stay pure). */
+export interface TableStamp {
+  id: Id
+  at: number
+}
