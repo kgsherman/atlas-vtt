@@ -19,7 +19,7 @@ I want to build a browser-based virtual tabletop (VTT) called Atlas VTT in TypeS
 - A free 3D orbit camera for editing, plus a button to preview the player view
 
 ## Player mode: 2.5D top-down play
-- Orthographic or slightly tilted camera looking down on the player's current level
+- Orthographic camera looking straight down on the player's current level
 - Automatic cutaway: anything above the token's current level is hidden or faded, so players see into rooms, not onto roofs
 - Tokens that live on a specific level and move between levels via stairs/ladders
 - Grid-based movement with measurement ruler, with the DM able to lock/unlock movement

@@ -79,8 +79,6 @@ function render(snap: PlayerClientSnapshot): string {
         camera={{
           onRotate: vi.fn(),
           onZoom: vi.fn(),
-          tilt: 15,
-          onTilt: vi.fn(),
           grid: true,
           onGrid: vi.fn(),
         }}

@@ -58,14 +58,12 @@ import {
 } from "../StatusScreens"
 import {
   isBool,
-  isNum,
   LiveBox,
   usePreference,
   useSessionResource,
 } from "../useSessionResource"
 import { PlayerHud } from "./PlayerHud"
 
-const DEG = Math.PI / 180
 const FOCUS_VIEW_HEIGHT = 70
 
 /** Backdrop canvas pixels for a quality ceiling: just under the engine's texel cap, so it is uploaded as is. */
@@ -129,7 +127,6 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
   const [selected, setSelected] = React.useState<Id | null>(null)
   const [tool, setTool] = React.useState<PlayTool>("move")
   const [grid, setGrid] = usePreference("atlas-play:grid", true, isBool)
-  const [tilt, setTilt] = usePreference("atlas-play:tilt", 15, isNum)
   const [engine, setEngine] = React.useState<Engine | null>(null)
   const quality = useQualityChoice()
   const [ceiling, setCeiling] = React.useState<Quality | null>(null)
@@ -413,7 +410,6 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
           activeLevelId={activeLevelId}
           selectedId={selectedId}
           grid={grid}
-          tilt={tilt}
           canvasRef={canvasRef}
         />
         {view && scene ? (
@@ -430,8 +426,6 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
               onRotate: (q) => engine?.rotateCamera(q),
               onZoom: (d) => zoomCanvas(canvasRef.current, d),
               onRecenter: () => focusToken(selectedId),
-              tilt,
-              onTilt: setTilt,
               grid,
               onGrid: setGrid,
               quality: {
@@ -463,7 +457,6 @@ function PlayerBridge({
   activeLevelId,
   selectedId,
   grid,
-  tilt,
   canvasRef,
 }: {
   client: AtlasPlayerClient
@@ -473,7 +466,6 @@ function PlayerBridge({
   activeLevelId: Id | null
   selectedId: Id | null
   grid: boolean
-  tilt: number
   canvasRef: React.RefObject<HTMLCanvasElement | null>
 }) {
   const { engine, canvas } = useEngine()
@@ -518,11 +510,10 @@ function PlayerBridge({
       hostMasks: masks,
       primaryViewerId: selectedId,
       dimmedTokenIds: [],
-      tilt: tilt * DEG,
       showHelpers: false,
       darkVision: false,
     })
-  }, [engine, visionTokenIds, masks, activeLevelId, selectedId, grid, tilt])
+  }, [engine, visionTokenIds, masks, activeLevelId, selectedId, grid])
 
   // Battlemap tiles.
   React.useEffect(

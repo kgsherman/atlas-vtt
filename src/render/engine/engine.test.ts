@@ -372,7 +372,7 @@ describe("engine", () => {
     const engine = createEngine(canvasEl())
     const internals = engine as unknown as Internals
     engine.setScene(scene)
-    engine.setView({ mode: "editor", camera: "topdown", activeLevelId: ground, tilt: 0 })
+    engine.setView({ mode: "editor", camera: "topdown", activeLevelId: ground })
     engine.focus({ x: 50, y: 0, z: 50 }, { distance: 90, immediate: true })
     frame(0)
     engine.setOverlays({ selectedIds: [token.id] })
@@ -451,8 +451,7 @@ describe("engine", () => {
     const engine = createEngine(canvasEl())
     const internals = engine as unknown as Internals
     engine.setScene(scene)
-    engine.setView({ mode: "player", camera: "topdown", activeLevelId: ground, tilt: 2 })
-    expect(engine.getView().tilt).toBeCloseTo((35 * Math.PI) / 180)
+    engine.setView({ mode: "player", camera: "topdown", activeLevelId: ground })
     expect(internals.controller.kind).toBe("topdown")
     expect(internals.plan.get(upper)!.mode).toBe("hidden")
     expect(internals.levels.get(upper)!.group.visible).toBe(false)
@@ -475,7 +474,7 @@ describe("engine", () => {
     const leaf = () => internals.levels.get(ground)!.doorLeaves()[0] as unknown as { marker: THREE.Mesh | null; leaf: { doorId: string } }
     expect(leaf().leaf.doorId).toBe(door.id)
     expect(leaf().marker!.visible).toBe(false)
-    engine.setView({ mode: "player", camera: "topdown", activeLevelId: ground, tilt: 0 })
+    engine.setView({ mode: "player", camera: "topdown", activeLevelId: ground })
     expect(leaf().marker!.visible).toBe(true)
     // Rebuilt door buckets keep following the camera.
     const locked: Scene = { ...scene, objects: { ...scene.objects, [door.id]: { ...door, state: "locked" } } }
@@ -491,7 +490,7 @@ describe("engine", () => {
     const { scene, ground, crate } = sampleScene()
     const engine = createEngine(canvasEl())
     engine.setScene(scene)
-    engine.setView({ mode: "player", camera: "topdown", activeLevelId: ground, tilt: 0 })
+    engine.setView({ mode: "player", camera: "topdown", activeLevelId: ground })
     engine.focus({ x: 50, y: 0, z: 50 }, { distance: 40, immediate: true })
     frame(0)
     const hit = engine.pick(400, 300, { levelId: ground, objects: true, tokens: true })

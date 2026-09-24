@@ -52,7 +52,7 @@ import { DIRECT_EMISSIVE, POST_SETTINGS, PostPipeline, type PostSettings } from 
 import { disposeCachedEdges, moveCachedEdges, type ObjectMeshRef } from "../overlays/highlight"
 import { OverlayManager } from "../overlays/manager"
 import { Picker } from "../picking/picker"
-import { DEFAULT_VIEW, MAX_TILT } from "./defaults"
+import { DEFAULT_VIEW } from "./defaults"
 import { classifyStructure, diffScenes, gridRect, heightmapDiffRect, invalidateTerrain, invalidation, occlusionClosure } from "./diff"
 import { GpuTimer } from "./gpuTimer"
 import { computeLevelPlan, effectiveActiveLevelId, type LevelPlanEntry } from "./levelPlan"
@@ -300,7 +300,6 @@ export class AtlasEngine implements Engine {
 
     this.orbit = new OrbitCameraController(canvas)
     this.topdown = new TopDownCameraController(canvas)
-    this.topdown.tilt = this.view.tilt
     this.controller = this.orbit
     this.orbit.active = true
 
@@ -726,14 +725,12 @@ export class AtlasEngine implements Engine {
   setView(partial: Partial<ViewState>): void {
     const prev = this.view
     const next: ViewState = { ...prev, ...partial }
-    next.tilt = Math.min(MAX_TILT, Math.max(0, next.tilt))
     this.view = next
     if (next.camera !== prev.camera) {
       this.switchCamera(next.camera === "topdown" ? this.topdown : this.orbit)
       // Door markers make doors in walls running up / down the screen visible and pickable from above.
       for (const lv of this.levels.values()) lv.setDoorMarkersVisible(next.camera === "topdown")
     }
-    this.topdown.tilt = next.tilt
     this.topdown.panKeys.arrows = next.mode !== "editor"
     this.replan()
     if (next.activeLevelId !== prev.activeLevelId && this.scene) this.lookAtActiveLevel(false)

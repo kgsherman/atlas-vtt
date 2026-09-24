@@ -1359,8 +1359,6 @@ export function editorViewState(state: Pick<EditorState, "view" | "activeLevelId
     darkVision: state.view.darkVision,
     cutaway: false,
     vision: "off",
-    // The editor's top view looks straight down (the player camera's tilt is the players' choice).
-    tilt: 0,
   }
 }
 

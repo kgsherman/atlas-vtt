@@ -19,7 +19,6 @@ import { useServices } from "@/app/services"
 import { groundHeightAt, tokenViewLevelId } from "@/core/scene/queries"
 import type { Id } from "@/core/scene/types"
 import { editorViewState } from "@/editor/store"
-import { DEFAULT_VIEW } from "@/render"
 import type { Engine, Quality, ViewState } from "@/render/contracts"
 
 import { useEditorContext } from "./context"
@@ -173,8 +172,6 @@ function ViewportBridge({
         primaryViewerId: previewTokenId,
         hostMasks: result.masks,
         dimmedTokenIds: [],
-        // As a player sees it by default (the editor's own top view looks straight down).
-        tilt: DEFAULT_VIEW.tilt,
       }
       engine.setView(view)
       engine.setOverlays({ selectedIds: [previewTokenId], hoveredId: null, preview: null, ruler: null, dragGhosts: {}, pendingMoves: {} })

@@ -15,10 +15,7 @@ export const DEFAULT_VIEW: ViewState = {
   gpuVisionRefine: true,
   dimmedTokenIds: [],
   primaryViewerId: null,
-  tilt: (15 * Math.PI) / 180,
   showHelpers: true,
   darkVision: false,
 }
 
-/** Player camera tilt range, radians (ARCHITECTURE §4.5: 0–35°). */
-export const MAX_TILT = (35 * Math.PI) / 180

@@ -73,8 +73,6 @@ export interface ViewState {
    * the shadow update budget. Defaults to viewerTokenIds[0].
    */
   primaryViewerId: Id | null
-  /** Player camera tilt from vertical, radians (0 = straight down). */
-  tilt: number
   /** Editor-only helpers (light radius gizmos, connector arrows, hidden objects outlined). */
   showHelpers: boolean
   /**

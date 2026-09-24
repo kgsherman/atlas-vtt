@@ -25,7 +25,6 @@
  *             scripts/free-assets/build-token-models.mjs, served with CORS)
  *   postview  ao | bloom: show one post-processing buffer (high / ultra tuning)
  *   floor     material id: every floor of the scene uses it (eyeballing procedural materials)
- *   tilt      player camera tilt, degrees                            (15)
  *   rotate    player camera quarter turns
  *   at        "x,z" look-at point on the active level                (player/dm-play: the first viewer)
  *   zoom      top-down view height / orbit distance, feet
@@ -395,8 +394,6 @@ async function main(): Promise<void> {
     showHelpers: flag("helpers", mode === "editor"),
     darkVision: flag("dark", false),
   }
-  const tilt = numParam("tilt")
-  if (tilt !== null) view.tilt = (tilt * Math.PI) / 180
   engine.setView(view)
   if (viewers[0] && mode !== "editor") engine.setOverlays({ selectedIds: [viewers[0].id] })
 

@@ -151,7 +151,6 @@ export const DEFAULT_VIEW_STATE: ViewState = {
   gpuVisionRefine: false,
   dimmedTokenIds: [],
   primaryViewerId: null,
-  tilt: 0,
   showHelpers: false,
   darkVision: false,
 }

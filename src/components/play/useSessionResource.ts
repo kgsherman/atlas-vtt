@@ -73,8 +73,6 @@ export function usePreference<T>(
 }
 
 export const isBool = (v: unknown): v is boolean => typeof v === "boolean"
-export const isNum = (v: unknown): v is number =>
-  typeof v === "number" && Number.isFinite(v)
 
 /**
  * A mutable box for the latest render values, read by long-lived controllers' callbacks (event time,

@@ -674,7 +674,7 @@ describe("editor store: view", () => {
     expect(s.view.showGrid).toBe(false)
     expect(s.view.showHelpers).toBe(false)
     expect(s.view.levelVisibility[f.upperId]).toBe(false)
-    expect(editorViewState(s)).toMatchObject({ mode: "editor", activeLevelId: f.groundId, showGrid: false, vision: "off", tilt: 0, levelVisibility: { [f.upperId]: false } })
+    expect(editorViewState(s)).toMatchObject({ mode: "editor", activeLevelId: f.groundId, showGrid: false, vision: "off", levelVisibility: { [f.upperId]: false } })
     store.getState().toggleLevelVisibility(f.upperId)
     expect(store.getState().view.levelVisibility[f.upperId]).toBe(true)
   })

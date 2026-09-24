@@ -461,15 +461,13 @@ Per level, the engine expands `HostLevelMasks` into R8 layers of `DataArrayTextu
   Held WASD pans either camera along the ground relative to the view, easing in and gliding to a stop.
   The top view never follows the selection: dragging or editing a selected token must not move the camera
   (the ground point under the cursor would shift and the drag would run away).
-- Player: orthographic, tilt 0–35° (default 15°), pan/zoom, rotate by 90°. Only the player and dm-play views
+- Player: orthographic, looking straight down (no tilt, in any view), pan/zoom, rotate by 90°. Only the player and dm-play views
   glide to the selected token's confirmed position (`checkFollow`).
 - Camera bounds (`cameras/fit.ts` `sceneBounds`: the grid extent, each level's slab..ceiling over its
   terrain) use the terrain as drawn, terrain previews included, and are refreshed on every terrain change
-  and whenever a preview leaves them. The top-down camera stands `orthoCameraDistance` from its target:
-  (above + 30)/cos(tilt) + (viewHeight/2)·tan(tilt), so geometry up to the bounds' top stays in front of the
-  near plane anywhere on screen (a tilted, zoomed-out view's bottom row is (viewHeight/2)·tan(tilt) closer;
-  without that term, and with bounds stale after a terrain commit, high terrain was clipped into a black
-  trapezoid).
+  and whenever a preview leaves them. The top-down camera stands 30 ft above the bounds' top, so all
+  geometry stays in front of its near plane (with bounds stale after a terrain commit, high terrain was
+  clipped away).
 - Pixel budget: cap physical pixels at ~2.1 MP (medium) / ~1.3 MP (low) instead of raw DPR; high / ultra render
   natively up to 2× DPR (§10). The WebGL context never has MSAA; medium and above get MSAA from the post
   pipeline's scene target (§10).
@@ -547,7 +545,7 @@ Per level, the engine expands `HostLevelMasks` into R8 layers of `DataArrayTextu
   - Gizmo: translate arrows (X red, Y green, Z blue; hover / active lighter) drawn in screen space
     (`materials/gizmoMaterial`) from `core/geometry/gizmo` `gizmoHandles(project, at)`, the handles the tool
     hit-tests (`hitGizmo`): shaft from 14 to 70 px along the projected axis, hit radius 7 px, an axis hidden
-    when its projected foot is shorter than min(2 px, 0.1 × the longest axis's), e.g. Y at tilt 0, and of two
+    when its projected foot is shorter than min(2 px, 0.1 × the longest axis's), e.g. Y in the top-down view, and of two
     visible axes within 8° of each other on screen (`GIZMO_MIN_SEPARATION_COS`; opposite directions do not
     count) the one with the shorter projected foot hidden, so the arrow drawn is the arrow hit (the hidden
     axis stays reachable with X / Y / Z). `OverlayManager.update` re-aims them every frame through
@@ -1719,7 +1717,8 @@ Known gaps and deliberate limits:
 - In cutaway views, the part of a lower storey's wall inner face that sits flush with the next storey's
   slab edge (between the cutaway plane and the next elevation) can be lit by lights of the hidden storey:
   the receiver's normal offset puts the test point inside the slab. The cap rule (§4.2) covers wall tops
-  only. Repro: `dev/render.html?sample=crooked-lantern&mode=dm-play&at=66,89.5&zoom=3&lights=floating&moon=0&rotate=2&tilt=35`.
+  only. Repro: `dev/render.html?sample=crooked-lantern&mode=dm-play&at=66,89.5&zoom=3&lights=floating&moon=0&camera=orbit&orbit=0,55`
+  (only the orbit camera sees these faces now that the top-down camera looks straight down).
 - Fog and perception edges along diagonal line-of-sight boundaries are scalloped (bumps of a 1.25 ft
   sub-cell). The host sends perception per 4×4 sub-cell, and the GPU line-of-sight refinement can only
   remove perception inside it, so the valleys (sub-cells the host says are not perceived) stay. Straight

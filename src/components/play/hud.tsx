@@ -1,6 +1,6 @@
 /**
  * Floating HUD building blocks shared by the player view and the DM's live view: glass panels, icon
- * buttons with tooltips + shortcuts, the camera dock (rotate, zoom, tilt, grid, recentre, render quality), the tool
+ * buttons with tooltips + shortcuts, the camera dock (rotate, zoom, grid, recentre, render quality), the tool
  * switch (move / measure) and the keyboard help popover.
  */
 import * as React from "react"
@@ -16,7 +16,6 @@ import {
   RotateCw,
   Ruler,
   Settings2,
-  SunMedium,
 } from "lucide-react"
 
 import { QualitySelect } from "@/components/canvas/QualitySelect"
@@ -35,7 +34,6 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover"
 import { Separator } from "@/components/ui/separator"
-import { Slider } from "@/components/ui/slider"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import {
   Tooltip,
@@ -113,8 +111,6 @@ export interface CameraDockProps {
   onZoom(direction: 1 | -1): void
   onRecenter?(): void
   recenterLabel?: string
-  tilt: number
-  onTilt(degrees: number): void
   grid: boolean
   onGrid(show: boolean): void
   /** Render-quality picker (Auto or a fixed tier); omitted = no picker. */
@@ -128,14 +124,12 @@ export interface CameraDockProps {
   side?: "top" | "bottom"
 }
 
-/** Camera controls: rotate, zoom, tilt, grid and recentre. */
+/** Camera controls: rotate, zoom, grid and recentre. */
 export function CameraDock({
   onRotate,
   onZoom,
   onRecenter,
   recenterLabel = "Centre on the selected token",
-  tilt,
-  onTilt,
   grid,
   onGrid,
   quality,
@@ -174,49 +168,6 @@ export function CameraDock({
         onClick={() => onZoom(1)}
       />
       <Separator orientation="vertical" className="mx-0.5 h-4 self-center" />
-      <Popover>
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <PopoverTrigger
-                render={
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    aria-label="Camera tilt"
-                  />
-                }
-              />
-            }
-          >
-            <SunMedium />
-          </TooltipTrigger>
-          <TooltipContent side={side}>
-            Camera tilt · {Math.round(tilt)}°
-          </TooltipContent>
-        </Tooltip>
-        <PopoverContent side={side} className="w-60 gap-3">
-          <PopoverHeader>
-            <PopoverTitle>Camera tilt</PopoverTitle>
-            <PopoverDescription>
-              0° looks straight down; tilt it to see walls in relief.
-            </PopoverDescription>
-          </PopoverHeader>
-          <div className="flex items-center gap-3">
-            <Slider
-              value={[tilt]}
-              min={0}
-              max={35}
-              step={1}
-              onValueChange={(v) => onTilt(Array.isArray(v) ? v[0] : v)}
-              aria-label="Tilt in degrees"
-            />
-            <span className="w-8 text-right text-xs text-muted-foreground tabular-nums">
-              {Math.round(tilt)}°
-            </span>
-          </div>
-        </PopoverContent>
-      </Popover>
       <HudButton
         label={grid ? "Hide grid" : "Show grid"}
         shortcut="G"

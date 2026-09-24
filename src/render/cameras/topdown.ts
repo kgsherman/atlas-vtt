@@ -1,6 +1,5 @@
 /**
- * Player 2.5D camera: orthographic, tilted `tilt` from vertical (ViewState.tilt, 0–35°), rotated in
- * 90° steps. Input: right/middle-drag pans (the grabbed ground point stays under the cursor), the
+ * Player 2.5D camera: orthographic, looking straight down, rotated in 90° steps. Input: right/middle-drag pans (the grabbed ground point stays under the cursor), the
  * wheel zooms about the cursor, WASD/arrow keys pan, two-finger touch pans and pinches. Left button
  * and single-finger touch are left to play controllers and tools.
  */
@@ -14,9 +13,7 @@ import {
   boundsDiagonal,
   damp,
   groundAxes,
-  orthoCameraDistance,
   orthoFitViewHeight,
-  playerCameraOffset,
   wheelPixels,
   wheelZoomFactor,
   zoomAboutPoint,
@@ -33,8 +30,6 @@ export class TopDownCameraController implements CameraController {
   readonly camera: THREE.OrthographicCamera
   enabled = true
   active = false
-  /** Tilt from vertical (radians), from ViewState.tilt. */
-  tilt = (15 * Math.PI) / 180
   /** Held WASD / arrow keys pan; set `panKeys.arrows = false` where arrows nudge (the editor). */
   readonly panKeys = new HeldPanKeys()
 
@@ -125,10 +120,9 @@ export class TopDownCameraController implements CameraController {
     cam.right = h * aspect
     cam.top = h
     cam.bottom = -h
-    // Stand well above the highest geometry, anywhere on screen (orthoCameraDistance); depth range covers the whole scene.
-    const distance = orthoCameraDistance(this.bounds.max.y - this.target.y, this.viewHeight, this.tilt)
-    const off = playerCameraOffset(this.yaw, this.tilt, distance)
-    cam.position.set(this.target.x + off.x, this.target.y + off.y, this.target.z + off.z)
+    // Stand well above the highest geometry; the depth range covers the whole scene.
+    const distance = Math.max(0, this.bounds.max.y - this.target.y) + 30
+    cam.position.set(this.target.x, this.target.y + distance, this.target.z)
     const { up } = groundAxes(this.yaw)
     cam.up.set(up.x, 0, up.z)
     cam.lookAt(this.target)
@@ -163,7 +157,7 @@ export class TopDownCameraController implements CameraController {
   frame(bounds: Bounds3, immediate = false): void {
     this.bounds = bounds
     const c = boundsCenter(bounds)
-    this.goalViewHeight = orthoFitViewHeight(bounds.max.x - bounds.min.x, bounds.max.z - bounds.min.z, this.cssWidth / this.cssHeight, this.goalYaw, this.tilt, 1.08)
+    this.goalViewHeight = orthoFitViewHeight(bounds.max.x - bounds.min.x, bounds.max.z - bounds.min.z, this.cssWidth / this.cssHeight, this.goalYaw, 1.08)
     this.goal.set(c.x, this.goal.y, c.z)
     this.clampGoal()
     if (immediate) {

@@ -1,9 +1,8 @@
 /**
  * Pure camera math shared by the editor orbit camera and the player 2.5D camera.
  *
- * Player camera convention: yaw 0 puts world −Z at the top of the screen and +X to the right; the
- * camera sits "behind" the target (toward the bottom of the screen) tilted `tilt` radians from
- * vertical. Quarter turns add π/2 to the yaw.
+ * Player camera convention: the camera looks straight down; yaw 0 puts world −Z at the top of the
+ * screen and +X to the right. Quarter turns add π/2 to the yaw.
  */
 import { heightRange } from "@/core/scene/heightmap"
 import type { Level, SceneLike, Vec2, Vec3 } from "@/core/scene/types"
@@ -101,35 +100,15 @@ export function groundAxes(yaw: number): { right: Vec2; up: Vec2 } {
   return { right: { x: c, z: -s }, up: { x: -s, z: -c } }
 }
 
-/** Camera offset from its target for the player camera (unit distance scaled by `distance`). */
-export function playerCameraOffset(yaw: number, tilt: number, distance: number): Vec3 {
-  const { up } = groundAxes(yaw)
-  const h = Math.sin(tilt) * distance
-  return { x: -up.x * h, y: Math.cos(tilt) * distance, z: -up.z * h }
-}
-
 /**
- * Distance from its target at which the tilted orthographic player camera (tilt from vertical, `viewHeight`
- * world units tall) keeps every point up to `above` feet above the target at least `margin` in front of
- * it, anywhere on screen. A point h feet up at screen row s (world units from the centre, down < 0) lies
- * at depth D + s·tan(tilt) − h / cos(tilt): the bottom row of the screen is (viewHeight/2)·tan(tilt)
- * closer than the target, so a tilted, zoomed-out view needs the camera further back than one straight
- * down (else high terrain near the bottom edge crosses the near plane and is clipped away).
+ * Orthographic view height (world units) that fits a w×d ground rect for a given yaw and aspect ratio
+ * (width / height).
  */
-export function orthoCameraDistance(above: number, viewHeight: number, tilt: number, margin = 30): number {
-  const c = Math.max(0.2, Math.cos(tilt))
-  return (Math.max(0, above) + margin) / c + (Math.max(0, viewHeight) / 2) * Math.tan(Math.min(Math.abs(tilt), 1.4))
-}
-
-/**
- * Orthographic view height (world units) that fits a w×d ground rect for a given yaw, tilt and
- * aspect ratio (width / height). Tilt foreshortens the ground's screen-vertical extent by cos(tilt).
- */
-export function orthoFitViewHeight(w: number, d: number, aspect: number, yaw: number, tilt: number, margin = 1.1): number {
+export function orthoFitViewHeight(w: number, d: number, aspect: number, yaw: number, margin = 1.1): number {
   const c = Math.abs(Math.cos(yaw))
   const s = Math.abs(Math.sin(yaw))
   const ex = w * c + d * s
-  const ey = (w * s + d * c) * Math.cos(tilt)
+  const ey = w * s + d * c
   return Math.max(ey, ex / Math.max(1e-3, aspect), 1) * margin
 }
 

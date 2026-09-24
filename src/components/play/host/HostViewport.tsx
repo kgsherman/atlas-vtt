@@ -39,7 +39,6 @@ import { HostContextMenuContent } from "./HostContextMenu"
 import { resolveMenuTarget, type MenuTarget } from "./menuTarget"
 import type { HostActions } from "./hostActions"
 
-const DEG = Math.PI / 180
 
 export interface PreviewInfo {
   tokenIds: Id[]
@@ -56,7 +55,6 @@ export interface HostViewportProps {
   editor: HostEditor | null
   activeLevelId: Id | null
   camera: CameraKind
-  tilt: number
   grid: boolean
   preview: Id[] | null
   quality?: Quality
@@ -136,7 +134,6 @@ function HostBridge({
   editor,
   activeLevelId,
   camera,
-  tilt,
   grid,
   preview,
   onPreviewInfo,
@@ -261,7 +258,6 @@ function HostBridge({
       hostMasks: previewing ? masks.masks : {},
       dimmedTokenIds: previewing ? masks.dimmed : [],
       primaryViewerId: previewing ? (preview[0] ?? null) : null,
-      tilt: tilt * DEG,
     })
   }, [
     engine,
@@ -270,7 +266,6 @@ function HostBridge({
     camera,
     activeLevelId,
     grid,
-    tilt,
     preview,
     masks,
   ])

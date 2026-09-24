@@ -46,7 +46,6 @@ import {
 } from "../StatusScreens"
 import {
   isBool,
-  isNum,
   LiveBox,
   usePreference,
   useSessionResource,
@@ -218,7 +217,6 @@ function HostConsole({
     "topdown",
     (v): v is CameraKind => v === "topdown" || v === "orbit"
   )
-  const [tilt, setTilt] = usePreference("atlas-host:tilt", 15, isNum)
   const [grid, setGrid] = usePreference("atlas-host:grid", true, isBool)
   const [sidebar, setSidebar] = usePreference(
     "atlas-host:sidebar",
@@ -537,7 +535,6 @@ function HostConsole({
               editor={editor}
               activeLevelId={activeLevelId}
               camera={camera}
-              tilt={tilt}
               grid={grid}
               preview={activePreview}
               onPreviewInfo={setPreviewInfo}
@@ -616,8 +613,6 @@ function HostConsole({
                       onRecenter={
                         selectedId ? () => focusToken(selectedId) : undefined
                       }
-                      tilt={tilt}
-                      onTilt={setTilt}
                       grid={grid}
                       onGrid={setGrid}
                     />
