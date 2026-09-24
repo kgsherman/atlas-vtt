@@ -6,6 +6,7 @@
 import { z } from "zod"
 
 import { rollResultSchema } from "../dice/schema"
+import { tokenConditionsSchema, tokenHpSchema } from "../scene/tokenStatus"
 import { TOKEN_MODEL_REF_RE } from "../scene/tokenModel"
 import { TERRAIN_RESOLUTIONS } from "../scene/types"
 import { TABLE_LIMITS } from "./table"
@@ -203,6 +204,9 @@ export const playerTokenSchema = z.strictObject({
   eyeHeight: num.optional(),
   vision: vision.optional(),
   speed: nonNeg.optional(),
+  hp: tokenHpSchema.optional(),
+  health: z.enum(["unhurt", "wounded", "bloodied", "down"]).optional(),
+  conditions: tokenConditionsSchema.optional(),
 })
 
 const level = z.strictObject({

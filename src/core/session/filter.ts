@@ -12,7 +12,8 @@
  *  - lights: remembered static lights (emitting = currently illuminating something perceived) and lights
  *    carried by tokens in the view (resolved, emitting = on). Never attachment ids;
  *  - tokens: controlled + vision tokens always, others while visible, never hidden ones; DM names,
- *    senses and speed only for tokens the player controls or sees through;
+ *    senses, speed and exact hit points only for tokens the player controls or sees through (others: a
+ *    coarse health band unless the DM hides wounds); conditions for every token sent;
  *  - levels: explored ("known") levels + stubs for levels referenced by sent connectors, tokens, lights;
  *  - terrain chunks overlapping explored cells with unexplored samples zeroed; masks;
  *  - backdrops: placement only (rect, opacity, tintWalls, tile size) for known levels with a map image —
@@ -29,6 +30,7 @@ import type { RolledTerm, RollResult } from "../dice/dice"
 import { TerrainSampler } from "../occlusion/terrain"
 import { sampleSpacing } from "../scene/heightmap"
 import { groundHeightAt, levelById, lightEffectivelyHidden, lightWorldPosition, sortedLevels, wallLength } from "../scene/queries"
+import { healthBand } from "../scene/tokenStatus"
 import type { ConnectorObject, Environment, Id, Level, LightObject, Scene, SceneObject, Token, Vec2 } from "../scene/types"
 import { wallBaseKnots, wallProfile, type WallProfile } from "../scene/wallProfile"
 import { encodeGrades, encodeMask, createCellMask, getCell, setCell } from "../vision/mask"
@@ -121,7 +123,7 @@ function attachedLights(scene: Pick<Scene, "objects">): LightObject[] {
 // Explicit builders (never spread DM objects)
 // ---------------------------------------------------------------------------
 
-function playerToken(t: Token, full: boolean): PlayerToken {
+function playerToken(t: Token, full: boolean, wounds: boolean): PlayerToken {
   const out: PlayerToken = {
     id: t.id,
     levelId: t.levelId,
@@ -140,6 +142,13 @@ function playerToken(t: Token, full: boolean): PlayerToken {
     out.vision = { darkvision: t.vision.darkvision, blindsight: t.vision.blindsight, blind: t.vision.blind }
     out.speed = t.speed
   }
+  // Health: exact for the player's own (and party) tokens, else at most the coarse band.
+  if (t.hp) {
+    if (full) out.hp = { current: t.hp.current, max: t.hp.max, temp: t.hp.temp }
+    else if (wounds) out.health = healthBand(t.hp)
+  }
+  // Conditions show on the token: whoever sees it sees them.
+  if (t.conditions && t.conditions.length > 0) out.conditions = [...t.conditions]
   return out
 }
 
@@ -291,7 +300,7 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
   const tokens: Record<Id, PlayerToken> = {}
   for (const id of [...tokenIds].sort()) {
     const t = tokenExistsForPlayers(state, id)
-    if (t) tokens[id] = playerToken(t, full.has(id))
+    if (t) tokens[id] = playerToken(t, full.has(id), state.hideWounds !== true)
   }
 
   // ---- objects from memory ------------------------------------------------

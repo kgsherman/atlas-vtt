@@ -6,6 +6,7 @@
 import { z } from "zod"
 
 import { MAX_PATH_STEPS } from "../movement"
+import { HP_LIMITS, TOKEN_CONDITIONS } from "../scene/tokenStatus"
 import { TABLE_LIMITS } from "./table"
 import type { ClientToHost } from "./types"
 
@@ -97,6 +98,16 @@ const initiativeSchema = z.strictObject({
 })
 const endTurnSchema = z.strictObject({ t: z.literal("end-turn"), reqId: tokenSchema, entryId: idSchema })
 const pingSchema = z.strictObject({ t: z.literal("ping"), levelId: idSchema, x: worldCoord, z: worldCoord })
+const hpValue = z.int().min(0).max(HP_LIMITS.max)
+const tokenStatusSchema = z
+  .strictObject({
+    t: z.literal("token-status"),
+    reqId: tokenSchema,
+    tokenId: idSchema,
+    hp: z.strictObject({ current: hpValue, temp: hpValue }).optional(),
+    conditions: z.array(z.enum(TOKEN_CONDITIONS)).max(TOKEN_CONDITIONS.length).optional(),
+  })
+  .refine((m) => m.hp !== undefined || m.conditions !== undefined, "nothing to change")
 
 export const clientMessageSchema = z.discriminatedUnion("t", [
   helloSchema,
@@ -108,6 +119,7 @@ export const clientMessageSchema = z.discriminatedUnion("t", [
   initiativeSchema,
   endTurnSchema,
   pingSchema,
+  tokenStatusSchema,
 ])
 
 /** Strict zod parse of an untrusted player message (limits enforced). null = drop silently. */

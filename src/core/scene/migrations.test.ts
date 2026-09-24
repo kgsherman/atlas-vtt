@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- these tests poke at raw, untyped JSON documents */
 import { describe, expect, it } from "vitest"
 
+import { createToken } from "./factory"
 import { MIGRATIONS, migrateToCurrent, readSchemaVersion, type Migration } from "./migrations"
 import { parseScene } from "./schema"
 import { SCENE_SCHEMA_VERSION } from "./types"
@@ -72,15 +73,15 @@ function v1Doc(): Record<string, any> {
 
 describe("migrateToCurrent", () => {
   it("has one migration per version step", () => {
-    expect(SCENE_SCHEMA_VERSION).toBe(4)
-    expect(Object.keys(MIGRATIONS)).toEqual(["1", "2", "3"])
+    expect(SCENE_SCHEMA_VERSION).toBe(5)
+    expect(Object.keys(MIGRATIONS)).toEqual(["1", "2", "3", "4"])
   })
 
   it("migrates v1 documents (no token models) to v2 unchanged", () => {
     const doc = { schemaVersion: 1, name: "x", tokens: { t: { id: "t" } } }
     expect(MIGRATIONS[1](structuredClone(doc))).toEqual(doc)
     const res = migrateToCurrent(doc)
-    expect(res).toEqual({ ok: true, doc: { schemaVersion: 4, name: "x", tokens: { t: { id: "t" } } }, from: 1 })
+    expect(res).toEqual({ ok: true, doc: { schemaVersion: SCENE_SCHEMA_VERSION, name: "x", tokens: { t: { id: "t" } } }, from: 1 })
     expect(doc.schemaVersion).toBe(1)
   })
 
@@ -167,7 +168,7 @@ describe("v2 → v3 (walls follow terrain)", () => {
     expect(res.ok).toBe(true)
     if (!res.ok) return
     expect(res.migratedFrom).toBe(1)
-    expect(res.scene.schemaVersion).toBe(4)
+    expect(res.scene.schemaVersion).toBe(SCENE_SCHEMA_VERSION)
     expect(res.scene.objects.wallG).toMatchObject({ type: "wall", followTerrain: true })
     expect(res.scene.objects.wallU).toMatchObject({ type: "wall", followTerrain: true, name: "Upper wall" })
     // Nothing else changes: levels keep no terrain edits, other objects are identical.
@@ -217,8 +218,39 @@ describe("v3 → v4 (resolutions 8 / 16, polygon shapes)", () => {
     expect(res.ok).toBe(true)
     if (!res.ok) return
     expect(res.migratedFrom).toBe(3)
-    expect(res.scene.schemaVersion).toBe(4)
+    expect(res.scene.schemaVersion).toBe(SCENE_SCHEMA_VERSION)
     expect(res.scene.levels).toEqual(v3.levels)
     expect(res.scene.objects).toEqual(v3.objects)
+  })
+})
+
+describe("v4 → v5 (token hit points and conditions)", () => {
+  it("leaves v4 documents unchanged; v5 tokens may carry hp and conditions", () => {
+    const v4: Record<string, any> = { ...(MIGRATIONS[2](v1Doc()) as Record<string, any>), schemaVersion: 4 }
+    expect(MIGRATIONS[4](structuredClone(v4))).toEqual(v4)
+    const res = parseScene(v4)
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.migratedFrom).toBe(4)
+    const token = createToken("ground", { x: 7.5, z: 7.5 })
+    const tokenId = token.id
+    res.scene.tokens[tokenId] = token
+    const v5 = structuredClone(res.scene)
+    v5.tokens[tokenId].hp = { current: 7, max: 12, temp: 3 }
+    v5.tokens[tokenId].conditions = ["poisoned", "prone"]
+    expect(parseScene(v5).ok).toBe(true)
+    for (const bad of [
+      { hp: { current: 13, max: 12, temp: 0 } },
+      { hp: { current: 1, max: 0, temp: 0 } },
+      { hp: { current: 1.5, max: 12, temp: 0 } },
+      { hp: { current: 1, max: 12 } },
+      { conditions: ["prone", "poisoned"] },
+      { conditions: ["prone", "prone"] },
+      { conditions: ["sleepy"] },
+    ]) {
+      const doc = structuredClone(res.scene)
+      Object.assign(doc.tokens[tokenId], bad)
+      expect(parseScene(doc).ok, JSON.stringify(bad)).toBe(false)
+    }
   })
 })

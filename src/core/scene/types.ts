@@ -14,7 +14,9 @@
  *    session. Live play state lives in the session's GameState copy (core/session).
  */
 
-export const SCENE_SCHEMA_VERSION = 4 as const
+import type { TokenCondition, TokenHp } from "./tokenStatus"
+
+export const SCENE_SCHEMA_VERSION = 5 as const
 
 export type Id = string
 
@@ -463,6 +465,13 @@ export interface Token {
   /** DM-only: hidden tokens (and lights attached to them) do not exist for players. */
   hidden: boolean
   dmNotes?: string
+  /**
+   * Hit points (core/scene/tokenStatus.ts). Absent: not tracked. Exact values reach only players who
+   * control the token or see through it; others may see a coarse band (§6.5).
+   */
+  hp?: TokenHp
+  /** Conditions shown on the token (catalog order, each once). Absent: none. */
+  conditions?: TokenCondition[]
 }
 
 // ---------------------------------------------------------------------------

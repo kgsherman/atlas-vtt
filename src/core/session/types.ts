@@ -1,6 +1,7 @@
 import type { Patch } from "immer"
 
 import type { RollResult } from "../dice/dice"
+import type { HealthBand, TokenCondition, TokenHp } from "../scene/tokenStatus"
 import type { MoveRejectReason, PathStep } from "../movement/types"
 import type {
   ConnectorObject,
@@ -68,6 +69,12 @@ export type PlayerToken = Pick<Token, "id" | "levelId" | "position" | "size" | "
   eyeHeight?: number
   vision?: VisionSettings
   speed?: number
+  /** Exact hit points: only for tokens the player controls or sees through. */
+  hp?: TokenHp
+  /** Other tokens with hit points: the coarse band, unless the DM hides wounds (GameState.hideWounds). */
+  health?: HealthBand
+  /** Conditions shown on the token (every player who sees it sees them). */
+  conditions?: TokenCondition[]
 }
 
 export interface PlayerLevel {
@@ -313,6 +320,8 @@ export interface GameState {
   freeMovement?: boolean
   /** Chat log and initiative tracker (absent: nothing said or rolled yet, no combat). */
   table?: TableState
+  /** Players get no health band of creatures they do not control (absent / false: they do). */
+  hideWounds?: boolean
 }
 
 // ===========================================================================
@@ -362,6 +371,11 @@ export type ClientToHost =
   | { t: "end-turn"; reqId: string; entryId: Id }
   /** Point at a spot (ephemeral: no result, never stored). Only on levels the player knows. */
   | { t: "ping"; levelId: Id; x: number; z: number }
+  /**
+   * Update one of the player's own tokens: current and temporary hit points (only when the DM tracks its
+   * hit points; max stays the DM's), and/or its conditions.
+   */
+  | { t: "token-status"; reqId: string; tokenId: Id; hp?: { current: number; temp: number }; conditions?: TokenCondition[] }
 
 /**
  * host → player on topic `session:{sid}:view:{uid}`. `epoch` changes on every host start;
@@ -418,6 +432,10 @@ export type DmCommand =
   | { t: "reset-fog"; userId?: string }
   /** Choose the free asset categories loaded into the game (GameState.freeAssets). */
   | { t: "set-free-assets"; categories: FreeAssetCategory[] }
+  /** A token's hit points (null: stop tracking them) and/or conditions. A play action, like a move. */
+  | { t: "set-token-status"; tokenId: Id; hp?: TokenHp | null; conditions?: TokenCondition[] }
+  /** Hide (or show) the health band of creatures players do not control. */
+  | { t: "set-hide-wounds"; hidden: boolean }
   /** Add a message to the table log (the host builds it: id, time, the DM's name, a host-side roll). */
   | { t: "table-post"; message: TableMessage }
   /** Forget the table log (combat stays). */

@@ -17,7 +17,8 @@
  * within one cell of the door segment; movement must not be locked. Every failure is "cannot";
  * "locked" is only reported after those checks pass. Players can never unlock.
  *
- * Table requests (say, roll, initiative, end-turn) go to core/session/table.ts.
+ * Table requests (say, roll, initiative, end-turn) go to core/session/table.ts, token-status (a player's
+ * own hit points and conditions) to core/session/tokenStatus.ts.
  */
 import { distancePointSegment2, segmentIntersection2 } from "../geometry/segment"
 import { rulerDistance } from "../grid/grid"
@@ -38,6 +39,7 @@ import {
   type RequestOutcome,
 } from "./state"
 import { defaultTableContext, reduceTableRequest, type TableContext } from "./table"
+import { reduceTokenStatus } from "./tokenStatus"
 import type { ClientToHost, GameState, PlayerView, RejectReason, RequestResult } from "./types"
 
 export interface RequestContext {
@@ -240,5 +242,7 @@ export function reduceRequest(state: GameState, userId: string, msg: StateReques
     case "initiative":
     case "end-turn":
       return reduceTableRequest(state, userId, msg, ctx.table ?? defaultTableContext())
+    case "token-status":
+      return reduceTokenStatus(state, userId, msg)
   }
 }

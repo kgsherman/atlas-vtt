@@ -21,6 +21,7 @@ import { validateReferences } from "./integrity"
 import { migrateToCurrent } from "./migrations"
 import { signedArea } from "./polygon"
 import { TOKEN_MODEL_REF_RE } from "./tokenModel"
+import { tokenConditionsSchema, tokenHpSchema } from "./tokenStatus"
 import { SCENE_SCHEMA_VERSION, TERRAIN_RESOLUTIONS, type GridSettings, type Scene } from "./types"
 
 export const SCENE_LIMITS = {
@@ -441,6 +442,8 @@ const tokenSchema = z.strictObject({
   model: z.string().regex(TOKEN_MODEL_REF_RE).optional(),
   hidden: z.boolean(),
   dmNotes: text.optional(),
+  hp: tokenHpSchema.optional(),
+  conditions: tokenConditionsSchema.optional(),
 })
 
 // ---------------------------------------------------------------------------

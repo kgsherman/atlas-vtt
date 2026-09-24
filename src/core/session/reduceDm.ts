@@ -10,6 +10,7 @@ import { levelById } from "../scene/queries"
 import { SCENE_LIMITS } from "../scene/schema"
 import type { GridSettings, Id, Scene } from "../scene/types"
 import { normalizeFreeAssetCategories } from "./freeAssets"
+import { tokenWithStatus } from "./tokenStatus"
 import { remapExplored } from "./masks"
 import { sanitizeObject } from "./sanitize"
 import { staticLightWorldY } from "./memory"
@@ -218,6 +219,17 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
       // DM-only: no player's view depends on it.
       return { state: { ...state, freeAssets: categories, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: [] }
     }
+    case "set-token-status": {
+      const t = own(state.scene.tokens, cmd.tokenId)
+      if (!t) return noop(state, "unknown token")
+      const next = tokenWithStatus(t, cmd.hp, cmd.conditions)
+      if (next === t) return noop(state)
+      // A play action (like a move): no map edit, no undo entry; views change, vision does not.
+      return { state: { ...state, scene: { ...state.scene, tokens: { ...state.scene.tokens, [t.id]: next } }, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: "all" }
+    }
+    case "set-hide-wounds":
+      if ((state.hideWounds ?? false) === cmd.hidden) return noop(state)
+      return { state: { ...state, hideWounds: cmd.hidden, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: "all" }
     case "set-enforce-speed":
       if (state.enforceSpeed === cmd.enabled) return noop(state)
       return { state: { ...state, enforceSpeed: cmd.enabled, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: "all" }

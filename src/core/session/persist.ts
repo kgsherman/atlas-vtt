@@ -176,6 +176,8 @@ const gameStateShape = z.strictObject({
   freeMovement: z.boolean().optional(),
   // Optional too (absent: no chat yet, no combat).
   table: tableSchema.optional(),
+  // Optional too (absent: players see other creatures' health bands).
+  hideWounds: z.boolean().optional(),
 })
 
 export type ParseGameStateResult = { ok: true; state: GameState } | { ok: false; issues: string[] }
@@ -295,6 +297,7 @@ export function parseGameStateDetailed(json: unknown): ParseGameStateResult {
       ...(raw.freeAssets !== undefined ? { freeAssets: normalizeFreeAssetCategories(raw.freeAssets) } : {}),
       ...(raw.freeMovement !== undefined ? { freeMovement: raw.freeMovement } : {}),
       ...(table !== undefined ? { table } : {}),
+      ...(raw.hideWounds !== undefined ? { hideWounds: raw.hideWounds } : {}),
     },
   }
 }
@@ -340,5 +343,6 @@ export function serializeGameState(state: GameState): string {
   if (state.freeAssets !== undefined) ordered.freeAssets = state.freeAssets
   if (state.freeMovement !== undefined) ordered.freeMovement = state.freeMovement
   if (state.table !== undefined) ordered.table = state.table
+  if (state.hideWounds !== undefined) ordered.hideWounds = state.hideWounds
   return JSON.stringify(ordered)
 }

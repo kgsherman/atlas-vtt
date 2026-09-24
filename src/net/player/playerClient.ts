@@ -25,6 +25,7 @@
  *    after 5 s ("DM not responding").
  */
 import type { PathStep } from "@/core/movement/types"
+import type { TokenCondition } from "@/core/scene/tokenStatus"
 import type { Cell, Id, Level, SceneLike, Vec2 } from "@/core/scene/types"
 import { applyPatchOps } from "@/core/session/diff"
 import { parsePlayerView, playerPingSchema } from "@/core/session/playerViewSchema"
@@ -153,6 +154,8 @@ export interface AtlasPlayerClient extends PlayerClient {
   rollInitiative(tokenId: Id, bonus: number): string
   /** End the turn of `entryId` (one of our tokens, acting now). */
   endTurn(entryId: Id): string
+  /** Our token's current / temporary hit points (when the DM tracks them) and/or conditions. */
+  setTokenStatus(tokenId: Id, status: { hp?: { current: number; temp: number }; conditions?: TokenCondition[] }): string
   /**
    * Point at a spot for the table (only on levels we know; the host drops the rest). Emitted to onPing
    * at once as `mine`. false when it could not be sent (not live, or more than one per PING_GAP_MS).
@@ -372,6 +375,11 @@ export function describeRequestResult(r: ClientRequestResult): string | null {
         return r.kind === "say" ? "Your message wasn't sent" : "The DM rejected that request"
     }
   }
+  if (r.kind === "token-status") {
+    if (r.reason === "not-owner") return "You don't control that character"
+    if (r.reason === "cannot") return "The DM doesn't track that character's hit points"
+    return "The DM rejected that change"
+  }
   const reasons: Partial<Record<RejectReason, string>> = {
     "not-owner": "You don't control that token",
     "movement-locked": "Movement is locked by the DM",
@@ -517,6 +525,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
     this.roll = this.roll.bind(this)
     this.rollInitiative = this.rollInitiative.bind(this)
     this.endTurn = this.endTurn.bind(this)
+    this.setTokenStatus = this.setTokenStatus.bind(this)
     this.ping = this.ping.bind(this)
     this.onPing = this.onPing.bind(this)
     this.compositor = new BackdropCompositor({
@@ -1176,6 +1185,17 @@ class PlayerClientImpl implements AtlasPlayerClient {
   endTurn(entryId: Id): string {
     const reqId = this.newRequestId()
     this.submit({ reqId, kind: "end-turn", sentAt: 0 }, { t: "end-turn", reqId, entryId })
+    this.changed()
+    return reqId
+  }
+
+  setTokenStatus(tokenId: Id, status: { hp?: { current: number; temp: number }; conditions?: TokenCondition[] }): string {
+    const reqId = this.newRequestId()
+    const msg: Extract<ClientToHost, { t: "token-status" }> = { t: "token-status", reqId, tokenId }
+    if (status.hp) msg.hp = { current: Math.max(0, Math.round(status.hp.current)), temp: Math.max(0, Math.round(status.hp.temp)) }
+    if (status.conditions) msg.conditions = [...status.conditions]
+    if (!msg.hp && !msg.conditions) this.pushResult({ reqId, ok: false, reason: "invalid" }, "invalid", "token-status")
+    else this.submit({ reqId, kind: "token-status", tokenId, sentAt: 0 }, msg)
     this.changed()
     return reqId
   }
