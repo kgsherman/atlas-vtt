@@ -891,6 +891,8 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
   - **tokens**: controlled + vision tokens always; others only while in `visibleTokenIds`; never hidden. Other
     players' tokens get `label` only; `name/eyeHeight/vision/speed` only for controlled/vision tokens.
     `model` (a `free:<id>` reference, §3) is sent with every token sent: it is what the token looks like.
+    Health (§6.5): exact `hp` only for controlled/vision tokens, others at most their band as `health`
+    (none while `hideWounds`); `conditions` with every token sent.
   - **levels**: known levels (any explored cell) + stubs (`known:false`, `name:null`) for levels referenced by a
     sent connector or own token, copied field by field (`playerLevel`), so `terrainEdits` never reaches a
     player (tests check that the serialised view contains neither `terrainEdits` nor `baseChunks`, and that
