@@ -243,13 +243,23 @@ export class Picker {
   }
 
   /** World point → canvas-relative CSS pixels. */
-  project(p: Vec3): { x: number; y: number; visible: boolean } {
+  project(p: Vec3): { x: number; y: number; visible: boolean; inFront: boolean } {
     const camera = this.host.camera()
     const rect = this.host.canvas.getBoundingClientRect()
     const v = new THREE.Vector3(p.x, p.y, p.z).project(camera)
     const x = ((v.x + 1) / 2) * rect.width
     const y = ((1 - v.y) / 2) * rect.height
-    const visible = v.z >= -1 && v.z <= 1 && x >= 0 && y >= 0 && x <= rect.width && y <= rect.height
-    return { x, y, visible }
+    const inFront = v.z >= -1 && v.z <= 1
+    const visible = inFront && x >= 0 && y >= 0 && x <= rect.width && y <= rect.height
+    return { x, y, visible, inFront }
+  }
+
+  /**
+   * The editor tools' projector (core/geometry/gizmo Projector): `visible` means in front of the camera,
+   * whether or not the point is inside the canvas, so an edge with an end off screen still projects.
+   */
+  projectForTools(p: Vec3): { x: number; y: number; visible: boolean } {
+    const q = this.project(p)
+    return { x: q.x, y: q.y, visible: q.inFront }
   }
 }

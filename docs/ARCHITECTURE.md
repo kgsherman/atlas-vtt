@@ -321,7 +321,10 @@ to the elevation; `base`, the other end of the prism's sides in the editor, not 
   (`topFaces`: a half-edge walk with the edges around each vertex sorted by angle, keeping the face on the
   left) all simple, covering the footprint exactly once with a single unbounded face, so dangling, spiky
   or detached edges are refused. The top is triangulated face by face, so raised inner edges are crisp
-  ridges and a raised crossing a peak. Edge element k < n is outline edge k, n + c is inner edge c
+  ridges and a raised crossing a peak. Faces are topology-ordered (each from its lowest vertex, sorted),
+  so their indices survive vertex moves; a cut top's faces are face elements n + f (picked by
+  `rayHitShape`'s `topFace`, box selected and selected all one by one; "top" stays the element of an uncut
+  top). Edge element k < n is outline edge k, n + c is inner edge c
   (`shapeEdgeEnds`, `shapeEdgeCount`; picking, box selection, select all and the element display include
   them, and interior vertex dots). Edits that re-index vertices re-index them (`withVertexMap`,
   `remapInnerEdges`: an edge losing an end, merging its ends or becoming an outline edge is dropped, then
@@ -599,7 +602,8 @@ Per level, the engine expands `HostLevelMasks` into R8 layers of `DataArrayTextu
     about) is a horizontal circle through the gizmo centre whose projection reaches 88 px along the longer
     projected horizontal axis (`gizmoRing`: a unit circle mesh scaled per frame; hidden when its ellipse's
     short axis is under 0.2 × its long axis, i.e. seen nearly edge-on), hit within 7 px of its projected
-    polyline (`ringDistancePx`, after the arrows). The value label ("+7.5 ft · Add") keeps a constant
+    polyline (`ringDistancePx`, after the arrows; in the vertex and edge modes a vertex or edge nearer the
+    cursor than the ring takes the press instead, since the ring runs across the shapes). The value label ("+7.5 ft · Add") keeps a constant
     pixel size (placement: §7). The brush ring is the brush preview's. The select sub-tool's marquee
     (`TerrainOverlay.marquee`, canvas CSS px, the frame the tool tests vertices and shapes in) is a
     screen-space rect drawn by its own small shader over everything else.
@@ -1261,8 +1265,10 @@ authoritative, and a player receives only what filter.ts lets through.
   Editor picks (the editor viewport and the host's live editor) pass `terrain: true`, the **editor ground
   cast**: wall nodes, shapes and hover markers land where the cursor ray meets the heightmap, floors or not
   (§4.6). Events also carry the pick's `ray`, the canvas-relative position (`canvasX/Y`) and the DOM
-  `buttons`; `controller.setProjector(engine.project)` gives tools `ToolDeps.project` (null until an engine
-  exists), and the canvas cursor and the options-bar hint come from the active tool when it provides them
+  `buttons`; `controller.setProjector` gives tools `ToolDeps.project` (null until an engine exists) from
+  `engine.project` with `visible` = `inFront` (in front of the camera, off-canvas points included, so an
+  edge with one end off screen stays pickable; `Engine.project`'s own `visible` also requires the canvas,
+  for HTML markers; the overlay's gizmo uses the same tools' projection, `Picker.projectForTools`), and the canvas cursor and the options-bar hint come from the active tool when it provides them
   (`Tool.cursor()` / `Tool.hint()`, read through `controller.toolCursor()` / `toolHint()`).
 - **Terrain tools** (ToolId `"terrain"`, "Terrain", key T; `editor/tools/terrain.ts` routes to the sub-tools
   in `editor/tools/terrain/` by `toolSettings.terrain.sub`: `select` | `brush` (default) | `block` | `ramp` |

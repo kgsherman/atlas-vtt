@@ -17,6 +17,7 @@ import {
   shapeBounds,
   shapeEdgeCount,
   shapeEdgeEnds,
+  topFaces,
   topVertexCount,
   topVertices,
   withVertexMap,
@@ -262,6 +263,7 @@ export interface ShapeHit {
   shapeId: Id
   /** Ray parameter of the hit (units of ray.direction). */
   t: number
+  /** Side face k < n, top face n + f of a cut top (topFaces), or "top" (an uncut top). */
   face: number | "top"
   point: Vec3
   /** The baked terrain is in front of the hit (the shape is buried / seen through the ground). */
@@ -296,7 +298,9 @@ export function shapeHits(
     if (!h) continue
     const hidden = groundT !== null && groundT < h.t - tol
     const onGround = s.op === "carve" && groundT !== null && Math.abs(groundT - h.t) <= floorTol
-    hits.push({ shapeId: s.id, t: h.t, face: h.face, point: rayAt(ray, h.t), hidden, onGround })
+    // A cut top's faces are elements of their own (n + f); an uncut top is the face "top".
+    const face = h.face === "top" && s.innerEdges && s.innerEdges.length > 0 ? s.points.length + h.topFace : h.face
+    hits.push({ shapeId: s.id, t: h.t, face, point: rayAt(ray, h.t), hidden, onGround })
   }
   return hits.sort((a, b) => Number(a.hidden) - Number(b.hidden) || a.t - b.t || (a.shapeId < b.shapeId ? -1 : a.shapeId > b.shapeId ? 1 : 0))
 }
@@ -416,7 +420,13 @@ export function elementsInScreenRect(
       }
     } else {
       const base = s.points.map((p) => projectedInside(project, { x: p.x, y: elevation + s.base, z: p.z }, r))
-      if (top.every(Boolean)) out.push({ shapeId: s.id, kind: "face", index: "top" })
+      if (!s.innerEdges?.length) {
+        if (top.every(Boolean)) out.push({ shapeId: s.id, kind: "face", index: "top" })
+      } else {
+        topFaces(s).forEach((f, fi) => {
+          if (f.every((k) => top[k])) out.push({ shapeId: s.id, kind: "face", index: n + fi })
+        })
+      }
       for (let k = 0; k < n; k++) {
         const j = (k + 1) % n
         if (top[k] && top[j] && base[k] && base[j]) out.push({ shapeId: s.id, kind: "face", index: k })
@@ -504,7 +514,11 @@ export function elementVerticesByShape(shapes: Readonly<Record<Id, TerrainShape>
 export function allElements(shapes: readonly TerrainShape[], mode: TerrainElementMode): TerrainElementRef[] {
   const out: TerrainElementRef[] = []
   for (const s of shapes) {
-    if (mode === "face") out.push({ shapeId: s.id, kind: "face", index: "top" })
+    if (mode === "face") {
+      // The whole top, or each face of a cut top.
+      if (!s.innerEdges?.length) out.push({ shapeId: s.id, kind: "face", index: "top" })
+      else topFaces(s).forEach((_, fi) => out.push({ shapeId: s.id, kind: "face", index: s.points.length + fi }))
+    }
     const count = mode === "edge" ? shapeEdgeCount(s) : mode === "vertex" ? topVertexCount(s) : s.points.length
     for (let k = 0; k < count; k++) out.push(mode === "face" ? { shapeId: s.id, kind: "face", index: k } : { shapeId: s.id, kind: mode, index: k })
   }

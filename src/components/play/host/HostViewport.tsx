@@ -294,7 +294,11 @@ function HostBridge({
         engine.previewTerrain(levelId, heights, dirty)
       )
       // Tools project world points to the canvas (terrain handles, height follow).
-      ec.setProjector((p) => engine.project(p))
+      ec.setProjector((p) => {
+        // Points off the canvas count too (an edge with one end off screen): in front of the camera is enough.
+        const q = engine.project(p)
+        return { x: q.x, y: q.y, visible: q.inFront ?? q.visible }
+      })
       return () => {
         off()
         ec.setTerrainPreview(null)

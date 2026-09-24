@@ -1260,25 +1260,25 @@ describe("rayHitShape", () => {
   const block = blockShape("b", { x: 0, z: 0, w: 10, d: 10 }, 0, 5, 0)
 
   it("hits the top from above and the sides from the side, never the base cap", () => {
-    expect(rayHitShape(block, 10, { origin: { x: 5, y: 100, z: 5 }, direction: { x: 0, y: -1, z: 0 } })).toEqual({ t: 85, face: "top" })
+    expect(rayHitShape(block, 10, { origin: { x: 5, y: 100, z: 5 }, direction: { x: 0, y: -1, z: 0 } })).toEqual({ t: 85, face: "top", topFace: 0 })
     const side = rayHitShape(block, 10, { origin: { x: -10, y: 12, z: 5 }, direction: { x: 1, y: 0, z: 0 } })
-    expect(side).toEqual({ t: 10, face: 3 })
-    expect(rayHitShape(block, 10, { origin: { x: 5, y: 12, z: 30 }, direction: { x: 0, y: 0, z: -1 } })).toEqual({ t: 20, face: 2 })
+    expect(side).toEqual({ t: 10, face: 3, topFace: 0 })
+    expect(rayHitShape(block, 10, { origin: { x: 5, y: 12, z: 30 }, direction: { x: 0, y: 0, z: -1 } })).toEqual({ t: 20, face: 2, topFace: 0 })
     expect(rayHitShape(block, 10, { origin: { x: -10, y: 9, z: 5 }, direction: { x: 1, y: 0, z: 0 } })).toBe(null)
-    expect(rayHitShape(block, 10, { origin: { x: 5, y: -50, z: 5 }, direction: { x: 0, y: 1, z: 0 } })).toEqual({ t: 65, face: "top" })
+    expect(rayHitShape(block, 10, { origin: { x: 5, y: -50, z: 5 }, direction: { x: 0, y: 1, z: 0 } })).toEqual({ t: 65, face: "top", topFace: 0 })
     expect(rayHitShape(block, 10, { origin: { x: 50, y: 100, z: 5 }, direction: { x: 0, y: -1, z: 0 } })).toBe(null)
     expect(rayHitShape(block, 10, { origin: { x: 5, y: 100, z: 5 }, direction: { x: 0, y: 1, z: 0 } })).toBe(null)
   })
 
   it("hits a carve's pit floor through its open top", () => {
     const pit = blockShape("p", { x: 0, z: 0, w: 10, d: 10 }, 0, -5, 0)
-    expect(rayHitShape(pit, 10, { origin: { x: 5, y: 100, z: 5 }, direction: { x: 0, y: -1, z: 0 } })).toEqual({ t: 95, face: "top" })
+    expect(rayHitShape(pit, 10, { origin: { x: 5, y: 100, z: 5 }, direction: { x: 0, y: -1, z: 0 } })).toEqual({ t: 95, face: "top", topFace: 0 })
     const dir = { x: 1 / Math.sqrt(5), y: -2 / Math.sqrt(5), z: 0 }
     const hit = rayHitShape(pit, 10, { origin: { x: -4, y: 20, z: 5 }, direction: dir })!
     expect(hit.face).toBe("top")
     expect(-4 + hit.t * dir.x).toBeCloseTo(3.5, 9)
     // Looking into the pit sideways from inside hits the far wall (inner side of face 1, x = 10).
-    expect(rayHitShape(pit, 10, { origin: { x: 5, y: 7, z: 5 }, direction: { x: 1, y: 0, z: 0 } })).toEqual({ t: 5, face: 1 })
+    expect(rayHitShape(pit, 10, { origin: { x: 5, y: 7, z: 5 }, direction: { x: 1, y: 0, z: 0 } })).toEqual({ t: 5, face: 1, topFace: 0 })
   })
 
   it("follows a sloped top and rejects non-finite rays", () => {
@@ -1389,6 +1389,28 @@ describe("inner edges and points (loop cuts)", () => {
     expect(third.edges).toHaveLength(2)
     expect(third.shape.innerPoints).toHaveLength(2)
     expect(topFaces(third.shape)).toHaveLength(6)
+  })
+
+  it("faces of a cut top are elements n + f in a topology-only order; rays report the face they hit", () => {
+    const { twice } = crossed()
+    const s = twice.shape
+    const n = s.points.length
+    const faces = topFaces(s)
+    // Each face starts at its lowest vertex; faces sorted by their vertex lists.
+    expect(faces).toEqual([
+      [0, 1, 8, 7],
+      [1, 2, 3, 8],
+      [3, 4, 5, 8],
+      [5, 6, 7, 8],
+    ])
+    expect(elementVertexIndices(s, { shapeId: "b", kind: "face", index: n + 2 })).toEqual([3, 4, 5, 8])
+    expect(elementVertexIndices(s, { shapeId: "b", kind: "face", index: n + 4 })).toEqual([])
+    expect(elementVertexIndices(s, { shapeId: "b", kind: "face", index: "top" })).toHaveLength(9)
+    // A vertex move keeps the order (it depends on the topology only).
+    expect(topFaces(translateVertices(s, [8], { x: 3, y: 2, z: -1 })!)).toEqual(faces)
+    const down = (x: number, z: number) => ({ origin: { x, y: 50, z }, direction: { x: 0, y: -1, z: 0 } })
+    expect(rayHitShape(s, 0, down(15, 8))).toMatchObject({ face: "top", topFace: 2 })
+    expect(rayHitShape(s, 0, down(2, 2))).toMatchObject({ face: "top", topFace: 0 })
   })
 
   it("a loop through an inner edge runs both ways, with one parameter along the whole ring", () => {

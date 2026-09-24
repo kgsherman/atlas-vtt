@@ -120,6 +120,9 @@ describe("Picker", () => {
     expect(p.x).toBeCloseTo(70)
     expect(p.y).toBeCloseTo(60)
     expect(picker.project({ x: 500, y: 0, z: 25 }).visible).toBe(false)
+    // Off the canvas but in front of the camera: the tools' projector still projects it (edges with one end off screen stay pickable).
+    expect(picker.project({ x: 500, y: 0, z: 25 }).inFront).toBe(true)
+    expect(picker.projectForTools({ x: 500, y: 0, z: 25 })).toMatchObject({ visible: true, y: expect.closeTo(50) })
   })
 })
 

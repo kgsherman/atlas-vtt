@@ -272,7 +272,11 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
     return { x: b.x + b.w / 2, y: a.level.elevation + y / n, z: b.z + b.d / 2 }
   }
 
-  /** The gizmo handle under the cursor (null without a projector, a selection or a hit). */
+  /**
+   * The gizmo handle under the cursor (null without a projector, a selection or a hit). The rotate ring is a
+   * long thin target running across the shapes: in the vertex and edge modes a vertex or edge nearer the
+   * cursor than the ring takes the press instead.
+   */
   const gizmoHit = (e: ToolPointerEvent): { part: GizmoPart; at: Vec3 } | null => {
     const cursor = canvasOf(e)
     if (!cursor || !deps.project) return null
@@ -280,7 +284,16 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
     if (!at) return null
     const axis = hitGizmo(gizmoHandles(deps.project, at), cursor)
     if (axis) return { part: axis, at }
-    return ringDistancePx(gizmoRing(deps.project, at), cursor) <= GIZMO_HIT_RADIUS_PX ? { part: "rotate", at } : null
+    const ring = ringDistancePx(gizmoRing(deps.project, at), cursor)
+    if (!(ring <= GIZMO_HIT_RADIUS_PX)) return null
+    const s = store.getState()
+    const a = activeLevel(s)
+    const ray = rayOf(e)
+    if (a && ray && editMode(s) && s.toolSettings.terrain.element !== "face") {
+      const [el] = elementCandidates(e, ray, selectedShapes(activeSelection(s), levelShapes(a.level)), a.level)
+      if (el && el.distance < ring) return null
+    }
+    return { part: "rotate", at }
   }
 
   /** Candidates of the current element kind among the selected shapes, best first. */

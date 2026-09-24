@@ -199,7 +199,7 @@ function SingleShape({ shape, levelId }: { shape: TerrainShape; levelId: Id }) {
             </Badge>
             <OpBadge op={shape.op} />
             {plural(topVertexCount(shape), "vertex", "vertices")}
-            {shape.innerEdges?.length ? ` · ${plural(shape.innerEdges.length, "loop cut")}` : ""}
+            {shape.innerEdges?.length ? ` · ${plural(shape.innerEdges.length, "inner edge")}` : ""}
           </>
         }
       />

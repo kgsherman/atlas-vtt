@@ -299,8 +299,11 @@ export interface Engine {
   benchmarkQuality?(): Promise<Quality>
 
   pick(clientX: number, clientY: number, opts: PickOptions): PickResult
-  /** Project a world point to canvas-relative CSS pixels (for HTML labels). */
-  project(p: Vec3): { x: number; y: number; visible: boolean }
+  /**
+   * Project a world point to canvas-relative CSS pixels (for HTML labels). `visible`: in front of the camera
+   * and inside the canvas; `inFront`: in front of the camera (off-canvas points included).
+   */
+  project(p: Vec3): { x: number; y: number; visible: boolean; inFront?: boolean }
   /**
    * Where a token is drawn right now (world space, its base centre): mid-walk while it animates to a new
    * position, so HTML markers can follow it. null for unknown tokens.

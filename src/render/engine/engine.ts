@@ -289,7 +289,7 @@ export class AtlasEngine implements Engine {
       activeLevelId: () => this.activeLevelId(),
       worldPerPixel: () => this.controller.worldPerPixel(),
       worldPerPixelAt: (p) => this.worldPerPixelAt(p),
-      project: (p) => this.picker.project(p),
+      project: (p) => this.picker.projectForTools(p),
       fade: () => {
         const t = this.controller.getTarget()
         return { x: t.x, z: t.z, radius: this.controller.viewRadius() }
@@ -1536,7 +1536,7 @@ export class AtlasEngine implements Engine {
     return this.tokens.drawnAt(tokenId)
   }
 
-  project(p: Vec3): { x: number; y: number; visible: boolean } {
+  project(p: Vec3): { x: number; y: number; visible: boolean; inFront: boolean } {
     return this.picker.project(p)
   }
 

@@ -136,7 +136,11 @@ function ViewportBridge({
     })
     const unsubController = controller.subscribe(() => engine.setOverlays(controller.overlays()))
     controller.setTerrainPreview((levelId, heights, dirty) => engine.previewTerrain(levelId, heights, dirty))
-    controller.setProjector((p) => engine.project(p))
+    controller.setProjector((p) => {
+      // Tools need points off the canvas too (an edge with one end off screen): in front of the camera is enough.
+      const q = engine.project(p)
+      return { x: q.x, y: q.y, visible: q.inFront ?? q.visible }
+    })
     return () => {
       unsubStore()
       unsubController()

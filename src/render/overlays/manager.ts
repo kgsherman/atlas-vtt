@@ -64,8 +64,8 @@ export interface OverlayHost {
   /** Centre and radius for the grid fade. */
   fade(): { x: number; z: number; radius: number }
   /**
-   * World point → canvas-relative CSS px (Engine.project), for the terrain overlay's gizmo, which must
-   * match the tool's screen-space hit test. Absent: no gizmo is drawn.
+   * World point → canvas-relative CSS px, `visible` = in front of the camera (the tools' projector), for
+   * the terrain overlay's gizmo, which must match the tool's screen-space hit test. Absent: no gizmo is drawn.
    */
   project?(p: Vec3): { x: number; y: number; visible: boolean }
 }

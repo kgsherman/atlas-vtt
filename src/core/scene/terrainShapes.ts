@@ -38,7 +38,8 @@ export type TerrainElementMode = "vertex" | "edge" | "face"
 
 /**
  * An element of a terrain shape. Vertex k = top vertex k; edge k < n = top outline edge (k → k+1 mod n),
- * edge n + c = inner edge c (`innerEdges[c]`, a loop cut); face "top" = the top surface, face k = the side
+ * edge n + c = inner edge c (`innerEdges[c]`, a loop cut); face "top" = the whole top surface, face n + f =
+ * top face f of a cut top (`topFaces(shape)[f]`), face k < n = the side
  * quad under top edge k. Every element maps to a set of top-vertex indices (see `elementVertexIndices`).
  */
 export type TerrainElementRef = { shapeId: Id; kind: "vertex" | "edge"; index: number } | { shapeId: Id; kind: "face"; index: number | "top" }
@@ -512,25 +513,45 @@ export function remapInnerEdges(edges: readonly (readonly [number, number])[] | 
 
 /**
  * Faces of the top: the footprint cut by the inner edges, each a list of top vertex indices in footprint
- * order (outline edge k appears as k followed by k + 1). The whole footprint when there are no inner edges
+ * order (outline edge k appears as k followed by k + 1), each starting at its lowest index, sorted. The whole footprint when there are no inner edges
  * or they do not form a valid graph.
  */
 export function topFaces(shape: TopShape): number[][] {
   const n = shape.points.length
   const whole = [Array.from({ length: n }, (_, k) => k)]
   if (!shape.innerEdges || shape.innerEdges.length === 0) return whole
-  return planarFaces(topVertices(shape), n, shape.innerEdges) ?? whole
+  const faces = planarFaces(topVertices(shape), n, shape.innerEdges)
+  if (!faces) return whole
+  // A canonical order (each face from its lowest vertex, faces by their vertex lists) that depends on the
+  // topology only: face indices (top face elements) survive vertex moves.
+  const rotated = faces.map((f) => {
+    const i = f.indexOf(Math.min(...f))
+    return [...f.slice(i), ...f.slice(0, i)]
+  })
+  return rotated.sort((a, b) => {
+    for (let k = 0; k < Math.min(a.length, b.length); k++) if (a[k] !== b[k]) return a[k] - b[k]
+    return a.length - b.length
+  })
 }
 
-/** Top triangles (index triples into topVertices, like triangulateFootprint): each face ear-clipped on its own. */
-function triangulateTop(shape: TopShape): number[] {
-  if (!shape.innerEdges || shape.innerEdges.length === 0) return triangulateFootprint(shape.points)
-  const verts = topVertices(shape)
-  const out: number[] = []
-  for (const face of topFaces(shape)) {
-    for (const k of triangulateFootprint(face.map((i) => verts[i]))) out.push(face[k])
+/**
+ * Top triangles (index triples into topVertices, like triangulateFootprint): each face ear-clipped on its
+ * own; `face[t]` is the topFaces index of triangle t.
+ */
+function triangulateTop(shape: TopShape): { tris: number[]; face: number[] } {
+  if (!shape.innerEdges || shape.innerEdges.length === 0) {
+    const tris = triangulateFootprint(shape.points)
+    return { tris, face: new Array<number>(tris.length / 3).fill(0) }
   }
-  return out
+  const verts = topVertices(shape)
+  const tris: number[] = []
+  const face: number[] = []
+  topFaces(shape).forEach((f, fi) => {
+    const local = triangulateFootprint(f.map((i) => verts[i]))
+    for (const k of local) tris.push(f[k])
+    for (let t = 0; t < local.length; t += 3) face.push(fi)
+  })
+  return { tris, face }
 }
 
 /** Edge elements of a shape: its outline edges plus its inner edges. */
@@ -602,6 +623,8 @@ const TRI_STRIDE = 16
 
 interface ShapeGeometry {
   tris: number[]
+  /** topFaces index of each triangle of `tris`. */
+  triFace: number[]
   /** Bounding box of the (finite) footprint; null without finite points. */
   bounds: Rect | null
   /** Triangles with doubled area > MIN_TRIANGLE_D, packed (TRI_STRIDE floats each). */
@@ -616,7 +639,7 @@ function shapeGeometry(shape: TerrainShape): ShapeGeometry {
   if (hit) return hit
   const pts = shape.points
   const verts = topVertices(shape)
-  const tris = triangulateTop(shape)
+  const { tris, face: triFace } = triangulateTop(shape)
   let minX = Infinity
   let minZ = Infinity
   let maxX = -Infinity
@@ -658,7 +681,7 @@ function shapeGeometry(shape: TerrainShape): ShapeGeometry {
       Math.max(a.z, b.z, c.z) + INSIDE_EPS
     )
   }
-  const geom = { tris, bounds, prepared: Float64Array.from(packed) }
+  const geom = { tris, triFace, bounds, prepared: Float64Array.from(packed) }
   geometryCache.set(shape, geom)
   return geom
 }
@@ -698,6 +721,11 @@ function canonicalHeight(v: number): number {
 /** The top's triangles (index triples into topVertices, cross(b − a, c − a) > 0 in (x, z)): the bake's triangulation, split along the inner edges. Cached; do not mutate. */
 export function shapeTopTriangles(shape: TerrainShape): readonly number[] {
   return shapeGeometry(shape).tris
+}
+
+/** The topFaces index of each of shapeTopTriangles' triangles. Cached; do not mutate. */
+export function shapeTopTriangleFaces(shape: TerrainShape): readonly number[] {
+  return shapeGeometry(shape).triFace
 }
 
 /** Bounding box of a shape's footprint (x, z world feet). */
@@ -1394,7 +1422,8 @@ export function polygonShape(id: Id, footprint: readonly Vec2[], y0: number, hei
 
 /**
  * Top vertex indices (into topVertices) of an element: vertex k → [k]; edge k → its two ends
- * (shapeEdgeEnds); side face k → [k, k+1 mod n]; top face → all. [] when out of range.
+ * (shapeEdgeEnds); side face k < n → [k, k+1 mod n]; face n + f → top face f's vertices (topFaces);
+ * face "top" → all. [] when out of range.
  */
 export function elementVertexIndices(shape: TerrainShape, ref: TerrainElementRef): number[] {
   const n = shape.points.length
@@ -1404,7 +1433,8 @@ export function elementVertexIndices(shape: TerrainShape, ref: TerrainElementRef
   if (typeof k !== "number" || !Number.isInteger(k) || k < 0) return []
   if (ref.kind === "edge") return shapeEdgeEnds(shape, k) ?? []
   if (ref.kind === "vertex") return k < count ? [k] : []
-  return k < n ? [k, (k + 1) % n] : []
+  if (k < n) return [k, (k + 1) % n]
+  return topFaces(shape)[k - n]?.slice() ?? []
 }
 
 /** The shape with its top vertices replaced (`verts` in topVertices order, same count) and `base`; null when invalid. */
@@ -1638,11 +1668,15 @@ export function collapseEdge(shape: TerrainShape, edgeIndex: number): TerrainSha
 
 /**
  * Nearest hit (t ≥ 0, in units of `ray.direction`) of the ray with the shape's prism at level `elevation`:
- * the top triangles (face "top"; a carve's top is its pit floor) and the vertical side quads (face k under
+ * the top triangles (face "top", with `topFace` its topFaces index; a carve's top is its pit floor) and the vertical side quads (face k under
  * top edge k, spanning y between the base and the top along the edge). The base cap is not an element and
  * is never hit. Null on a miss or non-finite input.
  */
-export function rayHitShape(shape: TerrainShape, elevation: number, ray: { origin: Vec3; direction: Vec3 }): { t: number; face: number | "top" } | null {
+export function rayHitShape(
+  shape: TerrainShape,
+  elevation: number,
+  ray: { origin: Vec3; direction: Vec3 }
+): { t: number; face: number | "top"; topFace: number } | null {
   const o = ray.origin
   const d = ray.direction
   if (![o.x, o.y, o.z, d.x, d.y, d.z, elevation].every(Number.isFinite)) return null
@@ -1650,7 +1684,8 @@ export function rayHitShape(shape: TerrainShape, elevation: number, ray: { origi
   const n = pts.length
   let bestT = Infinity
   let bestFace: number | "top" = "top"
-  const { tris } = shapeGeometry(shape)
+  let bestTop = 0
+  const { tris, triFace } = shapeGeometry(shape)
   const verts = topVertices(shape)
   const eps = 1e-9
   for (let t = 0; t < tris.length; t += 3) {
@@ -1685,6 +1720,7 @@ export function rayHitShape(shape: TerrainShape, elevation: number, ray: { origi
     if (hit >= 0 && hit < bestT) {
       bestT = hit
       bestFace = "top"
+      bestTop = triFace[t / 3]
     }
   }
   const baseY = elevation + shape.base
@@ -1708,5 +1744,5 @@ export function rayHitShape(shape: TerrainShape, elevation: number, ray: { origi
     bestT = hit
     bestFace = k
   }
-  return Number.isFinite(bestT) ? { t: bestT, face: bestFace } : null
+  return Number.isFinite(bestT) ? { t: bestT, face: bestFace, topFace: bestFace === "top" ? bestTop : 0 } : null
 }

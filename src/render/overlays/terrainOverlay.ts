@@ -36,7 +36,17 @@
 import * as THREE from "three"
 
 import { gizmoHandles, gizmoRing, GIZMO_RING_SEGMENTS, ringPoint, type GizmoAxis, type Projector } from "@/core/geometry/gizmo"
-import { shapeEdgeCount, shapeEdgeEnds, shapeTopTriangles, signedArea, topVertexCount, topVertices, type TerrainElementRef } from "@/core/scene/terrainShapes"
+import {
+  shapeEdgeCount,
+  shapeEdgeEnds,
+  shapeTopTriangleFaces,
+  shapeTopTriangles,
+  signedArea,
+  topFaces,
+  topVertexCount,
+  topVertices,
+  type TerrainElementRef,
+} from "@/core/scene/terrainShapes"
 import type { Id, TerrainShape } from "@/core/scene/types"
 
 import type { TerrainOverlay } from "../contracts"
@@ -322,12 +332,26 @@ function topEdgePair(shape: TerrainShape, elevation: number, k: number): number[
   return [a.x, elevation + a.y, a.z, b.x, elevation + b.y, b.z]
 }
 
-/** Outline of face `face` (segment pairs): the top outline, or side k's quad without zero-length sides. */
+/**
+ * Outline of face `face` (segment pairs): the top outline, top face n + f's polygon (a cut top), or side
+ * k's quad without zero-length sides.
+ */
 function faceOutline(shape: TerrainShape, elevation: number, face: number | "top"): number[] {
   const n = shape.points.length
   if (face === "top") {
     const out: number[] = []
     for (let k = 0; k < n; k++) out.push(...topEdgePair(shape, elevation, k))
+    return out
+  }
+  if (face >= n) {
+    const verts = topVertices(shape)
+    const f = topFaces(shape)[face - n] ?? []
+    const out: number[] = []
+    f.forEach((k, i) => {
+      const a = verts[k]
+      const b = verts[f[(i + 1) % f.length]]
+      out.push(a.x, elevation + a.y, a.z, b.x, elevation + b.y, b.z)
+    })
     return out
   }
   const a = shape.points[face]
@@ -346,6 +370,16 @@ function faceOutline(shape: TerrainShape, elevation: number, face: number | "top
     if (Math.abs(p[1] - q[1]) + Math.abs(p[0] - q[0]) + Math.abs(p[2] - q[2]) > FLAT_EPS) out.push(...p, ...q)
   }
   return out
+}
+
+/** The prism's top triangles (9 floats each) that belong to top face `f` (topFaces order). */
+function topFaceTriangles(shape: TerrainShape, prism: ShapePrism, f: number): Float32Array {
+  const faceOf = shapeTopTriangleFaces(shape)
+  const out: number[] = []
+  faceOf.forEach((g, i) => {
+    if (g === f) for (let k = i * 9; k < i * 9 + 9; k++) out.push(prism.top[k])
+  })
+  return Float32Array.from(out)
 }
 
 function concat(parts: readonly ArrayLike<number>[]): Float32Array {
@@ -801,9 +835,12 @@ function addElements(
       if (!shape) continue
       const n = shape.points.length
       if (ref.kind === "face") {
-        if (ref.index !== "top" && !(Number.isInteger(ref.index) && ref.index >= 0 && ref.index < n)) continue
+        const topCount = shape.innerEdges?.length ? topFaces(shape).length : 0
+        if (ref.index !== "top" && !(Number.isInteger(ref.index) && ref.index >= 0 && ref.index < n + topCount)) continue
         const prism = shapePrism(shape, elevation, spacing)
-        faces.push(ref.index === "top" ? prism.top : prism.sides.subarray(prism.sideStart[ref.index], prism.sideStart[ref.index + 1]))
+        if (ref.index === "top") faces.push(prism.top)
+        else if (ref.index < n) faces.push(prism.sides.subarray(prism.sideStart[ref.index], prism.sideStart[ref.index + 1]))
+        else faces.push(topFaceTriangles(shape, prism, ref.index - n))
         outlines.push(...faceOutline(shape, elevation, ref.index))
         continue
       }

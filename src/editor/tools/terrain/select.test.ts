@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
-import { gizmoHandles, gizmoRing, heightFollowParams, ringPoint, type GizmoAxis } from "@/core/geometry/gizmo"
-import { blockShape, cylinderShape, rotateShape } from "@/core/scene/terrainShapes"
+import { gizmoHandles, gizmoRing, heightFollowParams, ringDistancePx, ringPoint, type GizmoAxis } from "@/core/geometry/gizmo"
+import { blockShape, cylinderShape, loopCut, rotateShape, topFaces } from "@/core/scene/terrainShapes"
 import type { Vec3 } from "@/core/scene/types"
 
 import type { ShortcutAction } from "../../shortcuts"
@@ -698,6 +698,63 @@ describe("terrain select: advanced mode", () => {
     expect(t.sel()?.elements.map((e) => e.index)).toEqual([1, 2, 3])
     click(t, t.at(80, 0, 80))
     expect(t.sel()).toMatchObject({ shapeIds: [a], elements: [] })
+  })
+
+  it("an edge under the rotate ring takes the click when it is nearer than the ring", () => {
+    const t = terrainHarness({ sub: "select" })
+    // A 16 × 16 block over (60, 60)–(76, 76); edge 1 runs up x = 76, edge 2 back along z = 76.
+    const c = t.add(blockShape("c", { x: 60, z: 60, w: 16, d: 16 }, 0, 5, 0))
+    click(t, t.at(68, 5, 68))
+    act(t, { type: "terrain-advanced" }, "Tab")
+    act(t, { type: "terrain-element", element: "edge" }, "2")
+    click(t, t.at(68, 5, 76))
+    expect(t.store.getState().terrainSelection?.elements).toEqual([{ shapeId: c, kind: "edge", index: 2 }])
+    // The gizmo sits at edge 2's middle; its ring (8.8 ft at this zoom) crosses edge 1.
+    const ring = gizmoRing(t.camera.project, { x: 68, y: 5, z: 76 })
+    let hit: { x: number; y: number } | null = null
+    for (let i = 1; i < 160 && !hit; i++) {
+      const q = t.camera.project({ x: 76, y: 5, z: 60 + i / 10 })
+      const d = ringDistancePx(ring, q)
+      if (d > 2 && d < 6) hit = { x: q.x, y: q.y }
+    }
+    expect(hit).not.toBeNull()
+    click(t, t.px(hit!.x, hit!.y))
+    expect(t.store.getState().terrainSelection?.elements).toEqual([{ shapeId: c, kind: "edge", index: 1 }])
+  })
+
+  it("faces of a cut top are picked, box selected and moved one by one", () => {
+    const t = advanced()
+    const { a, store, levelId } = t
+    // Cut the 10 × 10 block (y 5) left to right, then top to bottom: four top faces around (15, 15).
+    const once = loopCut(t.shape(a), 1, [0.5])!.shape
+    const cut = loopCut(once, 0, [0.5])!.shape
+    expect(store.getState().applyTerrainEdit(levelId, { upsert: [cut] }, "Cut")).toBe(true)
+    const faces = topFaces(cut)
+    expect(faces).toHaveLength(4)
+    const n = cut.points.length
+    act(t, { type: "terrain-element", element: "face" }, "3")
+    // A click on the top picks the face under the pointer (element n + f), not the whole top.
+    click(t, t.at(12, 5, 12))
+    const [picked] = t.sel()!.elements
+    expect(picked).toMatchObject({ shapeId: a, kind: "face" })
+    const f = (picked.index as number) - n
+    const corners = faces[f].map((k) => [t.shape(a).points[k] ?? t.shape(a).innerPoints![k - n]]).flat()
+    expect(corners.every((p) => p.x <= 15 && p.z <= 15)).toBe(true)
+    // Its overlay highlight is that face only.
+    expect(t.overlay().elements?.selected).toEqual([picked])
+    // Raised with the Y arrow: only that quarter's vertices move (the crossing and three on the outline).
+    const at = { x: 12.5, y: 5, z: 12.5 }
+    const arrow = onArrow(t, at, "y")
+    t.tool.onPointerDown!(arrow)
+    t.tool.onPointerMove!(raised(t, arrow, at, 2))
+    t.tool.onPointerUp!(raised(t, arrow, at, 2))
+    const moved = [...t.shape(a).points, ...t.shape(a).innerPoints!].filter((p) => p.y === 7)
+    expect(moved).toHaveLength(4)
+    // Select all takes the four top faces and the sides, not the whole top.
+    act(t, { type: "select-all" }, "a")
+    const all = t.sel()!.elements.map((e) => e.index)
+    expect(all).not.toContain("top")
+    expect(all.filter((i) => (i as number) >= n)).toHaveLength(4)
   })
 
   it("Delete dissolves vertices / collapses edges (a shape keeps 3 vertices); faces need object mode", () => {

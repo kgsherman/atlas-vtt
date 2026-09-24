@@ -106,7 +106,7 @@ export function createLoopCutSubTool(ctx: TerrainToolContext): SubTool {
       if (h) {
         const shape = record[h.shapeId]
         const p = { x: h.point.x, z: h.point.z }
-        const edge = h.face === "top" ? sideNear(shape, p) : h.face
+        const edge = typeof h.face === "number" && h.face < shape.points.length ? h.face : sideNear(shape, p)
         if (edge !== null) return { levelId: a.levelId, shapeId: shape.id, edge, t: paramOn(shape, edge, p) }
       }
     }

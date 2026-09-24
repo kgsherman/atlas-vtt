@@ -450,6 +450,26 @@ describe("terrain overlay", () => {
     res.dispose()
   })
 
+  it("highlights one face of a cut top, not the whole top", () => {
+    const once = loopCut(blockShape("k", { x: 0, z: 0, w: 20, d: 10 }, 0, 4, 0), 1, [0.5])!.shape
+    const cut = loopCut(once, 0, [0.5])!.shape
+    const n = cut.points.length
+    const res = new TerrainOverlayResources()
+    const faceMesh = (index: number | "top") => {
+      const root = buildTerrainOverlay(
+        overlay({ shapes: [cut], selectedShapeIds: ["k"], elements: { mode: "face", selected: [{ shapeId: "k", kind: "face", index }], hover: null } }),
+        0,
+        SPACING,
+        res
+      )
+      return meshes(root).find((m) => m.renderOrder === TERRAIN_OVERLAY_ORDER.face)!
+    }
+    // A quarter of the top: two triangles (6 vertices); the whole top: eight.
+    expect(faceMesh(n).geometry.getAttribute("position").count).toBe(6)
+    expect(faceMesh("top").geometry.getAttribute("position").count).toBe(24)
+    res.dispose()
+  })
+
   it("shows the advanced mode's vertices and highlights selected and hovered elements", () => {
     const res = new TerrainOverlayResources()
     const a = block("a")
