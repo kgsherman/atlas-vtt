@@ -65,6 +65,7 @@ export function createOverlayComposer(): OverlayComposer {
         brush: parts.brush,
         label: parts.label,
         marquee: parts.marquee,
+        outline: parts.outline,
       }
     },
   }

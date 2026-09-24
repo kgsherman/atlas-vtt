@@ -2,7 +2,7 @@
  * Terrain editing mode (ARCHITECTURE §7 "Terrain tools", DESIGN §3): ToolId "terrain" with the sub-tools of
  * toolSettings.terrain.sub —
  *  - brush: paints the painted base under the shapes (terrain/brush.ts);
- *  - block / ramp / cylinder: Blender-style creation of terrain shapes (terrain/create.ts);
+ *  - block / ramp / cylinder / polygon: Blender-style creation of terrain shapes (terrain/create.ts);
  *  - select: selection, moves and the advanced vertex / edge / face mode (terrain/select.ts, actions.ts).
  * The renderer shows the BAKED document terrain; this tool's preview is always a TerrainOverlay with the
  * active level's shapes (drafts and dragged versions substituted), the selection, elements, gizmo, brush
@@ -82,6 +82,7 @@ export function createTerrainTool(deps: ToolDeps): TerrainTool {
     block: createShapeSubTool(ctx, "block"),
     ramp: createShapeSubTool(ctx, "ramp"),
     cylinder: createShapeSubTool(ctx, "cylinder"),
+    polygon: createShapeSubTool(ctx, "polygon"),
     select: createSelectSubTool(ctx, actions),
   }
   const composer = createOverlayComposer()
@@ -197,7 +198,9 @@ export function createTerrainTool(deps: ToolDeps): TerrainTool {
           else actions.rotate(k.turns)
           return true
         case "delete":
-          if (!busy) actions.delete()
+          // Mid-gesture it is the sub-tool's (the polygon's Backspace removes its last corner).
+          if (busy) sub.key(k)
+          else actions.delete()
           return true
         case "duplicate":
           if (!busy) actions.duplicate()
@@ -235,6 +238,8 @@ export function createTerrainTool(deps: ToolDeps): TerrainTool {
     preview,
 
     cursor: () => current().cursor(),
+
+    cursorKeys: () => (store.getState().readOnly ? null : (current().cursorKeys?.() ?? null)),
 
     hint() {
       if (notice) return notice

@@ -195,9 +195,10 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
 
 ## 3. Scene document & versioning
 
-- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 3` (v2 added the
+- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 4` (v2 added the
   optional `Token.model`, the v1 → v2 migration is the identity; v3: terrain shapes, `Level.terrainEdits`,
-  `WallObject.followTerrain`).
+  `WallObject.followTerrain`; v4 widened enums only, heightmap resolutions 8 and 16 and the `polygon` shape
+  kind, so the v3 → v4 migration is the identity and older apps open v4 documents read-only as too-new).
 - `Token.model` (optional): the 3D figure the token is drawn with, a reference `free:<assetId>` into the
   free asset catalog (category `token-models`, §6.4; `core/scene/tokenModel.ts`). The schema accepts only
   that form (`^free:[a-z0-9][a-z0-9-]{0,63}$`), never a URL, so a document cannot make clients fetch an
@@ -212,7 +213,11 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
     `imageUrl` http(s) or an absolute path, |elevation| and object y ≤ 1000 ft;
   - points and rects within the grid extent ± 50 ft (`coordMargin`); connector rects cell-aligned, ladders
     exactly 1×1 cell; attached-light offsets ≤ 50 ft;
-  - heightmap resolution ∈ {1,2,4}; chunk keys canonical `^(0|[1-9]\d*),(0|[1-9]\d*)$` and inside the grid's
+  - heightmap resolution ∈ {1,2,4,8,16} (`TERRAIN_RESOLUTIONS`), and at most
+    `MAX_TERRAIN_SAMPLES_PER_SIDE` = 800 lattice intervals per grid side (`core/scene/heightmap`
+    `terrainResolutionFits`: 8× on grids up to 100 cells, 16× up to 50, so no level has more samples than a
+    200-cell grid at 4×; the store refuses a resolution that does not fit, clamps grid resizes to the finest
+    level's limit, and the Levels / Scene panels disable or cap accordingly); chunk keys canonical `^(0|[1-9]\d*),(0|[1-9]\d*)$` and inside the grid's
     chunk range; exact base64 / byte length; finite samples within ±500 ft;
   - walls require `followTerrain: boolean`; `terrainProfile` (player scenes only, §6.2) is rejected;
   - terrain edits (below): ≤ 1000 shapes per level, 3..64 points per shape, ≤ 16000 points per level
@@ -248,7 +253,7 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
 
 `Level.heightmap` stays THE terrain for every consumer (render, occlusion, vision, movement, players).
 `Level.terrainEdits` (DM-only editing data, never sent to players or to the vision worker) holds what it is
-baked from: `shapes` (`TerrainShape`: `kind` block / ramp / cylinder is a label; `op` add / carve; integer
+baked from: `shapes` (`TerrainShape`: `kind` block / ramp / cylinder / polygon is a label; `op` add / carve; integer
 `order`; `points` = simple polygon footprint in canonical orientation, each with its top height y relative
 to the elevation; `base`, the other end of the prism's sides in the editor, not baked) and `baseChunks`
 (the painted terrain, "base", where it differs from the baked heightmap).
@@ -291,8 +296,10 @@ to the elevation; `base`, the other end of the prism's sides in the editor, not 
   terrain goes through the editor store's terrain actions (§7). `hasPaintedBase(level)`: the base is non-zero
   somewhere (reads chunk keys only, by the invariant; nothing is decoded).
 - Factories: `blockShape`, `rampShape` (dir 0 = +Z, 1 = +X, 2 = −Z, 3 = −X ascending; low edge y0, high
-  edge y0 + height), `cylinderShape` (a 3..64-gon inscribed in the circle); base y0, op carve when the
-  height is negative. `nextShapeOrder` = max order + 1.
+  edge y0 + height), `cylinderShape` (a 3..64-gon inscribed in the circle), `polygonShape` (a flat top
+  over a drawn footprint, stored canonical); base y0, op carve when the height is negative. Factories do not
+  validate (`isSimplePolygon`, `isValidTerrainShape`; `isSimplePolyline` checks an open chain that is still
+  being drawn). `nextShapeOrder` = max order + 1.
 
 ---
 
@@ -1137,6 +1144,18 @@ script checks that it is off.
     height phase.
     Cylinders have `cylinderSides` (6..64, default 24). The new shape (order = max + 1) is selected and the
     sub-tool stays.
+  - Polygon: the base phase is a points phase. Each click places a corner (snapped like block corners, Alt =
+    free) on the plane through the ground under the first one; a corner whose edge would cross the chain is
+    refused with a notice, Backspace / Delete removes the last corner (the last one ends the gesture).
+    Right-click, Enter, a double-click or a click on the first corner (same snapped point or within 10 px)
+    finish when there are ≥ 3 corners and the closed outline is simple, and the height phase follows,
+    anchored at the corner nearest the pointer. The overlay's `outline` draws the chain and the pending
+    corner with dots, the closing edge dimmed (red while it would cross), a zero-height fill once the outline
+    closes, and the pending edge's length. Idle, a dot shows where the first corner lands. Its keys float
+    next to the cursor (`Tool.cursorKeys` → `EditorController.toolCursorKeys` →
+    `components/editor/CursorKeys`, mounted in the editor and host viewports: rows of mouse input and keymap
+    commands shown with their current keys, placed by writing a transform on pointer moves, flipped left
+    near the right edge, hidden off the canvas).
   - Select, object mode: click selects (Shift / Ctrl toggles; shapes are hit by ray, nearest first), a
     click on nothing clears, a drag on nothing marquee-selects in screen space, a press on a shape selects
     and drags it. A press without Shift / Ctrl on an already selected shape keeps it when it is, in this
@@ -1269,7 +1288,7 @@ script checks that it is off.
   remapped keys work), then `runShortcut`. Tool-only actions (`confirm`, `terrain-advanced`,
   `terrain-element`, `axis`) do nothing in `runShortcut`, so an unused key keeps its browser default.
   Commands may declare `repeat: false` (fire once per press). The "Terrain" group: Q select, Shift+B brush (B toggles dark vision),
-  E block → ramp → cylinder (from another tool it re-enters the last creation sub-tool), Tab advanced mode,
+  E block → ramp → cylinder → polygon (from another tool it re-enters the last creation sub-tool), Tab advanced mode,
   1 / 2 / 3 element kind, X / Y / Z axis constraint (all but Q and Shift+B without auto-repeat); Enter confirms a
   shape's height (`confirm`). Alt for free placement comes from the library's key-state tracker. Map views turn off the theme provider's "D" hotkey
   (`useSuppressThemeHotkey`), because D pans the camera there. W A S D are the cameras' own held-key pan

@@ -121,6 +121,13 @@ export interface TerrainOverlay {
    * Absent or null: none.
    */
   marquee?: { from: { x: number; y: number }; to: { x: number; y: number } } | null
+  /**
+   * Outline of a polygon being drawn (world space): the corners placed so far and the pending one, joined
+   * in order, with vertex dots; `valid` false draws the open chain red. `closing`: the edge from the last
+   * point back to the first, drawn dimmed ("ok") or red ("crossing": it would cross the outline); "none"
+   * with fewer than three points. Absent or null: none.
+   */
+  outline?: { points: readonly Vec3[]; valid: boolean; closing: "none" | "ok" | "crossing" } | null
 }
 
 export type ToolPreview =

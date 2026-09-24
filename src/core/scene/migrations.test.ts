@@ -72,15 +72,15 @@ function v1Doc(): Record<string, any> {
 
 describe("migrateToCurrent", () => {
   it("has one migration per version step", () => {
-    expect(SCENE_SCHEMA_VERSION).toBe(3)
-    expect(Object.keys(MIGRATIONS)).toEqual(["1", "2"])
+    expect(SCENE_SCHEMA_VERSION).toBe(4)
+    expect(Object.keys(MIGRATIONS)).toEqual(["1", "2", "3"])
   })
 
   it("migrates v1 documents (no token models) to v2 unchanged", () => {
     const doc = { schemaVersion: 1, name: "x", tokens: { t: { id: "t" } } }
     expect(MIGRATIONS[1](structuredClone(doc))).toEqual(doc)
     const res = migrateToCurrent(doc)
-    expect(res).toEqual({ ok: true, doc: { schemaVersion: 3, name: "x", tokens: { t: { id: "t" } } }, from: 1 })
+    expect(res).toEqual({ ok: true, doc: { schemaVersion: 4, name: "x", tokens: { t: { id: "t" } } }, from: 1 })
     expect(doc.schemaVersion).toBe(1)
   })
 
@@ -167,7 +167,7 @@ describe("v2 → v3 (walls follow terrain)", () => {
     expect(res.ok).toBe(true)
     if (!res.ok) return
     expect(res.migratedFrom).toBe(1)
-    expect(res.scene.schemaVersion).toBe(3)
+    expect(res.scene.schemaVersion).toBe(4)
     expect(res.scene.objects.wallG).toMatchObject({ type: "wall", followTerrain: true })
     expect(res.scene.objects.wallU).toMatchObject({ type: "wall", followTerrain: true, name: "Upper wall" })
     // Nothing else changes: levels keep no terrain edits, other objects are identical.
@@ -206,5 +206,19 @@ describe("v2 → v3 (walls follow terrain)", () => {
     const res = parseScene({ ...v1Doc(), objects: { ...v1Doc().objects, wallG: { ...v1Doc().objects.wallG, height: -1 } } })
     expect(res.ok).toBe(false)
     if (!res.ok) expect(res.issues.join("\n")).toMatch(/objects\.wallG\.height/)
+  })
+})
+
+describe("v3 → v4 (resolutions 8 / 16, polygon shapes)", () => {
+  it("leaves v3 documents unchanged", () => {
+    const v3: Record<string, any> = { ...(MIGRATIONS[2](v1Doc()) as Record<string, any>), schemaVersion: 3 }
+    expect(MIGRATIONS[3](structuredClone(v3))).toEqual(v3)
+    const res = parseScene(v3)
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.migratedFrom).toBe(3)
+    expect(res.scene.schemaVersion).toBe(4)
+    expect(res.scene.levels).toEqual(v3.levels)
+    expect(res.scene.objects).toEqual(v3.objects)
   })
 })

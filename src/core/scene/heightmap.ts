@@ -3,10 +3,35 @@
  * everywhere (sampling, occlusion heightfields, render meshes): each lattice quad is split into
  * two triangles along the diagonal from sample (sx, sz) to (sx+1, sz+1).
  */
-import { HEIGHTMAP_CHUNK_CELLS, type GridSettings, type Heightmap, type Rect } from "./types"
+import { HEIGHTMAP_CHUNK_CELLS, type GridSettings, type Heightmap, type Rect, type TerrainResolution } from "./types"
 
 /** Heightmap resolution given to levels that get terrain for the first time (samples per cell). */
 export const DEFAULT_TERRAIN_RESOLUTION: Heightmap["resolution"] = 2
+
+/**
+ * Most lattice intervals along either grid axis (the largest 200-cell grid at resolution 4). Finer
+ * resolutions are limited to smaller grids so a level never has more samples per side than that: 8× up to
+ * 100 cells, 16× up to 50 (render meshes, occlusion heightfields and payload sizes stay as tested).
+ */
+export const MAX_TERRAIN_SAMPLES_PER_SIDE = 800
+
+/** Largest grid width / depth (cells) a heightmap of `resolution` supports. */
+export function maxCellsForResolution(resolution: number): number {
+  return Math.floor(MAX_TERRAIN_SAMPLES_PER_SIDE / resolution)
+}
+
+/** Whether a heightmap of `resolution` fits the grid (see MAX_TERRAIN_SAMPLES_PER_SIDE). */
+export function terrainResolutionFits(grid: Pick<GridSettings, "width" | "depth">, resolution: number): boolean {
+  const max = maxCellsForResolution(resolution)
+  return grid.width <= max && grid.depth <= max
+}
+
+/** The finest heightmap resolution among the levels (null: no level has terrain). */
+export function finestTerrainResolution(levels: Readonly<Record<string, { heightmap: Heightmap | null }>>): TerrainResolution | null {
+  let best: TerrainResolution | null = null
+  for (const l of Object.values(levels)) if (l.heightmap && (best === null || l.heightmap.resolution > best)) best = l.heightmap.resolution
+  return best
+}
 
 export function bytesToBase64(bytes: Uint8Array): string {
   let binary = ""

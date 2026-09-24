@@ -3,7 +3,7 @@
  */
 import { createHeightmap, sampleCounts, writeHeights } from "../scene/heightmap"
 import { createLevel, createScene } from "../scene/factory"
-import type { Id, Level, Scene, SceneObject } from "../scene/types"
+import type { Id, Level, Scene, SceneObject, TerrainResolution } from "../scene/types"
 
 export function flatScene(width = 20, depth = 20): { scene: Scene; levelId: Id } {
   const scene = createScene({ width, depth })
@@ -22,7 +22,7 @@ export function addLevel(scene: Scene, partial: Partial<Level>): Level {
 }
 
 /** Give a level a heightmap whose relative height at lattice point (x, z) is f(x, z). */
-export function paintHeightmap(scene: Scene, levelId: Id, f: (x: number, z: number) => number, resolution: 1 | 2 | 4 = 2): void {
+export function paintHeightmap(scene: Scene, levelId: Id, f: (x: number, z: number) => number, resolution: TerrainResolution = 2): void {
   const level = scene.levels[levelId]
   const hm = level.heightmap ?? createHeightmap(resolution)
   const { samplesX, samplesZ } = sampleCounts(scene.grid, hm.resolution)

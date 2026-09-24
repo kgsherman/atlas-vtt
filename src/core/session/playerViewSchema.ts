@@ -6,13 +6,14 @@
 import { z } from "zod"
 
 import { TOKEN_MODEL_REF_RE } from "../scene/tokenModel"
+import { TERRAIN_RESOLUTIONS } from "../scene/types"
 import { PLAYER_VIEW_VERSION, type PlayerView } from "./types"
 
 const MAX_ID = 64
 const MAX_STRING = 2000
 /**
  * Max entries of PlayerWall.terrainProfile (one per base knot of the piece: ~3200 for a diagonal across the
- * largest grid at resolution 4; only walls reaching far past the grid on tiny cells get more). The filter
+ * largest lattice, core/scene/heightmap MAX_TERRAIN_SAMPLES_PER_SIDE; only walls reaching far past the grid on tiny cells get more). The filter
  * omits longer profiles; the client then stands the piece on its own (clipped) terrain.
  */
 export const MAX_TERRAIN_PROFILE = 4096
@@ -209,7 +210,7 @@ const level = z.strictObject({
   elevation: num,
   height: num,
   floorThickness: num,
-  terrainResolution: z.union([z.literal(1), z.literal(2), z.literal(4), z.null()]),
+  terrainResolution: z.union([...TERRAIN_RESOLUTIONS.map((r) => z.literal(r)), z.null()]),
 })
 
 const grid = z.strictObject({

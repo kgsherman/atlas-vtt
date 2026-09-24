@@ -1,5 +1,5 @@
 /**
- * Shape creation sub-tools — block, ramp, cylinder (DESIGN §3.3), Blender style:
+ * Shape creation sub-tools — block, ramp, cylinder, polygon (DESIGN §3.3), Blender style:
  *  1. base: press and drag on the level (block / ramp corners snap like floor edges, the cylinder's centre
  *     with the snap mode, its radius to half cells; Alt = free); the drag runs on the horizontal plane
  *     through the ground at the first corner, never on the (previewed) terrain. A click makes a one-cell base
@@ -12,13 +12,29 @@
  *     cursor (at the draft's corner, or on the pointer ray where the corner barely moves on screen).
  *  3. confirm with a click or Enter (one undo step through store.applyTerrainEdit; the new shape is
  *     selected); right-click or Escape cancel. R / Shift+R turn a ramp's slope during the height phase.
+ *
+ * The polygon replaces step 1 with a points phase: each click places a corner (snapped like block corners,
+ * Alt = free) on the horizontal plane through the ground at the first one; Backspace / Delete removes the
+ * last corner; right-click, Enter, a double-click or a click on the first corner finish the outline (≥ 3
+ * corners, not crossing itself) and move on to the height, anchored at the corner nearest the pointer. A
+ * corner whose edge would cross the outline is refused. The keys ride next to the cursor (cursorKeys).
  */
 import { cellOf, cellRect, snapPoint } from "@/core/grid/grid"
 import { closestPointOnAxis, heightFromPointer, type HeightFollowState } from "@/core/geometry/gizmo"
 import { newId } from "@/core/scene/factory"
 import { MAX_TERRAIN_HEIGHT } from "@/core/scene/heightmapBrush"
 import { levelGround, rectIntersection } from "@/core/scene/queries"
-import { blockShape, cylinderShape, nextShapeOrder, rampShape, shapeBounds } from "@/core/scene/terrainShapes"
+import {
+  blockShape,
+  cylinderShape,
+  isSimplePolygon,
+  isSimplePolyline,
+  nextShapeOrder,
+  polygonShape,
+  rampShape,
+  shapeBounds,
+  TERRAIN_SHAPE_MAX_POINTS,
+} from "@/core/scene/terrainShapes"
 import type { Id, Rect, TerrainShape, Vec2, Vec3 } from "@/core/scene/types"
 
 import type { TerrainSubTool } from "../../settings"
@@ -38,7 +54,7 @@ import {
   type Ray,
 } from "../../terrainMath"
 import { rectFromCorners } from "../shared"
-import type { ToolPointerEvent } from "../types"
+import type { CursorKey, ToolPointerEvent } from "../types"
 import {
   activeLevel,
   cameraDragging,
@@ -54,7 +70,7 @@ import {
 } from "./context"
 import { createShapePreview, type ShapePreview } from "./lattice"
 
-export type CreateKind = Extract<TerrainSubTool, "block" | "ramp" | "cylinder">
+export type CreateKind = Extract<TerrainSubTool, "block" | "ramp" | "cylinder" | "polygon">
 
 /** Bases thinner than this (feet) count as a click. */
 const MIN_SIZE = 0.1
@@ -62,10 +78,12 @@ const MIN_SIZE = 0.1
 const MIN_RADIUS = 0.25
 /** Hysteresis of the ramp direction while dragging the base. */
 const RAMP_HYSTERESIS = 1.25
+/** A click this close (CSS px) to the polygon's first corner closes the outline. */
+const CLOSE_PX = 10
 
 export const NO_FLOOR_HINT = "No floor here: terrain is drawn only under floors"
 
-type Footprint = { kind: "rect"; rect: Rect } | { kind: "circle"; center: Vec2; radius: number }
+type Footprint = { kind: "rect"; rect: Rect } | { kind: "circle"; center: Vec2; radius: number } | { kind: "polygon"; points: Vec2[] }
 
 interface Common {
   levelId: Id
@@ -105,10 +123,30 @@ type Phase =
       h: number
       alt: boolean
     })
+  | (Common & {
+      kind: "points"
+      /** Polygon corners placed so far (inside the extent). */
+      points: Vec2[]
+      /** The corner a click would place (null: the pointer is off the plane / canvas). */
+      next: Vec2 | null
+      last: ToolPointerEvent
+    })
   /** Confirmed with a press: swallow events until the button is released (no new base). */
   | { kind: "swallow" }
 
 const UP: Vec3 = { x: 0, y: 1, z: 0 }
+
+/** Keys shown next to the cursor while drawing a polygon (see Tool.cursorKeys). */
+const POINTS_KEYS: readonly CursorKey[] = [
+  { mouse: "Click", label: "Add corner" },
+  { mouse: "Right-click", commands: ["confirm"], label: "Finish, set height" },
+  { commands: ["delete"], label: "Remove last corner" },
+  { commands: ["escape"], label: "Cancel" },
+]
+const HEIGHT_KEYS: readonly CursorKey[] = [
+  { mouse: "Click", commands: ["confirm"], label: "Confirm height" },
+  { mouse: "Right-click", commands: ["escape"], label: "Cancel" },
+]
 
 /** Height-follow of the height phase: screen up wherever the gain floor is active (DESIGN §3.3). */
 const FOLLOW = { screenUpWhenFloored: true } as const
@@ -125,8 +163,19 @@ export function createShapeSubTool(ctx: TerrainToolContext, shape: CreateKind): 
 
   const grid = () => store.getState().scene.grid
 
+  /** Polygon: the placed corners plus the pending one (when it is a new position). */
+  const chainOf = (p: Extract<Phase, { kind: "points" }>): Vec2[] => {
+    const n = p.next
+    if (!n || p.points.length >= TERRAIN_SHAPE_MAX_POINTS) return p.points
+    const last = p.points[p.points.length - 1]
+    return last && samePoint(last, n) ? p.points : [...p.points, n]
+  }
+
+  /** Idle polygon tool: the snapped point under the pointer (the first corner a click would place). */
+  let hover: { levelId: Id; at: Vec3 } | null = null
+
   /** The base the base phase describes (clamped to the scene extent). */
-  const footprintOf = (p: Extract<Phase, { kind: "base" }>, free: boolean): Footprint => {
+  const footprintOf = (p: Extract<Phase, { kind: "base" }>, free: boolean): Exclude<Footprint, { kind: "polygon" }> => {
     const g = grid()
     if (p.shape === "cylinder") {
       const half = g.cellSize / 2
@@ -146,6 +195,7 @@ export function createShapeSubTool(ctx: TerrainToolContext, shape: CreateKind): 
   }
 
   const makeShape = (id: Id, f: Footprint, p: Common, h: number, order: number): TerrainShape => {
+    if (f.kind === "polygon") return polygonShape(id, f.points, p.y0, h, order)
     if (f.kind === "circle") return cylinderShape(id, f.center, f.radius, store.getState().toolSettings.terrain.cylinderSides, p.y0, h, order)
     return p.shape === "ramp" ? rampShape(id, f.rect, p.dir, p.y0, h, order) : blockShape(id, f.rect, p.y0, h, order)
   }
@@ -170,6 +220,11 @@ export function createShapeSubTool(ctx: TerrainToolContext, shape: CreateKind): 
   /** The draft of the current phase (zero-height prism during the base phase). */
   const draft = (): { shape: TerrainShape; h: number } | null => {
     if (!phase || phase.kind === "swallow") return null
+    if (phase.kind === "points") {
+      const chain = chainOf(phase)
+      if (chain.length < 3 || !isSimplePolygon(chain)) return null
+      return { shape: stable(makeShape("draft", { kind: "polygon", points: chain }, phase, 0, 0)), h: 0 }
+    }
     if (phase.kind === "base") return { shape: stable(makeShape("draft", footprintOf(phase, snapModeOf(store, phase.last) === "free"), phase, 0, 0)), h: 0 }
     const h = snappedHeight(phase)
     return { shape: stable(makeShape("draft", phase.footprint, phase, h, 0)), h }
@@ -271,7 +326,11 @@ export function createShapeSubTool(ctx: TerrainToolContext, shape: CreateKind): 
 
   const startHeight = (p: Extract<Phase, { kind: "base" }>, e: ToolPointerEvent) => {
     const footprint = footprintOf(p, snapModeOf(store, p.last) === "free")
-    const corner = footprint.kind === "rect" ? cornerNear(footprint.rect, p.p1) : p.p1
+    enterHeight(p, footprint, footprint.kind === "rect" ? cornerNear(footprint.rect, p.p1) : p.p1, e)
+  }
+
+  /** Into the height phase over `footprint`, the height anchored at `corner` (on the base plane). */
+  const enterHeight = (p: Common, footprint: Footprint, corner: Vec2, e: ToolPointerEvent) => {
     const anchor = { x: corner.x, y: p.elevation + p.y0, z: corner.z }
     const ray: Ray | null = rayOf(e)
     const cursor = canvasOf(e)
@@ -297,17 +356,112 @@ export function createShapeSubTool(ctx: TerrainToolContext, shape: CreateKind): 
     updatePreview()
   }
 
+  /** Points phase: the snapped corner under the pointer (ray ∩ the base plane; the terrain pick when parallel). */
+  const cornerAt = (p: Common, e: ToolPointerEvent): Vec2 | null => {
+    const ray = rayOf(e)
+    const q = (ray && rayPlaneY(ray, p.elevation + p.y0)) ?? groundOf(e)
+    if (!q) return null
+    const g = grid()
+    const raw = { x: q.x, z: q.z }
+    const mode = snapModeOf(store, e)
+    return clampToExtent(g, mode === "free" ? raw : snapPoint(g, raw, edgeSnapMode(mode)))
+  }
+
+  /** Is `q` (a click) on the first corner: the same snapped point, or within CLOSE_PX of it on screen. */
+  const onFirst = (p: Extract<Phase, { kind: "points" }>, q: Vec2, e: ToolPointerEvent): boolean => {
+    const first = p.points[0]
+    if (samePoint(first, q)) return true
+    const cursor = canvasOf(e)
+    const at = deps.project?.({ x: first.x, y: p.elevation + p.y0, z: first.z })
+    return Boolean(cursor && at && Math.hypot(at.x - cursor.x, at.y - cursor.y) <= CLOSE_PX)
+  }
+
+  /** Finish the outline and move on to the height (false, with a notice, when it cannot close yet). */
+  const finishPoints = (p: Extract<Phase, { kind: "points" }>, e: ToolPointerEvent): boolean => {
+    if (p.points.length < 3) {
+      ctx.notify("Place at least 3 corners")
+      return false
+    }
+    if (!isSimplePolygon(p.points)) {
+      ctx.notify("The outline can't cross itself: add or remove corners")
+      return false
+    }
+    // Anchor the height at the corner nearest the pointer (the label and the relative follow start there).
+    const at = p.next ?? p.points[p.points.length - 1]
+    let near = p.points[0]
+    for (const q of p.points) if (Math.hypot(q.x - at.x, q.z - at.z) < Math.hypot(near.x - at.x, near.z - at.z)) near = q
+    enterHeight(p, { kind: "polygon", points: p.points.map((q) => ({ ...q })) }, near, e)
+    return true
+  }
+
+  /** Points phase click: place a corner, or finish on the first corner / a double-click. */
+  const addCorner = (p: Extract<Phase, { kind: "points" }>, e: ToolPointerEvent) => {
+    const q = cornerAt(p, e)
+    if (!q) return
+    p.next = q
+    if ((e.detail ?? 1) >= 2 || (p.points.length >= 3 && onFirst(p, q, e))) {
+      finishPoints(p, e)
+      return
+    }
+    if (samePoint(p.points[p.points.length - 1], q)) return
+    if (p.points.length >= TERRAIN_SHAPE_MAX_POINTS) {
+      ctx.notify(`A polygon has at most ${TERRAIN_SHAPE_MAX_POINTS} corners: finish it with Enter or a right-click`)
+      return
+    }
+    if (!isSimplePolyline([...p.points, q])) {
+      ctx.notify("That edge would cross the outline")
+      return
+    }
+    p.points.push(q)
+  }
+
+  /** Idle polygon tool: where a click would place the first corner (on the terrain under the pointer). */
+  const hoverAt = (e: ToolPointerEvent): { levelId: Id; at: Vec3 } | null => {
+    const s = store.getState()
+    const a = activeLevel(s)
+    if (!a || s.readOnly || !e.ground) return null
+    const g = s.scene.grid
+    const mode = snapModeOf(store, e)
+    const raw = clampToExtent(g, e.ground)
+    const q = mode === "free" ? raw : clampToExtent(g, snapPoint(g, raw, edgeSnapMode(mode)))
+    return { levelId: a.levelId, at: { x: q.x, y: levelGround(s.scene, a.levelId, q.x, q.z), z: q.z } }
+  }
+
+  /** Points phase overlay: the outline, a zero-height fill once it closes, the pending edge's length. */
+  const pointsParts = (p: Extract<Phase, { kind: "points" }>) => {
+    const chain = chainOf(p)
+    const y = p.elevation + p.y0
+    const valid = isSimplePolyline(chain)
+    const closes = chain.length >= 3 && isSimplePolygon(chain)
+    const d = draft()
+    const last = p.points[p.points.length - 1]
+    const pending = chain.length > p.points.length ? chain[chain.length - 1] : null
+    return {
+      ...NO_PARTS,
+      draft: d ? { shape: d.shape, valid: true } : null,
+      outline: { points: chain.map((q) => ({ x: q.x, y, z: q.z })), valid, closing: chain.length < 3 ? "none" : closes ? "ok" : "crossing" } as const,
+      label: pending ? { at: { x: pending.x, y, z: pending.z }, text: `${formatFeet(Math.hypot(pending.x - last.x, pending.z - last.z))} ft` } : null,
+    }
+  }
+
   return {
     gestureLevel: () => (phase && phase.kind !== "swallow" ? phase.levelId : null),
     captures: () => phase?.kind === "base",
 
     pointerDown(e) {
       if (e.button === 2) {
-        cancel()
+        // Right-click finishes a polygon's outline; everywhere else it cancels.
+        if (phase?.kind === "points") finishPoints(phase, e)
+        else cancel()
         ctx.changed()
         return
       }
       if (e.button !== 0) return
+      if (phase?.kind === "points") {
+        addCorner(phase, e)
+        ctx.changed()
+        return
+      }
       if (phase?.kind === "height") {
         // The confirming press's Alt decides the snapping (as the label showed it).
         phase.alt = e.alt
@@ -329,6 +483,23 @@ export function createShapeSubTool(ctx: TerrainToolContext, shape: CreateKind): 
       const ray = rayOf(e)
       const at = { x: p0.x, y: a.level.elevation + y0, z: p0.z }
       const forward = (ray && horizontalForward(ray.direction)) ?? (deps.project ? screenUpForward(deps.project, at) : null)
+      if (shape === "polygon") {
+        hover = null
+        phase = {
+          kind: "points",
+          levelId: a.levelId,
+          shape,
+          elevation: a.level.elevation,
+          y0,
+          dir: 0,
+          preview: createShapePreview(deps, s.scene, a.levelId),
+          points: [p0],
+          next: p0,
+          last: e,
+        }
+        ctx.changed()
+        return
+      }
       phase = {
         kind: "base",
         levelId: a.levelId,
@@ -348,6 +519,23 @@ export function createShapeSubTool(ctx: TerrainToolContext, shape: CreateKind): 
     },
 
     pointerMove(e) {
+      if (!phase && shape === "polygon") {
+        const next = hoverAt(e)
+        if (next?.levelId !== hover?.levelId || !sameVec(next?.at ?? null, hover?.at ?? null)) {
+          hover = next
+          ctx.changed()
+        }
+        return
+      }
+      if (phase?.kind === "points") {
+        const q = cornerAt(phase, e)
+        phase.last = e
+        if ((q === null) !== (phase.next === null) || (q && phase.next && !samePoint(q, phase.next))) {
+          phase.next = q
+          ctx.changed()
+        }
+        return
+      }
       if (!phase || phase.kind === "swallow") return
       const before = draft()?.shape
       // The label on the pointer ray moves with every move (also sideways, within one height step).
@@ -376,6 +564,15 @@ export function createShapeSubTool(ctx: TerrainToolContext, shape: CreateKind): 
     },
 
     key(k) {
+      if (phase?.kind === "points") {
+        if (k.type === "confirm") finishPoints(phase, phase.last)
+        else if (k.type === "delete") {
+          phase.points.pop()
+          if (phase.points.length === 0) cancel()
+        } else return k.type === "rotate"
+        ctx.changed()
+        return true
+      }
       if (k.type === "confirm") {
         if (phase?.kind !== "height") return false
         commit(false)
@@ -396,19 +593,27 @@ export function createShapeSubTool(ctx: TerrainToolContext, shape: CreateKind): 
     cancel() {
       cancel()
       lastDraft = null
+      hover = null
     },
 
     refresh() {
       // Alt from the store: the last event's flag is stale when Alt was pressed / released without a move.
       const alt = store.getState().altHeld
       if (phase?.kind === "base") moveBase(phase, { ...phase.last, alt })
-      else if (phase?.kind === "height") {
+      else if (phase?.kind === "points") {
+        phase.last = { ...phase.last, alt }
+        if (phase.next) phase.next = cornerAt(phase, phase.last)
+      } else if (phase?.kind === "height") {
         phase.alt = alt
         updatePreview()
       }
     },
 
     parts() {
+      if (!phase && hover && hover.levelId === activeLevel(store.getState())?.levelId) {
+        return { ...NO_PARTS, outline: { points: [hover.at], valid: true, closing: "none" } }
+      }
+      if (phase?.kind === "points") return pointsParts(phase)
       const d = draft()
       if (!d || !phase || phase.kind === "swallow") return NO_PARTS
       const valid = shapeAcceptable(d.shape, grid())
@@ -424,6 +629,11 @@ export function createShapeSubTool(ctx: TerrainToolContext, shape: CreateKind): 
       return { ...NO_PARTS, draft: { shape: d.shape, valid }, label: { at, text: heightLabel(d.h) } }
     },
 
+    cursorKeys() {
+      if (shape !== "polygon" || !phase || phase.kind === "swallow") return null
+      return phase.kind === "points" ? POINTS_KEYS : HEIGHT_KEYS
+    },
+
     cursor() {
       if (phase?.kind === "height") return "ns-resize"
       return store.getState().readOnly ? null : "crosshair"
@@ -432,9 +642,14 @@ export function createShapeSubTool(ctx: TerrainToolContext, shape: CreateKind): 
     hint() {
       if (!phase) {
         if (store.getState().readOnly) return null
+        if (shape === "polygon") return "Click to place the first corner of the outline"
         return shape === "cylinder" ? "Drag from the centre to set the radius (click: half-cell radius)" : "Drag to draw the base (click: one cell)"
       }
       if (phase.kind === "swallow") return null
+      if (phase.kind === "points") {
+        const n = phase.points.length
+        return n < 3 ? `Click to add corners (${n} of at least 3)` : "Click to add corners; right-click, Enter or click the first corner to set the height"
+      }
       if (phase.kind === "height" && phase.preview.offFloor() && snappedHeight(phase) !== 0) return NO_FLOOR_HINT
       if (phase.kind === "base")
         return shape === "cylinder" ? "Drag to set the radius, release to set the height" : "Drag to draw the base, release to set the height"
@@ -450,3 +665,7 @@ function cornerNear(rect: Rect, p: Vec2): Vec2 {
   const z = Math.abs(p.z - rect.z) <= Math.abs(p.z - (rect.z + rect.d)) ? rect.z : rect.z + rect.d
   return { x, z }
 }
+
+const samePoint = (a: Vec2, b: Vec2): boolean => Math.abs(a.x - b.x) <= 1e-6 && Math.abs(a.z - b.z) <= 1e-6
+
+const sameVec = (a: Vec3 | null, b: Vec3 | null): boolean => a === b || (a !== null && b !== null && a.x === b.x && a.y === b.y && a.z === b.z)

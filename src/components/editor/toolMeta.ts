@@ -60,7 +60,12 @@ export const TOOLS: ToolMeta[] = [
   meta("pillar", "Pillar", Cylinder, "Click to place a pillar."),
   meta("prop", "Prop", Package, "Click to place the chosen prop. R rotates the preview."),
   meta("light", "Light", Flame, "Click the ground, a wall (wall-mounted) or a token (carried light)."),
-  meta("terrain", "Terrain", Mountain, "Paint the ground, or drag a block / ramp / cylinder base and click at its height. Select shapes to edit them."),
+  meta(
+    "terrain",
+    "Terrain",
+    Mountain,
+    "Paint the ground, or drag a block / ramp / cylinder base (click a polygon's corners) and click at its height. Select shapes to edit them."
+  ),
   meta("token", "Token", CircleUserRound, "Click to place a token on the active level."),
   meta("measure", "Measure", Ruler, "Click to add waypoints; double-click, Enter or right-click ends the ruler."),
 ]

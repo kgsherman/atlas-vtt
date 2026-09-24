@@ -88,10 +88,10 @@ export interface BrushToolSettings {
 }
 
 /** Sub-tools of the terrain editing mode (ToolId "terrain"). */
-export type TerrainSubTool = "select" | "brush" | "block" | "ramp" | "cylinder"
+export type TerrainSubTool = "select" | "brush" | "block" | "ramp" | "cylinder" | "polygon"
 
 /** The shape-creating sub-tools, in the order the "cycle-create" key (E) steps through them. */
-export const TERRAIN_CREATE_SUB_TOOLS: readonly TerrainSubTool[] = ["block", "ramp", "cylinder"]
+export const TERRAIN_CREATE_SUB_TOOLS: readonly TerrainSubTool[] = ["block", "ramp", "cylinder", "polygon"]
 
 export interface TerrainToolSettings {
   sub: TerrainSubTool

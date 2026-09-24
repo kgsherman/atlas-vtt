@@ -398,3 +398,147 @@ describe("terrain shape creation", () => {
     expect(t.tool.capturesPointer).toBe(false)
   })
 })
+
+describe("terrain polygon", () => {
+  const click = (t: TerrainHarness, x: number, z: number, init: { button?: number; alt?: boolean } = {}) => {
+    const e = t.at(x, 0, z, init)
+    t.tool.onPointerMove!(e)
+    t.tool.onPointerDown!(e)
+    t.tool.onPointerUp!(e)
+    return e
+  }
+  const corners = (t: TerrainHarness) => t.overlay().outline?.points.map((p) => [p.x, p.z])
+
+  it("click corners, right-click to finish, move and click to set the height (one undo step)", () => {
+    const t = terrainHarness({ sub: "polygon" })
+    const { tool, store, levelId } = t
+    // Idle: the snapped point a click would place; no keys next to the cursor yet.
+    tool.onPointerMove!(t.at(10.4, 0, 9.7))
+    expect(corners(t)).toEqual([[10, 10]])
+    expect(tool.cursorKeys!()).toBeNull()
+    expect(tool.hint()).toMatch(/first corner/)
+
+    click(t, 10.4, 9.7)
+    expect(tool.capturesPointer).toBe(false)
+    const keys = tool.cursorKeys!()
+    expect(keys?.map((k) => k.label)).toEqual(["Add corner", "Finish, set height", "Remove last corner", "Cancel"])
+    expect(keys?.[1]).toMatchObject({ mouse: "Right-click", commands: ["confirm"] })
+    // The same list while nothing changes (the canvas re-renders on a new identity).
+    expect(tool.cursorKeys!()).toBe(keys)
+    click(t, 40.2, 10.3)
+    // The pending corner follows the pointer; with three the closing edge and a zero-height fill show.
+    tool.onPointerMove!(t.at(39.6, 0, 20.2))
+    let o = t.overlay()
+    expect(corners(t)).toEqual([
+      [10, 10],
+      [40, 10],
+      [40, 20],
+    ])
+    expect(o.outline).toMatchObject({ valid: true, closing: "ok" })
+    expect(o.draft?.shape.kind).toBe("polygon")
+    expect(o.label?.text).toBe("10 ft")
+    // Enter with two corners placed: not yet.
+    expect(tool.onKeyDown!(key("Enter", { action: { type: "confirm" } }))).toBe(true)
+    expect(tool.hint()).toBe("Place at least 3 corners")
+    click(t, 39.6, 20.2)
+    click(t, 25, 20)
+    click(t, 25, 30)
+    click(t, 10, 30)
+    expect(corners(t)).toHaveLength(6)
+    expect(tool.hint()).toMatch(/right-click, Enter or click the first corner/)
+
+    // Right-click finishes (it places no corner); the height is anchored at the corner nearest the pointer.
+    const release = t.at(11.3, 0, 28.8, { button: 2 })
+    tool.onPointerDown!(release)
+    expect(tool.cursor!()).toBe("ns-resize")
+    expect(tool.cursorKeys!()?.map((k) => k.label)).toEqual(["Confirm height", "Cancel"])
+    tool.onPointerMove!(t.heightAt({ x: 10, y: 0, z: 30 }, release, 4.1))
+    o = t.overlay()
+    expect(o.outline).toBeNull()
+    expect(o.label?.text).toBe("+4 ft · Add")
+    tool.onPointerDown!(t.at(0, 0, 0))
+    tool.onPointerUp!(t.at(0, 0, 0))
+
+    const [shape] = t.shapes()
+    expect(shape).toMatchObject({ kind: "polygon", op: "add", base: 0 })
+    expect(shape.points.map((p) => [p.x, p.y, p.z])).toEqual([
+      [10, 4, 10],
+      [40, 4, 10],
+      [40, 4, 20],
+      [25, 4, 20],
+      [25, 4, 30],
+      [10, 4, 30],
+    ])
+    expect(store.getState().history).toMatchObject({ undoDepth: 1, undoLabel: "Add terrain polygon" })
+    expect(store.getState().terrainSelection?.shapeIds).toEqual([shape.id])
+    expect(t.height(15, 25)).toBe(4)
+    expect(t.height(35, 25)).toBe(0)
+    expect(tool.cursorKeys!()).toBeNull()
+    expect(store.getState().scene.levels[levelId].terrainEdits).toBeDefined()
+  })
+
+  it("closes on the first corner or a double-click; Enter finishes too", () => {
+    const t = terrainHarness({ sub: "polygon" })
+    click(t, 10, 10)
+    click(t, 20, 10)
+    click(t, 20, 20)
+    click(t, 10.2, 9.9)
+    expect(t.tool.cursor!()).toBe("ns-resize")
+    t.tool.cancel!()
+
+    click(t, 10, 10)
+    click(t, 20, 10)
+    const e = t.at(15, 0, 20)
+    t.tool.onPointerDown!(e)
+    t.tool.onPointerDown!({ ...e, detail: 2 })
+    expect(t.tool.cursor!()).toBe("ns-resize")
+    t.tool.cancel!()
+
+    click(t, 10, 10)
+    click(t, 20, 10)
+    click(t, 15, 20)
+    expect(t.tool.onKeyDown!(key("Enter", { action: { type: "confirm" } }))).toBe(true)
+    expect(t.tool.cursor!()).toBe("ns-resize")
+    expect(t.shapes()).toHaveLength(0)
+  })
+
+  it("Backspace removes the last corner, a crossing corner is refused, Esc cancels", () => {
+    const t = terrainHarness({ sub: "polygon" })
+    const { tool, store } = t
+    const before = store.getState().scene
+    click(t, 10, 10)
+    click(t, 30, 10)
+    click(t, 30, 30)
+    // Back across the first edge: refused, with a notice.
+    click(t, 20, 0)
+    expect(tool.hint()).toBe("That edge would cross the outline")
+    tool.onPointerMove!(t.at(10, 0, 30))
+    expect(corners(t)).toHaveLength(4)
+    expect(tool.onKeyDown!(key("Backspace", { action: { type: "delete" } }))).toBe(true)
+    tool.onPointerMove!(t.at(10, 0, 30))
+    expect(corners(t)).toEqual([
+      [10, 10],
+      [30, 10],
+      [10, 30],
+    ])
+    // The document is untouched by corner edits.
+    expect(store.getState().scene).toBe(before)
+    // A "Z": the open chain is fine, but its closing edge crosses: drawn red, and it cannot finish yet.
+    click(t, 10, 30)
+    click(t, 30, 30)
+    expect(t.overlay().outline).toMatchObject({ valid: true, closing: "crossing" })
+    expect(t.overlay().draft).toBeNull()
+    tool.onPointerDown!(t.at(30, 0, 30, { button: 2 }))
+    expect(tool.hint()).toMatch(/can't cross itself/)
+    expect(tool.cursor!()).not.toBe("ns-resize")
+    expect(tool.onKeyDown!(key("Escape", { action: { type: "escape" } }))).toBe(true)
+    expect(t.overlay().outline ?? null).toBeNull()
+    expect(tool.cursorKeys!()).toBeNull()
+
+    // Removing every corner ends the gesture.
+    click(t, 10, 10)
+    tool.onKeyDown!(key("Backspace", { action: { type: "delete" } }))
+    expect(tool.cursorKeys!()).toBeNull()
+    expect(store.getState().scene).toBe(before)
+  })
+})

@@ -23,6 +23,7 @@ import type { Engine, Quality, ViewState } from "@/render/contracts"
 
 import { useEditorContext } from "./context"
 import { loadLevelImage } from "./lib/levelImages"
+import { CursorKeys } from "./CursorKeys"
 import { cursorReadout, editorCursor, stripBackgroundFloor, toToolPointerEvent, type DomPointerLike } from "./lib/pointer"
 import { createPreviewVision, type PreviewResult } from "./lib/preview"
 import { applyExtras, extrasApply, newItemIds } from "./lib/toolExtras"
@@ -47,9 +48,15 @@ export function EditorViewport({ quality, preview, onPreviewToken, onPreviewResu
   return (
     <EngineCanvas quality={quality} onEngine={onEngine} className="bg-background">
       <ViewportBridge preview={preview} onPreviewToken={onPreviewToken} onPreviewResult={onPreviewResult} info={info} />
+      {preview ? null : <EditorCursorKeys />}
       {children}
     </EngineCanvas>
   )
+}
+
+function EditorCursorKeys() {
+  const { controller } = useEditorContext()
+  return <CursorKeys controller={controller} />
 }
 
 /** CSS cursor of the canvas (skips redundant style writes). */

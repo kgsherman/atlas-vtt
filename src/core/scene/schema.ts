@@ -15,13 +15,13 @@
 import { z } from "zod"
 
 import { MIN_WALL_LENGTH } from "./defaults"
-import { base64ToBytes, chunkSamples, parseChunkKey, sampleCounts } from "./heightmap"
+import { base64ToBytes, chunkSamples, maxCellsForResolution, MAX_TERRAIN_SAMPLES_PER_SIDE, parseChunkKey, sampleCounts, terrainResolutionFits } from "./heightmap"
 import { MAX_TERRAIN_HEIGHT } from "./heightmapBrush"
 import { validateReferences } from "./integrity"
 import { migrateToCurrent } from "./migrations"
 import { signedArea } from "./polygon"
 import { TOKEN_MODEL_REF_RE } from "./tokenModel"
-import { SCENE_SCHEMA_VERSION, type GridSettings, type Scene } from "./types"
+import { SCENE_SCHEMA_VERSION, TERRAIN_RESOLUTIONS, type GridSettings, type Scene } from "./types"
 
 export const SCENE_LIMITS = {
   /** Max grid width / depth in cells. */
@@ -137,7 +137,7 @@ const chunkRecordSchema = z.record(
   z.string().regex(CHUNK_KEY, "invalid chunk key"),
   z
     .string()
-    .max(base64Length(chunkSamples(4) ** 2 * 4))
+    .max(base64Length(chunkSamples(TERRAIN_RESOLUTIONS[TERRAIN_RESOLUTIONS.length - 1]) ** 2 * 4))
     .regex(BASE64, "invalid base64")
 )
 
@@ -145,8 +145,8 @@ type Ctx = z.RefinementCtx
 type IssuePath = (string | number)[]
 
 /**
- * Payload checks of a chunk record at `resolution`: at most as many chunks as a 200×200 grid can have
- * (checked before decoding anything), each an exact-length base64 Float32 chunk of finite heights within
+ * Payload checks of a chunk record at `resolution`: at most as many chunks as the largest grid that
+ * resolution supports can have (checked before decoding anything), each an exact-length base64 Float32 chunk of finite heights within
  * ±MAX_TERRAIN_HEIGHT. `allowEmpty`: "" stands for an all-zero chunk (terrain base chunks only).
  * Issues are reported at `path`/<key>.
  */
@@ -160,7 +160,7 @@ function checkChunkPayloads(
   const n = chunkSamples(resolution)
   const bytes = n * n * 4
   const entries = Object.entries(chunks)
-  const maxPerAxis = Math.ceil((SCENE_LIMITS.maxGridCells * resolution + 1) / n)
+  const maxPerAxis = Math.ceil((Math.min(SCENE_LIMITS.maxGridCells * resolution, MAX_TERRAIN_SAMPLES_PER_SIDE) + 1) / n)
   if (entries.length > maxPerAxis * maxPerAxis) {
     ctx.addIssue({ code: "custom", message: `too many chunks (${entries.length})`, path })
     return
@@ -215,7 +215,7 @@ function checkChunkRange(
 
 const heightmapSchema = z
   .strictObject({
-    resolution: z.union([z.literal(1), z.literal(2), z.literal(4)]),
+    resolution: z.union(TERRAIN_RESOLUTIONS.map((r) => z.literal(r))),
     chunks: chunkRecordSchema,
   })
   .superRefine((hm, ctx) => checkChunkPayloads(hm.chunks, hm.resolution, ctx, ["chunks"]))
@@ -230,7 +230,7 @@ const terrainShapeSchema = z
   .strictObject({
     id: idSchema,
     name: text.optional(),
-    kind: z.enum(["block", "ramp", "cylinder"]),
+    kind: z.enum(["block", "ramp", "cylinder", "polygon"]),
     op: z.enum(["add", "carve"]),
     order: z.int().min(0).max(1_000_000),
     points: z.array(z.strictObject({ x: num, y: terrainY, z: num })).min(3).max(SCENE_LIMITS.maxTerrainShapePoints),
@@ -508,6 +508,14 @@ function checkExtent(scene: z.infer<typeof sceneShape>, ctx: Ctx): void {
     }
     const hm = level.heightmap
     if (!hm) continue
+    if (!terrainResolutionFits(scene.grid, hm.resolution)) {
+      const max = maxCellsForResolution(hm.resolution)
+      ctx.addIssue({
+        code: "custom",
+        message: `terrain resolution ${hm.resolution} supports grids up to ${max}×${max} cells`,
+        path: ["levels", id, "heightmap", "resolution"],
+      })
+    }
     checkChunkRange(hm.chunks, scene.grid, hm.resolution, ctx, ["levels", id, "heightmap", "chunks"])
     if (te) checkChunkRange(te.baseChunks, scene.grid, hm.resolution, ctx, ["levels", id, "terrainEdits", "baseChunks"])
   }

@@ -14,7 +14,7 @@ import type { OverlayState, PickResult } from "@/render/contracts"
 import { runShortcut, type PasteTarget, type ShortcutAction } from "./shortcuts"
 import { currentSnapMode, type EditorStore } from "./store"
 import { createTools, type ToolSet } from "./tools"
-import type { Tool, ToolKeyEvent, ToolPointerEvent } from "./tools/types"
+import type { CursorKey, Tool, ToolKeyEvent, ToolPointerEvent } from "./tools/types"
 
 export type EditorOverlays = Pick<OverlayState, "selectedIds" | "hoveredId" | "preview" | "ruler" | "dragGhosts">
 
@@ -63,6 +63,8 @@ export interface EditorController {
   toolCursor(): string | null
   /** Phase-aware hint of the active tool for the options bar (Tool.hint), or null for its static hint. Re-read on subscribe(). */
   toolHint(): string | null
+  /** Key hints of the active tool drawn next to the cursor (Tool.cursorKeys), or null. Re-read on subscribe(). */
+  toolCursorKeys(): readonly CursorKey[] | null
   /** Last pointer position on the active level (paste target). */
   cursor(): { ground: Vec2 | null; pick: PickResult } | null
   /**
@@ -195,6 +197,8 @@ export function createEditorController(store: EditorStore, opts: { now?: () => n
     toolCursor: () => current.cursor?.() ?? null,
 
     toolHint: () => current.hint?.() ?? null,
+
+    toolCursorKeys: () => current.cursorKeys?.() ?? null,
 
     cursor: () => lastPointer,
 

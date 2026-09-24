@@ -306,7 +306,7 @@ function MultiShape({ shapes, levelId }: { shapes: readonly TerrainShape[]; leve
   const ids = shapes.map((s) => s.id)
   const ops = new Set(shapes.map((s) => s.op))
   const op = ops.size === 1 ? shapes[0].op : null
-  const kinds = (["block", "ramp", "cylinder"] as const)
+  const kinds = (["block", "ramp", "cylinder", "polygon"] as const)
     .map((k) => [k, shapes.filter((s) => s.kind === k).length] as const)
     .filter(([, n]) => n > 0)
     .map(([k, n]) => plural(n, SHAPE_KIND_LABELS[k].toLowerCase()))
@@ -362,7 +362,7 @@ function NoShapeSelected() {
             ? selecting
               ? `This level has ${plural(count, "terrain shape")}. Click one to edit it, or drag a box around several.`
               : `This level has ${plural(count, "terrain shape")}. Pick “Select shapes”${selectKey ? ` (${selectKey})` : ""} in the options bar and click one to edit it.`
-            : `Draw a block, ramp or cylinder${createKey ? ` (${createKey})` : ""}: drag its base, then click at the height. Shapes stay editable while the terrain tool is active.`}
+            : `Draw a block, ramp, cylinder or polygon${createKey ? ` (${createKey})` : ""}: drag its base (polygon: click its corners), then click at the height. Shapes stay editable while the terrain tool is active.`}
         </EmptyDescription>
       </EmptyHeader>
     </Empty>

@@ -28,6 +28,7 @@
  * The gizmo and the label are persistent objects (`decor`, attached once to the overlay root by the
  * OverlayManager) updated every frame by `frame()`: the arrows are drawn in screen space from
  * core/geometry/gizmo gizmoHandles, the same handles the tool hit-tests, so what is drawn is what is grabbed.
+ * The polygon being drawn is an outline of anti-aliased lines and corner dots (owned, rebuilt with each overlay).
  * The select sub-tool's marquee is a screen-space rect (canvas CSS px, the frame the tool tests vertices
  * and shapes in), drawn by its own tiny shader over everything else.
  */
@@ -749,6 +750,7 @@ export function buildTerrainOverlay(p: TerrainOverlay, elevation: number, spacin
   if (p.draft) addPasses(root, res, prismGeometry(shapePrism(p.draft.shape, elevation, spacing)), "draft", p.draft.shape.op, p.draft.valid)
 
   if (p.elements && selected.length > 0) addElements(root, res, p.elements, byId, selectedIds, elevation, spacing)
+  if (p.outline) addOutline(root, res, p.outline)
   const marquee = p.marquee ? marqueeMesh(p.marquee) : null
   if (marquee) root.add(marquee)
 
@@ -809,6 +811,35 @@ function addElements(
   }
   draw(elements.selected, false)
   if (elements.hover) draw([elements.hover], true)
+}
+
+/**
+ * The polygon being drawn: the open chain (draft colour, red when invalid) and its closing edge (dimmed,
+ * red when it would cross), each depth-tested plus a dim x-ray pass, and a dot per corner. Owned geometry.
+ */
+function addOutline(root: THREE.Object3D, res: TerrainOverlayResources, outline: NonNullable<TerrainOverlay["outline"]>): void {
+  const C = TERRAIN_OVERLAY_COLORS
+  const O = TERRAIN_OVERLAY_ORDER
+  const pts = outline.points
+  if (pts.length === 0) return
+  const add = (geometry: THREE.BufferGeometry, material: THREE.Material, order: number) => {
+    const m = new THREE.Mesh(geometry, material)
+    m.renderOrder = order
+    root.add(m)
+  }
+  const lines = (pairs: Float32Array, color: string, opacity: number) => {
+    if (pairs.length === 0) return
+    const g = aaLineGeometry(pairs)
+    add(g, res.line(color, opacity * 0.5, 1.5, true), O.xrayEdge + 0.04)
+    add(g, res.line(color, opacity, 2, false), O.edge + 0.04)
+  }
+  lines(polylinePairs(pts), outline.valid ? C.draft : C.invalid, 1)
+  if (outline.closing !== "none" && pts.length >= 3) {
+    const a = pts[pts.length - 1]
+    const b = pts[0]
+    lines(new Float32Array([a.x, a.y, a.z, b.x, b.y, b.z]), outline.closing === "ok" ? C.draft : C.invalid, 0.45)
+  }
+  add(aaPointGeometry(pts.flatMap((q) => [q.x, q.y, q.z])), res.dot(outline.valid ? C.vertex : C.invalid, 7), O.dot + 0.04)
 }
 
 // ---------------------------------------------------------------------------

@@ -139,13 +139,13 @@ describe("runShortcut: terrain actions", () => {
     expect(store.getState().toolSettings.terrain.sub).toBe("select")
     expect(run({ type: "terrain-sub", sub: "brush" })).toBe(true)
     expect(store.getState().toolSettings.terrain.sub).toBe("brush")
-    // E cycles block → ramp → cylinder → block, starting at block from a non-creation sub-tool.
+    // E cycles block → ramp → cylinder → polygon → block, starting at block from a non-creation sub-tool.
     const cycle: string[] = []
-    for (let k = 0; k < 4; k++) {
+    for (let k = 0; k < 5; k++) {
       run({ type: "terrain-sub", sub: "cycle-create" })
       cycle.push(store.getState().toolSettings.terrain.sub)
     }
-    expect(cycle).toEqual(["block", "ramp", "cylinder", "block"])
+    expect(cycle).toEqual(["block", "ramp", "cylinder", "polygon", "block"])
     // From another tool, E re-enters the remembered creation sub-tool first.
     run({ type: "terrain-sub", sub: "cycle-create" })
     store.getState().setTool("wall")
@@ -167,7 +167,8 @@ describe("runShortcut: terrain actions", () => {
     expect(terrainSubFor("select", "ramp", true)).toBe("select")
     expect(terrainSubFor("cycle-create", "select", true)).toBe("block")
     expect(terrainSubFor("cycle-create", "brush", false)).toBe("block")
-    expect(terrainSubFor("cycle-create", "cylinder", true)).toBe("block")
+    expect(terrainSubFor("cycle-create", "cylinder", true)).toBe("polygon")
+    expect(terrainSubFor("cycle-create", "polygon", true)).toBe("block")
     expect(terrainSubFor("cycle-create", "cylinder", false)).toBe("cylinder")
   })
 })

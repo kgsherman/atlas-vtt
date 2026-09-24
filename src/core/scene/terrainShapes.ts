@@ -1,5 +1,5 @@
 /**
- * Terrain shapes (ARCHITECTURE §3 "Terrain edits"): editable blocks, ramps and cylinders baked into a
+ * Terrain shapes (ARCHITECTURE §3 "Terrain edits"): editable blocks, ramps, cylinders and polygons baked into a
  * level's heightmap. Pure: geometry of shapes and their elements, triangulation, baking, and the single
  * writer that keeps Level.heightmap (baked) and Level.terrainEdits (shapes + painted base) consistent.
  *
@@ -136,6 +136,50 @@ export function isSimplePolygon(points: readonly XZ[]): boolean {
       if (i === 0 && j === n - 1) {
         // Edges c→a (d = a) and a→b share a.
         if (distSeg2(c.x, c.z, a.x, a.z, b.x, b.z) <= eps2 || distSeg2(b.x, b.z, c.x, c.z, a.x, a.z) <= eps2) return false
+        continue
+      }
+      const o1 = orient(a, b, c)
+      const o2 = orient(a, b, d)
+      const o3 = orient(c, d, a)
+      const o4 = orient(c, d, b)
+      if (((o1 > 0 && o2 < 0) || (o1 < 0 && o2 > 0)) && ((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0))) return false
+      if (
+        distSeg2(c.x, c.z, a.x, a.z, b.x, b.z) <= eps2 ||
+        distSeg2(d.x, d.z, a.x, a.z, b.x, b.z) <= eps2 ||
+        distSeg2(a.x, a.z, c.x, c.z, d.x, d.z) <= eps2 ||
+        distSeg2(b.x, b.z, c.x, c.z, d.x, d.z) <= eps2
+      ) {
+        return false
+      }
+    }
+  }
+  return true
+}
+
+/**
+ * An open chain p0 → p1 → … → pn−1 that can still be closed into a simple polygon later: finite, no two
+ * vertices within VERTEX_EPS, no segment crossing or touching a non-adjacent one, no fold-back between
+ * adjacent segments. The closing segment is not considered (isSimplePolygon checks the closed outline).
+ */
+export function isSimplePolyline(points: readonly XZ[]): boolean {
+  const n = points.length
+  for (const p of points) if (!Number.isFinite(p.x) || !Number.isFinite(p.z)) return false
+  const eps2 = VERTEX_EPS * VERTEX_EPS
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const dx = points[i].x - points[j].x
+      const dz = points[i].z - points[j].z
+      if (dx * dx + dz * dz <= eps2) return false
+    }
+  }
+  for (let i = 0; i + 1 < n; i++) {
+    const a = points[i]
+    const b = points[i + 1]
+    for (let j = i + 1; j + 1 < n; j++) {
+      const c = points[j]
+      const d = points[j + 1]
+      if (j === i + 1) {
+        if (distSeg2(d.x, d.z, a.x, a.z, b.x, b.z) <= eps2 || distSeg2(a.x, a.z, c.x, c.z, d.x, d.z) <= eps2) return false
         continue
       }
       const o1 = orient(a, b, c)
@@ -562,7 +606,7 @@ export function hasPaintedBase(level: TerrainLevel): boolean {
 // import helpers from this module without an evaluation-order cycle).
 const SHAPE_ID = /^[A-Za-z0-9_-]{1,64}$/
 const MAX_NAME_LENGTH = 2000
-const SHAPE_KINDS: ReadonlySet<string> = new Set(["block", "ramp", "cylinder"])
+const SHAPE_KINDS: ReadonlySet<string> = new Set(["block", "ramp", "cylinder", "polygon"])
 const SHAPE_OPS: ReadonlySet<string> = new Set(["add", "carve"])
 
 const inHeightRange = (v: number) => Number.isFinite(v) && Math.abs(v) <= MAX_TERRAIN_HEIGHT
@@ -1043,6 +1087,16 @@ export function cylinderShape(id: Id, center: Vec2, radius: number, sides: numbe
     points.push({ x: center.x + radius * Math.cos(a), y: top, z: center.z + radius * Math.sin(a) })
   }
   return { id, kind: "cylinder", op: opFor(height), order, points, base: y0 }
+}
+
+/**
+ * A flat-topped prism over a drawn footprint (either orientation; stored canonical): top y0 + height, base
+ * y0. Like the other factories it does not validate: check the footprint with isSimplePolygon (and at most
+ * TERRAIN_SHAPE_MAX_POINTS corners) or the shape with isValidTerrainShape.
+ */
+export function polygonShape(id: Id, footprint: readonly Vec2[], y0: number, height: number, order: number): TerrainShape {
+  const top = y0 + height
+  return { id, kind: "polygon", op: opFor(height), order, points: canonicalize(footprint.map((p) => ({ x: p.x, y: top, z: p.z }))), base: y0 }
 }
 
 // ---------------------------------------------------------------------------

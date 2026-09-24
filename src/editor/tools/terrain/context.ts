@@ -11,7 +11,7 @@ import type { TerrainOverlay } from "@/render/contracts"
 import type { EditorState, EditorStore } from "../../store"
 import { FREE_HEIGHT_STEP, type Ray } from "../../terrainMath"
 import { pointerSnapMode, type ToolDeps } from "../shared"
-import type { ToolPointerEvent } from "../types"
+import type { CursorKey, ToolPointerEvent } from "../types"
 import type { TerrainKey } from "./keys"
 
 export interface TerrainToolContext {
@@ -37,6 +37,8 @@ export interface OverlayParts {
   label: TerrainOverlay["label"]
   /** Screen-space selection box (canvas CSS px). */
   marquee: NonNullable<TerrainOverlay["marquee"]> | null
+  /** Outline of the polygon being drawn. */
+  outline: NonNullable<TerrainOverlay["outline"]> | null
 }
 
 export const NO_PARTS: OverlayParts = {
@@ -48,6 +50,7 @@ export const NO_PARTS: OverlayParts = {
   brush: null,
   label: null,
   marquee: null,
+  outline: null,
 }
 
 /** One sub-tool of the terrain mode (brush, creation, select). */
@@ -68,6 +71,8 @@ export interface SubTool {
   parts(): OverlayParts
   cursor(): string | null
   hint(): string | null
+  /** Key hints next to the cursor (Tool.cursorKeys); absent: none. */
+  cursorKeys?(): readonly CursorKey[] | null
 }
 
 /** The active level, when it exists. */

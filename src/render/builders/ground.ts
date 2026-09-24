@@ -4,7 +4,7 @@
  * decoded dense lattice. A sampler can also be built from a dense preview lattice (terrain preview).
  */
 import { denseHeights, sampleSpacing } from "@/core/scene/heightmap"
-import type { GridSettings, Heightmap, Level, Vec2 } from "@/core/scene/types"
+import { TERRAIN_RESOLUTIONS, type GridSettings, type Heightmap, type Level, type TerrainResolution, type Vec2 } from "@/core/scene/types"
 
 export interface HeightRange {
   min: number
@@ -48,8 +48,8 @@ function arrayRange(a: Float32Array): HeightRange {
 }
 
 /** Heightmap resolution implied by a dense lattice length for this grid, or null if none matches. */
-export function resolutionForDense(grid: Pick<GridSettings, "width" | "depth">, length: number): 1 | 2 | 4 | null {
-  for (const r of [1, 2, 4] as const) {
+export function resolutionForDense(grid: Pick<GridSettings, "width" | "depth">, length: number): TerrainResolution | null {
+  for (const r of TERRAIN_RESOLUTIONS) {
     if ((grid.width * r + 1) * (grid.depth * r + 1) === length) return r
   }
   return null

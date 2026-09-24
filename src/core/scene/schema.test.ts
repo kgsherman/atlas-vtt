@@ -212,6 +212,30 @@ describe("parseScene", () => {
     rejects((d) => (hmOf(d).chunks["3,0"] = hmOf(d).chunks[Object.keys(hmOf(d).chunks)[0]]), /outside the grid/)
   })
 
+  it("accepts resolutions 8 and 16 only on grids they fit", () => {
+    const fine = (res: number) => (d: Record<string, any>) => {
+      const level = (Object.values(d.levels) as Record<string, any>[]).find((l) => l.heightmap)!
+      level.heightmap = { resolution: res, chunks: { "0,0": encodeChunk(new Float32Array(chunkSamples(res) ** 2).fill(1)) } }
+      delete level.terrainEdits
+    }
+    // The fixture grid is 20×16 cells.
+    for (const res of [8, 16]) {
+      const doc = json(fullScene())
+      fine(res)(doc)
+      const parsed = parseScene(doc)
+      expect(parsed.ok).toBe(true)
+    }
+    // 16× supports up to 50 cells per side, 8× up to 100 (the samples per side of 200 cells at 4×).
+    rejects((d) => {
+      fine(16)(d)
+      d.grid.width = 51
+    }, /heightmap\.resolution: terrain resolution 16 supports grids up to 50×50 cells/)
+    rejects((d) => {
+      fine(8)(d)
+      d.grid.depth = 101
+    }, /terrain resolution 8 supports grids up to 100×100 cells/)
+  })
+
   it("requires followTerrain on walls and rejects the player-only terrainProfile", () => {
     rejects((d, s) => delete d.objects[firstOf(s, "wall").id].followTerrain, /followTerrain/)
     rejects((d, s) => (d.objects[firstOf(s, "wall").id].followTerrain = "yes"), /followTerrain/)
@@ -247,6 +271,9 @@ describe("parseScene", () => {
 
     it("validate shapes strictly", () => {
       rejects((d) => (mound(d).kind = "sphere"), /kind/)
+      const polygon = json(fullScene())
+      mound(polygon).kind = "polygon"
+      expect(parseScene(polygon).ok).toBe(true)
       rejects((d) => (mound(d).op = "xor"), /op/)
       rejects((d) => (mound(d).order = 1.5), /order/)
       rejects((d) => (mound(d).order = -1), /order/)

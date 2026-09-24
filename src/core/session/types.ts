@@ -15,6 +15,7 @@ import type {
   PropObject,
   Rect,
   Scene,
+  TerrainResolution,
   Token,
   VisionSettings,
   WallObject,
@@ -76,7 +77,7 @@ export interface PlayerLevel {
   height: number
   floorThickness: number
   /** Heightmap resolution when the level has terrain (chunks travel in PlayerView.terrain). */
-  terrainResolution: 1 | 2 | 4 | null
+  terrainResolution: TerrainResolution | null
 }
 
 export interface PlayerSceneInfo {

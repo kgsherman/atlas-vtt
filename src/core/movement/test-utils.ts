@@ -4,7 +4,7 @@
 import { buildOcclusionWorld } from "../occlusion"
 import { createFloor, createLevel, createScene, createToken } from "../scene/factory"
 import { createHeightmap, sampleCounts, writeHeights } from "../scene/heightmap"
-import type { Cell, Id, Level, Scene, SceneObject, Token } from "../scene/types"
+import type { Cell, Id, Level, Scene, SceneObject, TerrainResolution, Token } from "../scene/types"
 import { anchorPosition, findPath, validateMove } from "./index"
 import type { MoveOptions, MoveValidation, PathStep } from "./types"
 
@@ -31,7 +31,7 @@ export function addLevel(scene: Scene, partial: Partial<Level>, floor = true): L
 }
 
 /** Give a level a heightmap whose relative height at lattice point (x, z) is f(x, z). */
-export function paintHeightmap(scene: Scene, levelId: Id, f: (x: number, z: number) => number, resolution: 1 | 2 | 4 = 2): void {
+export function paintHeightmap(scene: Scene, levelId: Id, f: (x: number, z: number) => number, resolution: TerrainResolution = 2): void {
   const level = scene.levels[levelId]
   const hm = level.heightmap ?? createHeightmap(resolution)
   const { samplesX, samplesZ } = sampleCounts(scene.grid, hm.resolution)

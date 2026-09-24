@@ -11,6 +11,7 @@ import { toast } from "sonner"
 import { useServices } from "@/app/services"
 import { EngineCanvas } from "@/components/canvas/EngineCanvas"
 import { useEngine } from "@/components/canvas/engineContext"
+import { CursorKeys } from "@/components/editor/CursorKeys"
 import { loadLevelImage } from "@/components/editor/lib/levelImages"
 import { ContextMenu, ContextMenuTrigger } from "@/components/ui/context-menu"
 import type { Id, Scene } from "@/core/scene/types"
@@ -111,6 +112,7 @@ export function HostViewport(props: HostViewportProps) {
           className="bg-background"
         >
           <HostBridge {...props} />
+          {editor ? <CursorKeys controller={editor.ctx.controller} /> : null}
           {props.children}
         </EngineCanvas>
       </ContextMenuTrigger>

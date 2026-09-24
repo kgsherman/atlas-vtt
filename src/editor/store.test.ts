@@ -968,6 +968,28 @@ describe("editor store: terrain actions", () => {
     expect(store.getState().scene.levels[f.upperId].heightmap).toEqual(createHeightmap(1))
   })
 
+  it("resolutions 8 and 16 fit small grids only; the grid cannot outgrow the finest terrain", () => {
+    const { f, store, grid } = terrainFixture()
+    expect(Math.max(grid.width, grid.depth)).toBeLessThanOrEqual(50)
+    const before = store.getState().scene.levels[f.groundId]
+    expect(store.getState().setTerrainResolution(f.groundId, 16)).toBe(true)
+    const level = store.getState().scene.levels[f.groundId]
+    expect(level.heightmap!.resolution).toBe(16)
+    expect(level.heightmap).toEqual(resampleTerrain(before, grid, 16).heightmap)
+    expectConsistent(level, grid)
+    // Growing the grid stops at 50 cells (800 samples per side at 16×).
+    store.getState().updateGrid({ width: 120 })
+    expect(store.getState().scene.grid.width).toBe(50)
+    // At 8× it may grow to 100 cells; at 8× a 101-cell grid is refused.
+    expect(store.getState().setTerrainResolution(f.groundId, 8)).toBe(true)
+    store.getState().updateGrid({ width: 120, depth: 100 })
+    expect(store.getState().scene.grid).toMatchObject({ width: 100, depth: 100 })
+    expect(store.getState().setTerrainResolution(f.groundId, 16)).toBe(false)
+    expect(store.getState().scene.levels[f.groundId].heightmap!.resolution).toBe(8)
+    expect(store.getState().setTerrainResolution(f.upperId, 16)).toBe(false)
+    expect(store.getState().scene.levels[f.upperId].heightmap).toBeNull()
+  })
+
   it("applyTerrainShapes bakes shapes into the base and deletes them", () => {
     const { f, store, grid } = terrainFixture()
     const heightmap = store.getState().scene.levels[f.groundId].heightmap

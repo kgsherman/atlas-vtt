@@ -397,6 +397,34 @@ describe("terrain overlay", () => {
     res.dispose()
   })
 
+  it("draws a polygon's outline: the chain, the dimmed closing edge (red when it crosses) and corner dots", () => {
+    const res = new TerrainOverlayResources()
+    const C = TERRAIN_OVERLAY_COLORS
+    const style = (m: THREE.Mesh) => {
+      const x = m.material as THREE.ShaderMaterial
+      return { color: "#" + x.uniforms.uColor.value.getHexString(), opacity: x.uniforms.uOpacity?.value as number, depthTest: x.depthTest }
+    }
+    const pts: Vec3[] = [
+      { x: 0, y: 1, z: 0 },
+      { x: 10, y: 1, z: 0 },
+      { x: 10, y: 1, z: 10 },
+    ]
+    const build = (outline: TerrainOverlay["outline"]) => meshes(buildTerrainOverlay(overlay({ shapes: [], outline }), 0, SPACING, res)).map(style)
+    // One corner: its dot only.
+    expect(build({ points: pts.slice(0, 1), valid: true, closing: "none" })).toEqual([expect.objectContaining({ color: C.vertex })])
+    // Chain (x-ray + depth-tested), closing edge (x-ray + depth-tested, dimmer), dots.
+    const ok = build({ points: pts, valid: true, closing: "ok" })
+    expect(ok).toHaveLength(5)
+    expect(ok.slice(0, 4).map((m) => m.color)).toEqual([C.draft, C.draft, C.draft, C.draft])
+    expect(ok.slice(0, 4).map((m) => m.depthTest)).toEqual([false, true, false, true])
+    expect(ok[3].opacity).toBeLessThan(ok[1].opacity)
+    const crossing = build({ points: pts, valid: true, closing: "crossing" })
+    expect(crossing.slice(0, 2).map((m) => m.color)).toEqual([C.draft, C.draft])
+    expect(crossing.slice(2, 4).map((m) => m.color)).toEqual([C.invalid, C.invalid])
+    expect(new Set(build({ points: pts, valid: false, closing: "none" }).map((m) => m.color))).toEqual(new Set([C.invalid]))
+    res.dispose()
+  })
+
   it("shows the advanced mode's vertices and highlights selected and hovered elements", () => {
     const res = new TerrainOverlayResources()
     const a = block("a")

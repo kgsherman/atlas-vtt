@@ -18,7 +18,7 @@ import { createStore, type StoreApi } from "zustand/vanilla"
 import type { SnapMode } from "@/core/grid/grid"
 import { createHistory, type HistoryOptions, type HistoryState } from "@/core/history"
 import { createLevel, createScene } from "@/core/scene/factory"
-import { createHeightmap, DEFAULT_TERRAIN_RESOLUTION, sampleCounts, sampleSpacing } from "@/core/scene/heightmap"
+import { createHeightmap, DEFAULT_TERRAIN_RESOLUTION, finestTerrainResolution, maxCellsForResolution, sampleCounts, sampleSpacing, terrainResolutionFits } from "@/core/scene/heightmap"
 import {
   applyShapesEdit,
   cropTerrainToGrid,
@@ -234,6 +234,7 @@ export interface EditorState {
   /**
    * Change the heightmap resolution: the painted base is resampled, the shapes rebaked at the new
    * resolution (baseChunks rewritten in the same edit). A level without terrain gets an empty heightmap.
+   * False when the resolution does not fit the grid (core/scene/heightmap terrainResolutionFits).
    */
   setTerrainResolution(levelId: Id, resolution: Heightmap["resolution"]): boolean
   /**
@@ -916,6 +917,7 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
         if (!hasOwn(s.scene.levels, levelId)) return false
         const level = s.scene.levels[levelId]
         if (level.heightmap?.resolution === resolution) return false
+        if (!terrainResolutionFits(s.scene.grid, resolution)) return false
         const next = resampleTerrain(level, s.scene.grid, resolution)
         return tryApply((d) => assignTerrain(d.levels[levelId], level, next), "Change terrain resolution") && get().scene !== s.scene
       },
@@ -1060,8 +1062,11 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
       },
 
       updateGrid(partial) {
-        const clampCells = (v: number) => Math.min(SCENE_LIMITS.maxGridCells, Math.max(1, Math.round(v)))
         const s = get()
+        // Fine terrain resolutions support smaller grids only (core/scene/heightmap MAX_TERRAIN_SAMPLES_PER_SIDE).
+        const finest = finestTerrainResolution(s.scene.levels)
+        const maxCells = Math.min(SCENE_LIMITS.maxGridCells, finest === null ? Infinity : maxCellsForResolution(finest))
+        const clampCells = (v: number) => Math.min(maxCells, Math.max(1, Math.round(v)))
         const prevGrid = s.scene.grid
         apply((d) => {
           if (partial.width !== undefined) d.grid.width = clampCells(partial.width)

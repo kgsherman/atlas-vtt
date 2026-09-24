@@ -11,7 +11,7 @@ import { clipPolygonHalfPlane, polygonArea } from "../geometry/polygon"
 import { segmentCellIntervals } from "../grid/grid"
 import { chunkSamples, decodeChunk, encodeChunk, parseChunkKey } from "../scene/heightmap"
 import { decodeFloorMask, floorRects } from "../scene/queries"
-import type { FloorMask, GridSettings, Id, Rect, Vec2 } from "../scene/types"
+import type { FloorMask, GridSettings, Id, Rect, TerrainResolution, Vec2 } from "../scene/types"
 import { cellTouched, getCell } from "../vision/mask"
 import { maskTouchesShape, type ObjectFootprint } from "../vision/observe"
 import { SUBCELLS, type CellMask, type EncodedMask, type GradeMask } from "../vision/types"
@@ -283,7 +283,13 @@ const TERRAIN_CACHE_LIMIT = 4096
  * A heightmap chunk as a player may receive it: samples touching no explored cell are zeroed
  * (lattice samples on cell edges/corners touch every adjacent cell). null = nothing to send.
  */
-export function clipTerrainChunk(b64: string, key: string, resolution: 1 | 2 | 4, grid: Pick<GridSettings, "width" | "depth">, mask: CellMask): string | null {
+export function clipTerrainChunk(
+  b64: string,
+  key: string,
+  resolution: TerrainResolution,
+  grid: Pick<GridSettings, "width" | "depth">,
+  mask: CellMask
+): string | null {
   const { ci, cj } = parseChunkKey(key)
   if (!Number.isInteger(ci) || !Number.isInteger(cj) || ci < 0 || cj < 0) return null
   const n = chunkSamples(resolution)

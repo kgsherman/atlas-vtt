@@ -4,7 +4,7 @@
  * controller.toolHint, e.g. the terrain tool's "Move to set the height, click to confirm") show it here.
  */
 import * as React from "react"
-import { Box, Cylinder, Magnet, MousePointer2, Paintbrush, RotateCcw, RotateCw, TriangleRight, Undo2 } from "lucide-react"
+import { Box, Cylinder, Magnet, MousePointer2, Paintbrush, Pentagon, RotateCcw, RotateCw, TriangleRight, Undo2 } from "lucide-react"
 
 import { CommandKbd } from "@/components/keybindings/CommandKbd"
 import { useCommandLabel } from "@/components/keybindings/keymapStore"
@@ -430,6 +430,7 @@ function TerrainOptions() {
     subOption("block", "Block", <Box />, createKey),
     subOption("ramp", "Ramp", <TriangleRight />, createKey),
     subOption("cylinder", "Cylinder", <Cylinder />, createKey),
+    subOption("polygon", "Polygon", <Pentagon />, createKey),
   ]
   // The advanced (vertex / edge / face) mode is effective only with shapes selected. The switch and the
   // element picker go through the tool (like Tab and 1 / 2 / 3), which explains when nothing is selected.
@@ -441,7 +442,7 @@ function TerrainOptions() {
       <Segmented className="shrink-0" value={t.sub} onValueChange={(sub) => set({ sub })} options={subs} aria-label="Terrain tool" />
       <Sep />
       {t.sub === "brush" ? <BrushOptions /> : null}
-      {t.sub === "block" || t.sub === "ramp" || t.sub === "cylinder" ? (
+      {t.sub === "block" || t.sub === "ramp" || t.sub === "cylinder" || t.sub === "polygon" ? (
         <Opt label="Height step">
           <NumberInput
             className="w-18"

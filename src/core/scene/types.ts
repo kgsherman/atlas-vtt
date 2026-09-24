@@ -14,7 +14,7 @@
  *    session. Live play state lives in the session's GameState copy (core/session).
  */
 
-export const SCENE_SCHEMA_VERSION = 3 as const
+export const SCENE_SCHEMA_VERSION = 4 as const
 
 export type Id = string
 
@@ -98,6 +98,10 @@ export interface Environment {
 /** Edge length of a heightmap chunk, in grid cells. */
 export const HEIGHTMAP_CHUNK_CELLS = 8
 
+/** Heightmap resolutions (samples per cell edge). */
+export const TERRAIN_RESOLUTIONS = [1, 2, 4, 8, 16] as const
+export type TerrainResolution = (typeof TERRAIN_RESOLUTIONS)[number]
+
 /**
  * Per-level terrain. Samples sit on a regular lattice: sample (sx, sz) is at world
  * (sx·s, sz·s) with s = cellSize / resolution, covering sx ∈ [0, width·resolution],
@@ -110,11 +114,13 @@ export const HEIGHTMAP_CHUNK_CELLS = 8
  * by z then x), heights in feet relative to level.elevation.
  */
 export interface Heightmap {
-  resolution: 1 | 2 | 4
+  /** Samples per cell edge. 8 and 16 are limited to smaller grids (core/scene/heightmap terrainResolutionFits). */
+  resolution: TerrainResolution
   chunks: Record<string, string>
 }
 
-export type TerrainShapeKind = "block" | "ramp" | "cylinder"
+/** "polygon": a flat-topped prism over a drawn footprint (like a block, any number of corners). */
+export type TerrainShapeKind = "block" | "ramp" | "cylinder" | "polygon"
 
 /** "add": the terrain is raised to the shape's top (max); "carve": it is cut down to it (min). */
 export type TerrainShapeOp = "add" | "carve"

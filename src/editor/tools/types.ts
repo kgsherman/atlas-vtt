@@ -53,6 +53,18 @@ export interface ToolKeyEvent {
   action?: ShortcutAction
 }
 
+/**
+ * One row of the key hints that float next to the cursor during a multi-step gesture (Tool.cursorKeys):
+ * a mouse input and / or keymap commands (shown with their current keys, so remaps show), and what it does.
+ */
+export interface CursorKey {
+  /** Mouse input shown as-is ("Click", "Right-click"). */
+  mouse?: string
+  /** Keymap command ids (EDITOR_COMMANDS) whose keys are shown. */
+  commands?: readonly string[]
+  label: string
+}
+
 export interface ToolContext {
   activeLevelId: Id
 }
@@ -73,4 +85,9 @@ export interface Tool {
   cursor?(): string | null
   /** Phase-aware hint for the options bar (null or absent: the tool's static hint). */
   hint?(): string | null
+  /**
+   * Key hints drawn next to the cursor (null or absent: none). Return the same array while it is unchanged:
+   * the canvas re-reads it on every controller notification and re-renders on a new identity.
+   */
+  cursorKeys?(): readonly CursorKey[] | null
 }

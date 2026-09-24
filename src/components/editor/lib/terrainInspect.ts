@@ -11,7 +11,7 @@ import type { GridSettings, Id, Level, TerrainShape, TerrainShapeKind, WallObjec
 import { wallProfile } from "@/core/scene/wallProfile"
 import type { EditorState } from "@/editor/store"
 
-export const SHAPE_KIND_LABELS: Record<TerrainShapeKind, string> = { block: "Block", ramp: "Ramp", cylinder: "Cylinder" }
+export const SHAPE_KIND_LABELS: Record<TerrainShapeKind, string> = { block: "Block", ramp: "Ramp", cylinder: "Cylinder", polygon: "Polygon" }
 
 /** Fewer lattice samples than this inside a shape: it bakes to a spike or to nothing. */
 export const MIN_SHAPE_SAMPLES = 4

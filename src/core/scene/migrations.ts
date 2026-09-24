@@ -36,6 +36,8 @@ export const MIGRATIONS: Readonly<Record<number, Migration>> = Object.freeze({
   // v2 added the optional Token.model; v1 documents are valid v2 documents.
   1: (doc: unknown) => doc,
   2: wallsFollowTerrain,
+  // v4 added heightmap resolutions 8 and 16 and the "polygon" terrain shape kind; v3 documents are valid v4 documents.
+  3: (doc: unknown) => doc,
 })
 
 export type MigrateResult =

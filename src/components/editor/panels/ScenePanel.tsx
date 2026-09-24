@@ -2,6 +2,8 @@ import * as React from "react"
 import { CloudMoon, Moon, Sun, Sunrise, Warehouse } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { finestTerrainResolution, maxCellsForResolution } from "@/core/scene/heightmap"
+import { SCENE_LIMITS } from "@/core/scene/schema"
 import type { AmbientLevel, DiagonalRule, DirectionalLightSettings, Environment } from "@/core/scene/types"
 import type { EnvironmentUpdate } from "@/editor/store"
 import { cn } from "@/lib/utils"
@@ -228,6 +230,8 @@ export function ScenePanel() {
   const { store } = useEditorContext()
   const readOnly = useEditorState((s) => s.readOnly)
   const grid = useEditorState((s) => s.scene.grid)
+  const finest = useEditorState((s) => finestTerrainResolution(s.scene.levels))
+  const maxCells = Math.min(SCENE_LIMITS.maxGridCells, finest === null ? Infinity : maxCellsForResolution(finest))
   const env = useEditorState((s) => s.scene.environment)
   const meta = useEditorState((s) => s.scene.meta)
   const setEnv = (partial: EnvironmentUpdate) => store.getState().updateEnvironment(partial)
@@ -235,10 +239,13 @@ export function ScenePanel() {
   return (
     <div className="flex flex-col">
       <PanelSection title="Grid">
-        <FieldRow label="Size" hint="Scene extent in 5 ft cells (max 200 × 200). Shrinking is refused if content would fall outside.">
+        <FieldRow
+          label="Size"
+          hint={`Scene extent in 5 ft cells (max ${maxCells} × ${maxCells}${maxCells < SCENE_LIMITS.maxGridCells ? `: terrain at ${finest}× resolution` : ""}). Shrinking is refused if content would fall outside.`}
+        >
           <FieldPair>
-            <NumberInput prefix="W" value={grid.width} min={1} max={200} step={1} precision={0} disabled={readOnly} onCommit={(width) => store.getState().updateGrid({ width })} aria-label="Grid width" />
-            <NumberInput prefix="D" value={grid.depth} min={1} max={200} step={1} precision={0} disabled={readOnly} onCommit={(depth) => store.getState().updateGrid({ depth })} aria-label="Grid depth" />
+            <NumberInput prefix="W" value={grid.width} min={1} max={maxCells} step={1} precision={0} disabled={readOnly} onCommit={(width) => store.getState().updateGrid({ width })} aria-label="Grid width" />
+            <NumberInput prefix="D" value={grid.depth} min={1} max={maxCells} step={1} precision={0} disabled={readOnly} onCommit={(depth) => store.getState().updateGrid({ depth })} aria-label="Grid depth" />
           </FieldPair>
         </FieldRow>
         <Hint>

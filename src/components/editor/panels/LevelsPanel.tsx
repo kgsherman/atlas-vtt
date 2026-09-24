@@ -17,16 +17,16 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useServices } from "@/app/services"
-import { heightRange } from "@/core/scene/heightmap"
+import { heightRange, maxCellsForResolution, terrainResolutionFits } from "@/core/scene/heightmap"
 import { SCENE_LIMITS } from "@/core/scene/schema"
 import { hasPaintedBase } from "@/core/scene/terrainShapes"
-import type { Heightmap, Id, Level } from "@/core/scene/types"
+import { TERRAIN_RESOLUTIONS, type GridSettings, type Id, type Level, type TerrainResolution } from "@/core/scene/types"
 import { floorFromImage, removeBackdrop, updateBackdrop, wallsFromImage } from "@/editor/imageOps"
 import type { LevelUpdate } from "@/editor/store"
 import { cn } from "@/lib/utils"
 
 import { useConfirm, useEditorActions, useEditorContext, useEditorShallow, useEditorState } from "../context"
-import { FieldRow, Hint, NumberInput, PanelSection, Segmented, SliderInput, SwitchField, TextInput } from "../fields"
+import { FieldRow, Hint, NumberInput, PanelSection, Segmented, SliderInput, SwitchField, TextInput, type Option } from "../fields"
 import { formatBytes, formatElevation, trimNumber } from "../lib/format"
 import { imagePixelsForTrace, loadLevelImage } from "../lib/levelImages"
 import { levelBelowElevation, levelsTopDown } from "../lib/levelOps"
@@ -195,11 +195,22 @@ function LevelProperties({ level }: { level: Level }) {
   )
 }
 
-const RESOLUTION_OPTIONS = [
-  { value: "1", label: "1×", tooltip: "1 sample per cell (5 ft)" },
-  { value: "2", label: "2×", tooltip: "2 samples per cell (2.5 ft)" },
-  { value: "4", label: "4×", tooltip: "4 samples per cell (1.25 ft)" },
-] as const
+type ResolutionValue = `${TerrainResolution}`
+
+/** Resolution choices for a grid: finer ones are disabled on grids larger than they support. */
+function resolutionOptions(grid: Pick<GridSettings, "width" | "depth" | "cellSize">): Option<ResolutionValue>[] {
+  return TERRAIN_RESOLUTIONS.map((r) => {
+    const spacing = `${r} sample${r === 1 ? "" : "s"} per cell (${trimNumber(grid.cellSize / r, 4)} ft)`
+    const fits = terrainResolutionFits(grid, r)
+    const max = maxCellsForResolution(r)
+    return {
+      value: `${r}`,
+      label: `${r}×`,
+      tooltip: fits ? spacing : `${spacing}: grids up to ${max}×${max} cells only`,
+      disabled: !fits,
+    }
+  })
+}
 
 function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? "" : "s"}`
@@ -220,6 +231,8 @@ export function TerrainSection({ level }: { level: Level }) {
   const terrainEdits = level.terrainEdits
   const painted = React.useMemo(() => hasPaintedBase({ heightmap: hm, terrainEdits }), [hm, terrainEdits])
   const shapes = terrainEdits ? Object.keys(terrainEdits.shapes).length : 0
+  const grid = useEditorState((s) => s.scene.grid)
+  const options = React.useMemo(() => resolutionOptions(grid), [grid])
 
   const toggle = async (on: boolean) => {
     if (on) {
@@ -260,12 +273,15 @@ export function TerrainSection({ level }: { level: Level }) {
       />
       {hm ? (
         <>
-          <FieldRow label="Resolution" hint="Height samples per grid cell. Changing it resamples the painted terrain and re-bakes the shapes.">
+          <FieldRow
+            label="Resolution"
+            hint={`Height samples per grid cell. Changing it resamples the painted terrain and re-bakes the shapes. 8× needs a grid of at most ${maxCellsForResolution(8)}×${maxCellsForResolution(8)} cells, 16× at most ${maxCellsForResolution(16)}×${maxCellsForResolution(16)}.`}
+          >
             <Segmented
-              value={String(hm.resolution) as "1" | "2" | "4"}
+              value={`${hm.resolution}` as ResolutionValue}
               disabled={readOnly}
-              onValueChange={(v) => void store.getState().setTerrainResolution(level.id, Number(v) as Heightmap["resolution"])}
-              options={RESOLUTION_OPTIONS}
+              onValueChange={(v) => void store.getState().setTerrainResolution(level.id, Number(v) as TerrainResolution)}
+              options={options}
             />
           </FieldRow>
           <div className="flex items-center justify-between gap-2">

@@ -33,9 +33,11 @@ import {
   flattenTerrain,
   hasPaintedBase,
   isSimplePolygon,
+  isSimplePolyline,
   isValidTerrainShape,
   latticeWindow,
   nextShapeOrder,
+  polygonShape,
   rampShape,
   rayHitShape,
   resampleTerrain,
@@ -281,6 +283,101 @@ function checkTriangulation(points: Vec3[], tris: number[]): number {
   }
   return sum
 }
+
+describe("isSimplePolyline", () => {
+  const xz = (a: [number, number][]) => a.map(([x, z]) => ({ x, z }))
+
+  it("accepts open chains that can still close, whatever the closing edge does", () => {
+    expect(isSimplePolyline([])).toBe(true)
+    expect(isSimplePolyline(xz([[0, 0]]))).toBe(true)
+    expect(
+      isSimplePolyline(
+        xz([
+          [0, 0],
+          [10, 0],
+        ])
+      )
+    ).toBe(true)
+    // An open "Z": its closing edge (last → first) would cross the first segment, but the chain is fine.
+    expect(
+      isSimplePolyline(
+        xz([
+          [0, 0],
+          [10, 0],
+          [0, 10],
+          [10, 10],
+        ])
+      )
+    ).toBe(true)
+    expect(
+      isSimplePolygon(
+        xz([
+          [0, 0],
+          [10, 0],
+          [0, 10],
+          [10, 10],
+        ])
+      )
+    ).toBe(false)
+    // A U shape drawn corner by corner.
+    const u = xz([
+      [0, 0],
+      [30, 0],
+      [30, 30],
+      [20, 30],
+      [20, 10],
+      [10, 10],
+      [10, 30],
+      [0, 30],
+    ])
+    for (let n = 1; n <= u.length; n++) expect(isSimplePolyline(u.slice(0, n))).toBe(true)
+    expect(isSimplePolygon(u)).toBe(true)
+  })
+
+  it("rejects crossings, touches, repeats, fold-backs and non-finite points", () => {
+    const bad: [number, number][][] = [
+      // The fourth segment crosses the first.
+      [
+        [0, 0],
+        [10, 0],
+        [10, 10],
+        [5, -5],
+      ],
+      // A corner on an earlier segment.
+      [
+        [0, 0],
+        [10, 0],
+        [10, 10],
+        [5, 0],
+      ],
+      // A repeated corner.
+      [
+        [0, 0],
+        [10, 0],
+        [10, 10],
+        [0, 0],
+      ],
+      [
+        [0, 0],
+        [10, 0],
+        [10, 0],
+      ],
+      // Folding back along the previous segment.
+      [
+        [0, 0],
+        [10, 0],
+        [5, 0],
+      ],
+    ]
+    for (const p of bad) expect(isSimplePolyline(xz(p)), JSON.stringify(p)).toBe(false)
+    expect(
+      isSimplePolyline([
+        { x: 0, z: 0 },
+        { x: NaN, z: 1 },
+      ])
+    ).toBe(false)
+  })
+})
 
 describe("triangulateFootprint", () => {
   it("triangulates convex, concave and reversed polygons exactly", () => {
@@ -1002,6 +1099,42 @@ describe("factories", () => {
       expect(signedArea(s.points)).toBeGreaterThan(0)
       expect(isValidTerrainShape(s)).toBe(true)
     }
+  })
+
+  it("builds flat-topped polygons in canonical order from either winding", () => {
+    const l = [
+      { x: 0, z: 0 },
+      { x: 20, z: 0 },
+      { x: 20, z: 20 },
+      { x: 10, z: 20 },
+      { x: 10, z: 10 },
+      { x: 0, z: 10 },
+    ]
+    for (const footprint of [l, [...l].reverse()]) {
+      const p = polygonShape("p", footprint, 1, 3, 2)
+      expect(p).toMatchObject({ kind: "polygon", op: "add", order: 2, base: 1 })
+      expect(p.points.map((q) => ({ x: q.x, z: q.z }))).toEqual(signedArea(l) > 0 ? l : [...l].reverse())
+      expect(p.points.every((q) => q.y === 4)).toBe(true)
+      expect(isValidTerrainShape(p)).toBe(true)
+      // An L: the notch stays at the ground.
+      expect(shapeTopAt(p, 5, 5)).toBe(4)
+      expect(shapeTopAt(p, 5, 15)).toBeNull()
+    }
+    expect(polygonShape("q", l, 0, -2, 0).op).toBe("carve")
+    // Not validated (like the other factories): a crossing outline is caught by isValidTerrainShape.
+    const bowtie = polygonShape(
+      "x",
+      [
+        { x: 0, z: 0 },
+        { x: 10, z: 10 },
+        { x: 10, z: 0 },
+        { x: 0, z: 10 },
+      ],
+      0,
+      1,
+      0
+    )
+    expect(isValidTerrainShape(bowtie)).toBe(false)
   })
 
   it("ramps rise towards their direction", () => {
