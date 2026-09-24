@@ -13,7 +13,7 @@ import { frameOpening, importSourceImage } from "./images"
 import { exportDesign } from "./render"
 import type { ImageCache, TokenMakerStore } from "./store"
 
-/** Default solid backdrop when no free backdrop is available (a dusky plum, like the free one). */
+/** Default solid backdrop when no free backdrop is available (a dark slate, like the free one). */
 export const DEFAULT_FILL = "#2a2230"
 
 /**

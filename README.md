@@ -155,7 +155,7 @@ with `?local=0`.
 
 ### Token maker setup
 
-- Free parts: upload `token-bg.png` and `token-frame.png` to the root of the `free-assets` bucket (paths in
+- Free parts: upload `token-bg.png` and `token-frame.png` to the `token/` folder of the `free-assets` bucket (paths in
   `FREE_TOKEN_PARTS`, `src/net/freeAssets.ts`). Without them a new token starts from a plain backdrop.
 - Background removal runs server-side; the provider key is never a `VITE_` variable and never reaches the
   browser. Settings (all optional except the key): `OPENAI_API_KEY`, `IMAGE_MODEL_PROVIDER` (`openai`),

@@ -5,7 +5,7 @@
  *
  * Local mode has no catalog (`available` false): free assets need Atlas Cloud.
  *
- * Token parts (ARCHITECTURE §11) are files at the bucket's root that the Token Maker offers as starting
+ * Token parts (ARCHITECTURE §11) are files in the bucket's `token/` folder that the Token Maker offers as starting
  * layers (a background disc and a ring). They are not catalog rows: they are not loaded into games,
  * and the Token Maker offers them all, whatever game it is used with.
  */
@@ -44,8 +44,8 @@ export interface FreeTokenPart {
 
 /** Token parts in the `free-assets` bucket (object paths at its root). */
 export const FREE_TOKEN_PARTS: ReadonlyArray<Omit<FreeTokenPart, "url"> & { path: string }> = [
-  { id: "token-bg", role: "background", name: "Dusk backdrop", path: "token-bg.png" },
-  { id: "token-frame", role: "frame", name: "Prismatic stone ring", path: "token-frame.png" },
+  { id: "token-bg", role: "background", name: "Slate backdrop", path: "token/token-bg.png" },
+  { id: "token-frame", role: "frame", name: "Stone ring", path: "token/token-frame.png" },
 ]
 
 export interface FreeAssetsRepo {

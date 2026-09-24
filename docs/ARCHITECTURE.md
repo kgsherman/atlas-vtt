@@ -1062,7 +1062,7 @@ Tables (RLS enabled on every table; default privileges revoke anon; functions re
   `token-models`), mirrored by the table's check and `FREE_ASSET_CATEGORIES` (`core/session/freeAssets.ts`).
   Token model metadata: `{lods: [triangles…], height, radius (footprint sides), size?}`. `net/freeAssets.ts`
   reads the catalog once per app run; local mode has none. The Token Maker's free parts (`token-bg.png`,
-  `token-frame.png`) are files at the bucket's root, not catalog rows (§11).
+  `token-frame.png` in `token/`) are plain files, not catalog rows (§11).
 - Bucket `token-images` (PUBLIC, PNG / WebP ≤ 4 MiB; migration `*_token_maker.sql`): finished tokens at
   `{userId}/{sha256 prefix}.{png|webp}`, so every client at a table loads a token's portrait by URL. Clients
   insert into their own folder only (`private.can_insert_token_image`: well-formed name, ≤ 300 objects /
@@ -1576,7 +1576,7 @@ the selected layer's mask (with a faint ghost of its hidden parts). New layers g
 the bottom (disc grown 0.02 to reach under the ring), frames on top (unmasked; the disc is fitted to their
 opening), character art under the topmost frame (disc). The design and its images autosave to IndexedDB
 (`draft.ts`, key `token-maker:current`) and come back on reload; a fresh page starts from the free parts.
-Free parts: `token-bg.png` and `token-frame.png` at the root of the public `free-assets` bucket
+Free parts: `token/token-bg.png` and `token/token-frame.png` in the public `free-assets` bucket
 (`FREE_TOKEN_PARTS`, `FreeAssetsRepo.tokenParts()`; not catalog rows: they are not loaded into games).
 Downloads are PNGs at 256–2048 px.
 

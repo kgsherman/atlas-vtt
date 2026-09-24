@@ -78,8 +78,8 @@ describe("free assets repository", () => {
   it("offers the Token Maker's free parts by public URL", () => {
     const repo = createRemoteFreeAssetsRepo(client([]).client)
     expect(repo.tokenParts()).toEqual([
-      { id: "token-bg", role: "background", name: "Dusk backdrop", url: url("token-bg.png") },
-      { id: "token-frame", role: "frame", name: "Prismatic stone ring", url: url("token-frame.png") },
+      { id: "token-bg", role: "background", name: "Slate backdrop", url: url("token/token-bg.png") },
+      { id: "token-frame", role: "frame", name: "Stone ring", url: url("token/token-frame.png") },
     ])
   })
 
