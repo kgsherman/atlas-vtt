@@ -35,6 +35,7 @@ import { isBool, usePreference } from "../useSessionResource"
 import {
   formatTime,
   parseChatInput,
+  resolveAudience,
   type Audience,
   type AudienceOption,
   type ChatEntry,
@@ -100,8 +101,7 @@ export function ChatDock({
     "all",
     (v): v is string => typeof v === "string"
   )
-  const option =
-    audiences.find((a) => a.key === audienceKeyValue) ?? audiences[0]
+  const option = resolveAudience(audiences, audienceKeyValue)
   const [draft, setDraft] = React.useState("")
   const [error, setError] = React.useState<string | null>(null)
   const inputRef = React.useRef<HTMLInputElement>(null)
@@ -151,7 +151,7 @@ export function ChatDock({
       "[data-slot=scroll-area-viewport]"
     )
     if (viewport) viewport.scrollTop = viewport.scrollHeight
-  }, [open, entries.length])
+  }, [open, newest?.id])
 
   // ---- sending --------------------------------------------------------------------------------------
   const send = (cmd: ReturnType<typeof parseChatInput>) => {
@@ -344,17 +344,17 @@ export function ChatDock({
           </div>
         </HudPanel>
       ) : preview ? (
-        <button
-          type="button"
+        <Button
+          variant="ghost"
           className={cn(
-            "pointer-events-auto absolute right-0 bottom-full mb-2 w-72 animate-in cursor-pointer rounded-lg p-2.5 text-left text-xs fade-in slide-in-from-bottom-1",
+            "pointer-events-auto absolute right-0 bottom-full mb-2 block h-auto w-72 animate-in rounded-lg p-2.5 text-left text-xs font-normal whitespace-normal fade-in slide-in-from-bottom-1",
             glass
           )}
           onClick={() => toggle(true)}
           aria-label="Open chat"
         >
           <ChatLine entry={preview} compact />
-        </button>
+        </Button>
       ) : null}
       <HudPanel className="relative p-1">
         <HudButton

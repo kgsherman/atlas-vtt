@@ -9,6 +9,8 @@ import {
   entriesFromState,
   entriesFromView,
   parseChatInput,
+  playerAudiences,
+  resolveAudience,
   type Audience,
 } from "./chatModel"
 
@@ -222,5 +224,20 @@ describe("chat entries", () => {
       ["y", "from DM"],
     ])
     expect(entriesFromView(null)).toEqual([])
+  })
+})
+
+describe("resolveAudience", () => {
+  it("falls back to the most private option, never to everyone, when the remembered one is gone", () => {
+    const dm = dmAudiences([{ userId: "u1", name: "Ann" }])
+    expect(resolveAudience(dm, "player:u1").label).toBe("Whisper to Ann")
+    expect(resolveAudience(dm, "player:gone").audience).toEqual({
+      kind: "self",
+    })
+    expect(resolveAudience(dm, "all").audience).toEqual({ kind: "all" })
+    expect(resolveAudience(dm, "garbage").audience).toEqual({ kind: "self" })
+    expect(resolveAudience(playerAudiences(), "self").audience).toEqual({
+      kind: "dm",
+    })
   })
 })

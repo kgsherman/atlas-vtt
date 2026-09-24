@@ -1118,18 +1118,26 @@ authoritative, and a player receives only what filter.ts lets through.
   bonus, then as added). `load-scene` ends combat; `rebind-player` (guest merge) moves a player's messages
   and whispers to the new id; `parseGameState` drops entries whose token is gone.
 - **Requests** (`ClientToHost`, strict zod, the sender is the topic's `{uid}`): `say {text ≤ 1000 UTF-16
-  units, to: all | dm}`, `roll {formula ≤ 200, to}`, `initiative {tokenId, formula}` (only for a token the
-  player owns that has a visible entry; sets its initiative, posts a public "Initiative" roll), `end-turn`
-  (only while the acting entry is a token the player owns; advances like the DM's Next turn). Reduced by
+  units, to: all | dm}`, `roll {formula ≤ 200, to}`, `initiative {tokenId, bonus}` (an integer within ±20;
+  only for a token the player owns whose entry is visible and has no initiative yet: the host rolls
+  `1d20 + bonus`, a formula it writes itself, stores the bonus as the entry's tie-break modifier and posts a
+  public "Initiative" roll, so the bonus is on show like at a real table; a second roll is refused until the
+  DM clears the value), `end-turn {entryId}` (only while that entry acts and is a token the player owns, so a
+  late or repeated click cannot end the next turn; advances like the DM's Next turn). Reduced by
   `reduceTableRequest` with a `TableContext` (`now`, `newId`, `rng`) from the host. Refusals: `bad-formula`,
   `cannot`, `not-owner`, `invalid`. `say` / `roll` have their own rate on top of the request rate
   (`TABLE_RATE` 2/s, burst 6), so one player cannot flush the shared log at once.
 - **DM commands**: `table-post` (the host builds the message: `dmSayCommand`, `dmRollCommand` roll on the
   DM's tab, which is the host), `table-clear-log`, `combat-start` / `-end` (with a `TableStamp` for their
-  notices), `-add` (tokens already in are skipped; hidden tokens join hidden), `-remove` (the next entry
-  acts if the acting one leaves), `-update` (initiative, bonus, hidden, a custom name; re-sorted), `-turn`
-  (±1; wrapping posts "Round N"), `-set-active`. `npcInitiativeCommand` rolls 1d20 + bonus for every
-  unrolled entry no player controls. Table commands mark players dirty but never the vision (empty delta).
+  notices), `-add` (tokens already in are skipped), `-remove` (`removeEntries`: if the acting entry leaves,
+  the next one acts, wrapping into a new round with its notice like Next turn), `-update` (initiative,
+  bonus, hidden, a custom name; re-sorted), `-turn` (±1; wrapping posts "Round N"), `-set-active`. A map
+  edit that deletes tokens removes their entries too (`pruneCombat`, in `apply-scene-patches`; a round it
+  starts posts no notice, since reducers make no ids). A hidden token joins as an ordinary entry: the filter
+  never sends a token a player cannot see, so its entry appears for them once it is revealed and in view;
+  the entry's own `hidden` flag is the DM's way to keep a visible creature out of the order.
+  `npcInitiativeCommand` rolls 1d20 + bonus for every unrolled entry no player controls. Table commands mark
+  players dirty but never the vision (empty delta).
 - **Filter** (`filterForPlayer` → `playerTable`, THE path): `PlayerView.table = {log, combat}`, absent
   when there is nothing to show. Log: the newest `maxViewLog` (60) messages the player may read (`canRead`:
   their own, public ones, whispers to them), keyed by id, each built field by field: `{id, at, kind, name,

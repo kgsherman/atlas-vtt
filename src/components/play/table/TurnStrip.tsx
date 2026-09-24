@@ -31,6 +31,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import type { Token } from "@/core/scene/types"
+import { TABLE_LIMITS } from "@/core/session/table"
 import { cn } from "@/lib/utils"
 
 import { HudButton, HudPanel } from "../hud"
@@ -63,11 +64,12 @@ export interface TurnStripProps {
 }
 
 const MOD_KEY = "atlas-play:initiative-mod:"
+const MAX_BONUS = TABLE_LIMITS.maxInitiativeBonus
 
 function storedModifier(tokenId: string): number {
   try {
     const v = Number(localStorage.getItem(MOD_KEY + tokenId))
-    return Number.isInteger(v) && Math.abs(v) <= 99 ? v : 0
+    return Number.isInteger(v) && Math.abs(v) <= MAX_BONUS ? v : 0
   } catch {
     return 0
   }
@@ -199,9 +201,9 @@ function EntryChip({
       <Tooltip>
         <TooltipTrigger
           render={
-            <button
-              type="button"
-              className="flex min-w-0 cursor-pointer items-center gap-1.5 rounded-sm text-left"
+            <Button
+              variant="ghost"
+              className="h-auto min-w-0 justify-start gap-1.5 rounded-sm p-0 text-left text-xs hover:bg-transparent dark:hover:bg-transparent"
               onClick={() => (e.tokenId ? onFocus?.(e.tokenId) : undefined)}
               aria-current={active ? "step" : undefined}
             />
@@ -272,7 +274,10 @@ function InitiativeRoll({
   const [mod, setMod] = React.useState(() => String(storedModifier(tokenId)))
   const id = React.useId()
   const roll = () => {
-    const m = Math.max(-99, Math.min(99, Math.round(Number(mod) || 0)))
+    const m = Math.max(
+      -MAX_BONUS,
+      Math.min(MAX_BONUS, Math.round(Number(mod) || 0))
+    )
     try {
       localStorage.setItem(MOD_KEY + tokenId, String(m))
     } catch {
@@ -312,8 +317,8 @@ function InitiativeRoll({
               id={id}
               type="number"
               inputMode="numeric"
-              min={-99}
-              max={99}
+              min={-MAX_BONUS}
+              max={MAX_BONUS}
               value={mod}
               onChange={(ev) => setMod(ev.target.value)}
               onKeyDown={(ev) => {

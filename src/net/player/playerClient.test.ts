@@ -835,13 +835,13 @@ describe("PlayerClient: the table and pings", () => {
     await waitFor(() => client.getSnapshot().status === "live", "live")
     const said = client.say("  Hello  ", "all")
     const rolled = client.roll("2d6+1 damage", "dm")
-    const endTurn = client.endTurn()
+    const endTurn = client.endTurn("c1")
     await waitFor(() => client.getSnapshot().results.length === 3, "results")
     expect(host.received.map((r) => r.msg)).toEqual(
       expect.arrayContaining([
         { t: "say", reqId: said, text: "Hello", to: "all" },
         { t: "roll", reqId: rolled, formula: "2d6+1 damage", to: "dm" },
-        { t: "end-turn", reqId: endTurn },
+        { t: "end-turn", reqId: endTurn, entryId: "c1" },
       ])
     )
     const results = client.getSnapshot().results

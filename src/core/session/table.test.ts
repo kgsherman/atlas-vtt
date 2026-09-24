@@ -295,8 +295,13 @@ describe("combat", () => {
     state = dm(state, { t: "combat-add", entries: [entry(pip, "dup"), entry(goblin, "c3", { initiative: 7 }), entry("no-such-token", "c9")] })
     expect(state.table!.combat!.entries.map((e) => e.id)).toEqual(["c1", "c3", "c2"])
     state = dm(state, { t: "combat-set-active", entryId: "c3" })
-    state = dm(state, { t: "combat-remove", entryId: "c3" })
+    state = dm(state, { t: "combat-remove", entryId: "c3", stamp: stamp("r1") })
     expect(state.table!.combat!.activeId).toBe("c2")
+    // The last one acting leaves: a new round starts, as Next turn would.
+    state = dm(state, { t: "combat-remove", entryId: "c2", stamp: stamp("r2", 7000) })
+    expect(state.table!.combat).toMatchObject({ round: 2, activeId: "c1" })
+    expect(state.table!.log.at(-1)).toMatchObject({ kind: "system", text: "Round 2", id: "r2" })
+    state = dm(state, { t: "combat-add", entries: [entry(aldric, "c2", { initiative: 5 })] })
     state = dm(state, { t: "combat-update", updates: [{ entryId: "c2", patch: { initiative: 99.123, modifier: 250 } }] })
     expect(state.table!.combat!.entries[0]).toMatchObject({ id: "c2", initiative: 99.12, modifier: TABLE_LIMITS.maxModifier })
     expect(reduceDm(state, { t: "combat-update", updates: [{ entryId: "c2", patch: { initiative: 99.12 } }] }).state).toBe(state)
@@ -311,17 +316,29 @@ describe("combat", () => {
       entries: [entry(pip, "c1"), entry(goblin, "c3", { initiative: 12 }), entry(aldric, "c2", { hidden: true })],
       stamp: stamp("n1"),
     })
-    expect(request(state, ALICE, { t: "initiative", reqId: "r", tokenId: goblin, formula: "d20" }).result.reason).toBe("not-owner")
-    expect(request(state, BOB, { t: "initiative", reqId: "r", tokenId: aldric, formula: "d20" }).result.reason).toBe("cannot")
-    expect(request(state, ALICE, { t: "initiative", reqId: "r", tokenId: pip, formula: "plus d20" }).result.reason).toBe("bad-formula")
-    const out = request(state, ALICE, { t: "initiative", reqId: "r", tokenId: pip, formula: "1d20+3 ignored" }, ctx(1000, fixedDice(14)))
+    expect(request(state, ALICE, { t: "initiative", reqId: "r", tokenId: goblin, bonus: 0 }).result.reason).toBe("not-owner")
+    expect(request(state, BOB, { t: "initiative", reqId: "r", tokenId: aldric, bonus: 0 }).result.reason).toBe("cannot")
+    expect(request(state, ALICE, { t: "initiative", reqId: "r", tokenId: pip, bonus: 21 }).result.reason).toBe("invalid")
+    expect(request(state, ALICE, { t: "initiative", reqId: "r", tokenId: pip, bonus: 1.5 }).result.reason).toBe("invalid")
+    const out = request(state, ALICE, { t: "initiative", reqId: "r", tokenId: pip, bonus: 3 }, ctx(1000, fixedDice(14)))
     expect(out.result.ok).toBe(true)
-    expect(out.state.table!.combat!.entries.map((e) => [e.id, e.initiative])).toEqual([
-      ["c1", 17],
-      ["c3", 12],
-      ["c2", null],
+    expect(out.state.table!.combat!.entries.map((e) => [e.id, e.initiative, e.modifier])).toEqual([
+      ["c1", 17, 3],
+      ["c3", 12, 0],
+      ["c2", null, 0],
     ])
-    expect(messages(filterForPlayer(out.state, BOB, sees()))[1]).toMatchObject({ kind: "roll", text: "Initiative", name: "Alice", roll: { total: 17 } })
+    // The host wrote the formula; everyone sees the bonus on the roll.
+    expect(messages(filterForPlayer(out.state, BOB, sees()))[1]).toMatchObject({
+      kind: "roll",
+      text: "Initiative",
+      name: "Alice",
+      roll: { formula: "1d20 + 3", total: 17 },
+    })
+    // Once: a second roll (to fish for a better one) is refused until the DM clears the value.
+    const again = request(out.state, ALICE, { t: "initiative", reqId: "r2", tokenId: pip, bonus: 3 }, ctx(2000, fixedDice(20)))
+    expect(again.result.reason).toBe("cannot")
+    const cleared = dm(out.state, { t: "combat-update", updates: [{ entryId: "c1", patch: { initiative: null } }] })
+    expect(request(cleared, ALICE, { t: "initiative", reqId: "r3", tokenId: pip, bonus: -2 }, ctx(3000, fixedDice(5))).result.ok).toBe(true)
   })
 
   it("a player ends only their own turn", () => {
@@ -329,13 +346,33 @@ describe("combat", () => {
     let { state } = g
     const { pip, goblin } = g
     state = dm(state, { t: "combat-start", entries: [entry(pip, "c1", { initiative: 15 }), entry(goblin, "c3", { initiative: 12 })], stamp: stamp("n1") })
-    expect(request(state, ALICE, { t: "end-turn", reqId: "r" }).result.reason).toBe("cannot")
+    expect(request(state, ALICE, { t: "end-turn", reqId: "r", entryId: "c1" }).result.reason).toBe("cannot")
     state = dm(state, { t: "combat-turn", delta: 1, stamp: stamp("n2") })
-    expect(request(state, BOB, { t: "end-turn", reqId: "r" }).result.reason).toBe("cannot")
-    const out = request(state, ALICE, { t: "end-turn", reqId: "r" })
+    expect(request(state, BOB, { t: "end-turn", reqId: "r", entryId: "c1" }).result.reason).toBe("cannot")
+    expect(request(state, ALICE, { t: "end-turn", reqId: "r", entryId: "c3" }).result.reason).toBe("cannot")
+    const out = request(state, ALICE, { t: "end-turn", reqId: "r", entryId: "c1" })
     expect(out.result.ok).toBe(true)
     expect(out.state.table!.combat!.activeId).toBe("c3")
-    expect(request(out.state, ALICE, { t: "end-turn", reqId: "r" }).result.reason).toBe("cannot")
+    // A repeated click names the turn that already ended: refused, the goblin keeps its turn.
+    expect(request(out.state, ALICE, { t: "end-turn", reqId: "r", entryId: "c1" }).result.reason).toBe("cannot")
+  })
+
+  it("a deleted token leaves combat, handing the turn on", () => {
+    const g = game()
+    let { state } = g
+    const { pip, goblin, ogre } = g
+    state = dm(state, {
+      t: "combat-start",
+      entries: [entry(pip, "c1", { initiative: 15 }), entry(goblin, "c3", { initiative: 12 }), entry(ogre, "c4", { initiative: 3 })],
+      stamp: stamp("n1"),
+    })
+    state = dm(state, { t: "combat-set-active", entryId: "c3" })
+    state = dm(state, { t: "apply-scene-patches", patches: [{ op: "remove", path: ["tokens", goblin] }] })
+    expect(state.table!.combat).toMatchObject({ round: 1, activeId: "c4" })
+    expect(state.table!.combat!.entries.map((e) => e.id)).toEqual(["c1", "c4"])
+    // The last one, acting: the order wraps into the next round (no notice: a map edit carries no ids).
+    state = dm(state, { t: "apply-scene-patches", patches: [{ op: "remove", path: ["tokens", ogre] }] })
+    expect(state.table!.combat).toMatchObject({ round: 2, activeId: "c1", entries: [{ id: "c1" }] })
   })
 
   it("a new map ends combat but keeps the log", () => {
@@ -416,8 +453,8 @@ describe("protocol and pings", () => {
   it("accepts well-formed table requests only", () => {
     expect(parseClientMessage({ t: "say", reqId: "r1", text: "hi", to: "all" })).not.toBeNull()
     expect(parseClientMessage({ t: "roll", reqId: "r1", formula: "d20", to: "dm" })).not.toBeNull()
-    expect(parseClientMessage({ t: "initiative", reqId: "r1", tokenId: "tok_1", formula: "d20+2" })).not.toBeNull()
-    expect(parseClientMessage({ t: "end-turn", reqId: "r1" })).not.toBeNull()
+    expect(parseClientMessage({ t: "initiative", reqId: "r1", tokenId: "tok_1", bonus: -3 })).not.toBeNull()
+    expect(parseClientMessage({ t: "end-turn", reqId: "r1", entryId: "c1" })).not.toBeNull()
     expect(parseClientMessage({ t: "ping", levelId: "lvl", x: 1, z: 2 })).not.toBeNull()
     for (const bad of [
       { t: "say", reqId: "r1", text: "", to: "all" },
@@ -428,7 +465,10 @@ describe("protocol and pings", () => {
       { t: "roll", reqId: "r1", formula: "d20", to: "all", result: 20 },
       { t: "ping", levelId: "lvl", x: Infinity, z: 2 },
       { t: "ping", levelId: "lvl", x: 1e9, z: 2 },
-      { t: "end-turn", reqId: "r1", entryId: "c1" },
+      { t: "end-turn", reqId: "r1" },
+      { t: "initiative", reqId: "r1", tokenId: "tok_1", formula: "999" },
+      { t: "initiative", reqId: "r1", tokenId: "tok_1", bonus: 21 },
+      { t: "initiative", reqId: "r1", tokenId: "tok_1", bonus: 2.5 },
     ]) {
       expect(parseClientMessage(bad), JSON.stringify(bad).slice(0, 60)).toBeNull()
     }

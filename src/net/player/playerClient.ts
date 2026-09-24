@@ -149,10 +149,10 @@ export interface AtlasPlayerClient extends PlayerClient {
   say(text: string, to: "all" | "dm"): string
   /** Ask the host to roll "formula [label]" (e.g. "1d20+5 to hit"). Returns the reqId. */
   roll(formula: string, to: "all" | "dm"): string
-  /** Roll initiative for one of our tokens in combat. */
-  rollInitiative(tokenId: Id, formula: string): string
-  /** End our token's turn. */
-  endTurn(): string
+  /** Roll initiative (1d20 + `bonus`, rolled by the host) for one of our tokens in combat. */
+  rollInitiative(tokenId: Id, bonus: number): string
+  /** End the turn of `entryId` (one of our tokens, acting now). */
+  endTurn(entryId: Id): string
   /**
    * Point at a spot for the table (only on levels we know; the host drops the rest). Emitted to onPing
    * at once as `mine`. false when it could not be sent (not live, or more than one per PING_GAP_MS).
@@ -360,7 +360,10 @@ export function describeRequestResult(r: ClientRequestResult): string | null {
       case "bad-formula":
         return "Those dice can't be read (try 1d20+5)"
       case "cannot":
-        return r.kind === "end-turn" ? "It isn't your turn" : "That character isn't in the fight"
+        return r.kind === "end-turn" ? "It isn't your turn" : "That character can't roll initiative now"
+      case "invalid":
+        if (r.kind === "initiative") return `Initiative bonuses go from −${TABLE_LIMITS.maxInitiativeBonus} to +${TABLE_LIMITS.maxInitiativeBonus}`
+        return r.kind === "say" ? "Your message wasn't sent" : "The DM rejected that request"
       case "not-owner":
         return "You don't control that character"
       case "rate-limited":
@@ -1162,18 +1165,17 @@ class PlayerClientImpl implements AtlasPlayerClient {
     return reqId
   }
 
-  rollInitiative(tokenId: Id, formula: string): string {
+  rollInitiative(tokenId: Id, bonus: number): string {
     const reqId = this.newRequestId()
-    const f = typeof formula === "string" ? formula.trim() : ""
-    if (!f || f.length > TABLE_LIMITS.maxFormulaInput) this.pushResult({ reqId, ok: false, reason: "bad-formula" }, "invalid", "initiative")
-    else this.submit({ reqId, kind: "initiative", tokenId, sentAt: 0 }, { t: "initiative", reqId, tokenId, formula: f })
+    if (!Number.isInteger(bonus) || Math.abs(bonus) > TABLE_LIMITS.maxInitiativeBonus) this.pushResult({ reqId, ok: false, reason: "invalid" }, "invalid", "initiative")
+    else this.submit({ reqId, kind: "initiative", tokenId, sentAt: 0 }, { t: "initiative", reqId, tokenId, bonus })
     this.changed()
     return reqId
   }
 
-  endTurn(): string {
+  endTurn(entryId: Id): string {
     const reqId = this.newRequestId()
-    this.submit({ reqId, kind: "end-turn", sentAt: 0 }, { t: "end-turn", reqId })
+    this.submit({ reqId, kind: "end-turn", sentAt: 0 }, { t: "end-turn", reqId, entryId })
     this.changed()
     return reqId
   }

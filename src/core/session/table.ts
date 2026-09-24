@@ -34,6 +34,8 @@ export const TABLE_LIMITS = {
   /** |initiative| (decimals allowed, e.g. 15.5 to break a tie). */
   maxInitiative: 999,
   maxModifier: 99,
+  /** |bonus| a player may add to their own initiative roll (shown on the roll, like at a real table). */
+  maxInitiativeBonus: 20,
 } as const
 
 /** How the DM appears at the table. */
@@ -140,6 +142,31 @@ export function advanceTurn(combat: Combat, delta: 1 | -1): { combat: Combat; ne
   return { combat: { ...combat, activeId: null }, newRound: false }
 }
 
+/**
+ * Combat without these entries. When the acting one goes, the turn passes to the next entry that stays
+ * (wrapping into a new round like Next turn: `newRound`), or to nobody when none stays.
+ */
+export function removeEntries(combat: Combat, ids: ReadonlySet<Id>): { combat: Combat; newRound: boolean } {
+  const entries = combat.entries.filter((e) => !ids.has(e.id))
+  if (combat.activeId === null || !ids.has(combat.activeId)) return { combat: { ...combat, entries }, newRound: false }
+  const idx = combat.entries.findIndex((e) => e.id === combat.activeId)
+  const after = combat.entries.slice(idx + 1).find((e) => !ids.has(e.id))
+  if (after) return { combat: { ...combat, entries, activeId: after.id }, newRound: false }
+  if (entries.length === 0) return { combat: { ...combat, entries, activeId: null }, newRound: false }
+  const round = Math.min(TABLE_LIMITS.maxRound, combat.round + 1)
+  return { combat: { round, entries, activeId: entries[0].id }, newRound: round !== combat.round }
+}
+
+/** Combat entries of tokens that no longer exist removed (after a map edit deleted tokens). */
+export function pruneCombat(state: GameState): GameState {
+  const combat = state.table?.combat
+  if (!combat) return state
+  const gone = new Set(combat.entries.filter((e) => e.tokenId !== null && !own(state.scene.tokens, e.tokenId)).map((e) => e.id))
+  if (gone.size === 0) return state
+  // No notice for a round this starts: reducers make no ids (a map edit carries none).
+  return { ...state, table: { ...state.table!, combat: removeEntries(combat, gone).combat } }
+}
+
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v)
 
 function clampInitiative(v: number | null): number | null {
@@ -226,18 +253,34 @@ export function reduceTableRequest(state: GameState, userId: string, msg: TableR
       if (!ownsToken(state, userId, msg.tokenId)) return rejected(state, msg.reqId, "not-owner")
       const combat = table.combat
       const entry = combat?.entries.find((e) => e.tokenId === msg.tokenId)
-      if (!combat || !entry || entry.hidden || !tokenExistsForPlayers(state, msg.tokenId)) return rejected(state, msg.reqId, "cannot")
-      const p = parseRoll(msg.formula)
-      if (!p.ok) return rejected(state, msg.reqId, "bad-formula")
-      const roll = rollFormula(p.formula, ctx.rng)
-      const entries = sortCombat(combat.entries.map((e) => (e.id === entry.id ? { ...e, initiative: clampInitiative(roll.total) } : e)))
+      // Once: a rolled initiative is the DM's to change (clearing it allows another roll).
+      if (!combat || !entry || entry.hidden || entry.initiative !== null || !tokenExistsForPlayers(state, msg.tokenId)) {
+        return rejected(state, msg.reqId, "cannot")
+      }
+      const bonus = msg.bonus
+      if (!Number.isInteger(bonus) || Math.abs(bonus) > TABLE_LIMITS.maxInitiativeBonus) return rejected(state, msg.reqId, "invalid")
+      // The host writes the formula: the player chooses only the bonus, which everyone sees on the roll.
+      const formula = parseRoll(bonus === 0 ? "1d20" : `1d20${bonus > 0 ? "+" : "-"}${Math.abs(bonus)}`)
+      if (!formula.ok) return rejected(state, msg.reqId, "invalid")
+      const roll = rollFormula(formula.formula, ctx.rng)
+      const entries = sortCombat(
+        combat.entries.map((e) => (e.id === entry.id ? { ...e, initiative: clampInitiative(roll.total), modifier: clampModifier(bonus) } : e))
+      )
       const m: TableMessage = { ...base, kind: "roll", to: "all", text: "Initiative", roll }
       return accepted(withTable(state, appendMessage({ ...table, combat: { ...combat, entries } }, m)), msg.reqId, "all")
     }
     case "end-turn": {
       const combat = table.combat
       const entry = activeEntry(combat)
-      if (!combat || !entry || entry.tokenId === null || !ownsToken(state, userId, entry.tokenId) || !tokenExistsForPlayers(state, entry.tokenId)) {
+      // The turn the player meant: a late or repeated click must not end the next one.
+      if (
+        !combat ||
+        !entry ||
+        entry.id !== msg.entryId ||
+        entry.tokenId === null ||
+        !ownsToken(state, userId, entry.tokenId) ||
+        !tokenExistsForPlayers(state, entry.tokenId)
+      ) {
         return rejected(state, msg.reqId, "cannot")
       }
       const next = advanceTurn(combat, 1)
@@ -325,13 +368,11 @@ export function reduceTableDm(state: GameState, cmd: TableCommand): ReduceResult
     }
     case "combat-remove": {
       if (!combat) return unchanged(state, "no combat")
-      const idx = combat.entries.findIndex((e) => e.id === cmd.entryId)
-      if (idx < 0) return unchanged(state)
-      const entries = combat.entries.filter((e) => e.id !== cmd.entryId)
-      let activeId = combat.activeId
-      // The acting entry left: the next one in the order acts (the first when it was the last).
-      if (activeId === cmd.entryId) activeId = entries.length === 0 ? null : entries[idx < entries.length ? idx : 0].id
-      return changed(state, { ...table, combat: { ...combat, entries, activeId } })
+      if (!combat.entries.some((e) => e.id === cmd.entryId)) return unchanged(state)
+      const r = removeEntries(combat, new Set([cmd.entryId]))
+      let t: TableState = { ...table, combat: r.combat }
+      if (r.newRound) t = appendMessage(t, systemMessage(cmd.stamp, `Round ${r.combat.round}`))
+      return changed(state, t)
     }
     case "combat-update": {
       if (!combat) return unchanged(state, "no combat")

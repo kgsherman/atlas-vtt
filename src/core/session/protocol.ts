@@ -89,8 +89,13 @@ const audience = z.enum(["all", "dm"])
 
 const saySchema = z.strictObject({ t: z.literal("say"), reqId: tokenSchema, text: chatText, to: audience })
 const rollSchema = z.strictObject({ t: z.literal("roll"), reqId: tokenSchema, formula: formulaInput, to: audience })
-const initiativeSchema = z.strictObject({ t: z.literal("initiative"), reqId: tokenSchema, tokenId: idSchema, formula: formulaInput })
-const endTurnSchema = z.strictObject({ t: z.literal("end-turn"), reqId: tokenSchema })
+const initiativeSchema = z.strictObject({
+  t: z.literal("initiative"),
+  reqId: tokenSchema,
+  tokenId: idSchema,
+  bonus: z.int().min(-TABLE_LIMITS.maxInitiativeBonus).max(TABLE_LIMITS.maxInitiativeBonus),
+})
+const endTurnSchema = z.strictObject({ t: z.literal("end-turn"), reqId: tokenSchema, entryId: idSchema })
 const pingSchema = z.strictObject({ t: z.literal("ping"), levelId: idSchema, x: worldCoord, z: worldCoord })
 
 export const clientMessageSchema = z.discriminatedUnion("t", [

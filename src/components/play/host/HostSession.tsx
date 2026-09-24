@@ -504,7 +504,13 @@ function HostConsole({
   )
 
   // ---- the table ---------------------------------------------------------------------------------------
-  const chatEntries = React.useMemo(() => entriesFromState(state), [state])
+  // Rebuilt only when the table (or who plays) changes, not on every token step.
+  const table = state.table
+  const tablePlayersRec = state.players
+  const chatEntries = React.useMemo(
+    () => entriesFromState({ table, players: tablePlayersRec }),
+    [table, tablePlayersRec]
+  )
   const tablePlayers = React.useMemo(
     () =>
       Object.values(state.players)
@@ -518,7 +524,11 @@ function HostConsole({
   )
   const toOf = (a: Audience): TableAudience =>
     a.kind === "all" ? "all" : a.kind === "player" ? [a.userId] : []
-  const turn = React.useMemo(() => dmTurnOrder(state), [state])
+  const tokens = state.scene.tokens
+  const turn = React.useMemo(
+    () => dmTurnOrder({ table, scene: { tokens } }),
+    [table, tokens]
+  )
   const turnActive = turn?.entries.find((e) => e.id === turn.activeId) ?? null
   const subscribePings = React.useCallback(
     (cb: (p: MapPing) => void) =>

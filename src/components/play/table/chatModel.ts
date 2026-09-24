@@ -62,6 +62,26 @@ export function dmAudiences(
   ]
 }
 
+/**
+ * The option a remembered audience key names. One that is gone (a player who left) falls back to the
+ * most private option ("Only me" / "DM only"), never to everyone: what was meant for one person must not
+ * reach the table.
+ */
+export function resolveAudience(
+  options: readonly AudienceOption[],
+  key: string
+): AudienceOption {
+  const found = options.find((a) => a.key === key)
+  if (found) return found
+  if (key !== "all") {
+    const private_ = options.find(
+      (a) => a.audience.kind === "self" || a.audience.kind === "dm"
+    )
+    if (private_) return private_
+  }
+  return options[0]
+}
+
 /** The player's view of the log, oldest first. */
 export function entriesFromView(view: PlayerView | null): ChatEntry[] {
   const log = view?.table?.log
@@ -94,7 +114,9 @@ function dmPrivacy(
 }
 
 /** The DM's log (everything), oldest first. */
-export function entriesFromState(state: GameState | null): ChatEntry[] {
+export function entriesFromState(
+  state: Pick<GameState, "table" | "players"> | null
+): ChatEntry[] {
   const log = state?.table?.log
   if (!log) return []
   const names = (uid: string) =>

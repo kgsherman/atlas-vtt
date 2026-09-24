@@ -2,6 +2,7 @@
  * A dice roll in the chat log: the formula, every die (dropped ones struck through), and the total,
  * with natural 20s and 1s called out on single-d20 rolls. Clicking the formula rolls it again.
  */
+import { Button } from "@/components/ui/button"
 import { naturalD20, type RollResult } from "@/core/dice/dice"
 import { cn } from "@/lib/utils"
 
@@ -26,14 +27,15 @@ export function RollCard({
     >
       <div className="flex min-w-0 flex-1 flex-col gap-1">
         {onReroll ? (
-          <button
-            type="button"
-            className="w-fit cursor-pointer truncate text-left text-[0.6875rem] text-muted-foreground hover:text-foreground hover:underline"
+          <Button
+            variant="link"
+            size="xs"
+            className="h-auto w-fit justify-start truncate p-0 text-[0.6875rem] font-normal text-muted-foreground hover:text-foreground"
             title="Roll again"
             onClick={() => onReroll(roll.formula)}
           >
             {roll.formula}
-          </button>
+          </Button>
         ) : (
           <span className="truncate text-[0.6875rem] text-muted-foreground">
             {roll.formula}

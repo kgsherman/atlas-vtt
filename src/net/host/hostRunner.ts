@@ -41,6 +41,7 @@ import {
   filterForPlayer,
   DM_COLOR,
   DM_NAME,
+  levelKnown,
   onlyTerrainEdits,
   parseClientMessage,
   perceivedCellLookup,
@@ -1072,7 +1073,7 @@ export class HostRunnerImpl implements HostRunner {
   private handlePing(conn: PlayerConn, msg: Extract<ClientToHost, { t: "ping" }>): void {
     const player = this.state && Object.hasOwn(this.state.players, conn.userId) ? this.state.players[conn.userId] : null
     // Only on a level the sender knows (so pings cannot probe for levels).
-    if (!player || !conn.lastSent || pingForPlayer({ levelId: msg.levelId, x: msg.x, z: msg.z, name: "", color: "#000000", focus: false }, conn.lastSent) === null) return
+    if (!player || !levelKnown(conn.lastSent, msg.levelId)) return
     this.firePing({ levelId: msg.levelId, x: msg.x, z: msg.z, name: player.displayName, color: player.color, focus: false }, conn.userId)
   }
 

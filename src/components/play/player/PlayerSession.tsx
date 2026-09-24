@@ -499,12 +499,11 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
                 client.roll(formula, audience.kind === "all" ? "all" : "dm"),
             }}
             turn={turn}
-            onEndTurn={() => client.endTurn()}
-            onRollInitiative={(tokenId, mod) =>
-              client.rollInitiative(
-                tokenId,
-                mod === 0 ? "1d20" : `1d20${mod > 0 ? "+" : ""}${mod}`
-              )
+            onEndTurn={() => {
+              if (turnActive?.mine) client.endTurn(turnActive.id)
+            }}
+            onRollInitiative={(tokenId, bonus) =>
+              client.rollInitiative(tokenId, bonus)
             }
             onFocusToken={(id) => focusToken(id)}
             camera={{

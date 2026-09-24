@@ -89,14 +89,15 @@ export function createHostActions(
   const scene = (): Scene | null => getState()?.scene ?? null
   const rng = cryptoDiceRng()
   const ctx = (): TableContext => ({ now: Date.now(), newId, rng })
+  // A hidden token needs no hidden entry: players are never sent a token they cannot see (filter.ts),
+  // so its entry shows up for them once the token is revealed and in view.
   const tokenEntry = (tokenId: Id): CombatEntry => ({
     id: newId(),
     tokenId,
     name: "",
     initiative: null,
     modifier: 0,
-    // Hidden tokens join hidden: adding one must not reveal it.
-    hidden: scene()?.tokens[tokenId]?.hidden ?? false,
+    hidden: false,
   })
 
   const dispatch = (cmd: DmCommand, failure = "That didn't work"): boolean => {
@@ -276,7 +277,7 @@ export function createHostActions(
       )
       if (e)
         dispatch(
-          { t: "combat-remove", entryId: e.id },
+          { t: "combat-remove", entryId: e.id, stamp: tableStamp(ctx()) },
           "Couldn't remove from combat"
         )
     },

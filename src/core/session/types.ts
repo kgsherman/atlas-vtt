@@ -353,10 +353,13 @@ export type ClientToHost =
   | { t: "say"; reqId: string; text: string; to: "all" | "dm" }
   /** Roll dice ("1d20+5 to hit": formula, then an optional label); the host rolls. */
   | { t: "roll"; reqId: string; formula: string; to: "all" | "dm" }
-  /** Roll initiative for one of the player's tokens in combat (the formula's label is ignored). */
-  | { t: "initiative"; reqId: string; tokenId: Id; formula: string }
-  /** End the current turn (only when the acting entry is a token the player controls). */
-  | { t: "end-turn"; reqId: string }
+  /**
+   * Roll initiative for one of the player's tokens in combat that has none yet: the host rolls 1d20 +
+   * `bonus` (an integer within ±TABLE_LIMITS.maxInitiativeBonus, shown on the roll), once.
+   */
+  | { t: "initiative"; reqId: string; tokenId: Id; bonus: number }
+  /** End the turn of `entryId` (only while it acts and is a token the player controls). */
+  | { t: "end-turn"; reqId: string; entryId: Id }
   /** Point at a spot (ephemeral: no result, never stored). Only on levels the player knows. */
   | { t: "ping"; levelId: Id; x: number; z: number }
 
@@ -427,7 +430,8 @@ export type DmCommand =
   | { t: "combat-end"; stamp: TableStamp }
   /** Add entries (tokens already in combat are skipped). */
   | { t: "combat-add"; entries: CombatEntry[] }
-  | { t: "combat-remove"; entryId: Id }
+  /** Remove an entry; when it was acting, the turn passes on (a new round posts a notice with `stamp`). */
+  | { t: "combat-remove"; entryId: Id; stamp: TableStamp }
   /** Change entries (initiative, modifier, hidden, a custom entry's name); the order is re-sorted. */
   | { t: "combat-update"; updates: { entryId: Id; patch: Partial<Pick<CombatEntry, "initiative" | "modifier" | "hidden" | "name">> }[] }
   /** Next (1) or previous (-1) turn; a new round posts a notice with `stamp`. */

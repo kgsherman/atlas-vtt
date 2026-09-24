@@ -50,7 +50,12 @@ export function playerTurnOrder(view: PlayerView | null): TurnOrder | null {
   }
 }
 
-export function dmTurnOrder(state: GameState | null): TurnOrder | null {
+export function dmTurnOrder(
+  state: {
+    table?: GameState["table"]
+    scene: Pick<GameState["scene"], "tokens">
+  } | null
+): TurnOrder | null {
   const c = state?.table?.combat
   if (!state || !c) return null
   const entries = c.entries.map((e): TurnStripEntry => {

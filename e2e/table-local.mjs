@@ -212,8 +212,8 @@ try {
     hidden.some((t) => t.id === e.tokenId)
   )
   checks.ok(
-    !hiddenEntry || hiddenEntry.hidden,
-    "a hidden token joins as a hidden entry"
+    hiddenEntry !== undefined,
+    "the hidden token is in the DM's order (players are never sent it)"
   )
   await dm.getByRole("button", { name: /Begin/ }).click()
   await sleep(1500)
@@ -343,7 +343,10 @@ try {
   const combatSecrets = {
     ids: [
       ...secrets.ids,
-      ...hostNow.table.combat.entries.filter((e) => e.hidden).map((e) => e.id),
+      // Entries the DM hid, and entries of hidden tokens.
+      ...hostNow.table.combat.entries
+        .filter((e) => e.hidden || hidden.some((t) => t.id === e.tokenId))
+        .map((e) => e.id),
     ],
     strings: [...secrets.strings, "SENTINEL_SECRET_ROLL"],
   }

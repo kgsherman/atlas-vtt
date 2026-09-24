@@ -660,6 +660,11 @@ function playerTable(state: GameState, userId: string, tokens: Record<Id, Player
   return { log, combat }
 }
 
+/** Whether a view shows a level as explored (not a stub): the levels a player may ping on and be pinged on. */
+export function levelKnown(view: PlayerView | null, levelId: Id): boolean {
+  return view !== null && own(view.scene.levels, levelId)?.known === true
+}
+
 /** A ping as the host holds it (the sender's name and colour resolved by the host, never from a payload). */
 export interface TablePing {
   levelId: Id
@@ -675,8 +680,6 @@ export interface TablePing {
  * reveals a level. `view`: the view last sent to that player.
  */
 export function pingForPlayer(ping: TablePing, view: PlayerView | null): PlayerPing | null {
-  if (!view || !Number.isFinite(ping.x) || !Number.isFinite(ping.z)) return null
-  const level = own(view.scene.levels, ping.levelId)
-  if (!level || !level.known) return null
+  if (!Number.isFinite(ping.x) || !Number.isFinite(ping.z) || !levelKnown(view, ping.levelId)) return null
   return { levelId: ping.levelId, x: ping.x, z: ping.z, name: ping.name, color: ping.color, focus: ping.focus }
 }

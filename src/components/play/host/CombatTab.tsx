@@ -278,9 +278,9 @@ function CombatRow({
       data-entry={e.id}
       aria-current={active ? "step" : undefined}
     >
-      <button
-        type="button"
-        className="flex min-w-0 flex-1 items-center gap-2 text-left outline-none"
+      <Button
+        variant="ghost"
+        className="h-auto min-w-0 flex-1 justify-start gap-2 p-0 text-left font-normal hover:bg-transparent dark:hover:bg-transparent"
         onClick={() => (t ? onFocusToken(t.id) : undefined)}
       >
         {t ? (
@@ -310,7 +310,7 @@ function CombatRow({
             {hidden ? " · hidden" : ""}
           </span>
         </span>
-      </button>
+      </Button>
       <NumberCell
         value={e.initiative}
         label={`Initiative of ${name}`}

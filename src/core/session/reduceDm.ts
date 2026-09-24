@@ -14,7 +14,7 @@ import { remapExplored } from "./masks"
 import { sanitizeObject } from "./sanitize"
 import { staticLightWorldY } from "./memory"
 import { attachedLightIds, emptyDelta, nextPlayerColor, own, type ReduceResult, type SceneDelta } from "./state"
-import { isTableCommand, rebindTable, reduceTableDm, tableOf } from "./table"
+import { isTableCommand, pruneCombat, rebindTable, reduceTableDm, tableOf } from "./table"
 import type { DmCommand, GameState, PlayerObject } from "./types"
 
 enablePatches()
@@ -267,7 +267,8 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
       const edited: GameState = { ...state, scene, seq: state.seq + 1 }
       // The live map now differs from the library version it came from.
       if (state.origin && !state.origin.dirty) edited.origin = { ...state.origin, dirty: true }
-      const next = reconcileKnowledge(edited, state.scene, scene)
+      // Deleted tokens leave combat (the turn passes on if one was acting).
+      const next = pruneCombat(reconcileKnowledge(edited, state.scene, scene))
       // Terrain-edit bookkeeping only (e.g. a shape renamed, or painting under a shape): no player view changes.
       return { state: next, delta, dirtyPlayers: onlyTerrainEdits(cmd.patches) ? [] : "all" }
     }

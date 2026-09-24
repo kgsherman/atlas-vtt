@@ -26,7 +26,7 @@ export { clientMessageSchema, parseClientMessage, PROTOCOL_LIMITS } from "./prot
 export { deltaFromPatches, onlyTerrainEdits, reduceDm } from "./reduceDm"
 export { reduceRequest, segmentRectDistance, type RequestContext, type StateRequest } from "./reduceRequest"
 export { updateKnowledge } from "./memory"
-export { filterForPlayer, pingForPlayer, type TablePing } from "./filter"
+export { filterForPlayer, levelKnown, pingForPlayer, type TablePing } from "./filter"
 export {
   activeEntry,
   advanceTurn,
