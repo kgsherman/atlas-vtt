@@ -301,6 +301,11 @@ export interface Engine {
   pick(clientX: number, clientY: number, opts: PickOptions): PickResult
   /** Project a world point to canvas-relative CSS pixels (for HTML labels). */
   project(p: Vec3): { x: number; y: number; visible: boolean }
+  /**
+   * Where a token is drawn right now (world space, its base centre): mid-walk while it animates to a new
+   * position, so HTML markers can follow it. null for unknown tokens.
+   */
+  tokenDrawnAt(tokenId: Id): { levelId: Id; position: Vec3 } | null
 
   /** Camera helpers. */
   focus(point: Vec3, opts?: { distance?: number; immediate?: boolean }): void

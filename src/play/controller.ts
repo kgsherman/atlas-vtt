@@ -25,7 +25,7 @@ import {
   type MotionPoint,
 } from "@/core/movement"
 import type { PathStep } from "@/core/movement/types"
-import type { Id, SceneLike, Vec2 } from "@/core/scene/types"
+import type { Id, SceneLike, Vec2, Vec3 } from "@/core/scene/types"
 import type { OverlayState, PickResult, RulerOverlay } from "@/render/contracts"
 
 import { doorAt, type DoorHit } from "./doors"
@@ -45,6 +45,9 @@ export type PlayTool = "move" | "measure"
 
 /** Pixels the pointer must travel before a press on a token becomes a drag. */
 export const DRAG_THRESHOLD_PX = 5
+
+/** A left press held this long without moving (move tool, not on a token you can drag) pings the spot. */
+export const LONG_PRESS_MS = 450
 
 export interface PlayPointerEvent {
   clientX: number
@@ -113,6 +116,13 @@ export interface PlayControllerHost {
   /** Explain why nothing happened (toast). */
   onHint(message: string): void
   setCameraControls(enabled: boolean): void
+  /**
+   * A long press on the map: point at that spot for the table. `shift`: held with Shift (the DM's
+   * "everyone look here"). Absent: long presses do nothing.
+   */
+  onPing?(levelId: Id, point: Vec3, shift: boolean): void
+  /** Timer for long presses (default setTimeout); returns a cancel function. */
+  setTimer?(fn: () => void, ms: number): () => void
 }
 
 interface DragState {
@@ -143,6 +153,11 @@ export type PlayOverlays = Pick<
 
 const NO_GHOSTS: OverlayState["dragGhosts"] = {}
 
+function defaultTimer(fn: () => void, ms: number): () => void {
+  const t = setTimeout(fn, ms)
+  return () => clearTimeout(t)
+}
+
 export class PlayController {
   private readonly host: PlayControllerHost
   private tool: PlayTool = "move"
@@ -158,6 +173,10 @@ export class PlayController {
   private stranded: StrandedMove | null = null
   /** A left press cancelled a move command: its release does nothing else. */
   private swallowLeft = false
+  /** A left press that may become a ping (cancelled by moving or releasing first). */
+  private longPress: { cancel: () => void; x: number; y: number } | null = null
+  /** The press being held already pinged: its release does nothing else. */
+  private pinged = false
 
   constructor(host: PlayControllerHost) {
     this.host = host
@@ -343,7 +362,34 @@ export class PlayController {
         this.host.setCameraControls(false)
       }
     }
+    if (!this.drag) this.armLongPress(levelId, e)
     return true
+  }
+
+  /** Start timing a press that pings its spot if held still (see LONG_PRESS_MS). */
+  private armLongPress(levelId: Id, e: PlayPointerEvent): void {
+    this.cancelLongPress()
+    this.pinged = false
+    const onPing = this.host.onPing
+    const ground = e.pick.ground
+    if (!onPing || !ground) return
+    const point = { x: ground.x, y: ground.y, z: ground.z }
+    const shift = e.shift
+    const timer = this.host.setTimer ?? defaultTimer
+    const cancel = timer(() => {
+      if (this.longPress?.cancel !== cancel) return
+      this.longPress = null
+      if (!this.pressed || this.drag) return
+      this.pinged = true
+      onPing(levelId, point, shift)
+    }, LONG_PRESS_MS)
+    this.longPress = { cancel, x: e.clientX, y: e.clientY }
+  }
+
+  private cancelLongPress(): void {
+    const lp = this.longPress
+    this.longPress = null
+    lp?.cancel()
   }
 
   /** Right press: start a move command for the selected token. */
@@ -374,6 +420,12 @@ export class PlayController {
     const scene = this.host.scene()
     if (!scene) return
     this.alt = e.alt ?? false
+    const lp = this.longPress
+    if (
+      lp &&
+      Math.hypot(e.clientX - lp.x, e.clientY - lp.y) >= DRAG_THRESHOLD_PX
+    )
+      this.cancelLongPress()
     if (this.tool === "measure") {
       if (
         this.pressed &&
@@ -439,6 +491,12 @@ export class PlayController {
       return true
     }
     if (this.drag?.button === 2) return true
+    this.cancelLongPress()
+    if (this.pinged) {
+      this.pinged = false
+      this.pressed = false
+      return true
+    }
     const wasPressed = this.pressed
     this.pressed = false
     const scene = this.host.scene()
@@ -486,6 +544,8 @@ export class PlayController {
     this.drag = null
     this.pressed = false
     this.stranded = null
+    this.cancelLongPress()
+    this.pinged = false
     this.measure.clear()
     this.host.setCameraControls(true)
     if (had) this.emit()

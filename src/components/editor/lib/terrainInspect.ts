@@ -6,7 +6,15 @@
 import { TerrainSampler } from "@/core/occlusion"
 import { sampleSpacing } from "@/core/scene/heightmap"
 import { adjacentLevels } from "@/core/scene/queries"
-import { applyShapesClosure, compareShapeOrder, countShapeSamples, isValidTerrainShape, type TerrainEdit, type TerrainLevel } from "@/core/scene/terrainShapes"
+import {
+  applyShapesClosure,
+  compareShapeOrder,
+  countShapeSamples,
+  isValidTerrainShape,
+  topVertices,
+  type TerrainEdit,
+  type TerrainLevel,
+} from "@/core/scene/terrainShapes"
 import type { GridSettings, Id, Level, TerrainShape, TerrainShapeKind, WallObject } from "@/core/scene/types"
 import { wallProfile } from "@/core/scene/wallProfile"
 import type { EditorState } from "@/editor/store"
@@ -17,22 +25,25 @@ export const SHAPE_KIND_LABELS: Record<TerrainShapeKind, string> = { block: "Blo
 export const MIN_SHAPE_SAMPLES = 4
 
 /** Mean top height of a shape (feet relative to the level's elevation) and its range. */
-export function shapeTopStats(shape: Pick<TerrainShape, "points">): { mean: number; min: number; max: number } {
+export function shapeTopStats(shape: Pick<TerrainShape, "points" | "innerPoints">): { mean: number; min: number; max: number } {
   let sum = 0
   let min = Infinity
   let max = -Infinity
-  for (const p of shape.points) {
+  const verts = topVertices(shape)
+  for (const p of verts) {
     sum += p.y
     min = Math.min(min, p.y)
     max = Math.max(max, p.y)
   }
-  const n = shape.points.length
+  const n = verts.length
   return n > 0 ? { mean: sum / n, min, max } : { mean: 0, min: 0, max: 0 }
 }
 
 /** The shape with every top vertex moved by `dy` (the Inspector's "Top" field sets the mean). */
 export function offsetShapeTop(shape: TerrainShape, dy: number): TerrainShape {
-  return { ...shape, points: shape.points.map((p) => ({ ...p, y: p.y + dy })) }
+  const out = { ...shape, points: shape.points.map((p) => ({ ...p, y: p.y + dy })) }
+  if (shape.innerPoints) out.innerPoints = shape.innerPoints.map((p) => ({ ...p, y: p.y + dy }))
+  return out
 }
 
 /** Lattice samples the bake covers at the level's resolution (capped at MIN_SHAPE_SAMPLES), or null without terrain. */

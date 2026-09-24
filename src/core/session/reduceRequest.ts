@@ -17,6 +17,9 @@
  * within one cell of the door segment; movement must not be locked. Every failure is "cannot";
  * "locked" is only reported after those checks pass. Players can never unlock.
  *
+ * Table requests (say, roll, initiative, end-turn) go to core/session/table.ts, token-status (a player's
+ * own hit points and conditions) to core/session/tokenStatus.ts.
+ *
  * Token images (Token Maker): ownership first (as for moves), then the image must be in the player's
  * own folder of the token image store (`tokenImageBase`), else "invalid". Movement locks do not apply:
  * it changes how the token looks, not where it is.
@@ -39,6 +42,8 @@ import {
   tokenExistsForPlayers,
   type RequestOutcome,
 } from "./state"
+import { defaultTableContext, reduceTableRequest, type TableContext } from "./table"
+import { reduceTokenStatus } from "./tokenStatus"
 import { playerTokenImageAllowed } from "./tokenImages"
 import type { ClientToHost, GameState, PlayerView, RejectReason, RequestResult } from "./types"
 
@@ -49,9 +54,14 @@ export interface RequestContext {
   currentView: PlayerView | null
   /** Whether a cell on a level is currently perceived by this player (see perceivedCellLookup). */
   perceivedByPlayer: (levelId: Id, i: number, j: number) => boolean
+  /** Time, ids and dice for table requests (default: now, random ids, crypto dice). */
+  table?: TableContext
   /** Public URL prefix of the token image store (null / absent: players cannot set token images). */
   tokenImageBase?: string | null
 }
+
+/** Requests reduced on the GameState (hellos and pings are handled by the host itself). */
+export type StateRequest = Exclude<ClientToHost, { t: "hello" | "ping" }>
 
 /** Movement reasons that reveal something about the world at the failing step. */
 const WORLD_REASONS: ReadonlySet<MoveRejectReason> = new Set(["blocked", "corner-cutting", "connector-edge", "no-connector", "no-ground"])
@@ -237,7 +247,7 @@ function reduceTokenImage(state: GameState, userId: string, msg: Extract<ClientT
  * Apply an authorised player request. `perceivedByPlayer` reports whether a cell on a level is currently
  * perceived by that player (used to mask rejection reasons).
  */
-export function reduceRequest(state: GameState, userId: string, msg: Exclude<ClientToHost, { t: "hello" }>, ctx: RequestContext): RequestOutcome {
+export function reduceRequest(state: GameState, userId: string, msg: StateRequest, ctx: RequestContext): RequestOutcome {
   switch (msg.t) {
     case "move":
       return reduceMove(state, userId, msg, ctx)
@@ -245,6 +255,13 @@ export function reduceRequest(state: GameState, userId: string, msg: Exclude<Cli
       return reduceJump(state, userId, msg, ctx)
     case "door":
       return reduceDoor(state, userId, msg, ctx)
+    case "say":
+    case "roll":
+    case "initiative":
+    case "end-turn":
+      return reduceTableRequest(state, userId, msg, ctx.table ?? defaultTableContext())
+    case "token-status":
+      return reduceTokenStatus(state, userId, msg)
     case "token-image":
       return reduceTokenImage(state, userId, msg, ctx)
   }

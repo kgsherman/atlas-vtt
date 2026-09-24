@@ -82,6 +82,18 @@ function render(snap: PlayerClientSnapshot): string {
           grid: true,
           onGrid: vi.fn(),
         }}
+        chat={{
+          entries: [],
+          focusSignal: 0,
+          disabledReason: null,
+          onSay: vi.fn(),
+          onRoll: vi.fn(),
+        }}
+        turn={null}
+        onEndTurn={vi.fn()}
+        onRollInitiative={vi.fn()}
+        onTokenStatus={vi.fn()}
+        onFocusToken={vi.fn()}
       />
     )
   )

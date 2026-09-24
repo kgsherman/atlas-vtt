@@ -6,6 +6,8 @@
 import { z } from "zod"
 
 import { MAX_PATH_STEPS } from "../movement"
+import { HP_LIMITS, TOKEN_CONDITIONS } from "../scene/tokenStatus"
+import { TABLE_LIMITS } from "./table"
 import { MAX_TOKEN_IMAGE_URL } from "./tokenImages"
 import type { ClientToHost } from "./types"
 
@@ -79,6 +81,40 @@ const doorSchema = z.strictObject({
   action: z.enum(["open", "close"]),
 })
 
+/** Raw chat text (the host cleans it and keeps TABLE_LIMITS.maxText characters; emoji count double here). */
+const chatText = z
+  .string()
+  .min(1)
+  .max(TABLE_LIMITS.maxText * 2)
+const formulaInput = z.string().min(1).max(TABLE_LIMITS.maxFormulaInput)
+const audience = z.enum(["all", "dm"])
+
+const saySchema = z.strictObject({ t: z.literal("say"), reqId: tokenSchema, text: chatText, to: audience })
+const rollSchema = z.strictObject({ t: z.literal("roll"), reqId: tokenSchema, formula: formulaInput, to: audience })
+const initiativeSchema = z.strictObject({
+  t: z.literal("initiative"),
+  reqId: tokenSchema,
+  tokenId: idSchema,
+  bonus: z.int().min(-TABLE_LIMITS.maxInitiativeBonus).max(TABLE_LIMITS.maxInitiativeBonus),
+})
+const endTurnSchema = z.strictObject({ t: z.literal("end-turn"), reqId: tokenSchema, entryId: idSchema })
+const pingSchema = z.strictObject({ t: z.literal("ping"), levelId: idSchema, x: worldCoord, z: worldCoord })
+const conditionList = z.array(z.enum(TOKEN_CONDITIONS)).max(TOKEN_CONDITIONS.length)
+// Relative changes (core/scene/tokenStatus.ts HpChange, ConditionChange): the host applies them to the
+// token as it is when they arrive, so concurrent changes never overwrite each other.
+const tokenStatusSchema = z
+  .strictObject({
+    t: z.literal("token-status"),
+    reqId: tokenSchema,
+    tokenId: idSchema,
+    hp: z.strictObject({ kind: z.enum(["damage", "heal", "temp"]), amount: z.int().min(1).max(HP_LIMITS.max) }).optional(),
+    conditions: z
+      .strictObject({ add: conditionList.optional(), remove: conditionList.optional() })
+      .refine((c) => (c.add?.length ?? 0) + (c.remove?.length ?? 0) > 0, "no condition to change")
+      .optional(),
+  })
+  .refine((m) => m.hp !== undefined || m.conditions !== undefined, "nothing to change")
+
 /** The URL is only shape-checked here; the host allows the player's own token images only. */
 const tokenImageSchema = z.strictObject({
   t: z.literal("token-image"),
@@ -87,7 +123,19 @@ const tokenImageSchema = z.strictObject({
   imageUrl: z.string().min(1).max(MAX_TOKEN_IMAGE_URL).nullable(),
 })
 
-export const clientMessageSchema = z.discriminatedUnion("t", [helloSchema, moveSchema, jumpSchema, doorSchema, tokenImageSchema])
+export const clientMessageSchema = z.discriminatedUnion("t", [
+  helloSchema,
+  moveSchema,
+  jumpSchema,
+  doorSchema,
+  saySchema,
+  rollSchema,
+  initiativeSchema,
+  endTurnSchema,
+  pingSchema,
+  tokenStatusSchema,
+  tokenImageSchema,
+])
 
 /** Strict zod parse of an untrusted player message (limits enforced). null = drop silently. */
 export function parseClientMessage(raw: unknown): ClientToHost | null {

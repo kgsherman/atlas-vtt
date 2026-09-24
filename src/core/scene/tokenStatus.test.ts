@@ -1,0 +1,79 @@
+import { describe, expect, it } from "vitest"
+
+import {
+  applyConditionChange,
+  applyDamage,
+  applyHealing,
+  applyHpChange,
+  clampHp,
+  healthBand,
+  hpFraction,
+  normalizeConditions,
+  TOKEN_CONDITIONS,
+  withMaxHp,
+} from "./tokenStatus"
+
+describe("token status", () => {
+  it("normalizes conditions: known ones, once, in catalog order", () => {
+    expect(normalizeConditions(["prone", "poisoned", "prone", "sleepy", 3, "blinded"])).toEqual(["blinded", "poisoned", "prone"])
+    expect(normalizeConditions([])).toEqual([])
+    expect(normalizeConditions([...TOKEN_CONDITIONS].reverse())).toEqual([...TOKEN_CONDITIONS])
+  })
+
+  it("clamps hit points to their rules", () => {
+    expect(clampHp({ current: 15, max: 12 })).toEqual({ current: 12, max: 12, temp: 0 })
+    expect(clampHp({ current: -3, max: 0.4, temp: -2 })).toEqual({ current: 0, max: 1, temp: 0 })
+    expect(clampHp({ current: 7.6, max: 12.2, temp: 2.5 })).toEqual({ current: 8, max: 12, temp: 3 })
+    expect(clampHp({ current: Number.NaN, max: Number.POSITIVE_INFINITY })).toEqual({ current: 0, max: 1, temp: 0 })
+  })
+
+  it("changing max keeps the damage taken, caps current, and starts untracked hit points full", () => {
+    const hp = { current: 7, max: 10, temp: 2 }
+    expect(withMaxHp(hp, 15)).toEqual({ current: 12, max: 15, temp: 2 })
+    expect(withMaxHp(hp, 5)).toEqual({ current: 5, max: 5, temp: 2 })
+    expect(withMaxHp(hp, 8.6)).toEqual({ current: 7, max: 9, temp: 2 })
+    expect(withMaxHp(null, 22)).toEqual({ current: 22, max: 22, temp: 0 })
+    expect(withMaxHp(undefined, 0)).toEqual({ current: 1, max: 1, temp: 0 })
+  })
+
+  it("damage spends temporary hit points first and stops at 0; healing stops at max", () => {
+    const hp = { current: 10, max: 20, temp: 4 }
+    expect(applyDamage(hp, 3)).toEqual({ current: 10, max: 20, temp: 1 })
+    expect(applyDamage(hp, 9)).toEqual({ current: 5, max: 20, temp: 0 })
+    expect(applyDamage(hp, 999)).toEqual({ current: 0, max: 20, temp: 0 })
+    expect(applyDamage(hp, -5)).toEqual(hp)
+    expect(applyHealing(hp, 7)).toEqual({ current: 17, max: 20, temp: 4 })
+    expect(applyHealing(hp, 70)).toEqual({ current: 20, max: 20, temp: 4 })
+  })
+
+  it("relative changes: damage, healing, temporary hit points keep the higher, max", () => {
+    const hp = { current: 10, max: 20, temp: 4 }
+    expect(applyHpChange(hp, { kind: "damage", amount: 6 })).toEqual({ current: 8, max: 20, temp: 0 })
+    expect(applyHpChange(hp, { kind: "heal", amount: 50 })).toEqual({ current: 20, max: 20, temp: 4 })
+    expect(applyHpChange(hp, { kind: "temp", amount: 3 })).toEqual(hp)
+    expect(applyHpChange(hp, { kind: "temp", amount: 9 })).toEqual({ current: 10, max: 20, temp: 9 })
+    expect(applyHpChange(hp, { kind: "max", max: 25 })).toEqual({ current: 15, max: 25, temp: 4 })
+    // A typed value changes only its own field (and stays within the rules).
+    expect(applyHpChange(hp, { kind: "set", current: 3 })).toEqual({ current: 3, max: 20, temp: 4 })
+    expect(applyHpChange(hp, { kind: "set", temp: 0, current: 99 })).toEqual({ current: 20, max: 20, temp: 0 })
+    // Two changes made from the same stale value both count.
+    expect(applyHpChange(applyHpChange(hp, { kind: "damage", amount: 5 }), { kind: "damage", amount: 5 })).toEqual({ current: 4, max: 20, temp: 0 })
+  })
+
+  it("condition changes add and remove against the current list", () => {
+    expect(applyConditionChange(["prone"], { add: ["poisoned"] })).toEqual(["poisoned", "prone"])
+    expect(applyConditionChange(["poisoned", "prone"], { remove: ["prone"] })).toEqual(["poisoned"])
+    expect(applyConditionChange(["prone"], { add: ["prone", "blinded"], remove: ["prone"] })).toEqual(["blinded"])
+    expect(applyConditionChange([], {})).toEqual([])
+  })
+
+  it("bands: down, bloodied at half or less, wounded, unhurt", () => {
+    expect(healthBand({ current: 0, max: 10, temp: 5 })).toBe("down")
+    expect(healthBand({ current: 5, max: 10, temp: 0 })).toBe("bloodied")
+    expect(healthBand({ current: 3, max: 7, temp: 0 })).toBe("bloodied")
+    expect(healthBand({ current: 4, max: 7, temp: 0 })).toBe("wounded")
+    expect(healthBand({ current: 10, max: 10, temp: 0 })).toBe("unhurt")
+    expect(hpFraction({ hp: { current: 5, max: 20, temp: 0 } })).toBe(0.25)
+    expect(hpFraction({})).toBeNull()
+  })
+})

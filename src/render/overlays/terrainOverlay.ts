@@ -36,7 +36,7 @@
 import * as THREE from "three"
 
 import { gizmoHandles, gizmoRing, GIZMO_RING_SEGMENTS, ringPoint, type GizmoAxis, type Projector } from "@/core/geometry/gizmo"
-import { shapeEdgeCount, shapeEdgeEnds, shapeTopTriangles, signedArea, type TerrainElementRef } from "@/core/scene/terrainShapes"
+import { shapeEdgeCount, shapeEdgeEnds, shapeTopTriangles, signedArea, topVertexCount, topVertices, type TerrainElementRef } from "@/core/scene/terrainShapes"
 import type { Id, TerrainShape } from "@/core/scene/types"
 
 import type { TerrainOverlay } from "../contracts"
@@ -107,7 +107,7 @@ export interface ShapePrism {
   sideStart: Uint32Array
   /** Edge segment pairs (6 floats each): the top outline, the vertical edges, the base outline, the inner (loop cut) edges. */
   edges: Float32Array
-  /** Top vertex positions (3 floats each), in the shape's point order. */
+  /** Top vertex positions (3 floats each), in topVertices order (footprint points, then interior points). */
   vertices: Float32Array
   /**
    * How far (ft) the baked terrain can rise above the top between lattice samples (0 for a planar top or
@@ -193,14 +193,15 @@ export function topLift(top: Float32Array, spacing: number): number {
 function buildPrism(shape: TerrainShape, elevation: number, spacing: number): ShapePrism {
   const pts = shape.points
   const n = pts.length
+  const verts = topVertices(shape)
   const baseY = elevation + shape.base
   const tris = shapeTopTriangles(shape)
   // shapeTopTriangles' triples have cross(b − a, c − a) > 0 in (x, z), i.e. a −Y normal: reversed.
   const top = new Float32Array(tris.length * 3)
   for (let t = 0; t + 2 < tris.length; t += 3) {
-    putPoint(top, t * 3, pts[tris[t]], elevation)
-    putPoint(top, t * 3 + 3, pts[tris[t + 2]], elevation)
-    putPoint(top, t * 3 + 6, pts[tris[t + 1]], elevation)
+    putPoint(top, t * 3, verts[tris[t]], elevation)
+    putPoint(top, t * 3 + 3, verts[tris[t + 2]], elevation)
+    putPoint(top, t * 3 + 6, verts[tris[t + 1]], elevation)
   }
   const lift = topLift(top, spacing)
   let liftedTop = top
@@ -213,7 +214,7 @@ function buildPrism(shape: TerrainShape, elevation: number, spacing: number): Sh
   const sideStart = new Uint32Array(n + 1)
   const inner = shape.innerEdges ?? []
   const edges = new Float32Array(n * 18 + inner.length * 6)
-  const vertices = new Float32Array(n * 3)
+  const vertices = new Float32Array(verts.length * 3)
   const orientation = signedArea(pts) < 0 ? -1 : 1
   let s = 0
   let e = 0
@@ -242,9 +243,10 @@ function buildPrism(shape: TerrainShape, elevation: number, spacing: number): Sh
     // A base edge under a top edge lying on the base is that top edge.
     if (!onBase(k) || !onBase((k + 1) % n)) e = putSegment(edges, e, a.x, baseY, a.z, b.x, baseY, b.z)
   }
+  for (let m = n; m < verts.length; m++) putPoint(vertices, m * 3, verts[m], elevation)
   for (const [i, j] of inner) {
-    const a = pts[i]
-    const b = pts[j]
+    const a = verts[i]
+    const b = verts[j]
     e = putSegment(edges, e, a.x, elevation + a.y, a.z, b.x, elevation + b.y, b.z)
   }
   return { top, sides: trim(sides, s), sideStart, edges: trim(edges, e), vertices, topLift: lift, liftedTop }
@@ -314,8 +316,9 @@ function writeOutward(
 function topEdgePair(shape: TerrainShape, elevation: number, k: number): number[] {
   const ends = shapeEdgeEnds(shape, k)
   if (!ends) return []
-  const a = shape.points[ends[0]]
-  const b = shape.points[ends[1]]
+  const verts = topVertices(shape)
+  const a = verts[ends[0]]
+  const b = verts[ends[1]]
   return [a.x, elevation + a.y, a.z, b.x, elevation + b.y, b.z]
 }
 
@@ -804,10 +807,10 @@ function addElements(
         outlines.push(...faceOutline(shape, elevation, ref.index))
         continue
       }
-      const count = ref.kind === "edge" ? shapeEdgeCount(shape) : n
+      const count = ref.kind === "edge" ? shapeEdgeCount(shape) : ref.kind === "vertex" ? topVertexCount(shape) : n
       if (!(Number.isInteger(ref.index) && ref.index >= 0 && ref.index < count)) continue
       if (ref.kind === "vertex") {
-        const v = shape.points[ref.index]
+        const v = topVertices(shape)[ref.index]
         dots.push(v.x, elevation + v.y, v.z)
       } else edges.push(...topEdgePair(shape, elevation, ref.index))
     }

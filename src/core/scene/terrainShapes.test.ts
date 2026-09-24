@@ -32,13 +32,12 @@ import {
   elementVertexIndices,
   flattenTerrain,
   hasPaintedBase,
-  innerEdgesValid,
   isSimplePolygon,
   isSimplePolyline,
   isValidTerrainShape,
   latticeWindow,
   loopCut,
-  loopCutOpposite,
+  loopCutRing,
   nextShapeOrder,
   polygonShape,
   removeInnerEdges,
@@ -50,10 +49,11 @@ import {
   shapeBounds,
   shapeEdgeEnds,
   shapeTopAt,
-  shapeTopTriangles,
   signedArea,
   TERRAIN_SHAPE_MAX_POINTS,
   topFaces,
+  topGraphValid,
+  topVertices,
   translateShape,
   translateVertices,
   triangulateFootprint,
@@ -1288,16 +1288,24 @@ describe("rayHitShape", () => {
   })
 })
 
-describe("inner edges (loop cuts)", () => {
+describe("inner edges and points (loop cuts)", () => {
   // A 20×10 block at y 4 over (0, 0)–(20, 10); its edges run 0: (0,0)→(20,0), 1: →(20,10), 2: →(0,10), 3: →(0,0).
   const box = () => blockShape("b", { x: 0, z: 0, w: 20, d: 10 }, 0, 4, 0)
+  const xz = (s: TerrainShape) => topVertices(s).map((p) => [p.x, p.z])
+  /** Cut left to right (through the short sides), then top to bottom through the first cut. */
+  const crossed = () => {
+    const once = loopCut(box(), 1, [0.5])!.shape
+    return { once, twice: loopCut(once, 0, [0.5])! }
+  }
 
-  it("loop cut: vertices on the side and the opposite side, joined by an inner edge; the shape keeps its form", () => {
+  it("one cut: vertices on the side and the opposite side, joined by an inner edge; the shape keeps its form", () => {
     const b = box()
-    expect(loopCutOpposite(b, 0)).toBe(2)
-    expect(loopCutOpposite(b, 1)).toBe(3)
+    expect(loopCutRing(b, 0)).toEqual([
+      [0, 1],
+      [3, 2],
+    ])
     const cut = loopCut(b, 0, [0.25])!
-    expect(cut.shape.points.map((p) => [p.x, p.z])).toEqual([
+    expect(xz(cut.shape)).toEqual([
       [0, 0],
       [5, 0],
       [20, 0],
@@ -1305,9 +1313,8 @@ describe("inner edges (loop cuts)", () => {
       [5, 10],
       [0, 10],
     ])
-    // Parallel to the other sides: the partner sits at 1 − t along the opposite edge (which runs the other way).
     expect(cut.shape.innerEdges).toEqual([[1, 4]])
-    // Edge element n + 0 is the new inner edge.
+    expect(cut.shape.innerPoints).toBeUndefined()
     expect(cut.edges).toEqual([6])
     expect(shapeEdgeEnds(cut.shape, 6)).toEqual([1, 4])
     expect(isValidTerrainShape(cut.shape)).toBe(true)
@@ -1318,52 +1325,101 @@ describe("inner edges (loop cuts)", () => {
       [4.9, 3],
     ])
       expect(shapeTopAt(cut.shape, x, z)).toBeCloseTo(4, 9)
-    // The top is split along it: two faces, each triangulated on its own.
-    expect(topFaces(6, cut.shape.innerEdges)).toEqual([
-      [1, 2, 3, 4],
-      [4, 5, 0, 1],
+    expect(topFaces(cut.shape)).toHaveLength(2)
+  })
+
+  it("a second cut crosses the first: an interior vertex splits it, four faces", () => {
+    const { once, twice } = crossed()
+    expect(xz(once)).toEqual([
+      [0, 0],
+      [20, 0],
+      [20, 5],
+      [20, 10],
+      [0, 10],
+      [0, 5],
     ])
-    const tris = shapeTopTriangles(cut.shape)
-    for (let t = 0; t < tris.length; t += 3) {
-      const tri = [tris[t], tris[t + 1], tris[t + 2]]
-      expect(tri.every((k) => [1, 2, 3, 4].includes(k)) || tri.every((k) => [4, 5, 0, 1].includes(k))).toBe(true)
-    }
+    expect(once.innerEdges).toEqual([[2, 5]])
+    // The loop runs from the bottom side through the first cut to the top side.
+    expect(loopCutRing(once, 0)).toEqual([
+      [0, 1],
+      [5, 2],
+      [4, 3],
+    ])
+    const s = twice.shape
+    expect(xz(s)).toEqual([
+      [0, 0],
+      [10, 0],
+      [20, 0],
+      [20, 5],
+      [20, 10],
+      [10, 10],
+      [0, 10],
+      [0, 5],
+      [10, 5],
+    ])
+    expect(s.innerPoints).toEqual([{ x: 10, y: 4, z: 5 }])
+    expect(s.innerEdges).toEqual([
+      [1, 8],
+      [3, 8],
+      [5, 8],
+      [7, 8],
+    ])
+    // The new edges (bottom half, top half) are selected; the first cut's halves are not.
+    expect(twice.edges.map((k) => shapeEdgeEnds(s, k))).toEqual([
+      [1, 8],
+      [5, 8],
+    ])
+    expect(isValidTerrainShape(s)).toBe(true)
+    expect(topFaces(s)).toHaveLength(4)
+    for (const [x, z] of [
+      [1, 1],
+      [10, 5],
+      [19, 9],
+      [15, 2],
+    ])
+      expect(shapeTopAt(s, x, z)).toBeCloseTo(4, 9)
+    // A raised crossing point is a peak: every face slopes down from it.
+    const peak = translateVertices(s, [8], { x: 0, y: 3, z: 0 })!
+    expect(shapeTopAt(peak, 10, 5)).toBeCloseTo(7, 9)
+    expect(shapeTopAt(peak, 10, 0.5)).toBeCloseTo(4.3, 9)
+    expect(shapeTopAt(peak, 0.5, 5)).toBeCloseTo(4.15, 9)
+    expect(shapeTopAt(peak, 1, 1)).toBeLessThan(5)
+    // A third cut runs through one half only (the left half's faces are quads too).
+    const third = loopCut(s, 0, [0.5])!
+    expect(third.edges).toHaveLength(2)
+    expect(third.shape.innerPoints).toHaveLength(2)
+    expect(topFaces(third.shape)).toHaveLength(6)
   })
 
-  it("a raised inner edge is a crisp ridge (the triangulation follows it)", () => {
-    const flat = loopCut(box(), 0, [0.5])!.shape
-    const ridge = translateVertices(flat, [1, 4], { x: 0, y: 3, z: 0 })!
-    expect(ridge.innerEdges).toEqual(flat.innerEdges)
-    // Along the ridge line x = 10 the top is 7; halfway down each slope 5.5, whatever z.
-    for (const z of [0.5, 5, 9.5]) {
-      expect(shapeTopAt(ridge, 10, z)).toBeCloseTo(7, 9)
-      expect(shapeTopAt(ridge, 5, z)).toBeCloseTo(5.5, 9)
-      expect(shapeTopAt(ridge, 15, z)).toBeCloseTo(5.5, 9)
-    }
+  it("a loop through an inner edge runs both ways, with one parameter along the whole ring", () => {
+    const { once } = crossed()
+    // Inner edge 6 = [2, 5] runs (20, 5) → (0, 5).
+    const ring = loopCutRing(once, 6)!
+    expect(ring).toEqual([
+      [3, 4],
+      [2, 5],
+      [1, 0],
+    ])
+    const cut = loopCut(once, 6, [0.25])!
+    expect(cut.edges.map((k) => shapeEdgeEnds(cut.shape, k)!.map((i) => topVertices(cut.shape)[i].x))).toEqual([
+      [15, 15],
+      [15, 15],
+    ])
   })
 
-  it("several cuts, parallel cuts in a cut face, and where there is no loop", () => {
+  it("several cuts; where there is no loop; too many vertices", () => {
     const three = loopCut(box(), 0, [0.75, 0.25, 0.5])!
     expect(three.shape.points).toHaveLength(10)
-    expect(three.shape.innerEdges).toHaveLength(3)
     expect(three.edges.map((k) => shapeEdgeEnds(three.shape, k)!.map((i) => three.shape.points[i].x))).toEqual([
       [5, 5],
       [10, 10],
       [15, 15],
     ])
-    const once = loopCut(box(), 0, [0.5])!.shape
-    // In the left face (0, 1, 4, 5) the side 5 → 0 is opposite the inner edge: no loop (it would need a vertex inside the top).
-    expect(loopCutOpposite(once, 5)).toBeNull()
-    // Its bottom side 0 → 1 is opposite 4 → 5: a parallel cut works, and keeps the first inner edge.
-    expect(loopCutOpposite(once, 0)).toBe(4)
-    const twice = loopCut(once, 0, [0.5])!
-    expect(twice.shape.points.map((p) => p.x)).toEqual([0, 5, 10, 20, 20, 10, 5, 0])
-    expect(twice.shape.innerEdges).toEqual([
-      [1, 6],
-      [2, 5],
-    ])
-    // Odd faces have no opposite side; t outside (0, 1) and too many vertices refuse.
-    expect(loopCutOpposite(cylinderShape("c", { x: 20, z: 20 }, 5, 7, 0, 2, 0), 0)).toBeNull()
+    // Three parallel cuts, crossed by a fourth (through the right side, edge 4 now): three interior vertices.
+    const grid = loopCut(three.shape, 4, [0.5])!
+    expect(grid.shape.innerPoints).toHaveLength(3)
+    expect(topFaces(grid.shape)).toHaveLength(8)
+    expect(loopCutRing(cylinderShape("c", { x: 20, z: 20 }, 5, 7, 0, 2, 0), 0)).toBeNull()
     expect(loopCut(box(), 0, [0, 1])).toBeNull()
     expect(
       loopCut(
@@ -1372,7 +1428,7 @@ describe("inner edges (loop cuts)", () => {
         Array.from({ length: 31 }, (_, i) => (i + 1) / 32)
       )
     ).toBeNull()
-    // A cut that would leave an L-shaped footprint is invalid.
+    // A loop leaving an L-shaped footprint is invalid.
     const l = polygonShape(
       "l",
       [
@@ -1390,26 +1446,44 @@ describe("inner edges (loop cuts)", () => {
     expect(loopCut(l, 1, [0.5])).toBeNull()
   })
 
-  it("edits keep, re-index or drop inner edges", () => {
-    const cut = loopCut(box(), 0, [0.5])!.shape // points 0..5, inner [1, 4]
-    // Moves and rotations keep them.
-    expect(translateShape(cut, { x: 1, y: 1, z: 1 })!.innerEdges).toEqual([[1, 4]])
-    expect(rotateShape(cut, { x: 10, z: 5 }, 0.3)!.innerEdges).toEqual([[1, 4]])
-    // Dissolving an end drops it; dissolving another vertex re-indexes it.
-    expect(dissolveVertices(cut, [1])!.innerEdges).toBeUndefined()
-    const shifted = dissolveVertices(cut, [0])!
-    expect(shifted.innerEdges).toEqual([[0, 3]])
-    expect(isValidTerrainShape(shifted)).toBe(true)
-    // Collapsing an edge merges its ends: the inner edge follows the merged vertex.
-    const collapsed = collapseEdge(cut, 2)!
-    expect(collapsed.innerEdges).toEqual([[1, 3]])
-    // Removing it restores a plain top.
-    expect(removeInnerEdges(cut, [0])!.innerEdges).toBeUndefined()
-    expect(removeInnerEdges(cut, [5])).toBeNull()
+  it("edits keep, re-index or drop inner edges and points (no dangling edges)", () => {
+    const { once, twice } = crossed()
+    const s = twice.shape
+    // Moves and rotations move interior points too.
+    expect(translateShape(s, { x: 1, y: 1, z: 1 })!.innerPoints).toEqual([{ x: 11, y: 5, z: 6 }])
+    expect(rotateShapeQuarter(s, { x: 10, z: 5 }, 1)!.innerPoints).toEqual([{ x: 10, y: 4, z: 5 }])
+    expect(rotateShape(s, { x: 0, z: 0 }, 0.3)!.innerEdges).toEqual(s.innerEdges)
+    // Dissolving the crossing drops its four edges; the outline keeps the cut vertices.
+    const flat = dissolveVertices(s, [8])!
+    expect(flat.innerPoints).toBeUndefined()
+    expect(flat.innerEdges).toBeUndefined()
+    expect(flat.points).toHaveLength(8)
+    // Dissolving an outline end of the first cut drops that half: the crossing stays on three edges (a T).
+    const half = dissolveVertices(s, [3])!
+    expect(half.innerPoints).toEqual([{ x: 10, y: 4, z: 5 }])
+    expect(half.innerEdges).toHaveLength(3)
+    // Removing three of the four edges leaves the last one dangling from the crossing: both go.
+    const bare = removeInnerEdges(s, [0, 1, 2])!
+    expect(bare.innerPoints).toBeUndefined()
+    expect(bare.innerEdges).toBeUndefined()
+    // Removing both halves of the first cut keeps the second as a chain through the (now straight) vertex.
+    const chain = removeInnerEdges(s, [1, 3])!
+    expect(chain.innerPoints).toEqual([{ x: 10, y: 4, z: 5 }])
+    expect(chain.innerEdges).toEqual([
+      [1, 8],
+      [5, 8],
+    ])
+    // Removing one half leaves a T: still valid.
+    expect(isValidTerrainShape(removeInnerEdges(s, [1])!)).toBe(true)
+    // Collapsing an outline edge re-indexes the interior vertex.
+    const collapsed = collapseEdge(s, 0)!
+    expect(collapsed.innerPoints).toEqual([{ x: 10, y: 4, z: 5 }])
+    expect(isValidTerrainShape(collapsed)).toBe(true)
+    expect(removeInnerEdges(once, [5])).toBeNull()
   })
 
-  it("innerEdgesValid wants ascending, non-adjacent, inside, non-crossing diagonals", () => {
-    const hex = [
+  it("topGraphValid: interior points inside and on edges, no crossings, simple faces, nothing detached", () => {
+    const sq = [
       { x: 0, z: 0 },
       { x: 10, z: 0 },
       { x: 20, z: 0 },
@@ -1417,68 +1491,101 @@ describe("inner edges (loop cuts)", () => {
       { x: 10, z: 10 },
       { x: 0, z: 10 },
     ]
-    expect(innerEdgesValid(hex, undefined)).toBe(true)
-    expect(innerEdgesValid(hex, [[1, 4]])).toBe(true)
+    const c = { x: 10, y: 0, z: 5 }
+    expect(topGraphValid(sq, undefined, undefined)).toBe(true)
+    expect(topGraphValid(sq, undefined, [[1, 4]])).toBe(true)
     expect(
-      innerEdgesValid(hex, [
-        [0, 4],
-        [1, 4],
-      ])
+      topGraphValid(
+        sq,
+        [c],
+        [
+          [1, 6],
+          [4, 6],
+        ]
+      )
     ).toBe(true)
-    for (const bad of [
-      [[4, 1]],
-      [[1, 2]],
-      [[0, 5]],
-      [[1, 6]],
-      [[1.5, 4]],
+    const bad: [unknown, unknown][] = [
+      // An interior point on no edge, or dangling on one.
+      [[c], undefined],
+      [[c], [[1, 6]]],
+      // Outside the footprint, or on the outline.
       [
-        [1, 4],
-        [0, 4],
+        [{ x: 30, y: 0, z: 5 }],
+        [
+          [1, 6],
+          [4, 6],
+        ],
       ],
       [
-        [1, 4],
-        [1, 4],
+        [{ x: 10, y: 0, z: 0 }],
+        [
+          [1, 6],
+          [4, 6],
+        ],
       ],
+      // Unsorted, repeated, an outline edge, out of range.
+      [undefined, [[4, 1]]],
       [
-        [0, 3],
-        [2, 5],
+        [c],
+        [
+          [4, 6],
+          [1, 6],
+        ],
       ],
-      // Along the bottom side through vertex 1.
-      [[0, 2]],
+      [undefined, [[1, 2]]],
+      [undefined, [[1, 9]]],
+      // Crossing edges.
       [
-        [0, 2],
-        [0, 3],
-        [0, 4],
-        [1, 4],
+        undefined,
+        [
+          [0, 3],
+          [2, 5],
+        ],
       ],
-      "x",
-      [[1]],
-    ]) {
-      expect(innerEdgesValid(hex, bad), JSON.stringify(bad)).toBe(false)
-    }
-    // Outside a concave footprint.
-    const l = [
-      { x: 0, z: 0 },
-      { x: 20, z: 0 },
-      { x: 20, z: 10 },
-      { x: 10, z: 10 },
-      { x: 10, z: 20 },
-      { x: 0, z: 20 },
+      // Along the outline through a vertex.
+      [undefined, [[0, 2]]],
+      // A detached triangle inside.
+      [
+        [
+          { x: 5, y: 0, z: 3 },
+          { x: 8, y: 0, z: 3 },
+          { x: 6, y: 0, z: 6 },
+        ],
+        [
+          [6, 7],
+          [6, 8],
+          [7, 8],
+        ],
+      ],
+      // A spike: an interior vertex hanging off a vertex by two collinear edges (a face touches itself).
+      [
+        [
+          { x: 10, y: 0, z: 3 },
+          { x: 10, y: 0, z: 6 },
+        ],
+        [
+          [1, 6],
+          [6, 7],
+        ],
+      ],
+      ["x", undefined],
     ]
-    expect(innerEdgesValid(l, [[0, 3]])).toBe(true)
-    expect(innerEdgesValid(l, [[2, 4]])).toBe(false)
+    for (const [points, edges] of bad) expect(topGraphValid(sq, points, edges), JSON.stringify([points, edges])).toBe(false)
   })
 
-  it("the writer stores them, and shapes differing only in inner edges are different", () => {
+  it("the writer stores them, and shapes differing only in them are different", () => {
     const level: TerrainLevel = { heightmap: null }
     const b = box()
     expect(writeTerrain(level, grid, { upsert: [b] })).toBe(true)
-    const cut = loopCut(b, 0, [0.5])!.shape
-    expect(writeTerrain(level, grid, { upsert: [cut] })).toBe(true)
-    expect(level.terrainEdits!.shapes.b.innerEdges).toEqual([[1, 4]])
-    const plain = removeInnerEdges(cut, [0])!
+    const s = crossed().twice.shape
+    expect(writeTerrain(level, grid, { upsert: [s] })).toBe(true)
+    expect(level.terrainEdits!.shapes.b.innerPoints).toEqual([{ x: 10, y: 4, z: 5 }])
+    const peak = translateVertices(s, [8], { x: 0, y: 2, z: 0 })!
+    expect(writeTerrain(level, grid, { upsert: [peak] })).toBe(true)
+    expect(level.terrainEdits!.shapes.b.innerPoints).toEqual([{ x: 10, y: 6, z: 5 }])
+    const plain = dissolveVertices(peak, [8])!
     expect(writeTerrain(level, grid, { upsert: [plain] })).toBe(true)
+    expect(level.terrainEdits!.shapes.b).not.toHaveProperty("innerPoints")
     expect(level.terrainEdits!.shapes.b).not.toHaveProperty("innerEdges")
-    expect(writeTerrain(level, grid, { upsert: [{ ...cut, innerEdges: [[1, 2]] }] })).toBe(false)
   })
 })

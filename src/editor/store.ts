@@ -39,6 +39,7 @@ import {
 } from "@/core/scene/integrity"
 import { groundHeightAt, lightLevelId, lightWorldPosition, sortedLevels, wallLength } from "@/core/scene/queries"
 import { SCENE_LIMITS } from "@/core/scene/schema"
+import { applyConditionChange, applyHpChange, clampHp, type TokenHp, type TokenStatusChange } from "@/core/scene/tokenStatus"
 import type {
   DirectionalLightSettings,
   DoorState,
@@ -257,6 +258,15 @@ export interface EditorState {
    */
   updateObject(id: Id, partial: ObjectUpdate, opts?: ApplyOptions): boolean
   updateToken(id: Id, partial: TokenUpdate, opts?: ApplyOptions): boolean
+  /**
+   * A relative change of a token's hit points and/or conditions. In a live session (play sink) it is a
+   * play action, not an edit: the host applies it to the token as it holds it (so a player's change made
+   * meanwhile stands) and there is no undo entry (undo would restore a stale value over players'
+   * changes). Otherwise an ordinary edit.
+   */
+  changeTokenStatus(id: Id, change: TokenStatusChange): void
+  /** Start (`hp`) or stop (null) tracking a token's hit points: a play action in a live session, like changeTokenStatus. */
+  setTokenHp(id: Id, hp: TokenHp | null): void
   /** Delete objects/tokens and their dependents (openings of walls, attached lights are detached). */
   deleteIds(ids: Id[], label?: string): void
   setDoorState(id: Id, state: DoorState): void
@@ -1004,8 +1014,9 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
           (d) => {
             const t = d.tokens[id]
             Object.assign(t, rest)
-            // `model: undefined` means the default body: drop the key instead of storing undefined.
-            if (Object.hasOwn(rest, "model") && rest.model === undefined) delete t.model
+            // `undefined` means none (the default body, untracked hit points, no conditions): drop the key
+            // instead of storing undefined.
+            for (const k of ["model", "hp", "conditions"] as const) if (Object.hasOwn(rest, k) && rest[k] === undefined) delete t[k]
             // Attached lights keep their stored level aligned with their carrier's.
             for (const o of Object.values(d.objects)) {
               if (o.type === "light" && o.attachedTokenId === id && o.levelId !== t.levelId) o.levelId = t.levelId
@@ -1022,6 +1033,31 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
         const present = ids.filter((id) => itemExists(s.scene, id))
         if (present.length === 0) return
         apply((d) => deleteWithDependents(d, present), label ?? `Delete ${plural(present.length, "item")}`)
+      },
+
+      changeTokenStatus(id, change) {
+        const t = hasOwn(get().scene.tokens, id) ? get().scene.tokens[id] : undefined
+        if (!t || (!change.hp && !change.conditions)) return
+        if (playSink) {
+          playSink({ t: "change-token-status", tokenId: id, ...change })
+          return
+        }
+        const partial: TokenUpdate = {}
+        if (change.hp && t.hp) partial.hp = applyHpChange(t.hp, change.hp)
+        if (change.conditions) {
+          const next = applyConditionChange(t.conditions ?? [], change.conditions)
+          partial.conditions = next.length > 0 ? next : undefined
+        }
+        if (Object.keys(partial).length > 0) get().updateToken(id, partial)
+      },
+
+      setTokenHp(id, hp) {
+        if (!hasOwn(get().scene.tokens, id)) return
+        if (playSink) {
+          playSink({ t: "set-token-status", tokenId: id, hp })
+          return
+        }
+        get().updateToken(id, { hp: hp ? clampHp(hp) : undefined })
       },
 
       setDoorState(id, state) {

@@ -639,6 +639,39 @@ describe("editor store: live session sinks", () => {
     expect(obj<WallObject>(s, f.wallId).a).toEqual({ x: 15, z: 10 })
   })
 
+  it("health changes: play actions in a live session (no undo entry), edits otherwise", () => {
+    const f = fixtureScene()
+    const hero = createToken(f.groundId, { x: 2.5, z: 2.5 })
+    hero.hp = { current: 9, max: 12, temp: 0 }
+    hero.conditions = ["prone"]
+    f.scene.tokens[hero.id] = hero
+    // Standalone editor: ordinary, undoable edits.
+    const solo = makeStore(f.scene)
+    solo.getState().changeTokenStatus(hero.id, { hp: { kind: "damage", amount: 4 }, conditions: { add: ["poisoned"], remove: ["prone"] } })
+    expect(solo.getState().scene.tokens[hero.id]).toMatchObject({ hp: { current: 5, max: 12, temp: 0 }, conditions: ["poisoned"] })
+    solo.getState().changeTokenStatus(hero.id, { conditions: { remove: ["poisoned"] } })
+    expect(solo.getState().scene.tokens[hero.id].conditions).toBeUndefined()
+    solo.getState().setTokenHp(hero.id, null)
+    expect(solo.getState().scene.tokens[hero.id].hp).toBeUndefined()
+    solo.getState().undo()
+    expect(solo.getState().scene.tokens[hero.id].hp).toEqual({ current: 5, max: 12, temp: 0 })
+    // Live session: relative commands to the host, the document and history untouched.
+    const live = makeStore(f.scene)
+    const commands: DmCommand[] = []
+    live.getState().setPlaySink((c) => commands.push(c))
+    live.getState().changeTokenStatus(hero.id, { hp: { kind: "set", current: 4 } })
+    live.getState().changeTokenStatus(hero.id, { conditions: { add: ["poisoned"] } })
+    live.getState().setTokenHp(hero.id, null)
+    live.getState().changeTokenStatus("nope", { conditions: { add: ["prone"] } })
+    expect(commands).toEqual([
+      { t: "change-token-status", tokenId: hero.id, hp: { kind: "set", current: 4 } },
+      { t: "change-token-status", tokenId: hero.id, conditions: { add: ["poisoned"] } },
+      { t: "set-token-status", tokenId: hero.id, hp: null },
+    ])
+    expect(live.getState().scene.tokens[hero.id]).toEqual(hero)
+    expect(live.getState().history.canUndo).toBe(false)
+  })
+
   it("syncScene adopts an external scene without touching history", () => {
     const f = fixtureScene()
     const store = makeStore(f.scene)

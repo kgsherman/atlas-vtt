@@ -312,6 +312,29 @@ describe("parseScene", () => {
       for (const bad of [[[4, 1]], [[1, 2]], [[0, 2]], [[0, 3], [2, 5]], [[1, 9]], [[1, 4, 5]], [[-1, 3]], "x"]) {
         rejects((d) => hex(d, bad), /innerEdges/)
       }
+      // Interior points (where cuts cross) must lie inside, on inner edges.
+      const crossed = json(fullScene())
+      hex(crossed, [
+        [1, 6],
+        [4, 6],
+      ])
+      mound(crossed).innerPoints = [{ x: 30, y: 2, z: 25 }]
+      expect(parseScene(crossed).ok).toBe(true)
+      rejects((d) => {
+        hex(d, [
+          [1, 6],
+          [4, 6],
+        ])
+        mound(d).innerPoints = [{ x: 60, y: 2, z: 25 }]
+      }, /innerEdges/)
+      rejects((d) => {
+        hex(d, [[1, 4]])
+        mound(d).innerPoints = [{ x: 30, y: 2, z: 25 }]
+      }, /innerEdges/)
+      rejects((d) => {
+        hex(d, [[1, 4]])
+        mound(d).innerPoints = new Array(62).fill({ x: 30, y: 2, z: 25 })
+      }, /expected at most 64 points per terrain shape, got 68/)
     })
 
     it("require the canonical orientation and a non-degenerate footprint", () => {

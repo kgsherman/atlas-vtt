@@ -14,7 +14,7 @@ import { createDoor, createWall } from "@/core/scene/factory"
 import { sampleById } from "@/core/scene/samples"
 import { blockShape, writeTerrain } from "@/core/scene/terrainShapes"
 import type { Id, Scene } from "@/core/scene/types"
-import { playerViewSchema } from "@/core/session"
+import { dmSayCommand, playerViewSchema } from "@/core/session"
 import { add, addToken, flatScene } from "@/core/session/test-utils"
 import type { PlayerDoor, PlayerView } from "@/core/session/types"
 import { deepEqual } from "@/core/session/util"
@@ -23,8 +23,9 @@ import { cellTouched, decodeMask } from "@/core/vision/mask"
 import { createLocalScenesRepo } from "../scenesRepo"
 import { NetError } from "../supabase"
 import { sameVisionLevels, type HostRunnerImpl } from "./hostRunner"
-import { createSessionFixture, DM, FakeWorker, Mirror, P1, P2, P3, recordingAssets, sleep, startHost, TEST_TIMING, waitFor, type SessionFixture } from "./test-utils"
+import { createSessionFixture, DM, fakeLocks, FakeWorker, Mirror, P1, P2, P3, recordingAssets, sleep, startHost, TEST_TIMING, waitFor, type SessionFixture } from "./test-utils"
 import type { TileCodec } from "./tiles"
+import type { HostPingEvent } from "./types"
 import { createInThreadVisionClient, createWorkerVisionClient, type WorkerLike } from "./visionClient"
 import { responseTransferables, VisionWorkerCore, type VisionRequest } from "./visionProtocol"
 
@@ -867,10 +868,12 @@ describe("host runner — membership and hosting", () => {
   it("one host per browser: a second tab waits in standby until it takes over", async () => {
     const k = keep()
     const fx = await fixture(k.scene, [P1])
-    const a = host(fx, { locks: undefined }).host
+    // navigator.locks (undefined: the runner's default) where the runtime has it (Node 24+), else a fake.
+    const locks = (globalThis.navigator as { locks?: unknown } | undefined)?.locks ? undefined : fakeLocks()
+    const a = host(fx, { locks }).host
     await a.start()
     expect(a.getSnapshot().status).toBe("hosting")
-    const b = host(fx, { locks: undefined }).host
+    const b = host(fx, { locks }).host
     await b.start()
     expect(b.getSnapshot().status).toBe("standby")
     expect(b.getSnapshot().error).toMatch(/another tab/)
@@ -1291,3 +1294,175 @@ describe("host runner — terrain editing data", () => {
 
 // Keep the DM id referenced (fixture identity).
 void DM
+
+describe("host runner — the table (chat, dice, combat, pings)", () => {
+  /** Dice that always show `v`. */
+  const always =
+    (v: number) =>
+    (sides: number): number =>
+      Math.min(v, sides)
+  const texts = (m: Mirror) =>
+    Object.values(m.view?.table?.log ?? {})
+      .sort((a, b) => a.at - b.at)
+      .map((x) => x.text)
+
+  it("chat, whispers and host-rolled dice reach exactly their readers", async () => {
+    const k = keep()
+    const { fx, h } = await hosted(k.scene, [P1, P2], { diceRng: always(13) })
+    h.dispatch({ t: "assign-token", tokenId: k.ada.id, userId: P1, assigned: true })
+    h.dispatch({ t: "assign-token", tokenId: k.bo.id, userId: P2, assigned: true })
+    const m1 = mirror(fx, P1)
+    const m2 = mirror(fx, P2)
+    const both: Array<[string, Mirror]> = [
+      [P1, m1],
+      [P2, m2],
+    ]
+    await settle(h, both)
+    await m1.send({ t: "say", reqId: "s1", text: "Hello table", to: "all" })
+    await m2.send({ t: "say", reqId: "s2", text: "SENTINEL_WHISPER", to: "dm" })
+    await m1.send({ t: "roll", reqId: "s3", formula: "1d20+2 to hit", to: "all" })
+    await m1.send({ t: "roll", reqId: "s4", formula: "not dice", to: "all" })
+    await waitFor(() => m1.result("s4") !== undefined && texts(m2).length === 3, "player messages")
+    const cmd = dmSayCommand("SENTINEL_DM_NOTE", [P1], { now: Date.now(), newId: () => "dmnote1", rng: always(1) })!
+    h.dispatch(cmd)
+    await waitFor(() => m1.result("s4") !== undefined && texts(m1).length === 3 && texts(m2).length === 3, "table messages")
+    await settle(h, both)
+    // Players' requests travel on their own channels: only each sender's order is fixed.
+    expect(texts(m1)).toEqual(["Hello table", "to hit", "SENTINEL_DM_NOTE"])
+    expect(texts(m2).sort()).toEqual(["Hello table", "SENTINEL_WHISPER", "to hit"])
+    expect(m1.result("s4")).toEqual({ reqId: "s4", ok: false, reason: "bad-formula" })
+    const roll = Object.values(m2.view!.table!.log).find((x) => x.kind === "roll")!
+    expect(roll.roll).toMatchObject({ formula: "1d20 + 2", total: 15 })
+    // The DM sees everything.
+    expect(h.getSnapshot().state!.table!.log.map((x) => x.text).sort()).toEqual(["Hello table", "SENTINEL_DM_NOTE", "SENTINEL_WHISPER", "to hit"])
+    expect(m1.raw.join("\n")).not.toContain("SENTINEL_WHISPER")
+    expect(m2.raw.join("\n")).not.toContain("SENTINEL_DM_NOTE")
+    expect(playerViewSchema.parse(m1.view)).toEqual(m1.view)
+    expect(m1.applyErrors).toEqual([])
+  })
+
+  it("rate-limits chat floods separately from moves", async () => {
+    const k = keep()
+    const { fx, h } = await hosted(k.scene, [P1])
+    const m = mirror(fx, P1)
+    await settle(h, [[P1, m]])
+    for (let n = 0; n < 20; n++) void m.send({ t: "say", reqId: `c${n}`, text: `spam ${n}`, to: "all" })
+    await waitFor(() => m.results.length >= 8, "chat results")
+    await sleep(150)
+    const ok = m.results.filter((r) => r.ok).length
+    // Burst 6 (plus a little refill while the flood arrives).
+    expect(ok).toBeGreaterThanOrEqual(6)
+    expect(ok).toBeLessThanOrEqual(8)
+    expect(h.getSnapshot().state!.table!.log.length).toBe(ok)
+  })
+
+  it("pings reach the others who know the level, and the DM; never the sender", async () => {
+    const k = keep()
+    const { fx, h } = await hosted(k.scene, [P1, P2, P3])
+    h.dispatch({ t: "assign-token", tokenId: k.ada.id, userId: P1, assigned: true })
+    h.dispatch({ t: "assign-token", tokenId: k.bo.id, userId: P2, assigned: true })
+    const m1 = mirror(fx, P1)
+    const m2 = mirror(fx, P2)
+    // P3 controls nothing: it knows no level.
+    const m3 = mirror(fx, P3)
+    await settle(h, [
+      [P1, m1],
+      [P2, m2],
+      [P3, m3],
+    ])
+    const seen: HostPingEvent[] = []
+    h.onPing((ev) => seen.push(ev))
+    const pings = (m: Mirror) => m.messages.filter((x) => x.t === "ping").map((x) => (x as Extract<typeof x, { t: "ping" }>).ping)
+    await m1.send({ t: "ping", levelId: k.ground, x: 12, z: 14 })
+    await m1.send({ t: "ping", levelId: "no-such-level", x: 12, z: 14 })
+    await waitFor(() => pings(m2).length === 1 && seen.length === 1, "ping delivered")
+    await sleep(100)
+    const name = h.getSnapshot().state!.players[P1].displayName
+    expect(pings(m2)).toEqual([{ levelId: k.ground, x: 12, z: 14, name, color: h.getSnapshot().state!.players[P1].color, focus: false }])
+    expect(pings(m1)).toEqual([])
+    expect(pings(m3)).toEqual([])
+    expect(seen).toEqual([{ ping: { levelId: k.ground, x: 12, z: 14, name, color: expect.any(String), focus: false }, from: P1 }])
+
+    h.ping(k.ground, { x: 30, z: 5 }, { focus: true })
+    await waitFor(() => pings(m1).length === 1 && pings(m2).length === 2, "DM ping")
+    expect(pings(m1)[0]).toMatchObject({ name: "DM", focus: true, x: 30, z: 5 })
+    expect(seen[1].from).toBeNull()
+
+    // A flood: 1/s, burst 3.
+    for (let n = 0; n < 10; n++) void m2.send({ t: "ping", levelId: k.ground, x: n, z: 1 })
+    await sleep(200)
+    expect(pings(m1).length - 1).toBeLessThanOrEqual(4)
+    expect(pings(m1).length - 1).toBeGreaterThanOrEqual(3)
+  })
+
+  it("combat: players see only entries they may; they roll initiative and end their own turn", async () => {
+    const k = keep()
+    const { fx, h } = await hosted(k.scene, [P1, P2], { diceRng: always(9) })
+    h.dispatch({ t: "assign-token", tokenId: k.ada.id, userId: P1, assigned: true })
+    h.dispatch({ t: "assign-token", tokenId: k.bo.id, userId: P2, assigned: true })
+    const m1 = mirror(fx, P1)
+    const m2 = mirror(fx, P2)
+    const both: Array<[string, Mirror]> = [
+      [P1, m1],
+      [P2, m2],
+    ]
+    await settle(h, both)
+    // Ada cannot see the goblin behind the closed door; the assassin is hidden.
+    expect(m1.view!.tokens[k.goblin.id]).toBeUndefined()
+    const entry = (id: Id, tokenId: Id, initiative: number | null) => ({ id, tokenId, name: "", initiative, modifier: 0, hidden: false })
+    h.dispatch({
+      t: "combat-start",
+      entries: [entry("e-ada", k.ada.id, null), entry("e-bo", k.bo.id, 11), entry("e-gob", k.goblin.id, 18), entry("e-ass", k.assassin.id, 25)],
+      stamp: { id: "start1", at: Date.now() },
+    })
+    await settle(h, both)
+    expect(m1.view!.table!.combat!.entries.map((e) => e.id)).toEqual(["e-bo", "e-ada"])
+    const r = "i1"
+    await m1.send({ t: "initiative", reqId: r, tokenId: k.ada.id, bonus: 4 })
+    await waitFor(() => m1.result(r) !== undefined, "initiative result")
+    expect(m1.result(r)).toEqual({ reqId: r, ok: true })
+    await settle(h, both)
+    expect(m1.view!.table!.combat!.entries.map((e) => [e.id, e.initiative])).toEqual([
+      ["e-ada", 13],
+      ["e-bo", 11],
+    ])
+    // The assassin acts first: nobody sees whose turn it is.
+    h.dispatch({ t: "combat-turn", delta: 1, stamp: { id: "t1", at: Date.now() } })
+    await settle(h, both)
+    expect(m1.view!.table!.combat!.activeId).toBeNull()
+    await m1.send({ t: "end-turn", reqId: "x1", entryId: "e-ada" })
+    await waitFor(() => m1.result("x1") !== undefined, "end-turn refused")
+    expect(m1.result("x1")).toMatchObject({ ok: false, reason: "cannot" })
+    h.dispatch({ t: "combat-set-active", entryId: "e-ada" })
+    await settle(h, both)
+    expect(m2.view!.table!.combat!.activeId).toBe("e-ada")
+    await m1.send({ t: "end-turn", reqId: "x2", entryId: "e-ada" })
+    await waitFor(() => m1.result("x2") !== undefined, "end-turn")
+    expect(m1.result("x2")).toEqual({ reqId: "x2", ok: true })
+    await settle(h, both)
+    expect(m1.view!.table!.combat!.activeId).toBe("e-bo")
+    for (const m of [m1, m2]) {
+      const raw = m.raw.join("\n")
+      expect(raw).not.toContain("SENTINEL_ASSASSIN")
+      expect(raw).not.toContain("e-ass")
+      expect(raw).not.toContain(k.assassin.id)
+    }
+    expect(m1.raw.join("\n")).not.toContain(k.goblin.id)
+  })
+
+  it("the table survives a host restart", async () => {
+    const k = keep()
+    const { fx, h } = await hosted(k.scene, [P1])
+    const m = mirror(fx, P1)
+    await settle(h, [[P1, m]])
+    await m.send({ t: "say", reqId: "s1", text: "remember me", to: "all" })
+    await waitFor(() => texts(m).includes("remember me"), "message")
+    await h.save()
+    await h.stop()
+    const b = host(fx).host
+    await b.start()
+    expect(b.getSnapshot().state!.table!.log.map((x) => x.text)).toEqual(["remember me"])
+    await settle(b, [[P1, m]])
+    expect(texts(m)).toEqual(["remember me"])
+  })
+})

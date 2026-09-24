@@ -325,51 +325,148 @@ export function triangulateFootprint(points: readonly XZ[]): number[] {
 }
 
 // ---------------------------------------------------------------------------
-// Inner edges (loop cuts)
+// The top graph: interior vertices and inner edges (loop cuts)
 // ---------------------------------------------------------------------------
 
+type TopShape = Pick<TerrainShape, "points" | "innerPoints" | "innerEdges">
+
+/** Most inner edges a shape may have (a planar graph on TERRAIN_SHAPE_MAX_POINTS vertices has fewer). */
+export const TERRAIN_SHAPE_MAX_INNER_EDGES = 3 * TERRAIN_SHAPE_MAX_POINTS
+
+/** Every top vertex: the footprint points, then the interior points (vertex element k indexes this list). */
+export function topVertices(shape: Pick<TerrainShape, "points" | "innerPoints">): readonly Vec3[] {
+  return shape.innerPoints && shape.innerPoints.length > 0 ? [...shape.points, ...shape.innerPoints] : shape.points
+}
+
+/** Number of top vertices (footprint points plus interior points). */
+export function topVertexCount(shape: Pick<TerrainShape, "points" | "innerPoints">): number {
+  return shape.points.length + (shape.innerPoints?.length ?? 0)
+}
+
+const isOutlineEdge = (a: number, b: number, n: number) => a < n && b < n && ((b - a + n) % n === 1 || (a - b + n) % n === 1)
+
 /**
- * Whether `edges` (TerrainShape.innerEdges; undefined = none) are valid for the footprint: at most n − 3
- * pairs [a, b] of integers 0 ≤ a < b < n, strictly ascending (by a, then b), never adjacent, each a proper
- * diagonal (no other vertex within VERTEX_EPS of it, crossing no outline edge, its midpoint inside), and no
- * two crossing. Expects a simple footprint (isSimplePolygon).
+ * Faces of the planar graph made of the footprint outline and the inner edges over `verts` (the first n
+ * are the footprint, canonical orientation): each bounded face as a vertex index list with positive signed
+ * area, in footprint order (outline edge k appears as k followed by k + 1). Null when the graph has more
+ * than one unbounded face (a part not connected to the outline).
  */
-export function innerEdgesValid(points: readonly XZ[], edges: unknown): boolean {
-  if (edges === undefined) return true
+function planarFaces(verts: readonly XZ[], n: number, inner: readonly (readonly [number, number])[]): number[][] | null {
+  const count = verts.length
+  const adj: number[][] = Array.from({ length: count }, () => [])
+  const link = (a: number, b: number) => {
+    adj[a].push(b)
+    adj[b].push(a)
+  }
+  for (let k = 0; k < n; k++) link(k, (k + 1) % n)
+  for (const [a, b] of inner) link(a, b)
+  for (let v = 0; v < count; v++) {
+    const angle = (w: number) => Math.atan2(verts[w].z - verts[v].z, verts[w].x - verts[v].x)
+    adj[v].sort((p, q) => angle(p) - angle(q))
+  }
+  const seen = new Set<number>()
+  const faces: number[][] = []
+  let unbounded = 0
+  const limit = 2 * (n + inner.length) + 2
+  for (let u = 0; u < count; u++) {
+    for (const v0 of adj[u]) {
+      if (seen.has(u * count + v0)) continue
+      const face: number[] = []
+      let a = u
+      let b = v0
+      do {
+        if (face.length > limit) return null
+        seen.add(a * count + b)
+        face.push(a)
+        // Keep the face on the left: at b, the edge just clockwise of the way back.
+        const around = adj[b]
+        const c = around[(around.indexOf(a) - 1 + around.length) % around.length]
+        a = b
+        b = c
+      } while (a !== u || b !== v0)
+      if (signedArea(face.map((k) => verts[k])) > 0) faces.push(face)
+      else unbounded++
+    }
+  }
+  return unbounded === 1 ? faces : null
+}
+
+/**
+ * Whether the interior points and inner edges (TerrainShape.innerPoints / innerEdges; undefined = none)
+ * form a valid top for the footprint (expected simple): at most TERRAIN_SHAPE_MAX_POINTS vertices in all;
+ * interior points finite, strictly inside the footprint, each on an inner edge; inner edges pairs [a, b] of
+ * vertex indices, a < b, strictly ascending, never an outline edge, no vertex within VERTEX_EPS of another
+ * or of an edge it is not an end of, no two edges crossing, each inside the footprint; and every face the
+ * edges cut the top into a simple polygon, the faces covering the footprint exactly once (no dangling or
+ * detached edges).
+ */
+export function topGraphValid(points: readonly XZ[], innerPoints: unknown, innerEdges: unknown): boolean {
   const n = points.length
-  if (!Array.isArray(edges) || edges.length > Math.max(0, n - 3)) return false
+  if (innerPoints !== undefined && !Array.isArray(innerPoints)) return false
+  const inner = (innerPoints ?? []) as { x: unknown; y: unknown; z: unknown }[]
+  if (n + inner.length > TERRAIN_SHAPE_MAX_POINTS) return false
+  for (const p of inner) if (typeof p !== "object" || p === null || ![p.x, p.y, p.z].every((v) => typeof v === "number" && Number.isFinite(v))) return false
+  if (innerEdges === undefined) return inner.length === 0
+  if (!Array.isArray(innerEdges) || innerEdges.length > TERRAIN_SHAPE_MAX_INNER_EDGES) return false
+  const verts = [...points, ...(inner as XZ[])]
+  const count = verts.length
   const eps2 = VERTEX_EPS * VERTEX_EPS
+  // Interior points: inside, away from the outline and from every other vertex.
+  for (let m = 0; m < inner.length; m++) {
+    const p = verts[n + m]
+    if (!pointInPolygon(p, points)) return false
+    for (let k = 0; k < n; k++) {
+      const q = points[(k + 1) % n]
+      if (distSeg2(p.x, p.z, points[k].x, points[k].z, q.x, q.z) <= eps2) return false
+    }
+    for (let k = 0; k < n + m; k++) if ((verts[k].x - p.x) ** 2 + (verts[k].z - p.z) ** 2 <= eps2) return false
+  }
+  const degree = new Array<number>(count).fill(0)
   let prev: [number, number] | null = null
-  for (const e of edges) {
+  for (const e of innerEdges) {
     if (!Array.isArray(e) || e.length !== 2) return false
     const [a, b] = e as unknown[]
     if (!Number.isInteger(a) || !Number.isInteger(b)) return false
     const ia = a as number
     const ib = b as number
-    if (ia < 0 || ib >= n || ib - ia < 2 || (ia === 0 && ib === n - 1)) return false
+    if (ia < 0 || ib >= count || ia >= ib || isOutlineEdge(ia, ib, n)) return false
     if (prev && (ia < prev[0] || (ia === prev[0] && ib <= prev[1]))) return false
     prev = [ia, ib]
-    const A = points[ia]
-    const B = points[ib]
-    for (let k = 0; k < n; k++) {
+    degree[ia]++
+    degree[ib]++
+    const A = verts[ia]
+    const B = verts[ib]
+    for (let k = 0; k < count; k++) {
       if (k === ia || k === ib) continue
-      if (distSeg2(points[k].x, points[k].z, A.x, A.z, B.x, B.z) <= eps2) return false
+      if (distSeg2(verts[k].x, verts[k].z, A.x, A.z, B.x, B.z) <= eps2) return false
+      if (k >= n) continue
       const j = (k + 1) % n
       if (j === ia || j === ib) continue
       if (properCross(A, B, points[k], points[j])) return false
     }
     if (!pointInPolygon({ x: (A.x + B.x) / 2, z: (A.z + B.z) / 2 }, points)) return false
   }
-  const list = edges as [number, number][]
-  for (let i = 0; i < list.length; i++) {
-    for (let j = i + 1; j < list.length; j++) {
-      const [a, b] = list[i]
-      const [c, d] = list[j]
+  for (let m = 0; m < inner.length; m++) if (degree[n + m] === 0) return false
+  const edges = innerEdges as [number, number][]
+  for (let i = 0; i < edges.length; i++) {
+    for (let j = i + 1; j < edges.length; j++) {
+      const [a, b] = edges[i]
+      const [c, d] = edges[j]
       if (a === c || a === d || b === c || b === d) continue
-      if (properCross(points[a], points[b], points[c], points[d])) return false
+      if (properCross(verts[a], verts[b], verts[c], verts[d])) return false
     }
   }
-  return true
+  if (edges.length === 0) return inner.length === 0
+  const faces = planarFaces(verts, n, edges)
+  if (!faces) return false
+  let area = 0
+  for (const f of faces) {
+    const poly = f.map((k) => verts[k])
+    if (new Set(f).size !== f.length || !isSimplePolygon(poly)) return false
+    area += signedArea(poly)
+  }
+  const total = signedArea(points)
+  return Math.abs(area - total) <= 1e-9 * Math.max(1, total)
 }
 
 /** Do segments p–q and r–s cross at a point interior to both? */
@@ -381,14 +478,14 @@ function properCross(p: XZ, q: XZ, r: XZ, s: XZ): boolean {
   return ((o1 > 0 && o2 < 0) || (o1 < 0 && o2 > 0)) && ((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0))
 }
 
-/** Sorted (a < b, ascending), duplicates, degenerate and adjacent pairs dropped. */
+/** Sorted (a < b, ascending); duplicates, loops and outline edges (for `n` footprint points) dropped. */
 function canonicalInnerEdges(edges: readonly (readonly [number, number])[], n: number): [number, number][] {
   const seen = new Set<string>()
   const out: [number, number][] = []
   for (const [x, y] of edges) {
     const a = Math.min(x, y)
     const b = Math.max(x, y)
-    if (a < 0 || b >= n || b - a < 2 || (a === 0 && b === n - 1)) continue
+    if (a < 0 || a === b || isOutlineEdge(a, b, n)) continue
     const key = `${a},${b}`
     if (seen.has(key)) continue
     seen.add(key)
@@ -398,9 +495,9 @@ function canonicalInnerEdges(edges: readonly (readonly [number, number])[], n: n
 }
 
 /**
- * The shape's inner edges after re-indexing its vertices: `map[k]` is the new index of old vertex k (−1:
- * removed), `n` the new vertex count. Edges losing an end, merging their ends, or becoming outline edges
- * are dropped; the result is canonical (see TerrainShape.innerEdges). Validity is left to the caller.
+ * Inner edges after re-indexing the top vertices: `map[k]` is the new index of old vertex k (−1: removed),
+ * `n` the new number of footprint points. Edges losing an end, merging their ends, or becoming outline
+ * edges are dropped; the result is canonical. Validity is left to the caller.
  */
 export function remapInnerEdges(edges: readonly (readonly [number, number])[] | undefined, map: readonly number[], n: number): [number, number][] {
   if (!edges || edges.length === 0) return []
@@ -414,36 +511,24 @@ export function remapInnerEdges(edges: readonly (readonly [number, number])[] | 
 }
 
 /**
- * Faces of the top: the footprint (vertex indices 0..n−1 in order) split along the inner edges, each face
- * a list of vertex indices in footprint order (a rotation of an increasing run). Edges that do not split a
- * face (repeated, adjacent in it) are skipped.
+ * Faces of the top: the footprint cut by the inner edges, each a list of top vertex indices in footprint
+ * order (outline edge k appears as k followed by k + 1). The whole footprint when there are no inner edges
+ * or they do not form a valid graph.
  */
-export function topFaces(n: number, edges: readonly (readonly [number, number])[] | undefined): number[][] {
-  const faces: number[][] = [Array.from({ length: n }, (_, k) => k)]
-  for (const [a, b] of edges ?? []) {
-    const f = faces.findIndex((face) => {
-      const i = face.indexOf(a)
-      const j = face.indexOf(b)
-      if (i < 0 || j < 0) return false
-      const lo = Math.min(i, j)
-      const hi = Math.max(i, j)
-      return hi - lo >= 2 && !(lo === 0 && hi === face.length - 1)
-    })
-    if (f < 0) continue
-    const face = faces[f]
-    const lo = Math.min(face.indexOf(a), face.indexOf(b))
-    const hi = Math.max(face.indexOf(a), face.indexOf(b))
-    faces.splice(f, 1, face.slice(lo, hi + 1), [...face.slice(hi), ...face.slice(0, lo + 1)])
-  }
-  return faces
+export function topFaces(shape: TopShape): number[][] {
+  const n = shape.points.length
+  const whole = [Array.from({ length: n }, (_, k) => k)]
+  if (!shape.innerEdges || shape.innerEdges.length === 0) return whole
+  return planarFaces(topVertices(shape), n, shape.innerEdges) ?? whole
 }
 
-/** Top triangles (index triples, like triangulateFootprint): each top face ear-clipped on its own. */
-function triangulateTop(points: readonly XZ[], edges: readonly (readonly [number, number])[] | undefined): number[] {
-  if (!edges || edges.length === 0) return triangulateFootprint(points)
+/** Top triangles (index triples into topVertices, like triangulateFootprint): each face ear-clipped on its own. */
+function triangulateTop(shape: TopShape): number[] {
+  if (!shape.innerEdges || shape.innerEdges.length === 0) return triangulateFootprint(shape.points)
+  const verts = topVertices(shape)
   const out: number[] = []
-  for (const face of topFaces(points.length, edges)) {
-    for (const k of triangulateFootprint(face.map((i) => points[i]))) out.push(face[k])
+  for (const face of topFaces(shape)) {
+    for (const k of triangulateFootprint(face.map((i) => verts[i]))) out.push(face[k])
   }
   return out
 }
@@ -453,13 +538,59 @@ export function shapeEdgeCount(shape: Pick<TerrainShape, "points" | "innerEdges"
   return shape.points.length + (shape.innerEdges?.length ?? 0)
 }
 
-/** The two vertex indices of edge element `k` (outline k → [k, k+1 mod n], inner n + c → innerEdges[c]); null when out of range. */
+/** The two top vertex indices of edge element `k` (outline k → [k, k+1 mod n], inner n + c → innerEdges[c]); null when out of range. */
 export function shapeEdgeEnds(shape: Pick<TerrainShape, "points" | "innerEdges">, k: number): [number, number] | null {
   const n = shape.points.length
   if (!Number.isInteger(k) || k < 0) return null
   if (k < n) return [k, (k + 1) % n]
   const e = shape.innerEdges?.[k - n]
   return e ? [e[0], e[1]] : null
+}
+
+/**
+ * The loop of a loop cut through edge element `edge` (Blender's edge ring): starting there, it crosses each
+ * top face to the side opposite the one it entered by (the face must have an even number of sides) and on
+ * into the next face, both ways, until it reaches the outline. Returns the crossed edges in order, each
+ * oriented (u, v) so that one parameter t along every u → v gives a single parallel cut; the first and last
+ * are outline edges. Null when the loop meets a face with an odd number of sides or runs into itself.
+ */
+export function loopCutRing(shape: TopShape, edge: number): [number, number][] | null {
+  const ends = shapeEdgeEnds(shape, edge)
+  if (!ends) return null
+  const n = shape.points.length
+  const count = topVertexCount(shape)
+  const faces = topFaces(shape)
+  const faceOf = new Map<number, [number, number]>()
+  faces.forEach((f, fi) => f.forEach((u, i) => faceOf.set(u * count + f[(i + 1) % f.length], [fi, i])))
+  const visited = new Set<number>()
+  /** Crossings beyond (u, v), walking into the face on the left of u → v; null when the loop cannot close. */
+  const walk = (u: number, v: number): [number, number][] | null => {
+    const out: [number, number][] = []
+    let p = u
+    let q = v
+    for (;;) {
+      const at = faceOf.get(p * count + q)
+      // The outer side of an outline edge: this end of the loop is done.
+      if (!at) return out
+      const [fi, i] = at
+      if (visited.has(fi)) return null
+      visited.add(fi)
+      const f = faces[fi]
+      const m = f.length
+      if (m % 2 !== 0) return null
+      const c = f[(i + m / 2) % m]
+      const d = f[(i + m / 2 + 1) % m]
+      out.push([d, c])
+      if (isOutlineEdge(c, d, n)) return out
+      p = d
+      q = c
+    }
+  }
+  const forward = walk(ends[0], ends[1])
+  const backward = forward && walk(ends[1], ends[0])
+  if (!forward || !backward) return null
+  // The backward crossings were found with the parameter measured the other way round.
+  return [...backward.map(([u, v]): [number, number] => [v, u]).reverse(), [ends[0], ends[1]], ...forward]
 }
 
 // ---------------------------------------------------------------------------
@@ -484,7 +615,8 @@ function shapeGeometry(shape: TerrainShape): ShapeGeometry {
   const hit = geometryCache.get(shape)
   if (hit) return hit
   const pts = shape.points
-  const tris = triangulateTop(pts, shape.innerEdges)
+  const verts = topVertices(shape)
+  const tris = triangulateTop(shape)
   let minX = Infinity
   let minZ = Infinity
   let maxX = -Infinity
@@ -499,9 +631,9 @@ function shapeGeometry(shape: TerrainShape): ShapeGeometry {
   const bounds = minX <= maxX ? { x: minX, z: minZ, w: maxX - minX, d: maxZ - minZ } : null
   const packed: number[] = []
   for (let t = 0; t < tris.length; t += 3) {
-    const a = pts[tris[t]]
-    const b = pts[tris[t + 1]]
-    const c = pts[tris[t + 2]]
+    const a = verts[tris[t]]
+    const b = verts[tris[t + 1]]
+    const c = verts[tris[t + 2]]
     const d = (b.x - a.x) * (c.z - a.z) - (b.z - a.z) * (c.x - a.x)
     if (!(d > MIN_TRIANGLE_D)) continue
     const lenA = Math.sqrt((c.x - b.x) * (c.x - b.x) + (c.z - b.z) * (c.z - b.z))
@@ -563,7 +695,7 @@ function canonicalHeight(v: number): number {
   return c === 0 ? 0 : c
 }
 
-/** The top's triangles (index triples into `points`, cross(b − a, c − a) > 0 in (x, z)): the bake's triangulation, split along the inner edges. Cached; do not mutate. */
+/** The top's triangles (index triples into topVertices, cross(b − a, c − a) > 0 in (x, z)): the bake's triangulation, split along the inner edges. Cached; do not mutate. */
 export function shapeTopTriangles(shape: TerrainShape): readonly number[] {
   return shapeGeometry(shape).tris
 }
@@ -758,8 +890,8 @@ const inHeightRange = (v: number) => Number.isFinite(v) && Math.abs(v) <= MAX_TE
 /**
  * What `writeTerrain` accepts: what the scene schema requires of a shape (id syntax, name ≤ 2000 chars,
  * 3..TERRAIN_SHAPE_MAX_POINTS finite points, heights and base within ±MAX_TERRAIN_HEIGHT, integer order in
- * [0, TERRAIN_SHAPE_MAX_ORDER], canonical signed area > TERRAIN_SHAPE_MIN_AREA, valid inner edges) plus a
- * simple footprint.
+ * [0, TERRAIN_SHAPE_MAX_ORDER], canonical signed area > TERRAIN_SHAPE_MIN_AREA, interior point heights
+ * within ±MAX_TERRAIN_HEIGHT, a valid top graph: topGraphValid) plus a simple footprint.
  * The grid extent is not checked (the editor's document guard refuses shapes beyond it).
  */
 export function isValidTerrainShape(shape: TerrainShape): boolean {
@@ -771,7 +903,9 @@ export function isValidTerrainShape(shape: TerrainShape): boolean {
   const pts = shape.points
   if (!Array.isArray(pts) || pts.length < 3 || pts.length > TERRAIN_SHAPE_MAX_POINTS) return false
   for (const p of pts) if (!Number.isFinite(p.x) || !Number.isFinite(p.z) || !inHeightRange(p.y)) return false
-  return signedArea(pts) > TERRAIN_SHAPE_MIN_AREA && isSimplePolygon(pts) && innerEdgesValid(pts, shape.innerEdges)
+  if (!(signedArea(pts) > TERRAIN_SHAPE_MIN_AREA) || !isSimplePolygon(pts)) return false
+  if (!topGraphValid(pts, shape.innerPoints, shape.innerEdges)) return false
+  return (shape.innerPoints ?? []).every((p) => inHeightRange(p.y))
 }
 
 function shapesEqual(a: TerrainShape | undefined, b: TerrainShape | undefined): boolean {
@@ -784,6 +918,10 @@ function shapesEqual(a: TerrainShape | undefined, b: TerrainShape | undefined): 
     const q = b.points[k]
     if (p.x !== q.x || p.y !== q.y || p.z !== q.z) return false
   }
+  const ia = a.innerPoints ?? []
+  const ib = b.innerPoints ?? []
+  if (ia.length !== ib.length) return false
+  for (let k = 0; k < ia.length; k++) if (ia[k].x !== ib[k].x || ia[k].y !== ib[k].y || ia[k].z !== ib[k].z) return false
   const ea = a.innerEdges ?? []
   const eb = b.innerEdges ?? []
   if (ea.length !== eb.length) return false
@@ -802,6 +940,7 @@ function normalizeShape(s: TerrainShape): TerrainShape {
     base: s.base,
   }
   if (s.name !== undefined) out.name = s.name
+  if (s.innerPoints && s.innerPoints.length > 0) out.innerPoints = s.innerPoints.map((p) => ({ x: p.x, y: p.y, z: p.z }))
   if (s.innerEdges && s.innerEdges.length > 0) out.innerEdges = s.innerEdges.map(([a, b]) => [a, b])
   return out
 }
@@ -1254,128 +1393,169 @@ export function polygonShape(id: Id, footprint: readonly Vec2[], y0: number, hei
 // ---------------------------------------------------------------------------
 
 /**
- * Top-vertex indices of an element: vertex k → [k]; edge k → its two ends (shapeEdgeEnds); side face k →
- * [k, k+1 mod n]; top face → all. [] when out of range.
+ * Top vertex indices (into topVertices) of an element: vertex k → [k]; edge k → its two ends
+ * (shapeEdgeEnds); side face k → [k, k+1 mod n]; top face → all. [] when out of range.
  */
 export function elementVertexIndices(shape: TerrainShape, ref: TerrainElementRef): number[] {
   const n = shape.points.length
-  if (ref.kind === "face" && ref.index === "top") return shape.points.map((_, k) => k)
+  const count = topVertexCount(shape)
+  if (ref.kind === "face" && ref.index === "top") return Array.from({ length: count }, (_, k) => k)
   const k = ref.index
   if (typeof k !== "number" || !Number.isInteger(k) || k < 0) return []
   if (ref.kind === "edge") return shapeEdgeEnds(shape, k) ?? []
-  if (k >= n) return []
-  return ref.kind === "vertex" ? [k] : [k, (k + 1) % n]
+  if (ref.kind === "vertex") return k < count ? [k] : []
+  return k < n ? [k, (k + 1) % n] : []
 }
 
-function withPoints(shape: TerrainShape, points: Vec3[], base = shape.base): TerrainShape | null {
-  const out: TerrainShape = { ...shape, points, base }
+/** The shape with its top vertices replaced (`verts` in topVertices order, same count) and `base`; null when invalid. */
+function withTop(shape: TerrainShape, verts: Vec3[], base = shape.base): TerrainShape | null {
+  const n = shape.points.length
+  const out: TerrainShape = { ...shape, points: verts.slice(0, n), base }
+  if (shape.innerPoints && shape.innerPoints.length > 0) out.innerPoints = verts.slice(n)
   return isValidTerrainShape(out) ? out : null
 }
 
 /**
- * The shape with new `points`, its inner edges re-indexed by `map` (old index → new index, −1 removed; see
- * remapInnerEdges). Null when the result is invalid.
+ * The shape with new footprint `points` and interior points `innerPoints`, its inner edges re-indexed by
+ * `map` (old top vertex index → new index in points ++ innerPoints, −1 removed; see remapInnerEdges).
+ * Interior vertices left on fewer than two edges go, with their edges, until none is (no dangling edges).
+ * Null when the result is invalid.
  */
-export function withVertexMap(shape: TerrainShape, points: Vec3[], map: readonly number[]): TerrainShape | null {
+export function withVertexMap(shape: TerrainShape, points: Vec3[], innerPoints: readonly Vec3[], map: readonly number[]): TerrainShape | null {
+  const n = points.length
+  let edges = remapInnerEdges(shape.innerEdges, map, n)
+  let inner = [...innerPoints]
+  for (;;) {
+    const degree = new Array<number>(n + inner.length).fill(0)
+    for (const [a, b] of edges) {
+      degree[a]++
+      degree[b]++
+    }
+    const re: number[] = Array.from({ length: n }, (_, k) => k)
+    const kept: Vec3[] = []
+    inner.forEach((p, m) => {
+      if (degree[n + m] < 2) re[n + m] = -1
+      else re[n + m] = n + kept.push(p) - 1
+    })
+    if (kept.length === inner.length) break
+    edges = remapInnerEdges(edges, re, n)
+    inner = kept
+  }
   const out: TerrainShape = { ...shape, points }
+  delete out.innerPoints
   delete out.innerEdges
-  const edges = remapInnerEdges(shape.innerEdges, map, points.length)
+  if (inner.length > 0) out.innerPoints = inner
   if (edges.length > 0) out.innerEdges = edges
   return isValidTerrainShape(out) ? out : null
 }
 
-/** Remove the inner edges with the given indices (into innerEdges). Null when none of them exists. */
+/** Remove the inner edges with the given indices (into innerEdges), and interior vertices left dangling. Null when none of them exists or the result is invalid. */
 export function removeInnerEdges(shape: TerrainShape, indices: readonly number[]): TerrainShape | null {
   const drop = new Set(indices)
   const all = shape.innerEdges ?? []
   const keep = all.filter((_, c) => !drop.has(c))
   if (keep.length === all.length) return null
-  const out: TerrainShape = { ...shape }
-  delete out.innerEdges
-  if (keep.length > 0) out.innerEdges = keep.map(([a, b]) => [a, b])
-  return isValidTerrainShape(out) ? out : null
+  const count = topVertexCount(shape)
+  return withVertexMap(
+    { ...shape, innerEdges: keep },
+    shape.points.map((p) => ({ ...p })),
+    (shape.innerPoints ?? []).map((p) => ({ ...p })),
+    Array.from({ length: count }, (_, k) => k)
+  )
 }
 
 /**
- * Loop cut geometry: the top face holding outline edge `edge` and the side opposite it (the face has an
- * even number of sides m, and the side m/2 further round is also an outline edge). Null otherwise (odd
- * faces, or the ring would run into an inner edge: a cut there would need a vertex inside the top).
- */
-export function loopCutOpposite(shape: Pick<TerrainShape, "points" | "innerEdges">, edge: number): number | null {
-  const n = shape.points.length
-  if (!Number.isInteger(edge) || edge < 0 || edge >= n) return null
-  const next = (edge + 1) % n
-  for (const face of topFaces(n, shape.innerEdges)) {
-    const m = face.length
-    const i = face.indexOf(edge)
-    if (i < 0 || face[(i + 1) % m] !== next) continue
-    if (m % 2 !== 0) return null
-    const u = face[(i + m / 2) % m]
-    const v = face[(i + m / 2 + 1) % m]
-    return v === (u + 1) % n ? u : null
-  }
-  return null
-}
-
-/**
- * Loop cut across the top: for each t in `ts` (0 < t < 1, along `edge` from its first vertex) a vertex on
- * `edge` at t and one on the opposite edge (loopCutOpposite) at 1 − t, joined by a new inner edge; heights
- * are interpolated along the edges, so a planar face keeps its shape. Returns the new shape and the edge
- * element indices of the new inner edges, or null (no opposite edge, too many vertices, invalid result).
+ * Loop cut: for each t in `ts` (0 < t < 1) a new vertex on every edge the loop through edge element `edge`
+ * crosses (loopCutRing; at t along its oriented crossing), and a new inner edge across every face it passes,
+ * joining them. Cut outline edges get the new vertices in the footprint; cut inner edges are split at
+ * interior vertices. Heights are interpolated along the edges, so planar faces keep their form. Returns the
+ * new shape and the edge element indices of the new edges across the faces, or null (no loop, too many
+ * vertices, an invalid result).
  */
 export function loopCut(shape: TerrainShape, edge: number, ts: readonly number[]): { shape: TerrainShape; edges: number[] } | null {
-  const opp = loopCutOpposite(shape, edge)
+  const ring = loopCutRing(shape, edge)
   const cuts = [...new Set(ts)].filter((t) => t > 0 && t < 1).sort((a, b) => a - b)
-  if (opp === null || cuts.length === 0) return null
+  if (!ring || cuts.length === 0) return null
   const n = shape.points.length
-  if (n + 2 * cuts.length > TERRAIN_SHAPE_MAX_POINTS) return null
+  const verts = topVertices(shape)
+  const count = verts.length
+  const C = cuts.length
+  if (count + ring.length * C > TERRAIN_SHAPE_MAX_POINTS) return null
   const lerp = (a: Vec3, b: Vec3, t: number): Vec3 => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, z: a.z + (b.z - a.z) * t })
-  const at = (k: number, t: number) => lerp(shape.points[k], shape.points[(k + 1) % n], t)
-  const points: Vec3[] = []
+  const at = (i: number, j: number) => lerp(verts[ring[i][0]], verts[ring[i][1]], cuts[j])
+  type Hit = { t: number; key: number }
+  // Crossings per cut edge, with the parameter along the edge's own direction (outline k → k+1, inner a → b).
+  const onOutline = new Map<number, Hit[]>()
+  const onInner = new Map<string, Hit[]>()
+  const push = <K>(m: Map<K, Hit[]>, k: K, h: Hit) => (m.get(k) ?? m.set(k, []).get(k)!).push(h)
+  ring.forEach(([u, v], i) => {
+    for (let j = 0; j < C; j++) {
+      const key = i * C + j
+      if (isOutlineEdge(u, v, n)) {
+        const k = v === (u + 1) % n ? u : v
+        push(onOutline, k, { t: k === u ? cuts[j] : 1 - cuts[j], key })
+      } else {
+        const a = Math.min(u, v)
+        push(onInner, `${a},${Math.max(u, v)}`, { t: a === u ? cuts[j] : 1 - cuts[j], key })
+      }
+    }
+  })
+  const vertexOf = new Map<number, number>()
   const map: number[] = []
-  /** New index of the vertex on `edge` at cuts[i] and of its partner on the opposite edge. */
-  const onEdge: number[] = []
-  const onOpp: number[] = []
+  const points: Vec3[] = []
   for (let k = 0; k < n; k++) {
     map[k] = points.length
     points.push({ ...shape.points[k] })
-    if (k === edge) {
-      for (let i = 0; i < cuts.length; i++) {
-        onEdge[i] = points.length
-        points.push(at(k, cuts[i]))
-      }
-    } else if (k === opp) {
-      // Along the opposite edge the partners run the other way: 1 − t ascending.
-      for (let i = cuts.length - 1; i >= 0; i--) {
-        onOpp[i] = points.length
-        points.push(at(k, 1 - cuts[i]))
-      }
+    for (const h of (onOutline.get(k) ?? []).sort((a, b) => a.t - b.t)) {
+      vertexOf.set(h.key, points.length)
+      points.push(at(Math.floor(h.key / C), h.key % C))
     }
   }
-  const moved = remapInnerEdges(shape.innerEdges, map, points.length)
-  const added = cuts.map((_, i): [number, number] => [onEdge[i], onOpp[i]])
-  const edges = canonicalInnerEdges([...moved, ...added], points.length)
-  const out: TerrainShape = { ...shape, points, innerEdges: edges }
+  const N = points.length
+  const inner = (shape.innerPoints ?? []).map((p) => ({ ...p }))
+  inner.forEach((_, m) => (map[n + m] = N + m))
+  const edges: [number, number][] = []
+  for (const [a, b] of shape.innerEdges ?? []) {
+    const hits = onInner.get(`${a},${b}`)
+    if (!hits) {
+      edges.push([map[a], map[b]])
+      continue
+    }
+    const chain = [map[a]]
+    for (const h of hits.sort((x, y) => x.t - y.t)) {
+      vertexOf.set(h.key, N + inner.length)
+      chain.push(N + inner.length)
+      inner.push(at(Math.floor(h.key / C), h.key % C))
+    }
+    chain.push(map[b])
+    for (let s = 0; s + 1 < chain.length; s++) edges.push([chain[s], chain[s + 1]])
+  }
+  const added: [number, number][] = []
+  for (let i = 0; i + 1 < ring.length; i++) for (let j = 0; j < C; j++) added.push([vertexOf.get(i * C + j)!, vertexOf.get((i + 1) * C + j)!])
+  const all = canonicalInnerEdges([...edges, ...added], N)
+  const out: TerrainShape = { ...shape, points, innerEdges: all }
+  delete out.innerPoints
+  if (inner.length > 0) out.innerPoints = inner
   if (!isValidTerrainShape(out)) return null
-  const index = (a: number, b: number) => edges.findIndex(([x, y]) => x === Math.min(a, b) && y === Math.max(a, b))
-  return { shape: out, edges: added.map(([a, b]) => points.length + index(a, b)) }
+  const index = ([a, b]: [number, number]) => all.findIndex(([x, y]) => x === Math.min(a, b) && y === Math.max(a, b))
+  return { shape: out, edges: added.map((e) => N + index(e)) }
 }
 
 /**
  * Move the given top vertices by `delta` (y moves those tops only; the base stays). Null when the result
- * is invalid: not simple, flipped orientation, heights out of range.
+ * is invalid: not simple, flipped orientation, heights out of range, a broken top graph.
  */
 export function translateVertices(shape: TerrainShape, indices: readonly number[], delta: Vec3): TerrainShape | null {
   const set = new Set(indices)
-  const points = shape.points.map((p, k) => (set.has(k) ? { x: p.x + delta.x, y: p.y + delta.y, z: p.z + delta.z } : { ...p }))
-  return withPoints(shape, points)
+  const verts = topVertices(shape).map((p, k) => (set.has(k) ? { x: p.x + delta.x, y: p.y + delta.y, z: p.z + delta.z } : { ...p }))
+  return withTop(shape, verts)
 }
 
 /** Move the whole shape (tops and base). Null when the result is invalid (e.g. heights out of range). */
 export function translateShape(shape: TerrainShape, delta: Vec3): TerrainShape | null {
-  return withPoints(
+  return withTop(
     shape,
-    shape.points.map((p) => ({ x: p.x + delta.x, y: p.y + delta.y, z: p.z + delta.z })),
+    topVertices(shape).map((p) => ({ x: p.x + delta.x, y: p.y + delta.y, z: p.z + delta.z })),
     shape.base + delta.y
   )
 }
@@ -1384,7 +1564,7 @@ export function translateShape(shape: TerrainShape, delta: Vec3): TerrainShape |
 export function rotateShapeQuarter(shape: TerrainShape, pivot: Vec2, quarterTurns: number): TerrainShape | null {
   const q = ((Math.round(quarterTurns) % 4) + 4) % 4
   if (q === 0) return shape
-  const points = shape.points.map((p) => {
+  const verts = topVertices(shape).map((p) => {
     let x = p.x - pivot.x
     let z = p.z - pivot.z
     for (let k = 0; k < q; k++) {
@@ -1394,7 +1574,7 @@ export function rotateShapeQuarter(shape: TerrainShape, pivot: Vec2, quarterTurn
     }
     return { x: pivot.x + x, y: p.y, z: pivot.z + z }
   })
-  return withPoints(shape, points)
+  return withTop(shape, verts)
 }
 
 /**
@@ -1410,25 +1590,28 @@ export function rotateShape(shape: TerrainShape, pivot: Vec2, angle: number, ind
   const c = Math.cos(angle)
   const sn = Math.sin(angle)
   const set = indices === null ? null : new Set(indices)
-  const points = shape.points.map((p, k) => {
+  const verts = topVertices(shape).map((p, k) => {
     if (set && !set.has(k)) return { ...p }
     const x = p.x - pivot.x
     const z = p.z - pivot.z
     return { x: pivot.x + x * c + z * sn, y: p.y, z: pivot.z - x * sn + z * c }
   })
-  return withPoints(shape, points)
+  return withTop(shape, verts)
 }
 
-/** Remove the given vertices (and the inner edges ending at them). Null when fewer than 3 would remain or the result is invalid. */
+/** Remove the given top vertices (and the inner edges ending at them). Null when fewer than 3 footprint points would remain or the result is invalid. */
 export function dissolveVertices(shape: TerrainShape, indices: readonly number[]): TerrainShape | null {
   const set = new Set(indices)
+  const n = shape.points.length
   const points: Vec3[] = []
   const map = shape.points.map((p, k) => (set.has(k) ? -1 : points.push({ ...p }) - 1))
   if (points.length < 3) return null
-  return withVertexMap(shape, points, map)
+  const inner: Vec3[] = []
+  ;(shape.innerPoints ?? []).forEach((p, m) => (map[n + m] = set.has(n + m) ? -1 : points.length + inner.push({ ...p }) - 1))
+  return withVertexMap(shape, points, inner, map)
 }
 
-/** Merge edge k's two vertices into their midpoint (at vertex k's position in the order). Null when fewer than 3 would remain or the result is invalid. */
+/** Merge outline edge k's two vertices into their midpoint (at vertex k's position in the order). Null when fewer than 3 would remain or the result is invalid. */
 export function collapseEdge(shape: TerrainShape, edgeIndex: number): TerrainShape | null {
   const n = shape.points.length
   if (n <= 3 || !Number.isInteger(edgeIndex) || edgeIndex < 0 || edgeIndex >= n) return null
@@ -1444,7 +1627,9 @@ export function collapseEdge(shape: TerrainShape, edgeIndex: number): TerrainSha
     points.push(k === edgeIndex ? mid : { ...shape.points[k] })
   }
   map[j] = map[edgeIndex]
-  return withVertexMap(shape, points, map)
+  const inner = (shape.innerPoints ?? []).map((p) => ({ ...p }))
+  inner.forEach((_, m) => (map[n + m] = n - 1 + m))
+  return withVertexMap(shape, points, inner, map)
 }
 
 // ---------------------------------------------------------------------------
@@ -1466,12 +1651,13 @@ export function rayHitShape(shape: TerrainShape, elevation: number, ray: { origi
   let bestT = Infinity
   let bestFace: number | "top" = "top"
   const { tris } = shapeGeometry(shape)
+  const verts = topVertices(shape)
   const eps = 1e-9
   for (let t = 0; t < tris.length; t += 3) {
     // Möller–Trumbore, two-sided.
-    const a = pts[tris[t]]
-    const b = pts[tris[t + 1]]
-    const c = pts[tris[t + 2]]
+    const a = verts[tris[t]]
+    const b = verts[tris[t + 1]]
+    const c = verts[tris[t + 2]]
     const ay = elevation + a.y
     const e1x = b.x - a.x
     const e1y = elevation + b.y - ay

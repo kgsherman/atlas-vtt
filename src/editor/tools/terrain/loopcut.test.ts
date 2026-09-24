@@ -72,10 +72,11 @@ describe("terrain loop cut", () => {
     store.getState().setAltHeld(true)
     tool.onPointerMove!(t.at(21, 4, 27.3))
     const [[a, b]] = t.overlay().cuts!.segments
-    expect(a.x).toBe(20)
+    expect([a.x, b.x].sort((p, q) => p - q)).toEqual([20, 40])
     expect(a.z).toBeCloseTo(27.3, 6)
-    expect(b.x).toBe(40)
     expect(b.z).toBeCloseTo(27.3, 6)
+    // The label sits on the hovered side.
+    expect(t.overlay().label!.at.x).toBe(20)
   })
 
   it("refuses where there is no loop (odd faces) and explains why", () => {
@@ -114,5 +115,43 @@ describe("terrain loop cut", () => {
     expect(store.getState().history.undoLabel).toBe("Remove terrain loop cuts")
     expect(t.shape(id).innerEdges).toBeUndefined()
     expect(t.shape(id).points).toHaveLength(6)
+  })
+
+  it("cuts across an earlier cut: left to right, then top to bottom (an interior vertex where they cross)", () => {
+    const t = terrainHarness({ sub: "loopcut" })
+    const { tool, store, levelId } = t
+    // 20 × 10 block over (20, 20)–(40, 30).
+    const id = t.add(blockShape("b", { x: 20, z: 20, w: 20, d: 10 }, 0, 4, 0))
+    // Near the right side: a cut across to the left side (z 25).
+    tool.onPointerMove!(t.at(39, 4, 25.2))
+    expect(t.overlay().cuts?.segments.map(([a, b]) => [a.z, b.z])).toEqual([[25, 25]])
+    tool.onPointerDown!(t.at(39, 4, 25.2))
+    expect(t.shape(id).innerEdges).toHaveLength(1)
+    // Near the bottom side: the loop runs up through the first cut to the top side, in two segments.
+    tool.onPointerMove!(t.at(30.2, 4, 21))
+    const o = t.overlay()
+    expect(o.cuts?.valid).toBe(true)
+    expect(o.cuts?.segments.map(([a, b]) => [a.x, b.x])).toEqual([
+      [30, 30],
+      [30, 30],
+    ])
+    tool.onPointerDown!(t.at(30.2, 4, 21))
+    const shape = t.shape(id)
+    expect(shape.innerPoints).toEqual([{ x: 30, y: 4, z: 25 }])
+    expect(shape.innerEdges).toHaveLength(4)
+    expect(store.getState().history.undoLabel).toBe("Loop cut terrain shape")
+    // Both new halves are selected; raising them (and the crossing) makes a ridge across the first cut.
+    const sel = store.getState().terrainSelection!
+    expect(sel.elements).toHaveLength(2)
+    expect(t.height(30, 25)).toBe(4)
+    // Hovering the first cut's left half (an inner edge) loops through it both ways: a cut at x 25.
+    tool.onPointerMove!(t.at(25, 4, 25.2))
+    expect(t.overlay().cuts?.segments.map(([a, b]) => [a.x, b.x, Math.min(a.z, b.z), Math.max(a.z, b.z)])).toEqual([
+      [25, 25, 20, 25],
+      [25, 25, 25, 30],
+    ])
+    tool.onPointerDown!(t.at(25, 4, 25.2))
+    expect(t.shape(id).innerPoints).toHaveLength(2)
+    expect(store.getState().scene.levels[levelId].terrainEdits!.shapes[id].innerEdges).toHaveLength(7)
   })
 })

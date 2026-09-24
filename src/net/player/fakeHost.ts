@@ -183,6 +183,8 @@ export class FakeHost {
       await this.answerHello(userId, msg)
       return
     }
+    // Pings are never answered (tests read them from `received`).
+    if (msg.t === "ping") return
     const outcome = this.opts.sim.request(userId, msg)
     await this.flush(userId, [outcome.result])
   }

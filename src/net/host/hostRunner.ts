@@ -11,6 +11,9 @@
  *   patch; the move's result never waits for them, and a probe resolved after anything else changed
  *   the scene or reduced visibility is discarded).
  *   DM command → reduceDm → vision update → dirty players (+ urgent save when it hides things).
+ *   Table requests (say, roll, initiative, end-turn) take the same path with their own rate on top
+ *   (dice rolled here, never by the player); pings are fanned out at once through filter.ts
+ *   pingForPlayer, outside the seq order, and never stored.
  *
  *   flush (per player, ≤ 10 Hz, event-driven): vision compute for the player's viewers (tag-checked:
  *   a result is only ever paired with the scene revision it was computed on) → updateKnowledge →
@@ -27,16 +30,22 @@
  */
 import type { Patch } from "immer"
 
+import { cryptoDiceRng, type DiceRng } from "@/core/dice/dice"
 import { buildOcclusionWorld, heightmapDiffRect } from "@/core/occlusion"
 import type { OcclusionWorld } from "@/core/occlusion/types"
+import { newId } from "@/core/scene/factory"
 import { parseScene } from "@/core/scene/schema"
 import type { Id, Scene, Vec2 } from "@/core/scene/types"
 import {
   diffViews,
   filterForPlayer,
+  DM_COLOR,
+  DM_NAME,
+  levelKnown,
   onlyTerrainEdits,
   parseClientMessage,
   perceivedCellLookup,
+  pingForPlayer,
   reduceDm,
   reduceRequest,
   sceneWithTokenAt,
@@ -52,6 +61,8 @@ import {
   type RequestOutcome,
   type RequestResult,
   type SceneDelta,
+  type StateRequest,
+  type TablePing,
 } from "@/core/session"
 import { parseGameStateDetailed } from "@/core/session/persist"
 import { createGameState, isEmptyDelta, ownsToken } from "@/core/session/state"
@@ -61,11 +72,25 @@ import type { ChunkEntry } from "../assets/chunks"
 import { isNetError, NetError } from "../supabase"
 import type { SessionMember } from "../sessionsRepo"
 import { encodePayload, MAX_BROADCAST_BYTES, sendFailure, utf8Length, type HostChannels, type HostPlayerLink, type PresenceEntry, type SendResult, type Unsubscribe } from "../transport"
-import { HELLO_RATE, hostEpochOfWire, HOST_TIMING, makeWireEpoch, MAX_PENDING_RESULTS, OpLog, REJECT_REPLY_RATE, REQUEST_RATE, RequestLimiter, ResultLog, viewSaveUrgency } from "./flush"
+import {
+  HELLO_RATE,
+  hostEpochOfWire,
+  HOST_TIMING,
+  makeWireEpoch,
+  MAX_PENDING_RESULTS,
+  OpLog,
+  PING_RATE,
+  REJECT_REPLY_RATE,
+  REQUEST_RATE,
+  RequestLimiter,
+  ResultLog,
+  TABLE_RATE,
+  viewSaveUrgency,
+} from "./flush"
 import { fencingFailure, ThrottledTask } from "./persistence"
 import { BackdropTiler, createCanvasTileCodec, type TileCodec } from "./tiles"
 import { createHostTimers, type HostTimers } from "./timers"
-import type { HostMember, HostRunner, HostRunnerOptions, HostSnapshot, HostStats, HostStatus, VisionClient } from "./types"
+import type { HostMember, HostPingEvent, HostRunner, HostRunnerOptions, HostSnapshot, HostStats, HostStatus, VisionClient } from "./types"
 import { createDefaultVisionClient, createInThreadVisionClient, type VisionClientExt } from "./visionClient"
 
 // ---------------------------------------------------------------------------
@@ -91,6 +116,10 @@ export interface HostRunnerInternalOptions {
   maxSnapshotBytes?: number
   /** Save on `visibilitychange → hidden` / `pagehide` (default: when a document exists). */
   watchVisibility?: boolean
+  /** Dice for players' rolls (default: crypto, unbiased). */
+  diceRng?: DiceRng
+  /** Wall clock for table message times (default Date.now; `now` may be a monotonic clock). */
+  wallClock?: () => number
   log?: (msg: string, err?: unknown) => void
 }
 
@@ -130,6 +159,9 @@ class PlayerConn {
   readonly helloLimiter: RequestLimiter
   /** … and so do "rate-limited" replies (beyond it, over-budget requests are dropped silently). */
   readonly rejectLimiter: RequestLimiter
+  /** Chat and rolls (on top of `limiter`), and pings (on their own). */
+  readonly tableLimiter: RequestLimiter
+  readonly pingLimiter: RequestLimiter
   /** The latest hello not handled yet (coalesced: at most one queued per player). */
   pendingHello: Extract<ClientToHost, { t: "hello" }> | null = null
   lastVis: VisibilityResult | null = null
@@ -151,6 +183,8 @@ class PlayerConn {
     this.limiter = new RequestLimiter(REQUEST_RATE, now)
     this.helloLimiter = new RequestLimiter(HELLO_RATE, now)
     this.rejectLimiter = new RequestLimiter(REJECT_REPLY_RATE, now)
+    this.tableLimiter = new RequestLimiter(TABLE_RATE, now)
+    this.pingLimiter = new RequestLimiter(PING_RATE, now)
   }
 
   takeResults(): RequestResult[] {
@@ -269,6 +303,9 @@ export class HostRunnerImpl implements HostRunner {
 
   private readonly stats: HostStats = { ...EMPTY_STATS }
   private readonly listeners = new Set<() => void>()
+  private readonly pingListeners = new Set<(ev: HostPingEvent) => void>()
+  private readonly diceRng: DiceRng
+  private readonly wallClock: () => number
   private snap: HostSnapshot | null = null
   private notifyQueued = false
   private statsTimer: ReturnType<typeof setTimeout> | null = null
@@ -283,6 +320,8 @@ export class HostRunnerImpl implements HostRunner {
     this.now = opts.now ?? (() => (typeof performance !== "undefined" ? performance.now() : Date.now()))
     this.log = opts.log ?? ((msg, err) => (err === undefined ? console.warn(`[atlas host] ${msg}`) : console.warn(`[atlas host] ${msg}`, err)))
     this.maxSnapshotBytes = Math.min(opts.maxSnapshotBytes ?? MAX_BROADCAST_BYTES, MAX_BROADCAST_BYTES)
+    this.diceRng = opts.diceRng ?? cryptoDiceRng()
+    this.wallClock = opts.wallClock ?? Date.now
   }
 
   // =========================================================================
@@ -1016,7 +1055,13 @@ export class HostRunnerImpl implements HostRunner {
       }
       return
     }
-    if (!conn.limiter.tryTake()) {
+    if (msg.t === "ping") {
+      // Never answered: over budget, it is simply dropped.
+      if (conn.pingLimiter.tryTake()) this.handlePing(conn, msg)
+      return
+    }
+    const chat = msg.t === "say" || msg.t === "roll"
+    if (!conn.limiter.tryTake() || (chat && !conn.tableLimiter.tryTake())) {
       // Replies to a flood are rate-limited too; the rest is dropped without a word.
       if (conn.rejectLimiter.tryTake()) this.pushResult(conn, { reqId: msg.reqId, ok: false, reason: "rate-limited" })
       return
@@ -1024,7 +1069,60 @@ export class HostRunnerImpl implements HostRunner {
     this.handleRequest(conn, msg, gen)
   }
 
-  private handleRequest(conn: PlayerConn, msg: Exclude<ClientToHost, { t: "hello" }>, gen: number): void {
+  /** A player's ping: to everyone else who knows its level (filter.ts pingForPlayer), and to the DM. */
+  private handlePing(conn: PlayerConn, msg: Extract<ClientToHost, { t: "ping" }>): void {
+    const player = this.state && Object.hasOwn(this.state.players, conn.userId) ? this.state.players[conn.userId] : null
+    // Only on a level the sender knows (so pings cannot probe for levels).
+    if (!player || !levelKnown(conn.lastSent, msg.levelId)) return
+    this.firePing({ levelId: msg.levelId, x: msg.x, z: msg.z, name: player.displayName, color: player.color, focus: false }, conn.userId)
+  }
+
+  /** Send a ping to every linked player but `except` (best-effort, outside the seq order) and tell the DM's UI. */
+  private firePing(ping: TablePing, except: string | null): void {
+    const epoch = this.wireEpoch
+    if (!epoch || this.status !== "hosting") return
+    for (const conn of this.conns.values()) {
+      const link = conn.link
+      if (conn.closed || conn.userId === except || !link?.isReady()) continue
+      const out = pingForPlayer(ping, conn.lastSent)
+      if (!out) continue
+      // Best-effort and outside the seq order: unlike send(), a ping neither postpones the idle sync
+      // (lastMessageAt) nor flags the link for a resume when it fails.
+      const msg: HostToClient = { t: "ping", epoch, ping: out }
+      void link
+        .send(msg)
+        .then((res) => {
+          if (!res.ok) return
+          this.stats.messagesSent++
+          this.stats.bytesSent += jsonBytes(msg)
+          this.statsChanged()
+        })
+        .catch(() => undefined)
+    }
+    const ev: HostPingEvent = { ping, from: except }
+    for (const cb of [...this.pingListeners]) {
+      try {
+        cb(ev)
+      } catch (err) {
+        this.log("ping listener failed", err)
+      }
+    }
+  }
+
+  ping(levelId: Id, point: Vec2, opts: { focus?: boolean } = {}): void {
+    const state = this.state
+    if (!state || !Object.hasOwn(state.scene.levels, levelId) || !Number.isFinite(point.x) || !Number.isFinite(point.z)) return
+    this.firePing({ levelId, x: point.x, z: point.z, name: DM_NAME, color: DM_COLOR, focus: opts.focus === true }, null)
+  }
+
+  onPing(cb: (ev: HostPingEvent) => void): () => void {
+    this.pingListeners.add(cb)
+    return () => {
+      this.pingListeners.delete(cb)
+    }
+  }
+
+  private handleRequest(conn: PlayerConn, msg: StateRequest, gen: number): void {
     const state = this.state
     const world = this.world
     if (!state || !world || !Object.hasOwn(state.players, conn.userId)) return
@@ -1042,6 +1140,7 @@ export class HostRunnerImpl implements HostRunner {
       world,
       currentView: conn.lastSent,
       perceivedByPlayer: perceivedCellLookup(conn.lastVis),
+      table: { now: this.wallClock(), newId, rng: this.diceRng },
       tokenImageBase: this.o.tokenImageBase ?? null,
     })
     if (out.state !== state) {

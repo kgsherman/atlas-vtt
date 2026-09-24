@@ -1,8 +1,9 @@
 /**
- * Right-click menus on the DM's live map: tokens (select, preview vision, hide/reveal, move to level,
- * assign to players), doors (open/close/lock/unlock, reveal a secret door) and lights (on/off).
+ * Right-click menus on the DM's live map: tokens (select, preview vision, hide/reveal, add to or remove
+ * from combat, move to level, assign to players, conditions), doors (open/close/lock/unlock, reveal a secret door) and lights (on/off).
  */
 import {
+  Dices,
   DoorClosed,
   DoorOpen,
   Eye,
@@ -15,6 +16,7 @@ import {
   MousePointerClick,
   ScanEye,
   Sparkles,
+  Tags,
   UserPlus,
 } from "lucide-react"
 
@@ -30,10 +32,12 @@ import {
   ContextMenuSubTrigger,
 } from "@/components/ui/context-menu"
 import { sortedLevels } from "@/core/scene/queries"
+import { CONDITION_LABELS, TOKEN_CONDITIONS } from "@/core/scene/tokenStatus"
 import type { Id } from "@/core/scene/types"
 import type { GameState } from "@/core/session/types"
 import { tokenDisplayName } from "@/play"
 
+import { CONDITION_ICONS } from "../table/healthStyle"
 import type { HostActions } from "./hostActions"
 import type { MenuTarget } from "./menuTarget"
 import { playerLabels } from "./playerLabels"
@@ -63,6 +67,9 @@ export function HostContextMenuContent({
       : null
     if (!t) return null
     const owners = state.owners[t.id] ?? []
+    const inCombat =
+      state.table?.combat?.entries.some((e) => e.tokenId === t.id) ?? false
+    const conditions = new Set(t.conditions ?? [])
     return (
       <ContextMenuContent className="w-56">
         <ContextMenuGroup>
@@ -81,6 +88,18 @@ export function HostContextMenuContent({
             {t.hidden ? <Eye /> : <EyeOff />}{" "}
             {t.hidden ? "Reveal to players" : "Hide from players"}
           </ContextMenuItem>
+          {inCombat ? (
+            <ContextMenuItem
+              onClick={() => actions.removeFromCombat({ tokenId: t.id })}
+            >
+              <Dices /> Remove from combat
+            </ContextMenuItem>
+          ) : (
+            <ContextMenuItem onClick={() => actions.addToCombat([t.id])}>
+              <Dices />{" "}
+              {state.table?.combat ? "Add to combat" : "Start combat with it"}
+            </ContextMenuItem>
+          )}
         </ContextMenuGroup>
         <ContextMenuSeparator />
         <ContextMenuSub>
@@ -124,6 +143,37 @@ export function HostContextMenuContent({
                   {p.displayName}
                 </ContextMenuCheckboxItem>
               ))}
+            </ContextMenuGroup>
+          </ContextMenuSubContent>
+        </ContextMenuSub>
+        <ContextMenuSub>
+          <ContextMenuSubTrigger>
+            <Tags /> Conditions
+            {conditions.size > 0 ? (
+              <span className="ml-auto text-xs text-muted-foreground tabular-nums">
+                {conditions.size}
+              </span>
+            ) : null}
+          </ContextMenuSubTrigger>
+          <ContextMenuSubContent className="max-h-80 w-48">
+            <ContextMenuGroup>
+              {TOKEN_CONDITIONS.map((c) => {
+                const Icon = CONDITION_ICONS[c]
+                return (
+                  <ContextMenuCheckboxItem
+                    key={c}
+                    checked={conditions.has(c)}
+                    closeOnClick={false}
+                    onCheckedChange={(on) =>
+                      actions.changeTokenStatus(t.id, {
+                        conditions: on ? { add: [c] } : { remove: [c] },
+                      })
+                    }
+                  >
+                    <Icon /> {CONDITION_LABELS[c]}
+                  </ContextMenuCheckboxItem>
+                )
+              })}
             </ContextMenuGroup>
           </ContextMenuSubContent>
         </ContextMenuSub>

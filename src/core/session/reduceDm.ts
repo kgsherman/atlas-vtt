@@ -8,12 +8,15 @@ import { applyPatches, enablePatches, produce, type Patch } from "immer"
 
 import { levelById } from "../scene/queries"
 import { SCENE_LIMITS } from "../scene/schema"
+import { applyConditionChange, applyHpChange } from "../scene/tokenStatus"
 import type { GridSettings, Id, Scene } from "../scene/types"
 import { normalizeFreeAssetCategories } from "./freeAssets"
+import { tokenWithStatus } from "./tokenStatus"
 import { remapExplored } from "./masks"
 import { sanitizeObject } from "./sanitize"
 import { staticLightWorldY } from "./memory"
 import { attachedLightIds, emptyDelta, nextPlayerColor, own, type ReduceResult, type SceneDelta } from "./state"
+import { isTableCommand, pruneCombat, rebindTable, reduceTableDm, tableOf } from "./table"
 import type { DmCommand, GameState, PlayerObject } from "./types"
 
 enablePatches()
@@ -155,6 +158,8 @@ function targets(state: GameState, userId: string | undefined): string[] {
 }
 
 export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
+  // Chat, dice and combat (core/session/table.ts).
+  if (isTableCommand(cmd)) return reduceTableDm(state, cmd)
   switch (cmd.t) {
     case "move-token": {
       const t = own(state.scene.tokens, cmd.tokenId)
@@ -215,6 +220,25 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
       // DM-only: no player's view depends on it.
       return { state: { ...state, freeAssets: categories, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: [] }
     }
+    case "set-token-status":
+    case "change-token-status": {
+      const t = own(state.scene.tokens, cmd.tokenId)
+      if (!t) return noop(state, "unknown token")
+      const next =
+        cmd.t === "set-token-status"
+          ? tokenWithStatus(t, cmd.hp, cmd.conditions)
+          : tokenWithStatus(
+              t,
+              cmd.hp && t.hp ? applyHpChange(t.hp, cmd.hp) : undefined,
+              cmd.conditions ? applyConditionChange(t.conditions ?? [], cmd.conditions) : undefined
+            )
+      if (next === t) return noop(state)
+      // A play action (like a move): no map edit, no undo entry; views change, vision does not.
+      return { state: { ...state, scene: { ...state.scene, tokens: { ...state.scene.tokens, [t.id]: next } }, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: "all" }
+    }
+    case "set-hide-wounds":
+      if ((state.hideWounds ?? false) === cmd.hidden) return noop(state)
+      return { state: { ...state, hideWounds: cmd.hidden, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: "all" }
     case "set-enforce-speed":
       if (state.enforceSpeed === cmd.enabled) return noop(state)
       return { state: { ...state, enforceSpeed: cmd.enabled, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: "all" }
@@ -264,7 +288,8 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
       const edited: GameState = { ...state, scene, seq: state.seq + 1 }
       // The live map now differs from the library version it came from.
       if (state.origin && !state.origin.dirty) edited.origin = { ...state.origin, dirty: true }
-      const next = reconcileKnowledge(edited, state.scene, scene)
+      // Deleted tokens leave combat (the turn passes on if one was acting).
+      const next = pruneCombat(reconcileKnowledge(edited, state.scene, scene))
       // Terrain-edit bookkeeping only (e.g. a shape renamed, or painting under a shape): no player view changes.
       return { state: next, delta, dirtyPlayers: onlyTerrainEdits(cmd.patches) ? [] : "all" }
     }
@@ -281,6 +306,8 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
       // Another map: the old origin no longer applies.
       const origin = cmd.origin ? { sceneId: cmd.origin.sceneId, version: cmd.origin.version, dirty: cmd.origin.dirty } : null
       const next: GameState = { ...state, scene: cmd.scene, owners, explored: {}, memory: {}, revealed: {}, seq: state.seq + 1, origin }
+      // Combat is about the old map's tokens; the table log stays.
+      if (state.table?.combat) next.table = { ...tableOf(state), combat: null }
       const delta: SceneDelta = {
         objects: sorted([...Object.keys(prev.objects), ...Object.keys(cmd.scene.objects)]),
         tokens: sorted([...Object.keys(prev.tokens), ...Object.keys(cmd.scene.tokens)]),
@@ -340,6 +367,7 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
         owners,
         seq: state.seq + 1,
       }
+      if (state.table) next.table = rebindTable(state.table, from, to)
       return { state: next, delta: emptyDelta(), dirtyPlayers: [from, to] }
     }
     case "reset-fog": {

@@ -2,7 +2,8 @@
  * The player's HUD over the map: session chip (scene, connection), status banners (own connection
  * offline, DM away, movement locked, reconnecting), the party panel (own characters, selected
  * character card with senses, speed and level changes: ladder climbs, stairs/ramp steps), the tool
- * dock and the camera dock. Everything floats in fixed-size glass panels so nothing shifts the map.
+ * dock, the camera dock, the initiative order (top) and the chat & dice dock (bottom-right). Everything
+ * floats in fixed-size glass panels so nothing shifts the map.
  */
 import * as React from "react"
 import {
@@ -40,6 +41,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
+import type { TokenStatusChange } from "@/core/scene/tokenStatus"
 import type { Id, SceneLike, Token } from "@/core/scene/types"
 import { cn } from "@/lib/utils"
 import type { PlayerClientSnapshot } from "@/net/player"
@@ -62,7 +64,18 @@ import {
   ToolSwitch,
   type CameraDockProps,
 } from "../hud"
+import { ChatDock } from "../table/ChatDock"
+import {
+  playerAudiences,
+  type Audience,
+  type ChatEntry,
+} from "../table/chatModel"
+import type { TurnOrder } from "../table/combatModel"
+import { TokenHealth } from "../table/health"
+import { TurnStrip } from "../table/TurnStrip"
 import { TokenAvatar } from "../TokenAvatar"
+
+const PLAYER_AUDIENCES = playerAudiences()
 
 export interface PlayerHudProps {
   snap: PlayerClientSnapshot
@@ -74,6 +87,19 @@ export interface PlayerHudProps {
   climbs: ClimbOption[]
   onClimb(o: ClimbOption): void
   camera: Omit<CameraDockProps, "className" | "side">
+  chat: {
+    entries: ChatEntry[]
+    focusSignal: number
+    disabledReason: string | null
+    onSay(text: string, audience: Audience): void
+    onRoll(formula: string, audience: Audience): void
+  }
+  turn: TurnOrder | null
+  onEndTurn(): void
+  onRollInitiative(tokenId: Id, modifier: number): void
+  onFocusToken(tokenId: Id): void
+  /** Change one of our characters' hit points (damage, healing, temporary) or conditions. */
+  onTokenStatus(tokenId: Id, change: TokenStatusChange): void
 }
 
 export function PlayerHud({
@@ -86,6 +112,12 @@ export function PlayerHud({
   climbs,
   onClimb,
   camera,
+  chat,
+  turn,
+  onEndTurn,
+  onRollInitiative,
+  onFocusToken,
+  onTokenStatus,
 }: PlayerHudProps) {
   const view = snap.view!
   const mine = presentTokens(scene, view.controlledTokenIds)
@@ -119,12 +151,26 @@ export function PlayerHud({
             snap={snap}
             climbs={climbs}
             tool={tool}
+            onStatus={(change) => onTokenStatus(selected.id, change)}
+            statusDisabled={chat.disabledReason !== null}
           />
         ) : null}
       </div>
 
-      {/* top-centre: status banners */}
-      <div className="absolute inset-x-0 top-3 flex justify-center">
+      {/* top-centre: the initiative order, then status banners (clear of the left column) */}
+      <div className="absolute top-3 right-3 left-78 flex flex-col items-center gap-2">
+        {turn ? (
+          <TurnStrip
+            role="player"
+            round={turn.round}
+            activeId={turn.activeId}
+            entries={turn.entries}
+            onEndTurn={onEndTurn}
+            onRollInitiative={onRollInitiative}
+            onFocus={onFocusToken}
+            disabled={chat.disabledReason !== null}
+          />
+        ) : null}
         <StatusBanners snap={snap} />
       </div>
 
@@ -182,12 +228,22 @@ export function PlayerHud({
         ) : null}
       </div>
 
-      {/* bottom-right: camera */}
+      {/* bottom-right: camera, then chat & dice (its panel opens above the row) */}
       <div className="absolute right-3 bottom-3 flex items-center gap-2">
         <CameraDock {...camera} />
         <HudPanel className="p-1">
           <ShortcutsButton />
         </HudPanel>
+        <ChatDock
+          role="player"
+          storageKey="atlas-play:chat"
+          entries={chat.entries}
+          audiences={PLAYER_AUDIENCES}
+          onSay={chat.onSay}
+          onRoll={chat.onRoll}
+          disabledReason={chat.disabledReason}
+          focusSignal={chat.focusSignal}
+        />
       </div>
     </div>
   )
@@ -421,12 +477,16 @@ function CharacterCard({
   snap,
   climbs,
   tool,
+  onStatus,
+  statusDisabled,
 }: {
   token: Token
   scene: SceneLike
   snap: PlayerClientSnapshot
   climbs: ClimbOption[]
   tool: PlayTool
+  onStatus(change: TokenStatusChange): void
+  statusDisabled: boolean
 }) {
   const view = snap.view!
   const pt = Object.hasOwn(view.tokens, token.id) ? view.tokens[token.id] : null
@@ -478,6 +538,13 @@ function CharacterCard({
           </TooltipContent>
         </Tooltip>
       </div>
+      <TokenHealth
+        key={token.id}
+        hp={pt?.hp ?? null}
+        conditions={pt?.conditions ?? []}
+        disabled={statusDisabled}
+        onChange={onStatus}
+      />
       <p className="text-[0.6875rem] leading-relaxed text-muted-foreground">
         {cardHint(tool, climbs)}
       </p>

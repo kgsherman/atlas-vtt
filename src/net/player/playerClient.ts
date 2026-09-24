@@ -25,11 +25,13 @@
  *    after 5 s ("DM not responding").
  */
 import type { PathStep } from "@/core/movement/types"
+import { HP_LIMITS, isTokenCondition, type TokenStatusChange } from "@/core/scene/tokenStatus"
 import type { Cell, Id, Level, SceneLike, Vec2 } from "@/core/scene/types"
 import { applyPatchOps } from "@/core/session/diff"
-import { parsePlayerView } from "@/core/session/playerViewSchema"
-import type { ClientToHost, HostBroadcast, HostToClient, PatchOp, PlayerBackdrop, PlayerView, RejectReason, RequestResult } from "@/core/session/types"
+import { parsePlayerView, playerPingSchema } from "@/core/session/playerViewSchema"
+import type { ClientToHost, HostBroadcast, HostToClient, PatchOp, PlayerBackdrop, PlayerPing, PlayerView, RejectReason, RequestResult } from "@/core/session/types"
 import { PROTOCOL_LIMITS } from "@/core/session/protocol"
+import { TABLE_LIMITS } from "@/core/session/table"
 import { viewToScene } from "@/core/session/viewToScene"
 import type { Engine, SceneChange } from "@/render/contracts"
 
@@ -63,6 +65,13 @@ export type LocalRejectReason =
 export interface ClientRequestResult extends RequestResult {
   /** Set when the client settled the request itself (no host verdict). */
   local?: LocalRejectReason
+  /** What was asked (known for the requests this client sent). */
+  kind?: PendingRequest["kind"]
+}
+
+/** A ping to draw: from the host (someone else's), or this player's own (`mine`, drawn at once). */
+export interface PingEvent extends PlayerPing {
+  mine: boolean
 }
 
 export interface PlayerClientSnapshot extends PlayerSnapshot {
@@ -137,6 +146,27 @@ export interface AtlasPlayerClient extends PlayerClient {
   backdropCanvas(levelId: Id): BackdropCanvas | null
   /** Retry backdrop tiles that were given up on. */
   retryBackdropTiles(): void
+  /** Chat to everyone, or whisper to the DM. Returns the reqId. */
+  say(text: string, to: "all" | "dm"): string
+  /** Ask the host to roll "formula [label]" (e.g. "1d20+5 to hit"). Returns the reqId. */
+  roll(formula: string, to: "all" | "dm"): string
+  /** Roll initiative (1d20 + `bonus`, rolled by the host) for one of our tokens in combat. */
+  rollInitiative(tokenId: Id, bonus: number): string
+  /** End the turn of `entryId` (one of our tokens, acting now). */
+  endTurn(entryId: Id): string
+  /**
+   * Change one of our tokens: damage, healing or temporary hit points (when the DM tracks them; `max`
+   * and `set` changes are the DM's and are not sent) and/or conditions to add and remove. Relative, so it
+   * never overwrites a change the DM (or an earlier click) made meanwhile.
+   */
+  changeTokenStatus(tokenId: Id, change: TokenStatusChange): string
+  /**
+   * Point at a spot for the table (only on levels we know; the host drops the rest). Emitted to onPing
+   * at once as `mine`. false when it could not be sent (not live, or more than one per PING_GAP_MS).
+   */
+  ping(levelId: Id, point: Vec2): boolean
+  /** Pings to draw (others' from the host, and our own). */
+  onPing(cb: (ev: PingEvent) => void): Unsubscribe
   /**
    * Pixel budget of a level's full backdrop canvas (default 32 MP). Pass the engine's texel budget
    * (`backdropTexelBudget(engine.getQualityCeiling())`) so each canvas is uploaded as is; layers whose
@@ -148,6 +178,9 @@ export interface AtlasPlayerClient extends PlayerClient {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** Our own pings: at most one per this long (the host allows 1/s, burst 3). */
+export const PING_GAP_MS = 400
 
 const MAX_NONCES = 8
 const MAX_REQ_IDS = 256
@@ -329,6 +362,37 @@ export function describeRequestResult(r: ClientRequestResult): string | null {
     default:
       break
   }
+  if (r.kind === "say" || r.kind === "roll" || r.kind === "initiative" || r.kind === "end-turn") {
+    switch (r.reason) {
+      case "bad-formula":
+        return "Those dice can't be read (try 1d20+5)"
+      case "cannot":
+        return r.kind === "end-turn" ? "It isn't your turn" : "That character can't roll initiative now"
+      case "invalid":
+        if (r.kind === "initiative") return `Initiative bonuses go from −${TABLE_LIMITS.maxInitiativeBonus} to +${TABLE_LIMITS.maxInitiativeBonus}`
+        return r.kind === "say" ? "Your message wasn't sent" : "The DM rejected that request"
+      case "not-owner":
+        return "You don't control that character"
+      case "rate-limited":
+        return "Slow down: too many messages"
+      default:
+        return r.kind === "say" ? "Your message wasn't sent" : "The DM rejected that request"
+    }
+  }
+  if (r.kind === "token-status") {
+    switch (r.reason) {
+      case "not-owner":
+        return "You don't control that character"
+      case "cannot":
+        return "The DM doesn't track that character's hit points"
+      case "unknown-token":
+        return "That character is gone"
+      case "rate-limited":
+        return "Slow down: too many requests"
+      default:
+        return "The DM rejected that change"
+    }
+  }
   const reasons: Partial<Record<RejectReason, string>> = {
     "not-owner": "You don't control that token",
     "movement-locked": "Movement is locked by the DM",
@@ -444,6 +508,10 @@ class PlayerClientImpl implements AtlasPlayerClient {
   private readonly compositor: BackdropCompositor
   private readonly backdropListeners = new Set<(ev: BackdropEvent) => void>()
 
+  // pings
+  private readonly pingListeners = new Set<(ev: PingEvent) => void>()
+  private lastPingAt = -Infinity
+
   constructor(opts: PlayerClientRuntimeOptions) {
     this.opts = opts
     this.t = { ...PLAYER_CLIENT_TIMINGS, ...opts.timings }
@@ -467,6 +535,13 @@ class PlayerClientImpl implements AtlasPlayerClient {
     this.backdropCanvas = this.backdropCanvas.bind(this)
     this.retryBackdropTiles = this.retryBackdropTiles.bind(this)
     this.setBackdropBudget = this.setBackdropBudget.bind(this)
+    this.say = this.say.bind(this)
+    this.roll = this.roll.bind(this)
+    this.rollInitiative = this.rollInitiative.bind(this)
+    this.endTurn = this.endTurn.bind(this)
+    this.changeTokenStatus = this.changeTokenStatus.bind(this)
+    this.ping = this.ping.bind(this)
+    this.onPing = this.onPing.bind(this)
     this.compositor = new BackdropCompositor({
       ...opts.backdrop,
       tiles: opts.tiles,
@@ -527,7 +602,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
     this.frozenStatus = this.computeStatus()
     this.stopped = true
     this.clearTimers()
-    for (const p of this.pending) this.pushResult({ reqId: p.reqId, ok: false }, "closed")
+    for (const p of this.pending) this.pushResult({ reqId: p.reqId, ok: false }, "closed", p.kind)
     this.pending = []
     await this.closeChannels()
     this.compositor.dispose()
@@ -573,7 +648,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
     this.terminal = kind
     this.synced = false
     this.clearTimers()
-    for (const p of this.pending) this.pushResult({ reqId: p.reqId, ok: false }, "closed")
+    for (const p of this.pending) this.pushResult({ reqId: p.reqId, ok: false }, "closed", p.kind)
     this.pending = []
     void this.closeChannels()
     this.changed()
@@ -620,7 +695,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
     this.networkOffline = offline
     if (offline) {
       // Nothing we send now arrives; the DM is not the one who is unresponsive.
-      for (const p of this.pending) this.pushResult({ reqId: p.reqId, ok: false }, "not-connected")
+      for (const p of this.pending) this.pushResult({ reqId: p.reqId, ok: false }, "not-connected", p.kind)
       if (this.pending.length) {
         this.pending = []
         this.armPendingTimer()
@@ -794,11 +869,32 @@ class PlayerClientImpl implements AtlasPlayerClient {
       case "tiles":
         this.onTiles(msg)
         return
+      case "ping":
+        this.onHostPing(msg)
+        return
       default:
         return
     }
     this.evaluate()
     this.changed()
+  }
+
+  /** Someone pointed at a spot (only the current host run's pings; malformed ones are dropped). */
+  private onHostPing(msg: Extract<HostToClient, { t: "ping" }>): void {
+    if (msg.epoch !== this.epoch) return
+    const res = playerPingSchema.safeParse(msg.ping)
+    if (!res.success) return
+    this.emitPing({ ...res.data, mine: false })
+  }
+
+  private emitPing(ev: PingEvent): void {
+    for (const cb of [...this.pingListeners]) {
+      try {
+        cb(ev)
+      } catch (err) {
+        console.error("[atlas player] ping listener failed", err)
+      }
+    }
   }
 
   /** Backdrop tile chunks were uploaded for us: tell the tile source, then fetch the tiles now. */
@@ -969,7 +1065,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
   private enterHostOffline(): void {
     this.synced = false
     // Nobody will answer these.
-    for (const p of this.pending) this.pushResult({ reqId: p.reqId, ok: false }, "host-offline")
+    for (const p of this.pending) this.pushResult({ reqId: p.reqId, ok: false }, "host-offline", p.kind)
     if (this.pending.length) {
       this.pending = []
       this.armPendingTimer()
@@ -1048,9 +1144,9 @@ class PlayerClientImpl implements AtlasPlayerClient {
   requestMove(tokenId: Id, path: PathStep[], end?: Vec2 | null): string {
     const reqId = this.newRequestId()
     if (!Array.isArray(path) || path.length === 0) {
-      this.pushResult({ reqId, ok: false, reason: "empty-path" }, "invalid")
+      this.pushResult({ reqId, ok: false, reason: "empty-path" }, "invalid", "move")
     } else if (path.length > PROTOCOL_LIMITS.maxPathSteps + 1) {
-      this.pushResult({ reqId, ok: false, reason: "path-too-long" }, "invalid")
+      this.pushResult({ reqId, ok: false, reason: "path-too-long" }, "invalid", "move")
     } else {
       const copy = path.map((s) => ({ cell: { i: s.cell.i, j: s.cell.j }, levelId: s.levelId }))
       const msg: ClientToHost = end ? { t: "move", reqId, tokenId, path: copy, end: { x: end.x, z: end.z } } : { t: "move", reqId, tokenId, path: copy }
@@ -1079,6 +1175,81 @@ class PlayerClientImpl implements AtlasPlayerClient {
     this.submit({ reqId, kind: "token-image", tokenId, sentAt: 0 }, { t: "token-image", reqId, tokenId, imageUrl })
     this.changed()
     return reqId
+  }
+
+  say(text: string, to: "all" | "dm"): string {
+    const reqId = this.newRequestId()
+    const t = typeof text === "string" ? text.trim() : ""
+    if (!t || t.length > TABLE_LIMITS.maxText * 2) this.pushResult({ reqId, ok: false, reason: "invalid" }, "invalid", "say")
+    else this.submit({ reqId, kind: "say", sentAt: 0 }, { t: "say", reqId, text: t, to })
+    this.changed()
+    return reqId
+  }
+
+  roll(formula: string, to: "all" | "dm"): string {
+    const reqId = this.newRequestId()
+    const f = typeof formula === "string" ? formula.trim() : ""
+    if (!f || f.length > TABLE_LIMITS.maxFormulaInput) this.pushResult({ reqId, ok: false, reason: "bad-formula" }, "invalid", "roll")
+    else this.submit({ reqId, kind: "roll", sentAt: 0 }, { t: "roll", reqId, formula: f, to })
+    this.changed()
+    return reqId
+  }
+
+  rollInitiative(tokenId: Id, bonus: number): string {
+    const reqId = this.newRequestId()
+    if (!Number.isInteger(bonus) || Math.abs(bonus) > TABLE_LIMITS.maxInitiativeBonus) this.pushResult({ reqId, ok: false, reason: "invalid" }, "invalid", "initiative")
+    else this.submit({ reqId, kind: "initiative", tokenId, sentAt: 0 }, { t: "initiative", reqId, tokenId, bonus })
+    this.changed()
+    return reqId
+  }
+
+  endTurn(entryId: Id): string {
+    const reqId = this.newRequestId()
+    this.submit({ reqId, kind: "end-turn", sentAt: 0 }, { t: "end-turn", reqId, entryId })
+    this.changed()
+    return reqId
+  }
+
+  changeTokenStatus(tokenId: Id, change: TokenStatusChange): string {
+    const reqId = this.newRequestId()
+    const msg: Extract<ClientToHost, { t: "token-status" }> = { t: "token-status", reqId, tokenId }
+    const hp = change.hp
+    // Players send amounts only (damage, heal, temp); max and typed values are the DM's.
+    if (hp && (hp.kind === "damage" || hp.kind === "heal" || hp.kind === "temp") && Number.isFinite(hp.amount)) {
+      const amount = Math.min(HP_LIMITS.max, Math.round(hp.amount))
+      if (amount >= 1) msg.hp = { kind: hp.kind, amount }
+    }
+    const add = (change.conditions?.add ?? []).filter(isTokenCondition)
+    const remove = (change.conditions?.remove ?? []).filter(isTokenCondition)
+    if (add.length > 0 || remove.length > 0) {
+      msg.conditions = {}
+      if (add.length > 0) msg.conditions.add = [...new Set(add)]
+      if (remove.length > 0) msg.conditions.remove = [...new Set(remove)]
+    }
+    if (!msg.hp && !msg.conditions) this.pushResult({ reqId, ok: false, reason: "invalid" }, "invalid", "token-status")
+    else this.submit({ reqId, kind: "token-status", tokenId, sentAt: 0 }, msg)
+    this.changed()
+    return reqId
+  }
+
+  ping(levelId: Id, point: Vec2): boolean {
+    const ch = this.channels
+    const now = this.clock.now()
+    if (!ch || this.stopped || this.terminal || this.networkOffline || this.computeStatus() !== "live") return false
+    if (!Number.isFinite(point.x) || !Number.isFinite(point.z) || now - this.lastPingAt < PING_GAP_MS) return false
+    const level = this.view && Object.hasOwn(this.view.scene.levels, levelId) ? this.view.scene.levels[levelId] : null
+    if (!level?.known) return false
+    this.lastPingAt = now
+    void ch.req.send({ t: "ping", levelId, x: point.x, z: point.z })
+    this.emitPing({ levelId, x: point.x, z: point.z, name: "", color: "", focus: false, mine: true })
+    return true
+  }
+
+  onPing(cb: (ev: PingEvent) => void): Unsubscribe {
+    this.pingListeners.add(cb)
+    return () => {
+      this.pingListeners.delete(cb)
+    }
   }
 
   private newRequestId(): string {
@@ -1110,7 +1281,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
   private submit(p: PendingRequest, msg: Parameters<PlayerChannels["req"]["send"]>[0]): void {
     const blocked = this.gate()
     if (blocked) {
-      this.pushResult({ reqId: p.reqId, ok: false, ...(blocked === "rate-limited" ? { reason: "rate-limited" as const } : {}) }, blocked)
+      this.pushResult({ reqId: p.reqId, ok: false, ...(blocked === "rate-limited" ? { reason: "rate-limited" as const } : {}) }, blocked, p.kind)
       return
     }
     const now = this.clock.now()
@@ -1129,8 +1300,9 @@ class PlayerClientImpl implements AtlasPlayerClient {
   private settlePending(reqId: string, result: RequestResult, local?: LocalRejectReason): boolean {
     const idx = this.pending.findIndex((p) => p.reqId === reqId)
     if (idx < 0) return false
+    const kind = this.pending[idx].kind
     this.pending = this.pending.filter((_, k) => k !== idx)
-    this.pushResult(result, local)
+    this.pushResult(result, local, kind)
     this.armPendingTimer()
     return true
   }
@@ -1149,8 +1321,9 @@ class PlayerClientImpl implements AtlasPlayerClient {
     }
   }
 
-  private pushResult(result: RequestResult, local?: LocalRejectReason): void {
+  private pushResult(result: RequestResult, local?: LocalRejectReason, kind?: PendingRequest["kind"]): void {
     const entry: ClientRequestResult = local ? { ...result, local } : { ...result }
+    if (kind) entry.kind = kind
     const next = [...this.results, entry]
     this.results = next.length > this.t.maxResults ? next.slice(next.length - this.t.maxResults) : next
   }
@@ -1174,7 +1347,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
     if (expired.length) {
       this.pending = this.pending.filter((p) => now - p.sentAt < this.t.pendingTimeoutMs)
       // Our own connection is down: that is not the DM's fault.
-      for (const p of expired) this.pushResult({ reqId: p.reqId, ok: false }, this.networkOffline ? "not-connected" : "timeout")
+      for (const p of expired) this.pushResult({ reqId: p.reqId, ok: false }, this.networkOffline ? "not-connected" : "timeout", p.kind)
       if (!this.networkOffline) this.hostUnresponsive = true
       // Maybe we silently lost sync (a dropped patch): make sure.
       this.resync()

@@ -14,7 +14,9 @@
  *    session. Live play state lives in the session's GameState copy (core/session).
  */
 
-export const SCENE_SCHEMA_VERSION = 5 as const
+import type { TokenCondition, TokenHp } from "./tokenStatus"
+
+export const SCENE_SCHEMA_VERSION = 7 as const
 
 export type Id = string
 
@@ -129,8 +131,8 @@ export type TerrainShapeOp = "add" | "carve"
  * Editable terrain geometry (ARCHITECTURE §3 "Terrain edits"), baked into Level.heightmap. A prism over a
  * simple polygon footprint: points[k] is footprint vertex k (x, z in world feet) with the height of the
  * shape's TOP at that vertex (y, feet relative to level.elevation). The top surface is the footprint
- * triangulated by core/scene/terrainShapes `shapeTopTriangles` (split along `innerEdges`, each part
- * ear-clipped by `triangulateFootprint`), with per-vertex heights.
+ * triangulated by core/scene/terrainShapes `shapeTopTriangles` (cut into faces along `innerEdges`, which may
+ * meet at `innerPoints`, each face ear-clipped by `triangulateFootprint`), with per-vertex heights.
  *  - Orientation is canonical: the signed area Σ(x_k·z_{k+1} − x_{k+1}·z_k)/2 is > 0.
  *  - Baking: shapes apply in ascending (order, id) over the painted terrain; "add" → max(terrain, top),
  *    "carve" → min(terrain, top), per lattice sample inside the footprint.
@@ -149,9 +151,15 @@ export interface TerrainShape {
   points: Vec3[]
   base: number
   /**
-   * Inner top edges (loop cuts): pairs [a, b] of point indices, a < b, not adjacent, each a diagonal inside
-   * the footprint, none crossing another. The top is split along them before it is triangulated, so a
-   * raised inner edge makes a crisp ridge. Absent or empty: none.
+   * Interior top vertices (made where loop cuts cross): x, z strictly inside the footprint, y the top height
+   * there. Top vertex k is points[k] for k < n, innerPoints[k − n] after. Each lies on inner edges. Absent
+   * or empty: none.
+   */
+  innerPoints?: Vec3[]
+  /**
+   * Inner top edges (loop cuts): pairs [a, b] of top vertex indices, a < b, ascending, never an outline
+   * edge, none crossing another, cutting the top into simple faces (core/scene/terrainShapes topGraphValid).
+   * The top is triangulated face by face, so a raised inner edge makes a crisp ridge. Absent or empty: none.
    */
   innerEdges?: [number, number][]
 }
@@ -470,6 +478,13 @@ export interface Token {
   /** DM-only: hidden tokens (and lights attached to them) do not exist for players. */
   hidden: boolean
   dmNotes?: string
+  /**
+   * Hit points (core/scene/tokenStatus.ts). Absent: not tracked. Exact values reach only players who
+   * control the token or see through it; others may see a coarse band (§6.5).
+   */
+  hp?: TokenHp
+  /** Conditions shown on the token (catalog order, each once). Absent: none. */
+  conditions?: TokenCondition[]
 }
 
 // ---------------------------------------------------------------------------

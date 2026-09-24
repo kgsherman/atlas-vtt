@@ -468,6 +468,12 @@ export class TokenLayer {
     return this.entries.get(tokenId)?.motion != null
   }
 
+  /** Where a token is drawn (mid-walk while it moves), or null. */
+  drawnAt(tokenId: Id): { levelId: Id; position: { x: number; y: number; z: number } } | null {
+    const v = this.entries.get(tokenId)?.visual
+    return v ? { levelId: v.levelId, position: { x: v.x, y: v.y, z: v.z } } : null
+  }
+
   /** Per frame: ring animation clock. */
   tick(timeSec: number): void {
     this.ringMaterial.uniforms.uTime.value = timeSec % 1000

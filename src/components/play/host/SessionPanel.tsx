@@ -11,10 +11,12 @@ import {
   Check,
   Copy,
   Crown,
+  Dices,
   Eye,
   EyeOff,
   Footprints,
   Grid3x3,
+  HeartPulse,
   Layers,
   Link2,
   Lock,
@@ -103,10 +105,11 @@ import { TOKEN_KIND_LABELS, tokenDisplayName } from "@/play"
 
 import { StatusDot } from "../hud"
 import { TokenAvatar } from "../TokenAvatar"
+import { CombatTab } from "./CombatTab"
 import type { HostActions } from "./hostActions"
 import { duplicateNames, playerLabels } from "./playerLabels"
 
-export type SessionTab = "players" | "tokens" | "table" | "assets"
+export type SessionTab = "players" | "tokens" | "combat" | "table" | "assets"
 
 export interface SessionPanelProps {
   snap: HostSnapshot
@@ -120,6 +123,8 @@ export interface SessionPanelProps {
   onPreviewToken(id: Id): void
   onKick(userId: string): Promise<void>
   onTakeOver(): void
+  /** The level shown on the map (Combat: "everyone on this level"). */
+  activeLevelId: Id | null
 }
 
 export function SessionPanel(props: SessionPanelProps) {
@@ -142,20 +147,30 @@ export function SessionPanel(props: SessionPanelProps) {
       >
         <div className="shrink-0 border-b px-2 py-2">
           <TabsList className="w-full">
+            {/* Five tabs in 20rem: labels without icons. */}
             <TabsTrigger value="players" className="gap-1 text-[0.6875rem]">
-              <Users /> Players
+              Players
               <Badge variant="secondary" className="h-4 px-1.5 tabular-nums">
                 {online}/{players.length}
               </Badge>
             </TabsTrigger>
-            <TabsTrigger value="tokens" className="gap-1 text-[0.6875rem]">
-              <Swords /> Tokens
+            <TabsTrigger value="tokens" className="text-[0.6875rem]">
+              Tokens
             </TabsTrigger>
-            <TabsTrigger value="table" className="gap-1 text-[0.6875rem]">
-              <Crown /> Table
+            <TabsTrigger value="combat" className="gap-1 text-[0.6875rem]">
+              Combat
+              {state.table?.combat ? (
+                <span
+                  className="size-1.5 rounded-full bg-sidebar-primary"
+                  aria-label="(running)"
+                />
+              ) : null}
             </TabsTrigger>
-            <TabsTrigger value="assets" className="gap-1 text-[0.6875rem]">
-              <Package /> Assets
+            <TabsTrigger value="table" className="text-[0.6875rem]">
+              Table
+            </TabsTrigger>
+            <TabsTrigger value="assets" className="text-[0.6875rem]">
+              Assets
             </TabsTrigger>
           </TabsList>
         </div>
@@ -167,6 +182,17 @@ export function SessionPanel(props: SessionPanelProps) {
         <TabsContent value="tokens" className="min-h-0 flex-1">
           <ScrollArea className="h-full">
             <TokensTab {...props} />
+          </ScrollArea>
+        </TabsContent>
+        <TabsContent value="combat" className="min-h-0 flex-1">
+          <ScrollArea className="h-full">
+            <CombatTab
+              state={state}
+              actions={props.actions}
+              selectedTokenId={props.selectedTokenId}
+              activeLevelId={props.activeLevelId}
+              onFocusToken={props.onFocusToken}
+            />
           </ScrollArea>
         </TabsContent>
         <TabsContent value="table" className="min-h-0 flex-1">
@@ -576,6 +602,9 @@ function TokensTab({
   }
   const labels = playerLabels(Object.values(state.players))
   const playerName = (uid: string) => labels.get(uid) ?? "Player"
+  const inCombat = new Set(
+    (state.table?.combat?.entries ?? []).map((e) => e.tokenId)
+  )
   if (Object.keys(scene.tokens).length === 0) {
     return (
       <Empty className="m-3 border border-dashed">
@@ -688,6 +717,21 @@ function TokensTab({
                       <DropdownMenuItem onClick={() => onPreviewToken(t.id)}>
                         <ScanEye /> Preview its vision
                       </DropdownMenuItem>
+                      {inCombat.has(t.id) ? (
+                        <DropdownMenuItem
+                          onClick={() =>
+                            actions.removeFromCombat({ tokenId: t.id })
+                          }
+                        >
+                          <Dices /> Remove from combat
+                        </DropdownMenuItem>
+                      ) : (
+                        <DropdownMenuItem
+                          onClick={() => actions.addToCombat([t.id])}
+                        >
+                          <Dices /> Add to combat
+                        </DropdownMenuItem>
+                      )}
                       <DropdownMenuSub>
                         <DropdownMenuSubTrigger>
                           <Layers /> Move to level
@@ -816,6 +860,13 @@ function TableTab({ state, actions }: SessionPanelProps) {
           description="Off: players can hold Alt to move tokens off the grid."
           checked={!(state.freeMovement ?? false)}
           onChange={(v) => actions.setFreeMovement(!v)}
+        />
+        <ToggleRow
+          icon={<HeartPulse />}
+          title="Show wounds to players"
+          description="Players see whether creatures they don't control are wounded, bloodied or down. Hit points go only to a creature's players (and the party, with shared vision)."
+          checked={!(state.hideWounds ?? false)}
+          onChange={(v) => actions.setHideWounds(!v)}
         />
       </FieldGroup>
       <Separator />

@@ -42,6 +42,7 @@ import { describeSenses, TOKEN_KIND_LABELS, tokenDisplayName } from "@/play"
 import type { CameraKind } from "@/render/contracts"
 
 import { HudButton, HudPanel } from "../hud"
+import { TokenHealth } from "../table/health"
 import { TokenAvatar } from "../TokenAvatar"
 import type { HostActions } from "./hostActions"
 import type { PreviewInfo } from "./HostViewport"
@@ -191,7 +192,7 @@ export function PreviewBanner({
   )
 }
 
-/** Card for the selected token: owners, senses and quick actions. */
+/** Card for the selected token: owners, senses, health and conditions, and quick actions. */
 export function SelectedTokenCard({
   state,
   tokenId,
@@ -256,6 +257,17 @@ export function SelectedTokenCard({
           ? `Controlled by ${owners.join(", ")}`
           : "Not assigned to a player"}
       </div>
+      <TokenHealth
+        key={t.id}
+        hp={t.hp ?? null}
+        conditions={t.conditions ?? []}
+        onChange={(change) => actions.changeTokenStatus(t.id, change)}
+        onTrack={(max) =>
+          actions.setTokenStatus(t.id, {
+            hp: max === null ? null : { current: max, max, temp: 0 },
+          })
+        }
+      />
       <div className="flex gap-1">
         <Button
           size="sm"
