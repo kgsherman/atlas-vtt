@@ -10,6 +10,7 @@ import { toast } from "sonner"
 import { cryptoDiceRng } from "@/core/dice/dice"
 import { newId } from "@/core/scene/factory"
 import { groundHeightAt, levelById } from "@/core/scene/queries"
+import type { TokenCondition, TokenHp } from "@/core/scene/tokenStatus"
 import type { DoorState, Id, Scene, Vec2 } from "@/core/scene/types"
 import type { FreeAssetCategory } from "@/core/session/freeAssets"
 import {
@@ -80,6 +81,13 @@ export interface HostActions {
   rollNpcInitiative(): void
   /** Point at a spot for every player who knows the level (`focus`: centre their cameras on it). */
   ping(levelId: Id, point: Vec2, focus: boolean): void
+  /** A token's hit points (null: stop tracking) and/or conditions (a play action, like a move). */
+  setTokenStatus(
+    tokenId: Id,
+    status: { hp?: TokenHp | null; conditions?: TokenCondition[] }
+  ): void
+  /** Hide (or show) other creatures' health bands from players. */
+  setHideWounds(hidden: boolean): void
 }
 
 export function createHostActions(
@@ -327,6 +335,18 @@ export function createHostActions(
     },
     ping(levelId, point, focus) {
       runner.ping(levelId, point, { focus })
+    },
+    setTokenStatus(tokenId, status) {
+      dispatch(
+        { t: "set-token-status", tokenId, ...status },
+        "Couldn't change the token"
+      )
+    },
+    setHideWounds(hidden) {
+      dispatch(
+        { t: "set-hide-wounds", hidden },
+        "Couldn't change what players see of wounds"
+      )
     },
     resetFog(userId) {
       if (

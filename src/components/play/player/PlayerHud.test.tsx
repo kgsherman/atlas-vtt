@@ -92,6 +92,7 @@ function render(snap: PlayerClientSnapshot): string {
         turn={null}
         onEndTurn={vi.fn()}
         onRollInitiative={vi.fn()}
+        onTokenStatus={vi.fn()}
         onFocusToken={vi.fn()}
       />
     )

@@ -2,6 +2,8 @@
  * HTML markers over the map, placed with Engine.project on every frame (no React render per frame):
  *  - PingLayer: pings as expanding rings with the pinger's name; one off screen shows at the edge with
  *    an arrow toward it. A "look here" ping (the DM's Shift + long press) also centres the camera;
+ *  - TokenBadges: health bars under tokens and condition icons at their top-right (clear of the turn
+ *    marker's label above the acting token);
  *  - TurnMarker: a slowly turning ring around the token whose turn it is (following it as it walks),
  *    under the HUD panels (z-5; the HUD is z-10). Pings stay above them (z-15): they are brief.
  */
@@ -9,9 +11,14 @@ import * as React from "react"
 import { ArrowUp } from "lucide-react"
 
 import { useEngine } from "@/components/canvas/engineContext"
+import { CONDITION_LABELS } from "@/core/scene/tokenStatus"
 import type { Id, SceneLike, Vec3 } from "@/core/scene/types"
 import { cn } from "@/lib/utils"
 import { groundY } from "@/play"
+
+import { HealthBar } from "./health"
+import type { BadgeToken } from "./healthModel"
+import { CONDITION_ICONS } from "./healthStyle"
 
 export interface MapPing {
   levelId: Id
@@ -244,6 +251,131 @@ export function TurnMarker({
       >
         {label}
       </span>
+    </div>
+  )
+}
+
+/** Condition icons shown above a token; beyond this, "+n". */
+const MAX_BADGE_ICONS = 4
+
+/**
+ * Health bars under tokens and condition icons above them (DM: every token's exact hit points; players:
+ * their own exactly, others as the band the host sends). Under the HUD (z-5), placed every frame.
+ * Pass a memoised `tokens` array (a new one re-registers the frame callback).
+ */
+export function TokenBadges({
+  tokens,
+  showOn,
+}: {
+  tokens: readonly BadgeToken[]
+  showOn: (levelId: Id) => boolean
+}) {
+  const { engine, canvas } = useEngine()
+  const nodes = React.useRef(new Map<Id, HTMLDivElement>())
+  const showRef = React.useRef(showOn)
+  React.useEffect(() => {
+    showRef.current = showOn
+  })
+  const shown = React.useMemo(
+    () =>
+      tokens.filter(
+        (t) => t.hp || t.band || (t.conditions && t.conditions.length > 0)
+      ),
+    [tokens]
+  )
+
+  React.useEffect(() => {
+    if (!engine || !canvas || shown.length === 0) return
+    const place = () => {
+      for (const t of shown) {
+        const el = nodes.current.get(t.id)
+        if (!el) continue
+        const at = engine.tokenDrawnAt(t.id)
+        const c = at ? engine.project(at.position) : null
+        if (!at || !c || !c.visible || !showRef.current(at.levelId)) {
+          el.style.visibility = "hidden"
+          continue
+        }
+        const e = engine.project({
+          x: at.position.x + t.radiusFt,
+          y: at.position.y,
+          z: at.position.z,
+        })
+        const r = Math.max(10, Math.hypot(e.x - c.x, e.y - c.y))
+        el.style.transform = `translate(${Math.round(c.x)}px, ${Math.round(c.y)}px)`
+        el.style.setProperty("--badge-r", `${Math.round(r)}px`)
+        el.style.visibility = "visible"
+      }
+    }
+    place()
+    return engine.onFrame(place)
+  }, [engine, canvas, shown])
+
+  if (shown.length === 0) return null
+  return (
+    <div
+      className="pointer-events-none absolute inset-0 z-[5] overflow-hidden"
+      data-slot="token-badges"
+    >
+      {shown.map((t) => {
+        const conditions = t.conditions ?? []
+        const extra = conditions.length - MAX_BADGE_ICONS
+        return (
+          <div
+            key={t.id}
+            ref={(el) => {
+              if (el) nodes.current.set(t.id, el)
+              else nodes.current.delete(t.id)
+            }}
+            className="absolute top-0 left-0"
+            style={{ visibility: "hidden" }}
+            data-token={t.id}
+          >
+            {t.hp || t.band ? (
+              <div
+                className="absolute"
+                style={{
+                  top: "calc(var(--badge-r) + 3px)",
+                  left: "calc(clamp(24px, var(--badge-r) * 2, 96px) / -2)",
+                  width: "clamp(24px, calc(var(--badge-r) * 2), 96px)",
+                }}
+              >
+                <HealthBar
+                  hp={t.hp}
+                  band={t.band}
+                  className="h-1 shadow-sm ring-1 ring-background/60"
+                />
+              </div>
+            ) : null}
+            {conditions.length > 0 ? (
+              <div
+                className="absolute flex items-center gap-0.5 rounded-full bg-card/85 px-1 py-0.5 shadow-sm"
+                style={{
+                  left: "calc(var(--badge-r) * 0.5)",
+                  bottom: "calc(var(--badge-r) * 0.6)",
+                }}
+                aria-label={conditions
+                  .map((c) => CONDITION_LABELS[c])
+                  .join(", ")}
+              >
+                {conditions.slice(0, MAX_BADGE_ICONS).map((c) => {
+                  const Icon = CONDITION_ICONS[c]
+                  return (
+                    <Icon
+                      key={c}
+                      className="size-3 text-foreground"
+                      aria-hidden
+                    />
+                  )
+                })}
+                {extra > 0 ? (
+                  <span className="text-[0.5625rem] font-medium">+{extra}</span>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        )
+      })}
     </div>
   )
 }

@@ -79,6 +79,11 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
   screen with a ring on the acting token. Players roll initiative for their own characters and end their
   own turn. A player sees only the combatants they can see: a creature out of sight, or one the DM hides,
   is never sent to them.
+- Hit points and conditions: the DM tracks hit points (with temporary hit points) and conditions like
+  prone, poisoned or concentrating from the token card, the token's right-click menu or the editor.
+  Players update their own characters from their character card. Tokens show a health bar and condition
+  icons on the map. Players see exact numbers only for their own characters. For other creatures they see
+  whether they are wounded, bloodied or down, and the DM can switch that off.
 - Pings: hold the left button on the map to point at a spot. The DM's Shift + hold also centres every
   player's view on it.
 
@@ -278,7 +283,7 @@ ATLAS_SCENE=$PWD/test_maps/vineyard.atlas.json ATLAS_URL=http://127.0.0.1:5173 n
 ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-supabase.mjs # the same against the real backend (+ Realtime / table / Storage RLS checks, no public channels, a kicked member's subscriptions, sub-cell chunk clipping)
 ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-latency.mjs  # move results on a 120×120 daylit field arrive well under the 5 s timeout
 ATLAS_URL=http://127.0.0.1:5173 node e2e/host-save-map.mjs        # "Save map to library" from a live session, including the conflict path
-ATLAS_URL=http://127.0.0.1:5173 node e2e/table-local.mjs         # DM + 2 players in local mode: chat, whispers, host-rolled dice, combat (hidden and unseen combatants never sent), initiative and turns, pings, reload, leak scan
+ATLAS_URL=http://127.0.0.1:5173 node e2e/table-local.mjs         # DM + 2 players in local mode: chat, whispers, host-rolled dice, combat (hidden and unseen combatants never sent), initiative and turns, hit points and conditions (bands only for others), pings, reload, leak scan
 ATLAS_URL=http://127.0.0.1:5173 node e2e/free-assets.mjs          # start a game with token models, put one on a token, a player downloads and draws it (ATLAS_FREE_ASSETS_DIR serves a local build)
 ATLAS_URL=http://127.0.0.1:5173 node e2e/engine-leak.mjs          # editor ↔ library round trips release every WebGL context
 ATLAS_URL=http://127.0.0.1:5173 node e2e/perf.mjs                 # frame times per GPU / tier / scene

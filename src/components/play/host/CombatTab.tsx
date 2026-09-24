@@ -42,6 +42,7 @@ import type { CombatEntry, GameState } from "@/core/session/types"
 import { cn } from "@/lib/utils"
 import { tokenDisplayName } from "@/play"
 
+import { HealthBar } from "../table/health"
 import { TokenAvatar } from "../TokenAvatar"
 import type { HostActions } from "./hostActions"
 
@@ -308,7 +309,10 @@ function CombatRow({
                   ? "Custom"
                   : "DM"}
             {hidden ? " · hidden" : ""}
+            {t?.hp ? ` · ${t.hp.current}/${t.hp.max} HP` : ""}
+            {t?.hp?.temp ? ` +${t.hp.temp}` : ""}
           </span>
+          {t?.hp ? <HealthBar hp={t.hp} className="mt-0.5 h-0.5" /> : null}
         </span>
       </Button>
       <NumberCell

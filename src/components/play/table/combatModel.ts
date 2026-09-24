@@ -39,6 +39,8 @@ export function playerTurnOrder(view: PlayerView | null): TurnOrder | null {
         : null,
       tokenId: e.tokenId,
       mine: e.tokenId !== null && mine.has(e.tokenId),
+      hp: t?.hp,
+      band: t?.hp ? undefined : t?.health,
     }
   })
   const active = entries.find((e) => e.id === c.activeId) ?? null
@@ -72,6 +74,7 @@ export function dmTurnOrder(
       tokenId: t ? e.tokenId : null,
       mine: false,
       hidden: e.hidden || (t?.hidden ?? false),
+      hp: t?.hp,
     }
   })
   const active = entries.find((e) => e.id === c.activeId) ?? null

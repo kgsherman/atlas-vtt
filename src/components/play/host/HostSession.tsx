@@ -47,7 +47,13 @@ import {
   type Audience,
 } from "../table/chatModel"
 import { dmTurnOrder, levelShown } from "../table/combatModel"
-import { PingLayer, TurnMarker, type MapPing } from "../table/MapMarkers"
+import { dmBadgeTokens, useStableBadges } from "../table/healthModel"
+import {
+  PingLayer,
+  TokenBadges,
+  TurnMarker,
+  type MapPing,
+} from "../table/MapMarkers"
 import { TurnStrip } from "../table/TurnStrip"
 import {
   BlockingScreen,
@@ -530,6 +536,7 @@ function HostConsole({
     [table, tokens]
   )
   const turnActive = turn?.entries.find((e) => e.id === turn.activeId) ?? null
+  const badges = useStableBadges(dmBadgeTokens(state.scene))
   const subscribePings = React.useCallback(
     (cb: (p: MapPing) => void) =>
       runner.onPing((ev) => cb({ ...ev.ping, mine: ev.from === null })),
@@ -704,6 +711,14 @@ function HostConsole({
                   </div>
                 </div>
               )}
+              {!editor ? (
+                <TokenBadges
+                  tokens={badges}
+                  showOn={(levelId) =>
+                    levelShown(scene, activeLevelId, levelId)
+                  }
+                />
+              ) : null}
               {!editor &&
               turn?.activeTokenId &&
               Object.hasOwn(scene.tokens, turn.activeTokenId) ? (

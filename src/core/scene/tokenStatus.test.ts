@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { applyDamage, applyHealing, clampHp, healthBand, hpFraction, normalizeConditions, TOKEN_CONDITIONS } from "./tokenStatus"
+import { applyDamage, applyHealing, clampHp, healthBand, hpFraction, normalizeConditions, TOKEN_CONDITIONS, withMaxHp } from "./tokenStatus"
 
 describe("token status", () => {
   it("normalizes conditions: known ones, once, in catalog order", () => {
@@ -14,6 +14,15 @@ describe("token status", () => {
     expect(clampHp({ current: -3, max: 0.4, temp: -2 })).toEqual({ current: 0, max: 1, temp: 0 })
     expect(clampHp({ current: 7.6, max: 12.2, temp: 2.5 })).toEqual({ current: 8, max: 12, temp: 3 })
     expect(clampHp({ current: Number.NaN, max: Number.POSITIVE_INFINITY })).toEqual({ current: 0, max: 1, temp: 0 })
+  })
+
+  it("changing max keeps the damage taken, caps current, and starts untracked hit points full", () => {
+    const hp = { current: 7, max: 10, temp: 2 }
+    expect(withMaxHp(hp, 15)).toEqual({ current: 12, max: 15, temp: 2 })
+    expect(withMaxHp(hp, 5)).toEqual({ current: 5, max: 5, temp: 2 })
+    expect(withMaxHp(hp, 8.6)).toEqual({ current: 7, max: 9, temp: 2 })
+    expect(withMaxHp(null, 22)).toEqual({ current: 22, max: 22, temp: 0 })
+    expect(withMaxHp(undefined, 0)).toEqual({ current: 1, max: 1, temp: 0 })
   })
 
   it("damage spends temporary hit points first and stops at 0; healing stops at max", () => {

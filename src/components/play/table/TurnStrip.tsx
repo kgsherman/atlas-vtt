@@ -30,12 +30,15 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
+import type { HealthBand, TokenHp } from "@/core/scene/tokenStatus"
 import type { Token } from "@/core/scene/types"
 import { TABLE_LIMITS } from "@/core/session/table"
 import { cn } from "@/lib/utils"
 
 import { HudButton, HudPanel } from "../hud"
 import { TokenAvatar } from "../TokenAvatar"
+import { HealthBar } from "./health"
+import { BAND_LABELS } from "./healthStyle"
 
 export interface TurnStripEntry {
   id: string
@@ -48,6 +51,9 @@ export interface TurnStripEntry {
   mine: boolean
   /** DM only: kept from players. */
   hidden?: boolean
+  /** Health as this viewer may see it: exact hit points or a band (neither: not shown). */
+  hp?: TokenHp
+  band?: HealthBand
 }
 
 export interface TurnStripProps {
@@ -216,19 +222,29 @@ function EntryChip({
               <Swords className="size-3" />
             </span>
           )}
-          <span
-            className={cn(
-              "max-w-24 truncate font-medium",
-              e.mine && "text-sidebar-primary"
-            )}
-          >
-            {e.name || "Unknown"}
+          <span className="flex min-w-0 flex-col gap-0.5">
+            <span
+              className={cn(
+                "max-w-24 truncate font-medium",
+                e.mine && "text-sidebar-primary"
+              )}
+            >
+              {e.name || "Unknown"}
+            </span>
+            {e.hp || e.band ? (
+              <HealthBar hp={e.hp} band={e.band} className="h-0.5" />
+            ) : null}
           </span>
         </TooltipTrigger>
         <TooltipContent side="bottom">
           {e.name || "Unknown"}
           {e.mine ? " (yours)" : ""}
           {e.hidden ? " · hidden from players" : ""}
+          {e.hp
+            ? ` · ${e.hp.current}/${e.hp.max} HP`
+            : e.band
+              ? ` · ${BAND_LABELS[e.band]}`
+              : ""}
           {active ? " · acting now" : ""}
         </TooltipContent>
       </Tooltip>

@@ -84,6 +84,16 @@ export function clampHp(hp: { current: number; max: number; temp?: number }): To
   return { current: clampInt(hp.current, 0, max), max, temp: clampInt(hp.temp ?? 0, 0, HP_LIMITS.max) }
 }
 
+/**
+ * New max hit points: raising max keeps the damage taken (current rises with it), lowering it caps
+ * current. Untracked hit points start full.
+ */
+export function withMaxHp(hp: TokenHp | null | undefined, max: number): TokenHp {
+  const next = clampInt(max, 1, HP_LIMITS.max)
+  if (!hp) return { current: next, max: next, temp: 0 }
+  return clampHp({ current: hp.current + Math.max(0, next - hp.max), max: next, temp: hp.temp })
+}
+
 /** Damage: temporary hit points go first, then current down to 0. */
 export function applyDamage(hp: TokenHp, amount: number): TokenHp {
   const dmg = clampInt(amount, 0, 10 * HP_LIMITS.max)

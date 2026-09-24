@@ -24,7 +24,8 @@ src/
     movement/           Move validation (walls/doors/windows/props, connectors), ruler measurement
     history/            Undo/redo over immer patches with transactions
     dice/               Dice notation, unbiased rolls, roll result schema (§6.5)
-    session/            GameState reducer, request validation, memory, filter, diff/apply, viewToScene, table (§6.5)
+    session/            GameState reducer, request validation, memory, filter, diff/apply, viewToScene, table and
+                        token status (§6.5)
   render/               three.js (WebGL2). Knows nothing about React or the network.
     engine/             Renderer, frame loop, resize, adaptive quality, stats
     builders/           Scene → visual meshes per level (floors, terrain, walls w/ openings, doors, props, tokens…)
@@ -197,10 +198,16 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
 
 ## 3. Scene document & versioning
 
-- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 4` (v2 added the
+- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 5` (v2 added the
   optional `Token.model`, the v1 → v2 migration is the identity; v3: terrain shapes, `Level.terrainEdits`,
   `WallObject.followTerrain`; v4 widened enums only, heightmap resolutions 8 and 16 and the `polygon` shape
-  kind, so the v3 → v4 migration is the identity and older apps open v4 documents read-only as too-new).
+  kind, so the v3 → v4 migration is the identity and older apps open v4 documents read-only as too-new;
+  v5 added the optional `Token.hp` and `Token.conditions`, the v4 → v5 migration is the identity).
+- `Token.hp` / `Token.conditions` (optional; `core/scene/tokenStatus.ts`): hit points `{current, max,
+  temp}` (integers, 1 ≤ max ≤ 99 999, 0 ≤ current ≤ max, temp ≥ 0: `tokenHpSchema`; absent = not tracked)
+  and conditions from a fixed catalog (`TOKEN_CONDITIONS`: the SRD's fourteen, exhaustion, concentrating,
+  dead), each once and in catalog order (`tokenConditionsSchema`; absent = none). They are set in the editor
+  and in play (§6.5); what players are sent of them is the filter's call.
 - `Token.model` (optional): the 3D figure the token is drawn with, a reference `free:<assetId>` into the
   free asset catalog (category `token-models`, §6.4; `core/scene/tokenModel.ts`). The schema accepts only
   that form (`^free:[a-z0-9][a-z0-9-]{0,63}$`), never a URL, so a document cannot make clients fetch an
@@ -1096,7 +1103,7 @@ receives none of its private broadcasts, checked by `e2e/multiplayer-supabase.mj
 switch guards the project's Realtime quota and future channels rather than today's session data; the same
 script checks that it is off.
 
-### 6.5 The table: chat, dice, combat, pings (`core/dice`, `core/session/table.ts`)
+### 6.5 The table: chat, dice, combat, health, pings (`core/dice`, `core/session/table.ts`, `tokenStatus.ts`)
 
 What a group needs around the map, built on the same rules as everything else: the DM's tab is
 authoritative, and a player receives only what filter.ts lets through.
@@ -1149,6 +1156,26 @@ authoritative, and a player receives only what filter.ts lets through.
   of those, else null (someone unseen acts). The order therefore never reveals a creature the player cannot
   see. Diff granularity: `table/log/{id}` and `table/combat` (a new message is one op). Views with the table
   still pass the strict `playerViewSchema`; `sceneChangeFromOps` treats table ops as "no scene change".
+- **Health and conditions** (`Token.hp`, `Token.conditions`, §3; `core/scene/tokenStatus.ts`,
+  `core/session/tokenStatus.ts`): damage spends temporary hit points first and stops at 0; healing stops at
+  max; the coarse **band** is `down` (0), `bloodied` (at most half), `wounded` (below max) or `unhurt`
+  (temporary hit points do not count). The DM's `set-token-status {tokenId, hp?: TokenHp | null (stop
+  tracking), conditions?}` is clamped and normalized (`clampHp`, `normalizeConditions`), a play action like a
+  move: empty delta, every player dirty, `origin.dirty` untouched (the map-save prompt does not nag about
+  it). A player's request `token-status {tokenId, hp?: {current, temp}, conditions?}` (strict zod: at least
+  one of them, integers ≥ 0) is accepted only for a token they own (`not-owner`), and hit points only while
+  the DM tracks them (`cannot`); `max` stays the DM's (the player cannot send it) and current is capped by
+  it. `GameState.hideWounds` (saved with the game; `set-hide-wounds`) turns the bands off.
+  **Filter** (`playerToken`): exact `hp` only for tokens the player controls or sees through with shared
+  vision (the same "full" set that gets a token's name and senses); every other sent token gets at most its
+  band as `health` (none while wounds are hidden); conditions go with every token the player is sent, since
+  they show on the token. A hidden or unseen token is never sent, so neither is its health.
+  **UI**: health bars under tokens (exact, or the band's colour) and condition icons at their top-right on
+  both maps (`TokenBadges`, placed like the turn marker); the hit point editor (damage / heal / temporary,
+  Enter damages and Shift + Enter heals; the DM also sets max and starts or stops tracking) and condition
+  chips on the DM's token card and on the player's character card; a Conditions submenu in the DM's token
+  menu; health bars in the turn strip and the Combat tab; "Show wounds to players" in the Table tab; the
+  editor's token inspector sets max, current and temporary hit points and conditions.
 - **Pings** (ephemeral, never stored): a player's `ping {levelId, x, z}` (1/s, burst 3, never answered) is
   dropped unless the level is known in the view last sent to them (so pings cannot probe for levels), then
   fanned out as `HostToClient {t: "ping", epoch, ping}` outside the seq order to every other linked player
@@ -1719,6 +1746,19 @@ SwiftShader (`ATLAS_CHROMIUM` + `ATLAS_GPU=swiftshader`): `table-local` 27/27 (n
 54/54, `keybindings` 33/33, `host-save-map` 12/12. `editor-smoke` fails the same three wall / door steps
 on this branch and on `master` there (SwiftShader only; not a regression). The Supabase scripts and the
 GPU runs were not repeated.
+
+**Token health and conditions (2026-09-24)** (§3, §6.5). Hit points, temporary hit points and conditions
+on tokens (scene v5), editable by the DM (token card, token menu, editor) and by players for their own
+characters, with bands for everyone else. Unit tests: damage / healing / max changes / bands and condition
+normalization; the v4 → v5 migration; the filter (exact numbers only for controlled and shared tokens,
+bands otherwise, none when wounds are hidden, conditions for whoever sees the token, strict view schema);
+the DM command (clamping, a play action) and the player request (own tokens only, hit points only when
+tracked, max stays the DM's), wire and saved-game schemas; the token menu's Conditions submenu. Final
+verification (2026-09-24): `tsc -b` 0 errors, `eslint .` clean, `npx vitest run` 1937 tests pass (4 live
+Supabase files skipped); `table-local` 35/35 on SwiftShader, with a step where the DM tracks a character's
+hit points from the token card, the player takes damage and goes prone from the character card, players see
+only a creature's band (and none once wounds are hidden), and the leak scan also looks for that creature's
+hit points in every frame and stored view.
 
 **Terrain review fixes (2026-09-23)**, each with a regression test that fails on the previous code:
 - Document: "Apply to terrain" bakes the downward closure, so the terrain no longer changes (§3, §7);

@@ -40,6 +40,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
+import type { TokenCondition, TokenHp } from "@/core/scene/tokenStatus"
 import type { Id, SceneLike, Token } from "@/core/scene/types"
 import { cn } from "@/lib/utils"
 import type { PlayerClientSnapshot } from "@/net/player"
@@ -69,6 +70,7 @@ import {
   type ChatEntry,
 } from "../table/chatModel"
 import type { TurnOrder } from "../table/combatModel"
+import { TokenHealth } from "../table/health"
 import { TurnStrip } from "../table/TurnStrip"
 import { TokenAvatar } from "../TokenAvatar"
 
@@ -95,6 +97,11 @@ export interface PlayerHudProps {
   onEndTurn(): void
   onRollInitiative(tokenId: Id, modifier: number): void
   onFocusToken(tokenId: Id): void
+  /** Change one of our characters' hit points (current and temporary) or conditions. */
+  onTokenStatus(
+    tokenId: Id,
+    status: { hp?: TokenHp; conditions?: TokenCondition[] }
+  ): void
 }
 
 export function PlayerHud({
@@ -112,6 +119,7 @@ export function PlayerHud({
   onEndTurn,
   onRollInitiative,
   onFocusToken,
+  onTokenStatus,
 }: PlayerHudProps) {
   const view = snap.view!
   const mine = presentTokens(scene, view.controlledTokenIds)
@@ -145,6 +153,8 @@ export function PlayerHud({
             snap={snap}
             climbs={climbs}
             tool={tool}
+            onStatus={(status) => onTokenStatus(selected.id, status)}
+            statusDisabled={chat.disabledReason !== null}
           />
         ) : null}
       </div>
@@ -463,12 +473,16 @@ function CharacterCard({
   snap,
   climbs,
   tool,
+  onStatus,
+  statusDisabled,
 }: {
   token: Token
   scene: SceneLike
   snap: PlayerClientSnapshot
   climbs: ClimbOption[]
   tool: PlayTool
+  onStatus(status: { hp?: TokenHp; conditions?: TokenCondition[] }): void
+  statusDisabled: boolean
 }) {
   const view = snap.view!
   const pt = Object.hasOwn(view.tokens, token.id) ? view.tokens[token.id] : null
@@ -512,6 +526,16 @@ function CharacterCard({
           </TooltipContent>
         </Tooltip>
       </div>
+      <TokenHealth
+        key={token.id}
+        hp={pt?.hp ?? null}
+        conditions={pt?.conditions ?? []}
+        dm={false}
+        disabled={statusDisabled}
+        onChange={({ hp, conditions }) =>
+          onStatus({ hp: hp ?? undefined, conditions })
+        }
+      />
       <p className="text-[0.6875rem] leading-relaxed text-muted-foreground">
         {cardHint(tool, climbs)}
       </p>

@@ -72,7 +72,8 @@ import {
 } from "../useSessionResource"
 import { entriesFromView } from "../table/chatModel"
 import { levelShown, playerTurnOrder } from "../table/combatModel"
-import { PingLayer, TurnMarker } from "../table/MapMarkers"
+import { playerBadgeTokens, useStableBadges } from "../table/healthModel"
+import { PingLayer, TokenBadges, TurnMarker } from "../table/MapMarkers"
 import { PlayerHud } from "./PlayerHud"
 
 const FOCUS_VIEW_HEIGHT = 70
@@ -263,6 +264,9 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
   const [chatFocus, setChatFocus] = React.useState(0)
   const chatEntries = React.useMemo(() => entriesFromView(view), [view])
   const turn = React.useMemo(() => playerTurnOrder(view), [view])
+  const badges = useStableBadges(
+    playerBadgeTokens(view, snap.scene?.grid.cellSize ?? 5)
+  )
   const turnActive = turn?.entries.find((e) => e.id === turn.activeId) ?? null
   // "Your turn" once per turn of one of our characters.
   const turnKey =
@@ -459,6 +463,12 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
           canvasRef={canvasRef}
         />
         <StrandedMove controller={controller} />
+        {scene ? (
+          <TokenBadges
+            tokens={badges}
+            showOn={(levelId) => levelShown(scene, activeLevelId, levelId)}
+          />
+        ) : null}
         <PingLayer
           subscribe={client.onPing}
           scene={scene}
@@ -508,6 +518,9 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
               client.rollInitiative(tokenId, bonus)
             }
             onFocusToken={(id) => focusToken(id)}
+            onTokenStatus={(tokenId, status) =>
+              client.setTokenStatus(tokenId, status)
+            }
             camera={{
               onRotate: (q) => engine?.rotateCamera(q),
               onZoom: (d) => zoomCanvas(canvasRef.current, d),

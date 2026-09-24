@@ -1,16 +1,18 @@
-// The table end to end in local mode (?local=1): chat, whispers, host-rolled dice, combat and pings
-// between the DM and two players, through the real UI (dock, quick dice, slash commands, the Combat
-// tab, the initiative order, long presses on the map).
+// The table end to end in local mode (?local=1): chat, whispers, host-rolled dice, combat, health and
+// pings between the DM and two players, through the real UI (dock, quick dice, slash commands, the
+// Combat tab, the initiative order, the token and character cards, long presses on the map).
 //
 // DM starts The Crooked Lantern → players A and B join and get a character each → A chats and rolls
 // a quick d20; B whispers to the DM; the DM rolls in secret and whispers to B by name → each player's
 // log holds exactly what they may read, and every roll equals the host's → the DM starts combat with
 // everyone on the level (the hidden Bandit Lookout included), rolls for the NPCs and begins → the
 // order players see holds only combatants they can see → A rolls initiative from the order, gets the
-// turn and ends it → A pings with a long press (B and the DM see it), the DM pings with Shift (B's
+// turn and ends it → the DM tracks A's hit points from the token card; A takes damage and goes prone
+// from its character card; players see a creature's band, never its hit points, and no band once the
+// DM hides wounds → A pings with a long press (B and the DM see it), the DM pings with Shift (B's
 // camera goes there) → B reloads and the log and order come back → no whisper, secret roll, hidden
-// combatant or other player's id ever reached the wrong player (every BroadcastChannel frame and the
-// stored player_views rows).
+// combatant, creature's hit points or other player's id ever reached the wrong player (every
+// BroadcastChannel frame and the stored player_views rows).
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/table-local.mjs
 import {
@@ -278,6 +280,153 @@ try {
   )
   checks.ok(true, "ending the turn hands it to the next combatant")
 
+  // ---- health and conditions ----------------------------------------------------------------------------
+  checks.step("Health: the DM tracks hit points, A takes damage and goes prone")
+  await dm.bringToFront()
+  await dm.getByRole("tab", { name: /Tokens/ }).click()
+  await dm
+    .getByRole("tabpanel")
+    .locator("button", { hasText: pcs[0].name })
+    .first()
+    .click()
+  const dmHealth = dm.locator("[data-slot=token-health]")
+  await dmHealth.getByLabel("Max HP").fill("30")
+  await dmHealth.getByRole("button", { name: "Track hit points" }).click()
+  await waitFor(
+    dm,
+    (id) =>
+      window.__atlasHost.runner.getSnapshot().state.scene.tokens[id].hp?.max ===
+      30,
+    pcs[0].id,
+    { timeout: 10000, label: "A's hit points tracked" }
+  )
+  checks.eq(
+    (await hostState(dm)).state.scene.tokens[pcs[0].id].hp,
+    { current: 30, max: 30, temp: 0 },
+    "the DM tracks A's hit points from the token card (starting full)"
+  )
+  // A creature next to A gets hit points players must never read (only its band).
+  const monster = Object.values(scene.tokens).find(
+    (t) => !t.hidden && t.kind !== "pc"
+  )
+  const aAt = (await hostState(dm)).state.scene.tokens[pcs[0].id]
+  let seen = false
+  for (const [dx, dz] of [
+    [5, 0],
+    [-5, 0],
+    [0, 5],
+    [0, -5],
+  ]) {
+    await dm.evaluate((cmd) => window.__atlasHost.runner.dispatch(cmd), {
+      t: "move-token",
+      tokenId: monster.id,
+      levelId: aAt.levelId,
+      x: aAt.position.x + dx,
+      z: aAt.position.z + dz,
+    })
+    seen = await waitFor(
+      A.page,
+      (id) =>
+        Object.hasOwn(
+          window.__atlasPlayer.client.getSnapshot().view.tokens,
+          id
+        ),
+      monster.id,
+      { timeout: 5000, label: "A sees the creature" }
+    )
+      .then(() => true)
+      .catch(() => false)
+    if (seen) break
+  }
+  checks.ok(seen, "A sees a creature the DM moved next to it", monster.name)
+  await dm.evaluate(
+    (id) =>
+      window.__atlasHost.runner.dispatch({
+        t: "set-token-status",
+        tokenId: id,
+        hp: { current: 31337, max: 65432, temp: 0 },
+      }),
+    monster.id
+  )
+  await A.page.bringToFront()
+  await A.page.evaluate((id) => window.__atlasPlayer.select(id), pcs[0].id)
+  const aHealth = A.page.locator("[data-slot=token-health]")
+  await aHealth.getByLabel("Amount").fill("7")
+  await aHealth.getByRole("button", { name: "Damage" }).click()
+  await waitFor(
+    dm,
+    (id) =>
+      window.__atlasHost.runner.getSnapshot().state.scene.tokens[id].hp
+        ?.current === 23,
+    pcs[0].id,
+    { timeout: 10000, label: "A's damage on the host" }
+  )
+  checks.ok(true, "A takes 7 damage from its character card")
+  await aHealth.getByRole("button", { name: "Condition" }).click()
+  await A.page.getByRole("menuitemcheckbox", { name: "Prone" }).click()
+  await A.page.keyboard.press("Escape")
+  await waitFor(
+    dm,
+    (id) =>
+      window.__atlasHost.runner
+        .getSnapshot()
+        .state.scene.tokens[id].conditions?.includes("prone"),
+    pcs[0].id,
+    { timeout: 10000, label: "A prone on the host" }
+  )
+  checks.ok(true, "A goes prone from its character card")
+  const aOwn = (await playerView(A.page)).tokens[pcs[0].id]
+  checks.ok(
+    aOwn.hp?.current === 23 && aOwn.hp.max === 30 && !aOwn.health,
+    "A sees its own exact hit points",
+    aOwn
+  )
+  checks.ok(
+    (await playerView(A.page)).tokens[monster.id].health === "bloodied" &&
+      (await playerView(A.page)).tokens[monster.id].hp === undefined,
+    "A sees only the creature's band"
+  )
+  checks.ok(
+    await A.page
+      .locator(`[data-slot=token-badges] [data-token="${monster.id}"]`)
+      .count(),
+    "the creature has a health badge on A's map"
+  )
+  const vbA = (await playerView(B.page)).tokens[pcs[0].id]
+  if (vbA) {
+    await waitFor(
+      B.page,
+      (id) =>
+        window.__atlasPlayer.client
+          .getSnapshot()
+          .view.tokens[id]?.conditions?.includes("prone"),
+      pcs[0].id,
+      { timeout: 10000, label: "B sees A prone" }
+    )
+    const b = (await playerView(B.page)).tokens[pcs[0].id]
+    checks.ok(
+      b.health === "wounded" && b.hp === undefined,
+      "B sees A wounded, without numbers",
+      b
+    )
+  }
+  await dm.bringToFront()
+  await dm.getByRole("tab", { name: /^Table/ }).click()
+  await dm.getByRole("switch", { name: "Show wounds to players" }).click()
+  await waitFor(
+    A.page,
+    (id) =>
+      window.__atlasPlayer.client.getSnapshot().view.tokens[id]?.health ===
+      undefined,
+    monster.id,
+    { timeout: 10000, label: "A no longer sees the creature's band" }
+  )
+  checks.ok(
+    (await playerView(A.page)).tokens[pcs[0].id].hp?.current === 23,
+    "with wounds hidden, A still sees its own hit points"
+  )
+  await shot(A.page, OUT, "03-a-health")
+
   // ---- pings --------------------------------------------------------------------------------------------
   checks.step("Pings: a player's long press, the DM's Shift + long press")
   const dmPings = []
@@ -348,7 +497,13 @@ try {
         .filter((e) => e.hidden || hidden.some((t) => t.id === e.tokenId))
         .map((e) => e.id),
     ],
-    strings: [...secrets.strings, "SENTINEL_SECRET_ROLL"],
+    strings: [
+      ...secrets.strings,
+      "SENTINEL_SECRET_ROLL",
+      // The creature's hit points (players get its band only).
+      '"max":65432',
+      '"current":31337',
+    ],
   }
   const frames = (who, viewOnly = false) =>
     wire[who]

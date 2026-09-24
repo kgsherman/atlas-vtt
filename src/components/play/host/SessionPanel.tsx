@@ -16,6 +16,7 @@ import {
   EyeOff,
   Footprints,
   Grid3x3,
+  HeartPulse,
   Layers,
   Link2,
   Lock,
@@ -859,6 +860,13 @@ function TableTab({ state, actions }: SessionPanelProps) {
           description="Off: players can hold Alt to move tokens off the grid."
           checked={!(state.freeMovement ?? false)}
           onChange={(v) => actions.setFreeMovement(!v)}
+        />
+        <ToggleRow
+          icon={<HeartPulse />}
+          title="Show wounds to players"
+          description="Players see whether other creatures are wounded, bloodied or down (never their hit points)."
+          checked={!(state.hideWounds ?? false)}
+          onChange={(v) => actions.setHideWounds(!v)}
         />
       </FieldGroup>
       <Separator />
