@@ -1700,9 +1700,13 @@ breaking out of the ring, or a revealed shield, lies over it in one piece.
 **Editor** (`src/tokenMaker/store.ts`, zustand; `components/tokenMaker`, `routes/TokenMakerPage.tsx`).
 Undo keeps design snapshots (≤ 100; commits sharing a key within 800 ms, a drag or a slider, are one step).
 Images are imported at ≤ 2048 px (`images.ts`), kept as blobs beside the design and decoded once
-(`ImageCache`; alpha maps for click-through picking: clicks pass the ring's transparent hole). The stage:
-drag moves the selected layer, wheel scales it about the pointer, Shift+wheel rotates; Reveal / Hide paint
-the selected layer's mask (with a faint ghost of its hidden parts). New layers go by role: backgrounds at
+(`ImageCache`; alpha maps for click-through picking: clicks pass the ring's transparent hole). The stage is a
+clipped viewport (`tokenMaker/view.ts`: zoom 0.25–8× about the pointer with Ctrl/⌘+wheel, pinch, the zoom
+buttons or `=` / `-` / `0`; pan with Space+drag or a middle-button drag), so a layer's outline can reach past
+the token without covering the page. Drag moves the selected layer, wheel scales it about the pointer,
+Shift+wheel rotates. A floating toolbar above the token holds Move and the Mask group: Reveal / Hide paint
+the selected layer's mask (with a faint ghost of its hidden parts), and the brush size follows the editor
+keymap's `brush.smaller` / `brush.larger` (`[` / `]`, remaps included), like the terrain brush. New layers go by role: backgrounds at
 the bottom (disc grown 0.02 to reach under the ring), frames on top (unmasked; the disc is fitted to their
 opening), character art under the topmost frame (disc). The design and its images autosave to IndexedDB
 (`draft.ts`, key `token-maker:current`) and come back on reload; a fresh page starts from the free parts.

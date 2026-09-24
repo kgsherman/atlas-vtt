@@ -14,6 +14,7 @@ import { addLayer, clampRadius, createLayer, emptyDesign, findLayer, layerIndex 
 import type { LayerRole, TokenDesign } from "@/core/tokenMaker/types"
 
 import { alphaAt, alphaMap, decodeImage, type AlphaMap } from "./images"
+import { clampView, DEFAULT_VIEW, type StageView } from "./view"
 
 export interface StoredImage {
   blob: Blob
@@ -36,6 +37,8 @@ export interface TokenMakerState {
   working: Record<string, string>
   /** Bumps whenever a decoded image becomes available (the stage redraws). */
   decodedRev: number
+  /** How the stage shows the token (zoom, pan). Not part of the design or its history. */
+  view: StageView
 }
 
 export interface TokenMakerActions {
@@ -53,6 +56,7 @@ export interface TokenMakerActions {
   addImageLayer(image: StoredImage, name: string, role: LayerRole, index?: number): string | null
   addFillLayer(color: string, name: string, role: LayerRole, index?: number): string | null
   setWorking(layerId: string, label: string | null): void
+  setView(view: StageView): void
   /** Start over from a design and its images (no history). */
   load(design: TokenDesign, images: Record<string, StoredImage>): void
 }
@@ -84,6 +88,7 @@ export function createTokenMakerStore(cache: ImageCache): TokenMakerStore {
     future: [],
     working: {},
     decodedRev: 0,
+    view: DEFAULT_VIEW,
 
     commit(next, coalesce) {
       const s = get()
@@ -150,10 +155,13 @@ export function createTokenMakerStore(cache: ImageCache): TokenMakerStore {
       else working[layerId] = label
       set({ working })
     },
+    setView(view) {
+      set({ view: clampView(view) })
+    },
     load(design, images) {
       last = null
       for (const [id, img] of Object.entries(images)) cache.put(id, img.blob)
-      set({ design, images, selectedId: null, tool: "move", past: [], future: [], working: {} })
+      set({ design, images, selectedId: null, tool: "move", past: [], future: [], working: {}, view: DEFAULT_VIEW })
     },
   }))
 

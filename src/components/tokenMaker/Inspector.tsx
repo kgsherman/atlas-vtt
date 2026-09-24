@@ -3,7 +3,7 @@
  * the token disc, and background removal.
  */
 import * as React from "react"
-import { Crosshair, Eraser, FlipHorizontal2, Maximize, Minimize, Move, Paintbrush, RotateCcw, Sparkles, Trash2 } from "lucide-react"
+import { Crosshair, FlipHorizontal2, Maximize, Minimize, RotateCcw, Sparkles, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 
 import { useServices } from "@/app/services"
@@ -13,41 +13,10 @@ import { Spinner } from "@/components/ui/spinner"
 import { clearStrokes, findLayer, setMask, setTransform, TOKEN_LIMITS, updateLayer } from "@/core/tokenMaker/design"
 import { describeImageToolError } from "@/net/imageTools"
 import { fitDiscToFrame, frameLayer, removeLayerBackground } from "@/tokenMaker/actions"
-import type { MakerTool } from "@/tokenMaker/store"
 
 import { useMaker, useTokenMaker } from "./context"
 
 const pct = (v: number) => `${Math.round(v * 100)}%`
-
-const TOOL_OPTIONS: ReadonlyArray<{ value: MakerTool; label: string; icon: React.ReactNode; tooltip: string }> = [
-  { value: "move", label: "Move", icon: <Move />, tooltip: "Move, scale and rotate the selected layer (V)" },
-  { value: "reveal", label: "Reveal", icon: <Paintbrush />, tooltip: "Paint the selected layer back in, e.g. a hand breaking out of the frame (B)" },
-  { value: "hide", label: "Hide", icon: <Eraser />, tooltip: "Paint the selected layer away (E)" },
-]
-
-/** Mask brush controls (shared by the stage toolbar and the mask section). */
-export function BrushControls() {
-  const { store } = useTokenMaker()
-  const tool = useMaker((s) => s.tool)
-  const brush = useMaker((s) => s.brush)
-  return (
-    <>
-      <Segmented aria-label="Tool" value={tool} onValueChange={(t) => store.getState().setTool(t)} options={TOOL_OPTIONS} />
-      {tool !== "move" ? (
-        <SliderInput
-          aria-label="Brush size"
-          className="min-w-32"
-          value={brush}
-          min={TOKEN_LIMITS.minBrush}
-          max={0.25}
-          step={0.005}
-          format={pct}
-          onChange={(v) => store.getState().setBrush(v)}
-        />
-      ) : null}
-    </>
-  )
-}
 
 export function LayerInspector() {
   const { store } = useTokenMaker()
@@ -214,14 +183,11 @@ export function LayerInspector() {
             </FieldRow>
           </>
         ) : null}
-        <div className="flex flex-wrap items-center gap-2">
-          <BrushControls />
-        </div>
         <div className="flex items-center justify-between gap-2">
           <Hint>
             {layer.mask.strokes.length
               ? `${layer.mask.strokes.length} painted stroke${layer.mask.strokes.length === 1 ? "" : "s"}.`
-              : "Reveal paints parts back in, in front of the frame (a hand, a weapon); Hide paints them away."}
+              : "Paint with the toolbar's Mask brushes: Reveal brings parts back in front of the frame (a hand, a weapon), Hide paints them away."}
           </Hint>
           {layer.mask.strokes.length ? (
             <Button size="sm" variant="ghost" onClick={() => commit(clearStrokes(design, layer.id))}>

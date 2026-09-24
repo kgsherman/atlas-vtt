@@ -13,10 +13,11 @@ import { useSearch } from "wouter"
 
 import { useServices } from "@/app/services"
 import { AppHeader } from "@/components/app/AppHeader"
+import { useCommandKeys } from "@/components/keybindings/keymapStore"
 import { useSessionResource } from "@/components/play/useSessionResource"
 import { TokenMakerContext, useMaker, useTokenMaker, type TokenMakerContextValue } from "@/components/tokenMaker/context"
 import { DownloadSection, GameSection } from "@/components/tokenMaker/ExportPanel"
-import { BrushControls, DiscSection, LayerInspector } from "@/components/tokenMaker/Inspector"
+import { DiscSection, LayerInspector } from "@/components/tokenMaker/Inspector"
 import { LayersPanel } from "@/components/tokenMaker/LayersPanel"
 import { Stage } from "@/components/tokenMaker/Stage"
 import { Button } from "@/components/ui/button"
@@ -25,6 +26,8 @@ import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { findLayer, removeLayer, setTransform, translateLayer } from "@/core/tokenMaker/design"
 import type { LayerRole } from "@/core/tokenMaker/types"
+import { BRUSH_STEP } from "@/editor/shortcuts"
+import { useAppHotkeys } from "@/lib/hotkeys"
 import { MakerLink } from "@/net/tokenMakerLink"
 import { addImageFile, nameFromFile, startTemplate } from "@/tokenMaker/actions"
 import { loadTokenDraft, saveTokenDraft } from "@/tokenMaker/draft"
@@ -120,7 +123,21 @@ export default function TokenMakerPage() {
     return () => window.removeEventListener("paste", onPaste)
   }, [addFiles])
 
-  // Keyboard: undo/redo, tools, brush size, nudging and deleting the selected layer.
+  // Brush size: the terrain brush's keys (the editor keymap's brush.smaller / brush.larger, [ and ] by
+  // default, remaps included).
+  const smallerKeys = useCommandKeys("editor", "brush.smaller")
+  const largerKeys = useCommandKeys("editor", "brush.larger")
+  useAppHotkeys(
+    React.useMemo(
+      () => [
+        ...smallerKeys.map((hotkey) => ({ hotkey, run: () => store.getState().setBrush(store.getState().brush / BRUSH_STEP) })),
+        ...largerKeys.map((hotkey) => ({ hotkey, run: () => store.getState().setBrush(store.getState().brush * BRUSH_STEP) })),
+      ],
+      [smallerKeys, largerKeys, store]
+    )
+  )
+
+  // Keyboard: undo/redo, tools, nudging and deleting the selected layer.
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (isEditable(e.target) || e.altKey) return
@@ -143,8 +160,6 @@ export default function TokenMakerPage() {
       if (key === "v") s.setTool("move")
       else if (key === "b") s.setTool("reveal")
       else if (key === "e") s.setTool("hide")
-      else if (key === "[") s.setBrush(s.brush / 1.25)
-      else if (key === "]") s.setBrush(s.brush * 1.25)
       else if (key === "escape") {
         if (s.tool !== "move") s.setTool("move")
         else s.select(null)
@@ -197,7 +212,6 @@ export default function TokenMakerPage() {
               <h1 className="mr-auto flex items-center gap-2 font-heading text-lg font-semibold tracking-tight">
                 <CircleUserRound className="size-5 text-primary" /> Token maker
               </h1>
-              <BrushControls />
               <UndoRedo />
               <NewTokenButton />
             </div>
@@ -209,13 +223,12 @@ export default function TokenMakerPage() {
               </div>
             )}
             <p className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[0.6875rem] text-muted-foreground">
-              <span>Drag to move</span>
-              <span>Scroll to resize</span>
+              <span>Drag to move · scroll to resize</span>
               <span>
                 <Kbd>Shift</Kbd> + scroll to rotate
               </span>
               <span>
-                <Kbd>B</Kbd> reveal · <Kbd>E</Kbd> hide · <Kbd>V</Kbd> move
+                <Kbd>Ctrl</Kbd> + scroll to zoom · <Kbd>Space</Kbd> + drag to pan
               </span>
             </p>
           </section>
