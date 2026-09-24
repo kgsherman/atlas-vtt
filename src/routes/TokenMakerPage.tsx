@@ -223,12 +223,12 @@ export default function TokenMakerPage() {
               </div>
             )}
             <p className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[0.6875rem] text-muted-foreground">
-              <span>Drag to move · scroll to resize</span>
+              <span>Scroll to zoom · drag to move</span>
               <span>
-                <Kbd>Shift</Kbd> + scroll to rotate
+                <Kbd>Ctrl</Kbd> + scroll to resize · <Kbd>Shift</Kbd> + scroll to rotate
               </span>
               <span>
-                <Kbd>Ctrl</Kbd> + scroll to zoom · <Kbd>Space</Kbd> + drag to pan
+                <Kbd>Space</Kbd> + drag to pan
               </span>
             </p>
           </section>

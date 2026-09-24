@@ -4,9 +4,9 @@
  * disc and the mask brush drawn over it, the floating toolbar above and zoom controls below.
  *
  * Move tool: click picks the topmost layer that is opaque under the pointer (so the frame's hole lets
- * clicks through to the character), drag moves the selected layer, wheel scales it about the pointer,
- * Shift+wheel rotates it. Reveal / Hide paint the selected layer's mask (wheel sizes the brush); while
- * painting, the layer's hidden parts show as a faint ghost. The view: Ctrl/⌘+wheel (or a pinch) zooms
+ * clicks through to the character), drag moves the selected layer, Ctrl/⌘+wheel scales it about the
+ * pointer, Shift+wheel rotates it. Reveal / Hide paint the selected layer's mask (Ctrl/⌘+wheel sizes the
+ * brush); while painting, the layer's hidden parts show as a faint ghost. The view: the wheel zooms
  * about the pointer, Space+drag or a middle-button drag pans (tokenMaker/view.ts).
  */
 import * as React from "react"
@@ -224,35 +224,33 @@ export function Stage({ className }: { className?: string }) {
     }
   }
 
-  // Wheel (non-passive, to keep the page still): Ctrl/⌘ (and pinches) zoom the view; otherwise scale /
-  // rotate the selected layer, or size the brush.
+  // Wheel (non-passive, to keep the page still): zooms the view about the pointer. Ctrl/⌘ (and trackpad
+  // pinches) scale the selected layer, or size the brush while painting; Shift / Alt rotate the layer.
   React.useEffect(() => {
     const el = viewportRef.current
     if (!el) return
     const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
       const s = store.getState()
       const r = el.getBoundingClientRect()
       const sx = e.clientX - r.left
       const sy = e.clientY - r.top
       const delta = e.deltaY || e.deltaX
-      if (e.ctrlKey || e.metaKey) {
-        e.preventDefault()
-        s.setView(zoomViewAt(s.view, vp, sx, sy, Math.exp(-delta * 0.002)))
-        return
-      }
-      if (s.tool !== "move") {
-        e.preventDefault()
+      const mod = e.ctrlKey || e.metaKey
+      const turn = e.shiftKey || e.altKey
+      if (mod && s.tool !== "move") {
         s.setBrush(s.brush * Math.exp(-delta * 0.002))
         return
       }
       const l = findLayer(s.design, s.selectedId)
-      if (!l || l.source.type !== "image") return
-      e.preventDefault()
-      const t =
-        e.shiftKey || e.altKey
+      if ((mod || turn) && s.tool === "move" && l?.source.type === "image") {
+        const t = turn
           ? { ...l.transform, rotation: l.transform.rotation + Math.sign(delta) * 2 }
           : zoomLayerAt(l.transform, screenToCanvas(s.view, vp, sx, sy), Math.exp(-delta * 0.0015))
-      s.commit(setTransform(s.design, l.id, t), `wheel:${l.id}`)
+        s.commit(setTransform(s.design, l.id, t), `wheel:${l.id}`)
+        return
+      }
+      s.setView(zoomViewAt(s.view, vp, sx, sy, Math.exp(-delta * 0.002)))
     }
     el.addEventListener("wheel", onWheel, { passive: false })
     return () => el.removeEventListener("wheel", onWheel)
@@ -284,7 +282,7 @@ export function Stage({ className }: { className?: string }) {
         <>
           <canvas
             ref={canvasRef}
-            aria-label="Token preview. Drag to move the selected layer, scroll to resize it, Shift+scroll to rotate it, Ctrl+scroll to zoom."
+            aria-label="Token preview. Scroll to zoom, drag to move the selected layer, Ctrl+scroll to resize it, Shift+scroll to rotate it."
             className="absolute atlas-checkerboard ring-1 ring-border"
             style={{ left: rect.left, top: rect.top, width: rect.side, height: rect.side }}
           />
@@ -375,7 +373,7 @@ export function Stage({ className }: { className?: string }) {
             {Math.round(view.zoom * 100)}%
           </TooltipTrigger>
           <TooltipContent className="max-w-64">
-            Fit the token <Kbd>0</Kbd>. Ctrl + scroll zooms about the pointer; Space + drag pans.
+            Fit the token <Kbd>0</Kbd>. Scroll zooms about the pointer; Space + drag pans.
           </TooltipContent>
         </Tooltip>
         <Tooltip>
