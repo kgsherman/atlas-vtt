@@ -8,6 +8,7 @@ import { applyPatches, enablePatches, produce, type Patch } from "immer"
 
 import { levelById } from "../scene/queries"
 import { SCENE_LIMITS } from "../scene/schema"
+import { applyConditionChange, applyHpChange } from "../scene/tokenStatus"
 import type { GridSettings, Id, Scene } from "../scene/types"
 import { normalizeFreeAssetCategories } from "./freeAssets"
 import { tokenWithStatus } from "./tokenStatus"
@@ -219,10 +220,18 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
       // DM-only: no player's view depends on it.
       return { state: { ...state, freeAssets: categories, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: [] }
     }
-    case "set-token-status": {
+    case "set-token-status":
+    case "change-token-status": {
       const t = own(state.scene.tokens, cmd.tokenId)
       if (!t) return noop(state, "unknown token")
-      const next = tokenWithStatus(t, cmd.hp, cmd.conditions)
+      const next =
+        cmd.t === "set-token-status"
+          ? tokenWithStatus(t, cmd.hp, cmd.conditions)
+          : tokenWithStatus(
+              t,
+              cmd.hp && t.hp ? applyHpChange(t.hp, cmd.hp) : undefined,
+              cmd.conditions ? applyConditionChange(t.conditions ?? [], cmd.conditions) : undefined
+            )
       if (next === t) return noop(state)
       // A play action (like a move): no map edit, no undo entry; views change, vision does not.
       return { state: { ...state, scene: { ...state.scene, tokens: { ...state.scene.tokens, [t.id]: next } }, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: "all" }

@@ -129,7 +129,8 @@ describe("token status: changes", () => {
     // Hit points the DM does not track cannot be changed by the player.
     const untracked = reduceDm(g.state, { t: "set-token-status", tokenId: g.pip, hp: null }).state
     expect(req(ALICE, { tokenId: g.pip, hp: { kind: "heal", amount: 5 } }, untracked).result.reason).toBe("cannot")
-    expect(req(ALICE, { tokenId: g.pip, conditions: { add: ["prone"] } }, untracked).state).toBe(untracked)
+    // Conditions still work on a token whose hit points are not tracked.
+    expect(req(ALICE, { tokenId: g.pip, conditions: { add: ["blinded"] } }, untracked).state.scene.tokens[g.pip].conditions).toEqual(["blinded", "prone"])
     // A hidden token is gone as far as its player knows.
     const tokens = g.state.scene.tokens
     const hidden: GameState = { ...g.state, scene: { ...g.state.scene, tokens: { ...tokens, [g.pip]: { ...tokens[g.pip], hidden: true } } } }
@@ -145,13 +146,43 @@ describe("token status: changes", () => {
     let s = req(g.state, { tokenId: g.pip, conditions: { add: ["poisoned"] } })
     s = req(s, { tokenId: g.pip, conditions: { add: ["blinded"] } })
     expect(s.scene.tokens[g.pip].conditions).toEqual(["blinded", "poisoned", "prone"])
-    // The DM deals 8 damage while the player adds temporary hit points: both stand.
-    s = reduceDm(s, { t: "set-token-status", tokenId: g.pip, hp: { current: 1, max: 12, temp: 0 } }).state
+    // The DM deals 8 damage (Pip: 9 + 2 temporary) while the player adds temporary hit points: both stand.
+    s = reduceDm(s, { t: "change-token-status", tokenId: g.pip, hp: { kind: "damage", amount: 8 } }).state
+    expect(s.scene.tokens[g.pip].hp).toEqual({ current: 3, max: 12, temp: 0 })
     s = req(s, { tokenId: g.pip, hp: { kind: "temp", amount: 5 } })
-    expect(s.scene.tokens[g.pip].hp).toEqual({ current: 1, max: 12, temp: 5 })
-    // Two quick damage entries both land.
+    expect(s.scene.tokens[g.pip].hp).toEqual({ current: 3, max: 12, temp: 5 })
+    // Two quick damage entries both land (5 temporary, then 3 current, then down).
     s = req(req(s, { tokenId: g.pip, hp: { kind: "damage", amount: 3 } }), { tokenId: g.pip, hp: { kind: "damage", amount: 3 } })
+    expect(s.scene.tokens[g.pip].hp).toEqual({ current: 2, max: 12, temp: 0 })
+    s = req(s, { tokenId: g.pip, hp: { kind: "damage", amount: 3 } })
     expect(s.scene.tokens[g.pip].hp).toEqual({ current: 0, max: 12, temp: 0 })
+  })
+
+  it("the DM's change-token-status applies to the token as the host holds it", () => {
+    const g = game()
+    const dm = (state: GameState, cmd: DmCommand) => reduceDm(state, cmd)
+    // A player ticked Concentrating a moment before the DM's menu (which still showed only Prone) adds Blinded.
+    const s0 = reduceRequest(
+      g.state,
+      ALICE,
+      { t: "token-status", reqId: "r", tokenId: g.pip, conditions: { add: ["concentrating"] } },
+      { world: null as never, currentView: null, perceivedByPlayer: () => false }
+    ).state
+    const r = dm(s0, { t: "change-token-status", tokenId: g.pip, conditions: { add: ["blinded"] }, hp: { kind: "max", max: 20 } })
+    expect(r.state.scene.tokens[g.pip]).toMatchObject({ hp: { current: 17, max: 20, temp: 2 }, conditions: ["blinded", "prone", "concentrating"] })
+    expect(r.dirtyPlayers).toBe("all")
+    expect(r.state.origin?.dirty).toBe(false)
+    // Typed values change only their own field.
+    expect(dm(r.state, { t: "change-token-status", tokenId: g.pip, hp: { kind: "set", temp: 0 } }).state.scene.tokens[g.pip].hp).toEqual({
+      current: 17,
+      max: 20,
+      temp: 0,
+    })
+    // Hit points that are not tracked are left alone; nothing to change keeps the state.
+    expect(dm(g.state, { t: "change-token-status", tokenId: g.ghost, hp: { kind: "heal", amount: 1 } }).state).toBe(g.state)
+    const untracked = dm(g.state, { t: "set-token-status", tokenId: g.pip, hp: null }).state
+    expect(dm(untracked, { t: "change-token-status", tokenId: g.pip, hp: { kind: "damage", amount: 3 } }).state).toBe(untracked)
+    expect(dm(g.state, { t: "change-token-status", tokenId: "nope", conditions: { add: ["prone"] } }).error).toBe("unknown token")
   })
 
   it("accepts only well-formed requests on the wire", () => {

@@ -1,7 +1,7 @@
 import type { Patch } from "immer"
 
 import type { RollResult } from "../dice/dice"
-import type { HealthBand, HpAmountChange, TokenCondition, TokenHp } from "../scene/tokenStatus"
+import type { ConditionChange, HealthBand, HpAmountChange, HpChange, TokenCondition, TokenHp } from "../scene/tokenStatus"
 import type { MoveRejectReason, PathStep } from "../movement/types"
 import type {
   ConnectorObject,
@@ -435,6 +435,11 @@ export type DmCommand =
   | { t: "set-free-assets"; categories: FreeAssetCategory[] }
   /** A token's hit points (null: stop tracking them) and/or conditions. A play action, like a move. */
   | { t: "set-token-status"; tokenId: Id; hp?: TokenHp | null; conditions?: TokenCondition[] }
+  /**
+   * A relative change (core/scene/tokenStatus.ts): applied to the token as the host holds it, so a
+   * player's change made meanwhile is never overwritten. Hit points only when tracked.
+   */
+  | { t: "change-token-status"; tokenId: Id; hp?: HpChange; conditions?: ConditionChange }
   /** Hide (or show) the health band of creatures players do not control. */
   | { t: "set-hide-wounds"; hidden: boolean }
   /** Add a message to the table log (the host builds it: id, time, the DM's name, a host-side roll). */

@@ -10,12 +10,10 @@ import { toast } from "sonner"
 import { cryptoDiceRng } from "@/core/dice/dice"
 import { newId } from "@/core/scene/factory"
 import { groundHeightAt, levelById } from "@/core/scene/queries"
-import {
-  applyConditionChange,
-  applyHpChange,
-  type TokenCondition,
-  type TokenHp,
-  type TokenStatusChange,
+import type {
+  TokenCondition,
+  TokenHp,
+  TokenStatusChange,
 } from "@/core/scene/tokenStatus"
 import type { DoorState, Id, Scene, Vec2 } from "@/core/scene/types"
 import type { FreeAssetCategory } from "@/core/session/freeAssets"
@@ -93,8 +91,8 @@ export interface HostActions {
     status: { hp?: TokenHp | null; conditions?: TokenCondition[] }
   ): void
   /**
-   * Damage, heal, temporary or max hit points (when tracked) and/or conditions to add and remove,
-   * applied to the token as the host holds it now (never a copy an earlier render saw).
+   * Damage, heal, temporary or max hit points (when tracked) and/or conditions to add and remove: the
+   * reducer applies it to the token as the host holds it (never a copy an earlier render saw).
    */
   changeTokenStatus(tokenId: Id, change: TokenStatusChange): void
   /** Hide (or show) other creatures' health bands from players. */
@@ -354,22 +352,10 @@ export function createHostActions(
       )
     },
     changeTokenStatus(tokenId, change) {
-      const tokens = runner.getSnapshot().state?.scene.tokens
-      const t =
-        tokens && Object.hasOwn(tokens, tokenId) ? tokens[tokenId] : null
-      if (!t) return
-      const status: { hp?: TokenHp; conditions?: TokenCondition[] } = {}
-      if (change.hp && t.hp) status.hp = applyHpChange(t.hp, change.hp)
-      if (change.conditions)
-        status.conditions = applyConditionChange(
-          t.conditions ?? [],
-          change.conditions
-        )
-      if (status.hp || status.conditions)
-        dispatch(
-          { t: "set-token-status", tokenId, ...status },
-          "Couldn't change the token"
-        )
+      dispatch(
+        { t: "change-token-status", tokenId, ...change },
+        "Couldn't change the token"
+      )
     },
     setHideWounds(hidden) {
       dispatch(

@@ -53,6 +53,9 @@ describe("token status", () => {
     expect(applyHpChange(hp, { kind: "temp", amount: 3 })).toEqual(hp)
     expect(applyHpChange(hp, { kind: "temp", amount: 9 })).toEqual({ current: 10, max: 20, temp: 9 })
     expect(applyHpChange(hp, { kind: "max", max: 25 })).toEqual({ current: 15, max: 25, temp: 4 })
+    // A typed value changes only its own field (and stays within the rules).
+    expect(applyHpChange(hp, { kind: "set", current: 3 })).toEqual({ current: 3, max: 20, temp: 4 })
+    expect(applyHpChange(hp, { kind: "set", temp: 0, current: 99 })).toEqual({ current: 20, max: 20, temp: 0 })
     // Two changes made from the same stale value both count.
     expect(applyHpChange(applyHpChange(hp, { kind: "damage", amount: 5 }), { kind: "damage", amount: 5 })).toEqual({ current: 4, max: 20, temp: 0 })
   })

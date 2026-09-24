@@ -1164,13 +1164,17 @@ authoritative, and a player receives only what filter.ts lets through.
   (temporary hit points do not count). The DM's `set-token-status {tokenId, hp?: TokenHp | null (stop
   tracking), conditions?}` is clamped and normalized (`clampHp`, `normalizeConditions`), a play action like a
   move: empty delta, every player dirty, `origin.dirty` untouched (the map-save prompt does not nag about
-  it). Changes made in play are **relative** (`HpChange`: damage, heal, temp (the higher value is kept) or
-  max; `ConditionChange`: conditions to add and remove), applied to the token as the host holds it when they
-  arrive (`applyHpChange`, `applyConditionChange`), so a change made meanwhile (the DM's damage while a
-  player adds temporary hit points, two quick ticks before the first result is back) is never overwritten.
-  The DM's UI goes through `HostActions.changeTokenStatus`, which reads the runner's current state and
-  dispatches the resulting `set-token-status`; only starting / stopping tracking sets absolute values. A
-  player's request `token-status {tokenId, hp?: {kind: damage | heal | temp, amount: 1 … 99 999},
+  it). Changes made in play are **relative** (`HpChange`: damage, heal, temp (the higher value is kept),
+  and for the DM max and `set` (a typed value: only the fields given change); `ConditionChange`: conditions to
+  add and remove), applied to the token as the host holds it when they arrive (`applyHpChange`,
+  `applyConditionChange`), so a change made meanwhile (the DM's damage while a player adds temporary hit
+  points, two quick ticks before the first result is back) is never overwritten. The DM's UI sends
+  `change-token-status {tokenId, hp?: HpChange, conditions?: ConditionChange}` (`HostActions.
+  changeTokenStatus`; the reducer applies it; hit points only when tracked); only starting / stopping
+  tracking uses `set-token-status`. The live "Edit map" inspector does the same through the editor's play
+  sink (`store.changeTokenStatus` / `setTokenHp`): play actions with no undo entry, since undoing would
+  write a stale value over players' changes; the standalone editor edits them like any field. A player's
+  request `token-status {tokenId, hp?: {kind: damage | heal | temp, amount: 1 … 99 999},
   conditions?: {add?, remove?}}` (strict zod: at least one change) is accepted only for a token they own
   (`not-owner`) that players can see (`unknown-token`), and hit points only while the DM tracks them
   (`cannot`); `max` is the DM's alone (the player cannot send it). `GameState.hideWounds` (saved with the
@@ -1766,9 +1770,12 @@ tracked, max stays the DM's), wire and saved-game schemas; the token menu's Cond
 found that player changes carried absolute values built from the player's last view, so two quick changes,
 or a player's change racing the DM's, lost one of them; changes are now relative and applied on the host
 (regression tests: two stale condition ticks both count, the DM's damage survives a player's temporary hit
-points, two quick damage entries both land; the client's wire shape). Final
-verification (2026-09-24): `tsc -b` 0 errors, `eslint .` clean, `npx vitest run` 1937 tests pass (4 live
-Supabase files skipped); `table-local` 35/35 on SwiftShader, with a step where the DM tracks a character's
+points, two quick damage entries both land; the client's wire shape). A second review found the same loss
+through the live "Edit map" inspector, whose health fields were undoable edits of whole values: they are now
+play actions (`change-token-status` through the play sink; test: the store sends commands and records no
+undo step in a live session, and edits with undo standalone). Final
+verification (2026-09-24, after both reviews' fixes): `tsc -b` 0 errors, `eslint .` clean, `npx vitest run`
+1943 tests pass (4 live Supabase files skipped); `table-local` 35/35 on SwiftShader, with a step where the DM tracks a character's
 hit points from the token card, the player takes damage and goes prone from the character card, players see
 only a creature's band (and none once wounds are hidden), and the leak scan also looks for that creature's
 hit points in every frame and stored view.

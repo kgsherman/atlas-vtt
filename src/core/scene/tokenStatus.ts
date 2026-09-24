@@ -110,10 +110,11 @@ export function applyHealing(hp: TokenHp, amount: number): TokenHp {
 /**
  * A change of hit points, applied to the current value when it arrives: concurrent changes (the DM's
  * damage while a player adds temporary hit points, two quick clicks) add up instead of overwriting each
- * other. Temporary hit points don't stack: the higher value is kept. `max` is the DM's alone.
+ * other. Temporary hit points don't stack: the higher value is kept. `max` and `set` (a value the DM
+ * typed: only the fields given change) are the DM's alone.
  */
 export type HpAmountChange = { kind: "damage" | "heal" | "temp"; amount: number }
-export type HpChange = HpAmountChange | { kind: "max"; max: number }
+export type HpChange = HpAmountChange | { kind: "max"; max: number } | { kind: "set"; current?: number; temp?: number }
 
 export function applyHpChange(hp: TokenHp, change: HpChange): TokenHp {
   switch (change.kind) {
@@ -125,6 +126,8 @@ export function applyHpChange(hp: TokenHp, change: HpChange): TokenHp {
       return { ...hp, temp: Math.max(hp.temp, clampInt(change.amount, 0, HP_LIMITS.max)) }
     case "max":
       return withMaxHp(hp, change.max)
+    case "set":
+      return clampHp({ current: change.current ?? hp.current, max: hp.max, temp: change.temp ?? hp.temp })
   }
 }
 

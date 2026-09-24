@@ -155,9 +155,9 @@ export interface AtlasPlayerClient extends PlayerClient {
   /** End the turn of `entryId` (one of our tokens, acting now). */
   endTurn(entryId: Id): string
   /**
-   * Change one of our tokens: damage, healing or temporary hit points (when the DM tracks them; a `max`
-   * change is the DM's and is not sent) and/or conditions to add and remove. Relative, so it never
-   * overwrites a change the DM (or an earlier click) made meanwhile.
+   * Change one of our tokens: damage, healing or temporary hit points (when the DM tracks them; `max`
+   * and `set` changes are the DM's and are not sent) and/or conditions to add and remove. Relative, so it
+   * never overwrites a change the DM (or an earlier click) made meanwhile.
    */
   changeTokenStatus(tokenId: Id, change: TokenStatusChange): string
   /**
@@ -1206,7 +1206,8 @@ class PlayerClientImpl implements AtlasPlayerClient {
     const reqId = this.newRequestId()
     const msg: Extract<ClientToHost, { t: "token-status" }> = { t: "token-status", reqId, tokenId }
     const hp = change.hp
-    if (hp && hp.kind !== "max" && Number.isFinite(hp.amount)) {
+    // Players send amounts only (damage, heal, temp); max and typed values are the DM's.
+    if (hp && (hp.kind === "damage" || hp.kind === "heal" || hp.kind === "temp") && Number.isFinite(hp.amount)) {
       const amount = Math.min(HP_LIMITS.max, Math.round(hp.amount))
       if (amount >= 1) msg.hp = { kind: hp.kind, amount }
     }
