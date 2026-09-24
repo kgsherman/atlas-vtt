@@ -242,7 +242,6 @@ function HostBridge({
         hostMasks: {},
         dimmedTokenIds: [],
         primaryViewerId: null,
-        tilt: tilt * DEG,
       })
       return
     }
