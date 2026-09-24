@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { flickerFactor, flickerSeed, valueNoise } from "./flicker"
-import { DARKVISION_MAX_GAIN, darkvisionRaise, directionToSun, lightFalloff, luma, softLambert } from "./lightModel"
+import { DARKVISION_MAX_GAIN, darkvisionRaise, directionToSun, LAMBERT_MIN_SLOPE, lambertDirection, lightFalloff, luma, softLambert } from "./lightModel"
 
 describe("lightFalloff", () => {
   it("is 1 at the source, 0.5 at the bright radius and 0 at the dim radius", () => {
@@ -42,6 +42,36 @@ describe("softLambert", () => {
       expect(v - prev).toBeLessThan(0.02)
       prev = v
     }
+  })
+})
+
+describe("lambertDirection", () => {
+  const dir = (x: number, y: number, z: number): [number, number, number] => {
+    const l = Math.hypot(x, y, z)
+    return [x / l, y / l, z / l]
+  }
+  const dot = (a: readonly number[], b: readonly number[]) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+  it("keeps directions above the minimum elevation and lifts lower ones to it, same azimuth", () => {
+    const high = dir(3, 4, 0)
+    expect(lambertDirection(high)).toEqual(high.map((v) => expect.closeTo(v, 12)))
+    const low = lambertDirection(dir(20, -1, 5))
+    expect(Math.hypot(...low)).toBeCloseTo(1, 12)
+    expect(low[1] / Math.hypot(low[0], low[2])).toBeCloseTo(LAMBERT_MIN_SLOPE, 12)
+    expect(low[2] / low[0]).toBeCloseTo(5 / 20, 12)
+    expect(lambertDirection([0, 1, 0])).toEqual([0, 1, 0])
+  })
+
+  it("keeps a torch 1 ft above bumpy ground from swinging between dark and lit", () => {
+    // Floor 20 ft away; ground tilted ±3° toward / away from the torch.
+    const l = dir(20, 1, 0)
+    const lit = (tilt: number) => softLambert(dot([Math.sin(tilt), Math.cos(tilt), 0], lambertDirection(l)))
+    const raw = (tilt: number) => softLambert(dot([Math.sin(tilt), Math.cos(tilt), 0], l))
+    const t = (3 * Math.PI) / 180
+    expect(raw(-t)).toBe(0)
+    expect(raw(t)).toBeGreaterThan(0.3)
+    expect(lit(-t)).toBeGreaterThan(0.6)
+    expect(lit(t) - lit(-t)).toBeLessThan(0.05)
   })
 })
 

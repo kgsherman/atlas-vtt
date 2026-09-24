@@ -6,7 +6,7 @@
 import * as THREE from "three"
 import { describe, expect, it } from "vitest"
 
-import { DARKVISION_MAX_GAIN } from "../lighting/lightModel"
+import { DARKVISION_MAX_GAIN, LAMBERT_MIN_SLOPE } from "../lighting/lightModel"
 import { DIRECTIONAL_BIAS_FT } from "../lighting/system"
 import { createSharedUniforms } from "../lighting/uniforms"
 import { CAP_EPSILON, CAP_INSET, DISTANCE_EPSILON } from "../shadows/octahedral"
@@ -242,6 +242,7 @@ describe("GLSL constants mirror the TypeScript side", () => {
     expect(define(COMMON_FUNCTIONS_GLSL, "AT_CAP_INSET")).toBe(CAP_INSET)
     expect(define(COMMON_FUNCTIONS_GLSL, "AT_CAP_EPS")).toBe(CAP_EPSILON)
     expect(define(COMMON_FUNCTIONS_GLSL, "AT_DIR_BIAS_FT")).toBe(DIRECTIONAL_BIAS_FT)
+    expect(define(COMMON_FUNCTIONS_GLSL, "AT_LAMBERT_MIN_SLOPE")).toBe(LAMBERT_MIN_SLOPE)
   })
 })
 

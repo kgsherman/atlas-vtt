@@ -35,6 +35,23 @@ export function softLambert(ndl: number): number {
   return smoothstepSafe(0, 0.2, ndl) * (0.6 + 0.4 * Math.min(ndl, 1))
 }
 
+/**
+ * Point lights' diffuse direction is never lower than atan(LAMBERT_MIN_SLOPE) ≈ 19° above the horizontal.
+ * A torch 1 ft above the ground reaches the floor 20 ft away at ~3°, where N·L sits in softLambert's
+ * steep [0, 0.2] ramp: a ground slope of a few degrees then swings it between dark and fully lit, and
+ * terrain (flat-sided terrain shapes above all) reads as hard-edged bright and dark bands. Lifted, the
+ * same slopes vary the light by a few percent. Only the diffuse term: shadows and falloff use the true
+ * direction.
+ */
+export const LAMBERT_MIN_SLOPE = 0.35
+
+/** Unit direction (toward the light) the diffuse term uses for the unit direction `l` (atLambertDir). */
+export function lambertDirection(l: readonly [number, number, number]): [number, number, number] {
+  const y = Math.max(l[1], LAMBERT_MIN_SLOPE * Math.hypot(l[0], l[2]))
+  const len = Math.hypot(l[0], y, l[2])
+  return [l[0] / len, y / len, l[2] / len]
+}
+
 /** Visual fill added for a rules light level (ambient under cover / sky). */
 export function levelFill(level: AmbientLevel): number {
   switch (level) {
