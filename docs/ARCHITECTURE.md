@@ -24,6 +24,7 @@ src/
     movement/           Move validation (walls/doors/windows/props, connectors), ruler measurement
     history/            Undo/redo over immer patches with transactions
     session/            GameState reducer, request validation, memory, filter, diff/apply, viewToScene
+    tokenMaker/         Token Maker designs: layers, transforms, masks, validation, frame opening detection (§11)
   render/               three.js (WebGL2). Knows nothing about React or the network.
     engine/             Renderer, frame loop, resize, adaptive quality, stats
     builders/           Scene → visual meshes per level (floors, terrain, walls w/ openings, doors, props, tokens…)
@@ -39,25 +40,28 @@ src/
     picking/            Ground/object/token picking
   editor/               DM editor state (zustand) + tools (the terrain mode: tools/terrain.ts + tools/terrain/, terrainMath)
   play/                 Play-mode controllers (token selection, drag-to-move, ruler, level switching)
+  tokenMaker/           Token Maker (§11): Canvas 2D compositor, image import, editor store, draft, flows
   net/                  Supabase client, auth, repositories, transports, host runner (+ vision worker), player client,
-                        free asset catalog (freeAssets.ts)
+                        free asset catalog (freeAssets.ts), token images, image tools, Token Maker link (§11)
     assets/             Map images: import (decode / resample / WebP), DM asset stores, per-player tile chunks
     host/               DM-side host runner, vision worker client, flush pipeline, persistence, backdrop tiler
     player/             Player client (sync rules, requests), backdrop compositor
   app/                  Service wiring (Supabase or local mode), router + lazy routes, library, scene digests
   lib/                  keymap (pure: remappable command tables, overrides), hotkeys (TanStack Hotkeys wrapper, key labels), utils
   components/           React + shadcn UI (app shell, editor panels, play HUD, host console, lobby)
-  routes/               Page-level components (home, editor, host, play, join, shared scene)
+  routes/               Page-level components (home, editor, host, play, join, shared scene, token maker)
   dev/                  Dev-only render harness (`dev/render.html`) and the Vineyard build helpers
   integration/          Cross-module consistency tests (render ↔ occlusion, vision ↔ movement, host → player, editor → session)
 supabase/migrations/    SQL: schema, RLS, RPCs, realtime policies
+supabase/functions/     Edge Functions: merge-guest (§6.4), remove-background (§11); _shared/imageModels.ts (§11)
+dev/imageToolsApi.ts    Dev-server-only /api/image-tools endpoint (§11)
 scripts/free-assets/    Build (STL → LOD GLB + thumbnail) and publish free token models (§4.3, §6.4)
 ```
 
 Dependency rule: `core` imports nothing outside `core` (immer types allowed). `render` imports `core`.
 `editor`/`play`/`net` import `core` and `render/contracts.ts` (`editor`/`play` also the pure `lib/keymap`). `components`/`routes` import everything.
-Bundling: `/editor`, `/host` and `/play` are lazy routes (`app/routes.ts`), so three.js and the renderer load
-only there; the home, join and shared-scene routes never download them.
+Bundling: `/editor`, `/host`, `/play` and `/tokens` are lazy routes (`app/routes.ts`), so three.js and the
+renderer load only in the first three; the home, join, shared-scene and token maker routes never download them.
 
 UI rule: compose from shadcn components in `src/components/ui` (preset `b5UKukPFuS` → style `base-mira`,
 Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme first.
@@ -897,7 +901,8 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
     their carrier token is in the view (resolved position, `emitting = on`). Never `attachedTokenId`.
   - **tokens**: controlled + vision tokens always; others only while in `visibleTokenIds`; never hidden. Other
     players' tokens get `label` only; `name/eyeHeight/vision/speed` only for controlled/vision tokens.
-    `model` (a `free:<id>` reference, §3) is sent with every token sent: it is what the token looks like.
+    `model` (a `free:<id>` reference, §3) and `imageUrl` (its portrait, e.g. a Token Maker image, §11) are sent
+    with every token sent: they are what the token looks like.
   - **levels**: known levels (any explored cell) + stubs (`known:false`, `name:null`) for levels referenced by a
     sent connector or own token, copied field by field (`playerLevel`), so `terrainEdits` never reaches a
     player (tests check that the serialised view contains neither `terrainEdits` nor `baseChunks`, and that
@@ -923,6 +928,9 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
   Door requests: the door must be in the player's current view, a controlled token on its level must be within
   one cell of the door segment, movement not locked; failures reply `"cannot"`; `"locked"` only after the
   adjacency check passes. Players can never unlock.
+  Token image requests (`token-image`, §11): ownership first (`not-owner`, as for moves), then the URL must be
+  an image in the player's own folder of the token image store (`HostRunnerOptions.tokenImageBase`,
+  `core/session/tokenImages.ts`), else `"invalid"`; `null` clears the image. Movement locks do not apply.
 - DM edits during a live session: the editor applies immer patches to `GameState.scene`
   (`apply-scene-patches`); play actions (token moves, door/light toggles) are DmCommands and never enter undo.
   Grid resizes remap explored masks; deleting a level drops its masks/memory.
@@ -1053,7 +1061,16 @@ Tables (RLS enabled on every table; default privileges revoke anon; functions re
   key (`scripts/free-assets/upload.mjs`). Categories: `private.free_asset_categories()` (today
   `token-models`), mirrored by the table's check and `FREE_ASSET_CATEGORIES` (`core/session/freeAssets.ts`).
   Token model metadata: `{lods: [triangles…], height, radius (footprint sides), size?}`. `net/freeAssets.ts`
-  reads the catalog once per app run; local mode has none.
+  reads the catalog once per app run; local mode has none. The Token Maker's free parts (`token-bg.png`,
+  `token-frame.png`) are files at the bucket's root, not catalog rows (§11).
+- Bucket `token-images` (PUBLIC, PNG / WebP ≤ 4 MiB; migration `*_token_maker.sql`): finished tokens at
+  `{userId}/{sha256 prefix}.{png|webp}`, so every client at a table loads a token's portrait by URL. Clients
+  insert into their own folder only (`private.can_insert_token_image`: well-formed name, ≤ 300 objects /
+  200 MB per owner), list and delete their own objects, and never update (content-addressed names).
+- `private.image_tool_usage(user_id, day, calls)` — no client access; spent by
+  `consume_image_tool_quota(user, anonymous)` (service_role only), which the Edge Function `remove-background`
+  calls before every model call: ≤ 10 calls per guest and ≤ 30 per permanent account per UTC day, ≤ 300 per
+  day for the whole project (`quota_exceeded`), rows older than a week dropped on the way.
 
 Helpers in schema `private` (`set search_path = ''`; execute revoked from public / anon / authenticated,
 then granted to authenticated only for the ones policies call, which are `security definer` and stable):
@@ -1092,7 +1109,9 @@ advisory lock). Sizes are `pg_column_size` (on-disk, compressed). Over a limit, 
   `create_session` deletes the oldest ended sessions beyond that (state, members and views cascade);
 - `scene-assets`: ≤ 300 objects and ≤ 1 GiB per owner (storage insert policy; 50 MB per object);
 - `session-tiles`: a chunk's `{userId}` must be a member of the session, and a session holds ≤ 20,000
-  objects.
+  objects;
+- `token-images`: ≤ 300 objects and ≤ 200 MB per owner (4 MiB per object);
+- image tools (paid model calls): ≤ 10 per guest / 30 per account / 300 in total per day (above).
 The limits are per account (guest or permanent): abuse spread over many accounts is bounded only by
 Supabase's per-IP anonymous sign-in rate limit (README).
 Realtime: `realtime.messages` policies per the §6.1 table, checking `extension` ('broadcast'/'presence').
@@ -1518,6 +1537,77 @@ parallel compilation are untested.
 
 ---
 
+## 11. Token Maker
+
+A tool of its own at `/tokens` (the header's "Token maker" tab; lazy route, no three.js): layer a
+background, character art and a frame, mask them into a round token whose character can break out of the
+frame, remove a picture's background with an image model, download a PNG, or put the token on a character
+of a game that is open in another tab. Everyone can use it: players for their characters, DMs for NPCs and
+monsters, anyone for fun. The play space stays untouched: the host console's "Token maker" button and the
+player HUD's (session chip, character card) open it in a NEW browser tab (`openTokenMaker`,
+`?session=<id>&token=<id>`), so the game keeps running.
+
+**Designs** (`core/tokenMaker`, pure, tested). A `TokenDesign` is `{version: 1, radius, layers}` in canvas
+units: the output square is [0, 1]², y down; the token disc is centred with radius `radius` (the frame's
+opening). A layer has a source (an image by id with its pixel size, or a solid fill), a transform (centre,
+displayed width `scale`, clockwise rotation, horizontal flip), opacity, visibility and a mask:
+`shape` (`none` = whole canvas, `disc` = the disc grown by `grow`), `popOut` (disc layers: everything above
+the disc's centre line, as wide as the disc, shows too) and painted strokes (round brush, `reveal` adds,
+`hide` removes, applied in order). Edits are immutable functions (`addLayer`, `moveLayer`, `setTransform`,
+`setMask`, `addStroke`, `zoomLayerAt`, `pickLayer`…) with budgets (`TOKEN_LIMITS`: 12 layers, 500 strokes /
+40k stroke coordinates per layer, brush and scale ranges); `parseTokenDesign` validates a saved design
+strictly. `detectFrameOpening(rgba)` measures a ring's hole: the median over 72 rays from the centre of the
+distance to the first ≥ 50% opaque pixel (studs and gaps do not skew it); null without an opening or a ring.
+`radiusForFrame` turns it into the disc radius when the frame is centred.
+
+**Compositing** (`src/tokenMaker/render.ts`, Canvas 2D, the same code for the stage, downloads and game
+images). Per layer, bottom to top: its content on a scratch canvas, cut by its mask. A disc layer that
+breaks out (pop-out or reveal strokes) is split: what lies outside its disc, in its pop-out region or under
+a reveal stroke is drawn in a second pass above every layer, the rest in place. So the default stack
+(backdrop, character, frame) keeps the character inside the ring and under its inner shadow, while a head
+breaking out of the ring, or a revealed shield, lies over it in one piece.
+
+**Editor** (`src/tokenMaker/store.ts`, zustand; `components/tokenMaker`, `routes/TokenMakerPage.tsx`).
+Undo keeps design snapshots (≤ 100; commits sharing a key within 800 ms, a drag or a slider, are one step).
+Images are imported at ≤ 2048 px (`images.ts`), kept as blobs beside the design and decoded once
+(`ImageCache`; alpha maps for click-through picking: clicks pass the ring's transparent hole). The stage:
+drag moves the selected layer, wheel scales it about the pointer, Shift+wheel rotates; Reveal / Hide paint
+the selected layer's mask (with a faint ghost of its hidden parts). New layers go by role: backgrounds at
+the bottom (disc grown 0.02 to reach under the ring), frames on top (unmasked; the disc is fitted to their
+opening), character art under the topmost frame (disc). The design and its images autosave to IndexedDB
+(`draft.ts`, key `token-maker:current`) and come back on reload; a fresh page starts from the free parts.
+Free parts: `token-bg.png` and `token-frame.png` at the root of the public `free-assets` bucket
+(`FREE_TOKEN_PARTS`, `FreeAssetsRepo.tokenParts()`; not catalog rows: they are not loaded into games).
+Downloads are PNGs at 256–2048 px.
+
+**Background removal** (model-agnostic). The client (`net/imageTools.ts`) only sends the image and its
+size and gets a transparent PNG back; which provider and model run is server configuration.
+`supabase/functions/_shared/imageModels.ts` (runtime-agnostic: fetch, FormData, Blob) defines
+`BackgroundRemovalModel` and the providers (`IMAGE_MODEL_PROVIDER`, default `openai`: OpenAI's Images edit
+endpoint with `OPENAI_IMAGE_MODEL` = `gpt-image-2.5-sunburst`, `background: "transparent"`,
+`output_format: "png"`, quality `high`, an output size with the input's aspect ratio, and a one-line
+prompt). It runs in the Edge Function `remove-background` (Cloud: the caller's JWT, then
+`consume_image_tool_quota`, then the model) and, under `npm run dev`, in the dev server's
+`POST /api/image-tools/remove-background` (`dev/imageToolsApi.ts`, key from `.env.local`, no quota). The dev
+client tries the dev endpoint first and falls through to the Edge Function when it is not configured.
+Provider keys are server secrets only, never `VITE_` variables. The result replaces the layer's image in
+place (same centre and width, one undo step) and turns the layer's pop-out on.
+
+**Games** (`net/tokenMakerLink.ts`). The Token Maker never joins a session. Game tabs of the same browser
+(the host console, a player's table: `components/play/useTokenMakerLink.ts`) announce themselves on the
+BroadcastChannel `atlas-vtt:token-maker:v1` with the tokens their user may re-skin (DM: all; player: the
+controlled ones) and whether they can apply now; they re-announce every 10 s and say "gone" on close, and
+the Token Maker forgets tabs silent for 25 s. Every message is zod-validated. Applying: the Token Maker
+renders the token at 512 px (WebP, PNG fallback), stores it in `token-images` (`net/tokenImages.ts`,
+content-addressed, so re-applying stores nothing new) and asks the chosen tab to put the public URL on the
+token: the DM's tab checks that the URL is the DM's own token image and makes the scene edit
+(`setTokenImagePatches`, like a model change; marks the map dirty); a player's tab sends the `token-image`
+request (§6.2), whose verdict it relays. The host authorises every player request itself; the link grants
+nothing. The token's `imageUrl` is the portrait the renderer draws on the token (`render/engine/portraits`,
+circle-cropped) and every avatar shows. Local mode has no token image store: download only.
+
+---
+
 ## Appendix: Implementation status (2026-09-23)
 
 Everything above is implemented, except for the known gaps and deliberate limits listed at the end of
@@ -1540,6 +1630,17 @@ run against a Vite dev server (Chromium, NVIDIA through WSL d3d12 unless noted; 
 | `perf` | 36/36 (AMD iGPU medium and NVIDIA ultra × Crooked Lantern, Stress Test, Vineyard; numbers in `docs/PERFORMANCE.md`) |
 | `showcase` | 5/5 (the screenshots in `docs/screenshots/` were re-shot: the darkvision views changed with the colour lift of §4.1) |
 | `firefox-smoke` | 14/14 in headless Firefox 155 (software WebGL2): the library, the editor at all four tiers, a local-mode player whose view equals the oracle, no console errors |
+
+**Token Maker (2026-09-24).** `tsc -b`, `npx vitest run` and `npx eslint .` pass. Chromium (Playwright) against
+the Vite dev server in local mode with a mock of OpenAI's Images edit endpoint (`OPENAI_BASE_URL`): adding a
+frame fits the disc to its opening, character art lands under the frame, background removal sends
+`gpt-image-2.5-sunburst` / `background: transparent` / `output_format: png` / a matching size and replaces
+the layer's image with pop-out on, zooming and dragging break the head out over the ring in one piece, a
+reveal stroke brings a shield over the ring, undo / redo, reload restores the draft, the PNG download, no
+console errors, no horizontal scroll at 390 px. Not run from the development container (no network access
+to them): the SQL tests `supabase/tests/token_maker_test.sql`, the Edge Function `remove-background`, the
+real OpenAI endpoint, and applying a token to a Cloud game (the request path is covered by
+`net/player/hostIntegration.test.ts` over the local transport, the tab link by `net/tokenMakerLink.test.ts`).
 
 Editing files while these scripts run no longer disturbs them unless the files are modules the page
 loads: Tailwind scans only `src/` and `index.html` (`src/index.css` `source(".")`). Before, a change to
@@ -1819,7 +1920,15 @@ Known gaps and deliberate limits:
   supported yet (`describeNetError("captcha_required")` explains the error, but the app has no widget).
 - Token portraits are the DM-supplied http(s) `imageUrl`, sent to players who see the token and loaded by
   their browsers from that host (without a referrer). The image host therefore learns the viewers' IP
-  addresses. Portraits are not copied into Storage, and there is no CSP `img-src` restriction.
+  addresses. Portraits are not copied into Storage, and there is no CSP `img-src` restriction. Token Maker
+  images live in Atlas's own public `token-images` bucket; players can only set those (their own folder).
+- Token Maker images (§11) are public: anyone with a URL can load it. The names are 128-bit content hashes,
+  and a URL reaches only players who see the token. A guest who merges into an account (§6.4) leaves their
+  token images in the guest's folder: the URLs keep working, but they count against no quota and nothing
+  lists or deletes them.
+- Background removal spends money at the model provider. Its allowance (§6.4) is per account and guests are
+  free to create, so the project-wide daily cap (300) is the real bound; lower it (or allow permanent
+  accounts only) for a public deployment.
 - Realtime authorises a channel when it is joined and re-checks only when the client sends a new JWT
   (§6.4): a member kicked while subscribed keeps receiving the host topic's `status` broadcasts (wire
   epoch, scene name) and lobby presence until their client refreshes its token, or at most until the JWT
@@ -1842,8 +1951,10 @@ Known gaps and deliberate limits:
   `src/components/play`, `src/play`, `e2e`, `scripts`) matches about two thirds of the source files, and
   `npm run format:check` lists ~170 files under `src` whose widths vary within the file, so formatting is
   not part of `lint`. A one-time `npm run format` would make it enforceable.
-- `tsconfig.node.json` (which covers only `vite.config.ts`) does not set `strict`, unlike
-  `tsconfig.app.json`; `vite.config.ts` passes under `--strict` today.
+- `tsconfig.node.json` (which covers `vite.config.ts`, `dev/imageToolsApi.ts` and the shared image model
+  module they import) does not set `strict`, unlike `tsconfig.app.json`. The Edge Functions themselves
+  (Deno) are not type-checked by `tsc -b`; `supabase/functions/_shared/imageModels.ts` is covered through
+  the dev endpoint and its vitest tests.
 
 **Bundle** (`npm run build`, minified)
 

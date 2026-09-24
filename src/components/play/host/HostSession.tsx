@@ -30,6 +30,7 @@ import { useSuppressThemeHotkey } from "@/components/theme-provider"
 import { Button } from "@/components/ui/button"
 import { sortedLevels } from "@/core/scene/queries"
 import type { Id } from "@/core/scene/types"
+import { playerTokenImageAllowed } from "@/core/session/tokenImages"
 import type { GameState } from "@/core/session/types"
 import { createHostRunner, type HostRunnerImpl } from "@/net/host"
 import { cycleToken, PlayController, type PlayTool } from "@/play"
@@ -37,6 +38,7 @@ import type { CameraKind, Engine, FrameStats } from "@/render/contracts"
 
 import { CameraDock, HudPanel, ShortcutsButton, ToolSwitch } from "../hud"
 import { usePlayKeys, zoomCanvas } from "../input"
+import { linkTokens, useGameLink } from "../useTokenMakerLink"
 import {
   BlockingScreen,
   EndedScreen,
@@ -96,6 +98,7 @@ export function HostSession({ sessionId }: { sessionId: string }) {
         assets: services.assets,
         // "Save map to library" (HostRunner.saveMapToLibrary) writes to the scene library.
         scenes: services.scenes,
+        tokenImageBase: services.tokenImages.publicBase,
       })
       void r
         .start()
@@ -260,6 +263,42 @@ function HostConsole({
   )
   const saveMap = useSaveMap(runner, snap)
   const [ending, setEnding] = React.useState(false)
+
+  // ---- Token Maker link: a Token Maker tab re-skins any token through this console -------------------
+  const services = useServices()
+  const linkGame = React.useMemo(
+    () => ({
+      sessionId: snap.sessionId,
+      role: "dm" as const,
+      title: scene.name,
+      userId: services.identity.userId,
+      ready: hosting,
+      tokens: linkTokens(Object.values(scene.tokens)),
+    }),
+    [
+      snap.sessionId,
+      scene.name,
+      scene.tokens,
+      services.identity.userId,
+      hosting,
+    ]
+  )
+  useGameLink(linkGame, async (tokenId, imageUrl) => {
+    // Only the DM's own uploads (what the Token Maker produces), never an arbitrary URL.
+    if (
+      !playerTokenImageAllowed(
+        imageUrl,
+        services.tokenImages.publicBase,
+        services.identity.userId
+      )
+    )
+      return { ok: false, error: "That image isn't one of your token images." }
+    const ok = actions.setTokenImage([tokenId], imageUrl)
+    if (ok) toast.success("Token image updated from the Token Maker")
+    return ok
+      ? { ok: true, error: null }
+      : { ok: false, error: "The table refused the image." }
+  })
   const focusToken = React.useCallback(
     (id: Id) => {
       const s = live.get()

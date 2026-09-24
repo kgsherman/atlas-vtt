@@ -65,6 +65,19 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
   in the session until the DM chooses **Save map to library**, which saves them (with the current token,
   door and light state) as a new version of the library scene, after a conflict check.
 
+**Token maker**
+- A tab of its own (**Token maker** in the header, `/tokens`) for round, modern tokens: stack a background,
+  character art and a frame, move / scale / rotate / flip each layer, and mask it to the token disc. Let the
+  character **break out of the frame** (the head over the ring) and paint the mask by hand with **Reveal** and
+  **Hide** brushes. The disc fits the frame's opening automatically. Two free parts (a backdrop and a ring)
+  are there to start from; upload your own images, paste or drop them.
+- **Remove background**: an image model cuts the character out of their art (model-agnostic; OpenAI's
+  `gpt-image-2.5-sunburst` with a transparent background by default, see "Token maker setup").
+- **Download** a PNG (256–2048 px), or **put it on a token in your game**: open the Token Maker from the host
+  console or the player HUD (it opens in a new tab, the game keeps running) and pick a token. DMs can re-skin
+  any token, players their own characters (the DM's table checks every request). Work in progress is saved in
+  the browser.
+
 **Multiplayer**
 - The DM hosts a session and players join with an 8-character room code. No accounts are needed: the app
   signs everyone in as an anonymous guest. A guest can create a permanent account with Discord (from the
@@ -113,7 +126,8 @@ with `?local=0`.
    use the Supabase CLI (`supabase init` if needed, then `supabase link --project-ref <ref>` and
    `supabase db push`), or paste each file into the SQL editor. They create the
    tables, RLS policies, RPCs, Realtime policies, the private Storage buckets `scene-assets` and
-   `session-tiles`, the public bucket `free-assets` and the free asset catalog (`free_assets`).
+   `session-tiles`, the public buckets `free-assets` and `token-images`, and the free asset catalog
+   (`free_assets`).
    The free asset files themselves are published separately (see "Free assets" below).
 2. In the Supabase dashboard:
    - **Authentication → Sign In / Providers → allow anonymous sign-ins** (on). Players and DMs sign in
@@ -138,6 +152,20 @@ with `?local=0`.
    ```
 
 4. Run `npm run dev`. The header shows **Cloud** instead of **Local**.
+
+### Token maker setup
+
+- Free parts: upload `token-bg.png` and `token-frame.png` to the root of the `free-assets` bucket (paths in
+  `FREE_TOKEN_PARTS`, `src/net/freeAssets.ts`). Without them a new token starts from a plain backdrop.
+- Background removal runs server-side; the provider key is never a `VITE_` variable and never reaches the
+  browser. Settings (all optional except the key): `OPENAI_API_KEY`, `IMAGE_MODEL_PROVIDER` (`openai`),
+  `OPENAI_IMAGE_MODEL` (`gpt-image-2.5-sunburst`), `OPENAI_IMAGE_QUALITY` (`high`), `OPENAI_IMAGE_SIZE`
+  (`match`: the input's aspect ratio; or `auto` / `WxH`), `OPENAI_INPUT_FIDELITY`, `OPENAI_BASE_URL`.
+  - Development: put `OPENAI_API_KEY=...` in `.env.local` and run `npm run dev`; the dev server answers
+    `/api/image-tools/remove-background` itself (no quota).
+  - Cloud: `supabase secrets set OPENAI_API_KEY=...` and `supabase functions deploy remove-background
+    --no-verify-jwt` (the function checks the caller's session itself). Each call spends from a daily
+    allowance: 10 per guest, 30 per account, 300 for the whole project (`*_token_maker.sql`).
 
 ### Scripts
 

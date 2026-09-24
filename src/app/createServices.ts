@@ -20,6 +20,7 @@ import {
   type AtlasIdentity,
 } from "@/net/auth"
 import { createLocalFreeAssetsRepo, createRemoteFreeAssetsRepo } from "@/net/freeAssets"
+import { createBackgroundRemover } from "@/net/imageTools"
 import { getLocalStore, type LocalStore } from "@/net/localStore"
 import { createMergeTicket, mergeGuest } from "@/net/guestMerge"
 import { createLocalTransport } from "@/net/localTransport"
@@ -27,6 +28,7 @@ import { createLocalScenesRepo, createRemoteScenesRepo } from "@/net/scenesRepo"
 import { createLocalSessionsRepo, createRemoteSessionsRepo } from "@/net/sessionsRepo"
 import { getSupabase, NetError, type AtlasClient } from "@/net/supabase"
 import { createSupabaseTransport } from "@/net/supabaseTransport"
+import { createLocalTokenImageStore, createRemoteTokenImageStore } from "@/net/tokenImages"
 
 import { beginAccountRedirect } from "./account"
 import { currentMode, type AppMode } from "./mode"
@@ -74,6 +76,8 @@ export async function createServices(opts: CreateServicesOptions = {}): Promise<
   const transport = client ? createSupabaseTransport(client) : createLocalTransport()
   const assets = safeAssetStore(mode, () => createAssetStore({ client, store, userId: identity.userId }))
   const freeAssets = client ? createRemoteFreeAssetsRepo(client) : createLocalFreeAssetsRepo()
+  const tokenImages = client ? createRemoteTokenImageStore(client, identity.userId) : createLocalTokenImageStore()
+  const backgroundRemover = createBackgroundRemover({ client, dev: import.meta.env.DEV })
 
   return {
     mode,
@@ -83,6 +87,8 @@ export async function createServices(opts: CreateServicesOptions = {}): Promise<
     transport,
     assets,
     freeAssets,
+    tokenImages,
+    backgroundRemover,
     tilesFor(sessionId: string): BackdropTileSource {
       try {
         return createTileSource({ sessionId, userId: identity.userId, client, store })

@@ -1,7 +1,7 @@
 /**
  * The player-side client (ARCHITECTURE §6.3, §9): joins the player's channels, keeps the PlayerView in
  * sync with the host (snapshots, sequenced patches, hello resynchronisation), falls back to the
- * persisted `player_views` row while the DM is away, sends move/door requests and composites the
+ * persisted `player_views` row while the DM is away, sends move/door/token-image requests and composites the
  * battlemap tiles of explored cells into per-level canvases.
  *
  * Sync rules (the host side lives in net/host):
@@ -460,6 +460,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
     this.requestMove = this.requestMove.bind(this)
     this.requestDoor = this.requestDoor.bind(this)
     this.requestJump = this.requestJump.bind(this)
+    this.requestTokenImage = this.requestTokenImage.bind(this)
     this.sceneChangeSince = this.sceneChangeSince.bind(this)
     this.onBackdrop = this.onBackdrop.bind(this)
     this.backdropLayers = this.backdropLayers.bind(this)
@@ -1069,6 +1070,13 @@ class PlayerClientImpl implements AtlasPlayerClient {
   requestDoor(doorId: Id, action: "open" | "close"): string {
     const reqId = this.newRequestId()
     this.submit({ reqId, kind: "door", doorId, sentAt: 0 }, { t: "door", reqId, doorId, action })
+    this.changed()
+    return reqId
+  }
+
+  requestTokenImage(tokenId: Id, imageUrl: string | null): string {
+    const reqId = this.newRequestId()
+    this.submit({ reqId, kind: "token-image", tokenId, sentAt: 0 }, { t: "token-image", reqId, tokenId, imageUrl })
     this.changed()
     return reqId
   }

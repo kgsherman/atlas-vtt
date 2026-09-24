@@ -68,6 +68,11 @@ import {
   usePreference,
   useSessionResource,
 } from "../useSessionResource"
+import {
+  linkTokens,
+  requestTokenImage,
+  useGameLink,
+} from "../useTokenMakerLink"
 import { PlayerHud } from "./PlayerHud"
 
 const FOCUS_VIEW_HEIGHT = 70
@@ -249,12 +254,48 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
     [controller]
   )
 
+  // ---- Token Maker link: a Token Maker tab re-skins this player's tokens through this table ---------
+  const makerRequests = React.useRef(new Set<string>())
+  const linkGame = React.useMemo(
+    () =>
+      view && scene
+        ? {
+            sessionId: snap.sessionId,
+            role: "player" as const,
+            title: view.scene.name,
+            userId: snap.userId,
+            ready: snap.status === "live" && !snap.networkOffline,
+            tokens: linkTokens(
+              controlled
+                .filter((id) => Object.hasOwn(scene.tokens, id))
+                .map((id) => scene.tokens[id])
+            ),
+          }
+        : null,
+    [
+      view,
+      scene,
+      controlled,
+      snap.sessionId,
+      snap.userId,
+      snap.status,
+      snap.networkOffline,
+    ]
+  )
+  useGameLink(linkGame, (tokenId, imageUrl) =>
+    requestTokenImage(client, tokenId, imageUrl, {
+      // The Token Maker tab reports the outcome; no toast here.
+      onRequest: (reqId) => makerRequests.current.add(reqId),
+    })
+  )
+
   // ---- request results → toasts ------------------------------------------------------------------
   const seen = React.useRef(new Set<string>())
   React.useEffect(() => {
     for (const r of snap.results) {
       if (seen.current.has(r.reqId)) continue
       seen.current.add(r.reqId)
+      if (makerRequests.current.has(r.reqId)) continue
       const text = describeRequestResult(r)
       if (text) toast.error(text, { id: `req-${r.reqId}` })
     }

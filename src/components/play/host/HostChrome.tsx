@@ -6,6 +6,7 @@ import * as React from "react"
 import { useStore } from "zustand"
 import {
   Activity,
+  CircleUserRound,
   Cpu,
   DoorClosed,
   Gauge,
@@ -21,7 +22,7 @@ import {
 } from "lucide-react"
 import { useLocation } from "wouter"
 
-import { paths } from "@/app/routes"
+import { openTokenMaker, paths } from "@/app/routes"
 import { AppLogoMark } from "@/components/app/AppLogo"
 import { QualitySelect } from "@/components/canvas/QualitySelect"
 import type { QualityChoice } from "@/components/canvas/qualityChoice"
@@ -201,6 +202,22 @@ export function HostTopBar({
         <TooltipContent side="bottom">
           See what the selected token (or the first PC) perceives{" "}
           <CommandKbd scope="play" command="preview-vision" />
+        </TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => openTokenMaker({ session: snap.sessionId })}
+            />
+          }
+        >
+          <CircleUserRound data-icon="inline-start" /> Token maker
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-64">
+          Make token art in a new tab and put it on any token of this game
         </TooltipContent>
       </Tooltip>
       <Separator orientation="vertical" className="mx-1 h-5 self-center" />

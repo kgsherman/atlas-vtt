@@ -6,6 +6,7 @@
 import { z } from "zod"
 
 import { MAX_PATH_STEPS } from "../movement"
+import { MAX_TOKEN_IMAGE_URL } from "./tokenImages"
 import type { ClientToHost } from "./types"
 
 export const PROTOCOL_LIMITS = {
@@ -78,7 +79,15 @@ const doorSchema = z.strictObject({
   action: z.enum(["open", "close"]),
 })
 
-export const clientMessageSchema = z.discriminatedUnion("t", [helloSchema, moveSchema, jumpSchema, doorSchema])
+/** The URL is only shape-checked here; the host allows the player's own token images only. */
+const tokenImageSchema = z.strictObject({
+  t: z.literal("token-image"),
+  reqId: tokenSchema,
+  tokenId: idSchema,
+  imageUrl: z.string().min(1).max(MAX_TOKEN_IMAGE_URL).nullable(),
+})
+
+export const clientMessageSchema = z.discriminatedUnion("t", [helloSchema, moveSchema, jumpSchema, doorSchema, tokenImageSchema])
 
 /** Strict zod parse of an untrusted player message (limits enforced). null = drop silently. */
 export function parseClientMessage(raw: unknown): ClientToHost | null {

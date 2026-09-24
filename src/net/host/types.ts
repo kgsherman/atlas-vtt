@@ -75,6 +75,11 @@ export interface HostRunnerOptions {
   assets: AssetStore
   /** The DM's scene library (saveMapToLibrary). Without it the live map cannot be saved back. */
   scenes?: ScenesRepo
+  /**
+   * Public URL prefix of the token image store (TokenImageStore.publicBase): players may put images from
+   * their own folder there on their tokens (`token-image` requests). Absent / null: they cannot.
+   */
+  tokenImageBase?: string | null
   /** Create the vision worker (injectable for tests; default spawns src/net/host/visionWorker.ts). */
   createVisionClient?: () => VisionClient
 }

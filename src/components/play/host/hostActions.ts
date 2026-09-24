@@ -14,6 +14,7 @@ import type { HostRunnerImpl } from "@/net/host"
 import {
   setDirectionalPatches,
   setObjectsHiddenPatches,
+  setTokenImagePatches,
   setTokenModelPatches,
   setTokensHiddenPatches,
 } from "@/play"
@@ -36,6 +37,8 @@ export interface HostActions {
   resetFog(userId?: string): void
   /** Token.model (`free:<id>`), or null for the default body. A map edit like hiding a token. */
   setTokenModel(tokenIds: Id[], model: string | null): void
+  /** Token.imageUrl (a portrait, e.g. from the Token Maker), or null for none. Returns false when refused. */
+  setTokenImage(tokenIds: Id[], imageUrl: string | null): boolean
   /** Free asset categories loaded into the game. */
   setFreeAssets(categories: FreeAssetCategory[]): void
 }
@@ -167,6 +170,16 @@ export function createHostActions(
           setTokenModelPatches(s, tokenIds, model),
           "Couldn't change the token's model"
         )
+    },
+    setTokenImage(tokenIds, imageUrl) {
+      const s = scene()
+      if (!s) return false
+      const patches = setTokenImagePatches(s, tokenIds, imageUrl)
+      if (patches.length === 0) return true
+      return dispatch(
+        { t: "apply-scene-patches", patches },
+        "Couldn't change the token's image"
+      )
     },
     setFreeAssets(categories) {
       dispatch(

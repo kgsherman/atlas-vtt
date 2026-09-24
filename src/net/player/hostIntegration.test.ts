@@ -18,6 +18,7 @@ import { createPlayerClient } from "./index"
 
 const DM = "d0000000-0000-4000-8000-000000000001"
 const P1 = "a1000000-0000-4000-8000-000000000001"
+const IMAGES = "https://ref.supabase.co/storage/v1/object/public/token-images/"
 
 const cleanups: Array<() => unknown> = []
 afterEach(async () => {
@@ -83,6 +84,7 @@ describe("player client ↔ real host runner", () => {
         locks: null,
         tileCodec: null,
         watchVisibility: false,
+        tokenImageBase: IMAGES,
       })
       cleanups.push(() => h.stop())
       return h
@@ -117,6 +119,18 @@ describe("player client ↔ real host runner", () => {
     expect(client.getSnapshot().results.find((r) => r.reqId === reqId)).toMatchObject({ ok: true })
     await waitFor(() => client.getSnapshot().scene?.tokens[tokenId]?.position.x === 22.5, "token moved")
     expect(client.getSnapshot().scene?.tokens[tokenId].position).toEqual({ x: 22.5, z: 17.5 })
+
+    // The player puts a Token Maker image from their own folder on their token; others' are refused.
+    const mine = `${IMAGES}${P1}/0123456789abcdef.webp`
+    const imageReq = client.requestTokenImage(tokenId, mine)
+    await waitFor(() => client.getSnapshot().scene?.tokens[tokenId]?.imageUrl === mine, "token image applied")
+    await waitFor(() => client.getSnapshot().results.some((r) => r.reqId === imageReq), "token image settled")
+    expect(client.getSnapshot().results.find((r) => r.reqId === imageReq)).toMatchObject({ ok: true })
+    expect(host.getSnapshot().state!.scene.tokens[tokenId].imageUrl).toBe(mine)
+    const foreign = client.requestTokenImage(tokenId, `${IMAGES}${DM}/0123456789abcdef.webp`)
+    await waitFor(() => client.getSnapshot().results.some((r) => r.reqId === foreign), "foreign image settled")
+    expect(client.getSnapshot().results.find((r) => r.reqId === foreign)).toMatchObject({ ok: false, reason: "invalid" })
+    expect(client.getSnapshot().scene?.tokens[tokenId].imageUrl).toBe(mine)
 
     // The DM leaves: the stored view keeps the game on screen, input is disabled.
     await host.stop()

@@ -53,6 +53,7 @@ import {
   previewSeenTokens,
   sceneChangeBetween,
   setDirectionalPatches,
+  setTokenImagePatches,
   setTokenModelPatches,
   setTokensHiddenPatches,
 } from "./host"
@@ -791,6 +792,11 @@ describe("host helpers", () => {
     expect(setTokenModelPatches(withModel, [t.id], null)).toEqual([
       { op: "remove", path: ["tokens", t.id, "model"] },
     ])
+    const url = "https://ref.supabase.co/storage/v1/object/public/token-images/u/a.webp"
+    expect(setTokenImagePatches(scene, [t.id, "missing"], url)).toEqual([
+      { op: "replace", path: ["tokens", t.id, "imageUrl"], value: url },
+    ])
+    expect(setTokenImagePatches(scene, [t.id], null)).toEqual([])
     const sun = setDirectionalPatches(
       scene,
       !scene.environment.directional.enabled

@@ -8,8 +8,10 @@ import type { AccountProvider, AtlasIdentity } from "@/net/auth"
 import type { AssetStore, BackdropTileSource } from "@/net/assets/types"
 import type { FreeAssetsRepo } from "@/net/freeAssets"
 import type { GuestMergeResult } from "@/net/guestMerge"
+import type { BackgroundRemover } from "@/net/imageTools"
 import type { ScenesRepo } from "@/net/scenesRepo"
 import type { SessionsRepo } from "@/net/sessionsRepo"
+import type { TokenImageStore } from "@/net/tokenImages"
 import type { Transport } from "@/net/transport"
 
 export interface AppServices {
@@ -22,6 +24,10 @@ export interface AppServices {
   assets: AssetStore
   /** The free asset catalog (token models, …); unavailable in local mode. */
   freeAssets: FreeAssetsRepo
+  /** Token images applied to game tokens (Token Maker); unavailable in local mode. */
+  tokenImages: TokenImageStore
+  /** AI background removal (Token Maker): Cloud's Edge Function, or the dev server's endpoint. */
+  backgroundRemover: BackgroundRemover
   /** Player-side backdrop tile source for a session. */
   tilesFor(sessionId: string): BackdropTileSource
   /** Update the display name (profiles / local identity); returns the normalised name. */

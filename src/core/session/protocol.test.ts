@@ -15,6 +15,18 @@ describe("parseClientMessage", () => {
     const jump = { t: "jump", reqId: "r3", tokenId: "tok_1", levelId: "L1", x: 41.3, z: 8 }
     expect(parseClientMessage(jump)).toEqual(jump)
     expect(parseClientMessage({ t: "door", reqId: "r2", doorId: "d-9", action: "open" })).toEqual({ t: "door", reqId: "r2", doorId: "d-9", action: "open" })
+    const image = { t: "token-image", reqId: "r4", tokenId: "tok_1", imageUrl: "https://x.supabase.co/storage/v1/object/public/token-images/u/a.png" }
+    expect(parseClientMessage(image)).toEqual(image)
+    expect(parseClientMessage({ ...image, imageUrl: null })).toEqual({ ...image, imageUrl: null })
+  })
+
+  it("bounds token image requests", () => {
+    const image = { t: "token-image", reqId: "r", tokenId: "t" }
+    expect(parseClientMessage({ ...image, imageUrl: "" })).toBeNull()
+    expect(parseClientMessage({ ...image, imageUrl: `https://x/${"a".repeat(2000)}` })).toBeNull()
+    expect(parseClientMessage({ ...image, imageUrl: 3 })).toBeNull()
+    expect(parseClientMessage({ ...image, imageUrl: null, userId: "u" })).toBeNull()
+    expect(parseClientMessage(image)).toBeNull()
   })
 
   it("rejects unknown keys anywhere (strict)", () => {

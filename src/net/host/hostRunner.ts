@@ -1042,6 +1042,7 @@ export class HostRunnerImpl implements HostRunner {
       world,
       currentView: conn.lastSent,
       perceivedByPlayer: perceivedCellLookup(conn.lastVis),
+      tokenImageBase: this.o.tokenImageBase ?? null,
     })
     if (out.state !== state) {
       this.state = out.state

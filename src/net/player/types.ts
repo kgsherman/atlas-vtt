@@ -23,7 +23,7 @@ export type PlayerStatus =
 
 export interface PendingRequest {
   reqId: string
-  kind: "move" | "jump" | "door"
+  kind: "move" | "jump" | "door" | "token-image"
   tokenId?: Id
   path?: PathStep[]
   doorId?: Id
@@ -69,6 +69,8 @@ export interface PlayerClient {
   /** Put a token at a point without walking there (when no path can be found). */
   requestJump(tokenId: Id, levelId: Id, position: Vec2): string
   requestDoor(doorId: Id, action: "open" | "close"): string
+  /** Put an image from the player's token image folder on a controlled token (null clears it). */
+  requestTokenImage(tokenId: Id, imageUrl: string | null): string
 }
 
 export type CreatePlayerClient = (opts: PlayerClientOptions) => PlayerClient

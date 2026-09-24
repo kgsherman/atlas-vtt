@@ -14,7 +14,12 @@ export async function copyText(text: string, what = "Link"): Promise<boolean> {
 
 /** Save text as a file download. */
 export function downloadText(fileName: string, mimeType: string, text: string): void {
-  const url = URL.createObjectURL(new Blob([text], { type: mimeType }))
+  downloadBlob(fileName, new Blob([text], { type: mimeType }))
+}
+
+/** Save a blob as a file (the browser's download). */
+export function downloadBlob(fileName: string, blob: Blob): void {
+  const url = URL.createObjectURL(blob)
   const a = document.createElement("a")
   a.href = url
   a.download = fileName

@@ -233,6 +233,11 @@ export type ClientToHost =
   /** Put a token at a point without walking there (no path could be found). */
   | { t: "jump"; reqId: string; tokenId: Id; levelId: Id; x: number; z: number }
   | { t: "door"; reqId: string; doorId: Id; action: "open" | "close" }
+  /**
+   * Put an image on a token the player controls (Token Maker, ARCHITECTURE §11), or clear it (null). The
+   * image must be in the player's own folder of the token image store (core/session/tokenImages.ts).
+   */
+  | { t: "token-image"; reqId: string; tokenId: Id; imageUrl: string | null }
 
 /**
  * host → player on topic `session:{sid}:view:{uid}`. `epoch` changes on every host start;

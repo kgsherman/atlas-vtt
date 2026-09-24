@@ -8,6 +8,7 @@ import * as React from "react"
 import {
   ArrowDownToLine,
   ArrowUpToLine,
+  CircleUserRound,
   Eye,
   Footprints,
   Hourglass,
@@ -20,7 +21,7 @@ import {
 } from "lucide-react"
 import { useLocation } from "wouter"
 
-import { paths } from "@/app/routes"
+import { openTokenMaker, paths } from "@/app/routes"
 import { AppLogoMark } from "@/components/app/AppLogo"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -237,6 +238,12 @@ function SessionChip({ snap }: { snap: PlayerClientSnapshot }) {
         </span>
       </div>
       <HudButton
+        label="Token maker (opens a new tab)"
+        side="bottom"
+        icon={<CircleUserRound />}
+        onClick={() => openTokenMaker({ session: snap.sessionId })}
+      />
+      <HudButton
         label="Leave the table"
         side="bottom"
         icon={<LogOut />}
@@ -429,7 +436,7 @@ function CharacterCard({
     <HudPanel className="flex flex-col gap-2.5 p-3">
       <div className="flex items-center gap-2.5">
         <TokenAvatar token={token} size="lg" />
-        <div className="flex min-w-0 flex-col leading-tight">
+        <div className="flex min-w-0 flex-1 flex-col leading-tight">
           <span className="truncate font-heading text-sm font-medium">
             {tokenDisplayName(token)}
           </span>
@@ -437,6 +444,14 @@ function CharacterCard({
             <Layers className="size-3" /> {levelName(scene, token.levelId)}
           </span>
         </div>
+        <HudButton
+          label="Make this character's token (opens a new tab)"
+          side="bottom"
+          icon={<CircleUserRound />}
+          onClick={() =>
+            openTokenMaker({ session: snap.sessionId, token: token.id })
+          }
+        />
       </div>
       <div className="flex flex-wrap gap-1">
         {senses.map((s) => (

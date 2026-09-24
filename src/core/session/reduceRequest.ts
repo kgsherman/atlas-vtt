@@ -16,6 +16,10 @@
  * Doors: the door must be in the player's current view and a controlled token on its level must be
  * within one cell of the door segment; movement must not be locked. Every failure is "cannot";
  * "locked" is only reported after those checks pass. Players can never unlock.
+ *
+ * Token images (Token Maker): ownership first (as for moves), then the image must be in the player's
+ * own folder of the token image store (`tokenImageBase`), else "invalid". Movement locks do not apply:
+ * it changes how the token looks, not where it is.
  */
 import { distancePointSegment2, segmentIntersection2 } from "../geometry/segment"
 import { rulerDistance } from "../grid/grid"
@@ -35,6 +39,7 @@ import {
   tokenExistsForPlayers,
   type RequestOutcome,
 } from "./state"
+import { playerTokenImageAllowed } from "./tokenImages"
 import type { ClientToHost, GameState, PlayerView, RejectReason, RequestResult } from "./types"
 
 export interface RequestContext {
@@ -44,6 +49,8 @@ export interface RequestContext {
   currentView: PlayerView | null
   /** Whether a cell on a level is currently perceived by this player (see perceivedCellLookup). */
   perceivedByPlayer: (levelId: Id, i: number, j: number) => boolean
+  /** Public URL prefix of the token image store (null / absent: players cannot set token images). */
+  tokenImageBase?: string | null
 }
 
 /** Movement reasons that reveal something about the world at the failing step. */
@@ -215,6 +222,17 @@ function reduceDoor(state: GameState, userId: string, msg: Extract<ClientToHost,
   }
 }
 
+function reduceTokenImage(state: GameState, userId: string, msg: Extract<ClientToHost, { t: "token-image" }>, ctx: RequestContext): RequestOutcome {
+  if (!ownsToken(state, userId, msg.tokenId)) return rejectOutcome(state, msg.reqId, "not-owner")
+  const token = tokenExistsForPlayers(state, msg.tokenId)
+  if (!token) return rejectOutcome(state, msg.reqId, "unknown-token", msg.tokenId)
+  if (msg.imageUrl !== null && !playerTokenImageAllowed(msg.imageUrl, ctx.tokenImageBase ?? null, userId)) return rejectOutcome(state, msg.reqId, "invalid", token.id)
+  const ok: RequestResult = { reqId: msg.reqId, ok: true }
+  if (token.imageUrl === msg.imageUrl) return { state, delta: emptyDelta(), dirtyPlayers: [], result: ok, visited: [], tokenId: token.id }
+  const next: GameState = { ...state, scene: { ...state.scene, tokens: { ...state.scene.tokens, [token.id]: { ...token, imageUrl: msg.imageUrl } } }, seq: state.seq + 1 }
+  return { state: next, delta: { ...emptyDelta(), tokens: [token.id] }, dirtyPlayers: "all", result: ok, visited: [], tokenId: token.id }
+}
+
 /**
  * Apply an authorised player request. `perceivedByPlayer` reports whether a cell on a level is currently
  * perceived by that player (used to mask rejection reasons).
@@ -227,5 +245,7 @@ export function reduceRequest(state: GameState, userId: string, msg: Exclude<Cli
       return reduceJump(state, userId, msg, ctx)
     case "door":
       return reduceDoor(state, userId, msg, ctx)
+    case "token-image":
+      return reduceTokenImage(state, userId, msg, ctx)
   }
 }

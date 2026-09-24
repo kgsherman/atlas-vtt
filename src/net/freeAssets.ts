@@ -4,6 +4,10 @@
  * The catalog is read once per app run and cached; a failed read is retried on the next call.
  *
  * Local mode has no catalog (`available` false): free assets need Atlas Cloud.
+ *
+ * Token parts (ARCHITECTURE §11) are files at the bucket's root that the Token Maker offers as starting
+ * layers (a background disc and a ring). They are not catalog rows: they are not loaded into games,
+ * and the Token Maker offers them all, whatever game it is used with.
  */
 import type { FreeAssetCategory } from "@/core/session/freeAssets"
 import { isFreeAssetCategory } from "@/core/session/freeAssets"
@@ -30,6 +34,20 @@ export interface FreeAsset {
   model?: { height: number; radius: number; size: CreatureSize | null }
 }
 
+/** A free Token Maker layer: the file's public URL and the role it is added with. */
+export interface FreeTokenPart {
+  id: string
+  role: "background" | "frame"
+  name: string
+  url: string
+}
+
+/** Token parts in the `free-assets` bucket (object paths at its root). */
+export const FREE_TOKEN_PARTS: ReadonlyArray<Omit<FreeTokenPart, "url"> & { path: string }> = [
+  { id: "token-bg", role: "background", name: "Dusk backdrop", path: "token-bg.png" },
+  { id: "token-frame", role: "frame", name: "Prismatic stone ring", path: "token-frame.png" },
+]
+
 export interface FreeAssetsRepo {
   /** false in local mode: there is no catalog. */
   readonly available: boolean
@@ -37,6 +55,8 @@ export interface FreeAssetsRepo {
   list(): Promise<FreeAsset[]>
   /** Public URL of a token model reference (`free:<id>`), or null when it names no token model. */
   tokenModelUrl(ref: string): Promise<string | null>
+  /** The Token Maker's free parts (none in local mode). */
+  tokenParts(): FreeTokenPart[]
 }
 
 type Row = Database["public"]["Tables"]["free_assets"]["Row"]
@@ -88,6 +108,7 @@ export function createRemoteFreeAssetsRepo(client: AtlasClient): FreeAssetsRepo 
       const asset = (await list()).find((a) => a.id === parsed.assetId && a.category === "token-models")
       return asset?.url ?? null
     },
+    tokenParts: () => FREE_TOKEN_PARTS.map(({ path, ...part }) => ({ ...part, url: publicUrl(path) })),
   }
 }
 
@@ -96,5 +117,6 @@ export function createLocalFreeAssetsRepo(): FreeAssetsRepo {
     available: false,
     list: async () => [],
     tokenModelUrl: async () => null,
+    tokenParts: () => [],
   }
 }

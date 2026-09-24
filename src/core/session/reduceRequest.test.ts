@@ -271,6 +271,65 @@ describe("door requests", () => {
   })
 })
 
+describe("token image requests", () => {
+  const BASE = "https://ref.supabase.co/storage/v1/object/public/token-images/"
+  const mine = `${BASE}p1/0123456789abcdef.webp`
+
+  function tokens() {
+    const { scene, ground } = flatScene(6, 6)
+    const pc = addToken(scene, ground, 7.5, 7.5)
+    const other = addToken(scene, ground, 17.5, 7.5)
+    const hidden = addToken(scene, ground, 22.5, 7.5)
+    scene.tokens[hidden.id] = { ...scene.tokens[hidden.id], hidden: true }
+    let state = createGameState({ sessionId: "s", roomCode: "R", scene })
+    for (const uid of ["p1", "p2"]) state = reduceDm(state, { t: "add-player", userId: uid, displayName: uid }).state
+    state = reduceDm(state, { t: "assign-token", tokenId: pc.id, userId: "p1", assigned: true }).state
+    state = reduceDm(state, { t: "assign-token", tokenId: other.id, userId: "p2", assigned: true }).state
+    state = reduceDm(state, { t: "assign-token", tokenId: hidden.id, userId: "p1", assigned: true }).state
+    const ctx: RequestContext = { world: buildOcclusionWorld(scene), currentView: null, perceivedByPlayer: () => true, tokenImageBase: BASE }
+    return { state, pc, other, hidden, ctx }
+  }
+
+  it("puts the player's own image on a token they control", () => {
+    const { state, pc, ctx } = tokens()
+    const out = reduceRequest(state, "p1", { t: "token-image", reqId: "i1", tokenId: pc.id, imageUrl: mine }, ctx)
+    expect(out.result).toEqual({ reqId: "i1", ok: true })
+    expect(out.state.scene.tokens[pc.id].imageUrl).toBe(mine)
+    expect(out.delta.tokens).toEqual([pc.id])
+    expect(out.dirtyPlayers).toBe("all")
+    expect(out.state.seq).toBe(state.seq + 1)
+    expect(state.scene.tokens[pc.id].imageUrl).toBeNull()
+    // The same image again changes nothing; null clears it.
+    const again = reduceRequest(out.state, "p1", { t: "token-image", reqId: "i2", tokenId: pc.id, imageUrl: mine }, ctx)
+    expect(again.state).toBe(out.state)
+    expect(again.dirtyPlayers).toEqual([])
+    const cleared = reduceRequest(out.state, "p1", { t: "token-image", reqId: "i3", tokenId: pc.id, imageUrl: null }, ctx)
+    expect(cleared.state.scene.tokens[pc.id].imageUrl).toBeNull()
+  })
+
+  it("ignores movement locks", () => {
+    const { state, pc, ctx } = tokens()
+    const locked = reduceDm(state, { t: "set-movement-locked", locked: true }).state
+    expect(reduceRequest(locked, "p1", { t: "token-image", reqId: "i", tokenId: pc.id, imageUrl: mine }, ctx).result.ok).toBe(true)
+  })
+
+  it("refuses other players' tokens before looking anything up, hidden tokens, and foreign images", () => {
+    const { state, pc, other, hidden, ctx } = tokens()
+    const req = (uid: string, tokenId: string, imageUrl: string | null, c = ctx) => reduceRequest(state, uid, { t: "token-image", reqId: "r", tokenId, imageUrl }, c)
+    expect(req("p1", other.id, mine).result).toEqual({ reqId: "r", ok: false, reason: "not-owner" })
+    expect(req("p1", "no-such-token", mine).result.reason).toBe("not-owner")
+    expect(req("p1", hidden.id, mine).result.reason).toBe("unknown-token")
+    // Someone else's folder, another host, or no store at all.
+    expect(req("p1", pc.id, `${BASE}p2/0123456789abcdef.webp`).result.reason).toBe("invalid")
+    expect(req("p1", pc.id, "https://tracker.example/pixel.png").result.reason).toBe("invalid")
+    expect(req("p1", pc.id, mine, { ...ctx, tokenImageBase: null }).result.reason).toBe("invalid")
+    expect(req("p1", pc.id, mine, { ...ctx, tokenImageBase: undefined }).result.reason).toBe("invalid")
+    for (const out of [req("p1", other.id, mine), req("p1", pc.id, `${BASE}p2/x.png`)]) expect(out.state).toBe(state)
+    // Clearing needs no store.
+    expect(req("p1", pc.id, null, { ...ctx, tokenImageBase: null }).result.ok).toBe(true)
+  })
+})
+
 describe("segmentRectDistance", () => {
   const r = { x: 0, z: 0, w: 5, d: 5 }
   it("is 0 for touching or crossing segments and the gap otherwise", () => {

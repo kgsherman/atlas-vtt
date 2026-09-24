@@ -75,6 +75,14 @@ describe("free assets repository", () => {
     expect(c.calls()).toBe(1)
   })
 
+  it("offers the Token Maker's free parts by public URL", () => {
+    const repo = createRemoteFreeAssetsRepo(client([]).client)
+    expect(repo.tokenParts()).toEqual([
+      { id: "token-bg", role: "background", name: "Dusk backdrop", url: url("token-bg.png") },
+      { id: "token-frame", role: "frame", name: "Prismatic stone ring", url: url("token-frame.png") },
+    ])
+  })
+
   it("retries after a failed read", async () => {
     const c = client([row()], true)
     const repo = createRemoteFreeAssetsRepo(c.client)
@@ -87,5 +95,6 @@ describe("free assets repository", () => {
     expect(repo.available).toBe(false)
     expect(await repo.list()).toEqual([])
     expect(await repo.tokenModelUrl("free:elf-archer")).toBeNull()
+    expect(repo.tokenParts()).toEqual([])
   })
 })

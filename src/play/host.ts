@@ -196,6 +196,18 @@ export function setTokenModelPatches(
   })
 }
 
+/** Patches that give tokens a portrait image (Token.imageUrl, e.g. from the Token Maker), or none. */
+export function setTokenImagePatches(
+  scene: Scene,
+  tokenIds: readonly Id[],
+  imageUrl: string | null
+): Patch[] {
+  return scenePatches(scene, (d) => {
+    for (const id of tokenIds)
+      if (Object.hasOwn(d.tokens, id)) d.tokens[id].imageUrl = imageUrl
+  })
+}
+
 /** Patches that turn the sun/moon on or off. */
 export function setDirectionalPatches(scene: Scene, enabled: boolean): Patch[] {
   return scenePatches(scene, (d) => {
