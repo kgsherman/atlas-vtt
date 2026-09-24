@@ -41,7 +41,16 @@ export type ParseRollResult = { ok: true; formula: DiceFormula; label: string } 
 
 /** One rolled term. `rolls` in rolling order; `dropped`: indices into `rolls` not counted. */
 export type RolledTerm =
-  | { kind: "dice"; sign: 1 | -1; count: number; sides: number; explode: boolean; keep: { mode: KeepMode; n: number } | null; rolls: number[]; dropped: number[] }
+  | {
+      kind: "dice"
+      sign: 1 | -1
+      count: number
+      sides: number
+      explode: boolean
+      keep: { mode: KeepMode; n: number } | null
+      rolls: number[]
+      dropped: number[]
+    }
   | { kind: "const"; sign: 1 | -1; value: number }
 
 export interface RollResult {
@@ -79,8 +88,11 @@ export function formulaText(terms: readonly DiceTerm[]): string {
 
 /** Printable text without control characters, whitespace collapsed, at most `max` characters. */
 export function cleanText(s: string, max: number): string {
-  // eslint-disable-next-line no-control-regex
-  const flat = s.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim()
+  const flat = s
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
   return [...flat].slice(0, max).join("")
 }
 
@@ -123,7 +135,8 @@ export function parseRoll(input: string): ParseRollResult {
       const explode = m[3] === "!"
       if (count < 1) return { ok: false, error: "Roll at least one die." }
       if (!Number.isSafeInteger(count) || count > DICE_LIMITS.maxDice) return { ok: false, error: `At most ${DICE_LIMITS.maxDice} dice per roll.` }
-      if (!Number.isSafeInteger(sides) || sides < 1 || sides > DICE_LIMITS.maxSides) return { ok: false, error: `Dice have 1 to ${DICE_LIMITS.maxSides} sides.` }
+      if (!Number.isSafeInteger(sides) || sides < 1 || sides > DICE_LIMITS.maxSides)
+        return { ok: false, error: `Dice have 1 to ${DICE_LIMITS.maxSides} sides.` }
       if (explode && sides < 2) return { ok: false, error: "Only dice with 2 or more sides can explode." }
       let keep: { mode: KeepMode; n: number } | null = null
       if (m[4]) {

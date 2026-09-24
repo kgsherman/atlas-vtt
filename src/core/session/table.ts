@@ -254,7 +254,9 @@ export function reduceTableRequest(state: GameState, userId: string, msg: TableR
 
 export type TableCommand = Extract<
   DmCommand,
-  { t: "table-post" | "table-clear-log" | "combat-start" | "combat-end" | "combat-add" | "combat-remove" | "combat-update" | "combat-turn" | "combat-set-active" }
+  {
+    t: "table-post" | "table-clear-log" | "combat-start" | "combat-end" | "combat-add" | "combat-remove" | "combat-update" | "combat-turn" | "combat-set-active"
+  }
 >
 
 export function isTableCommand(cmd: DmCommand): cmd is TableCommand {
@@ -374,7 +376,9 @@ export function rebindTable(table: TableState | undefined, from: string, to: str
   return {
     ...table,
     log: table.log.map((m) =>
-      m.from === from || (m.to !== "all" && m.to.includes(from)) ? { ...m, from: m.from === null ? null : swap(m.from), to: m.to === "all" ? "all" : [...new Set(m.to.map(swap))].sort() } : m
+      m.from === from || (m.to !== "all" && m.to.includes(from))
+        ? { ...m, from: m.from === null ? null : swap(m.from), to: m.to === "all" ? "all" : [...new Set(m.to.map(swap))].sort() }
+        : m
     ),
   }
 }
@@ -395,7 +399,11 @@ export function dmSayCommand(text: string, to: TableMessage["to"], ctx: TableCon
 }
 
 /** The DM rolls "formula [label]" (`to` as for dmSayCommand; [] is a secret roll). */
-export function dmRollCommand(input: string, to: TableMessage["to"], ctx: TableContext): { ok: true; cmd: DmCommand; total: number } | { ok: false; error: string } {
+export function dmRollCommand(
+  input: string,
+  to: TableMessage["to"],
+  ctx: TableContext
+): { ok: true; cmd: DmCommand; total: number } | { ok: false; error: string } {
   const p = parseRoll(input)
   if (!p.ok) return p
   const roll = rollFormula(p.formula, ctx.rng)
@@ -410,7 +418,8 @@ export function npcInitiativeCommand(state: GameState, entryIds: Id[] | null, ct
   const combat = tableOf(state).combat
   if (!combat) return null
   const controlled = (tokenId: Id | null) => tokenId !== null && (own(state.owners, tokenId)?.length ?? 0) > 0
-  const picked = entryIds === null ? combat.entries.filter((e) => e.initiative === null && !controlled(e.tokenId)) : combat.entries.filter((e) => entryIds.includes(e.id))
+  const picked =
+    entryIds === null ? combat.entries.filter((e) => e.initiative === null && !controlled(e.tokenId)) : combat.entries.filter((e) => entryIds.includes(e.id))
   if (picked.length === 0) return null
   return { t: "combat-update", updates: picked.map((e) => ({ entryId: e.id, patch: { initiative: ctx.rng(20) + e.modifier } })) }
 }

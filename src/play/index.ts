@@ -1,11 +1,12 @@
 /**
  * Play-mode controllers (ARCHITECTURE §8): token selection, drag-to-move with A* path previews and a
- * ruler, the Measure tool, ladder and stairs climbs, door clicks and the play keymap. Framework-free: the play
+ * ruler, the Measure tool, ladder and stairs climbs, door clicks, long-press pings and the play keymap. Framework-free: the play
  * pages (routes/PlayPage, routes/HostPage) feed DOM input in and push overlays to the engine.
  */
 export {
   PlayController,
   DRAG_THRESHOLD_PX,
+  LONG_PRESS_MS,
   type CommittedMove,
   type PlayControllerHost,
   type PlayOverlays,

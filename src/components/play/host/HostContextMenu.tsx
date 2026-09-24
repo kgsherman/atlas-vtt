@@ -1,8 +1,9 @@
 /**
- * Right-click menus on the DM's live map: tokens (select, preview vision, hide/reveal, move to level,
- * assign to players), doors (open/close/lock/unlock, reveal a secret door) and lights (on/off).
+ * Right-click menus on the DM's live map: tokens (select, preview vision, hide/reveal, add to or remove
+ * from combat, move to level, assign to players), doors (open/close/lock/unlock, reveal a secret door) and lights (on/off).
  */
 import {
+  Dices,
   DoorClosed,
   DoorOpen,
   Eye,
@@ -63,6 +64,8 @@ export function HostContextMenuContent({
       : null
     if (!t) return null
     const owners = state.owners[t.id] ?? []
+    const inCombat =
+      state.table?.combat?.entries.some((e) => e.tokenId === t.id) ?? false
     return (
       <ContextMenuContent className="w-56">
         <ContextMenuGroup>
@@ -81,6 +84,18 @@ export function HostContextMenuContent({
             {t.hidden ? <Eye /> : <EyeOff />}{" "}
             {t.hidden ? "Reveal to players" : "Hide from players"}
           </ContextMenuItem>
+          {inCombat ? (
+            <ContextMenuItem
+              onClick={() => actions.removeFromCombat({ tokenId: t.id })}
+            >
+              <Dices /> Remove from combat
+            </ContextMenuItem>
+          ) : (
+            <ContextMenuItem onClick={() => actions.addToCombat([t.id])}>
+              <Dices />{" "}
+              {state.table?.combat ? "Add to combat" : "Start combat with it"}
+            </ContextMenuItem>
+          )}
         </ContextMenuGroup>
         <ContextMenuSeparator />
         <ContextMenuSub>

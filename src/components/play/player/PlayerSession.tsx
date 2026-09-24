@@ -11,7 +11,9 @@
  *    requestDoor; a move with no path offers a jump (StrandedMove → requestJump); pending moves drawn
  *    dashed until the host answers; moved tokens walk along the route sent, or the planner's guess
  *    for moves this client did not make (tokenRouter);
- *  - results → toasts with friendly reasons.
+ *  - results → toasts with friendly reasons;
+ *  - the table: chat and dice (ChatDock; the host rolls), the initiative order (TurnStrip, turn ring
+ *    on the acting token), and pings (a long press; others' pings arrive from the host).
  */
 import * as React from "react"
 import { toast } from "sonner"
@@ -68,6 +70,9 @@ import {
   usePreference,
   useSessionResource,
 } from "../useSessionResource"
+import { entriesFromView } from "../table/chatModel"
+import { levelShown, playerTurnOrder } from "../table/combatModel"
+import { PingLayer, TurnMarker } from "../table/MapMarkers"
 import { PlayerHud } from "./PlayerHud"
 
 const FOCUS_VIEW_HEIGHT = 70
@@ -238,6 +243,11 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
         onHint: (message) => toast.info(message, { id: "play-hint" }),
         setCameraControls: (enabled) =>
           live.get().engine?.setCameraControlsEnabled(enabled),
+        onPing: (levelId, point) => {
+          const hint = offlineHint(live.get().snap)
+          if (hint) toast.info(hint, { id: "ping-offline" })
+          else client.ping(levelId, { x: point.x, z: point.z })
+        },
       })
   )
   React.useEffect(
@@ -248,6 +258,23 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
     () => controller.subscribe(() => setTool(controller.getTool())),
     [controller]
   )
+
+  // ---- the table ----------------------------------------------------------------------------------------
+  const [chatFocus, setChatFocus] = React.useState(0)
+  const chatEntries = React.useMemo(() => entriesFromView(view), [view])
+  const turn = React.useMemo(() => playerTurnOrder(view), [view])
+  const turnActive = turn?.entries.find((e) => e.id === turn.activeId) ?? null
+  // "Your turn" once per turn of one of our characters.
+  const turnKey =
+    turn && turnActive?.mine ? `${turn.round}:${turnActive.id}` : null
+  React.useEffect(() => {
+    if (turnKey && turnActive)
+      toast.success(`Your turn, ${turnActive.name || "adventurer"}!`, {
+        id: "your-turn",
+      })
+    // turnActive changes with every view; the key says when the turn did.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turnKey])
 
   // ---- request results → toasts ------------------------------------------------------------------
   const seen = React.useRef(new Set<string>())
@@ -324,6 +351,9 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
         return
       case "cancel":
         controller.cancel()
+        return
+      case "chat":
+        setChatFocus((n) => n + 1)
         return
       case "level":
       case "preview-vision":
@@ -427,6 +457,28 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
           canvasRef={canvasRef}
         />
         <StrandedMove controller={controller} />
+        <PingLayer
+          subscribe={client.onPing}
+          scene={scene}
+          onFocus={(p) => engine?.focus(p)}
+        />
+        {turn?.activeTokenId &&
+        scene &&
+        Object.hasOwn(scene.tokens, turn.activeTokenId) ? (
+          <TurnMarker
+            tokenId={turn.activeTokenId}
+            radiusFt={
+              (footprintCells(scene.tokens[turn.activeTokenId].size) *
+                scene.grid.cellSize) /
+              2
+            }
+            label={
+              turnActive?.mine ? "Your turn" : turnActive?.name || "Their turn"
+            }
+            mine={turnActive?.mine ?? false}
+            showOn={(levelId) => levelShown(scene, activeLevelId, levelId)}
+          />
+        ) : null}
         {view && scene ? (
           <PlayerHud
             snap={snap}
@@ -437,6 +489,24 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
             onTool={(t) => controller.setTool(t)}
             climbs={climbs}
             onClimb={climb}
+            chat={{
+              entries: chatEntries,
+              focusSignal: chatFocus,
+              disabledReason: offlineHint(snap),
+              onSay: (text, audience) =>
+                client.say(text, audience.kind === "all" ? "all" : "dm"),
+              onRoll: (formula, audience) =>
+                client.roll(formula, audience.kind === "all" ? "all" : "dm"),
+            }}
+            turn={turn}
+            onEndTurn={() => client.endTurn()}
+            onRollInitiative={(tokenId, mod) =>
+              client.rollInitiative(
+                tokenId,
+                mod === 0 ? "1d20" : `1d20${mod > 0 ? "+" : ""}${mod}`
+              )
+            }
+            onFocusToken={(id) => focusToken(id)}
             camera={{
               onRotate: (q) => engine?.rotateCamera(q),
               onZoom: (d) => zoomCanvas(canvasRef.current, d),

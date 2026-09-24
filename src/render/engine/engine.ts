@@ -1532,6 +1532,10 @@ export class AtlasEngine implements Engine {
     return this.picker.pick(clientX, clientY, opts)
   }
 
+  tokenDrawnAt(tokenId: Id): { levelId: Id; position: Vec3 } | null {
+    return this.tokens.drawnAt(tokenId)
+  }
+
   project(p: Vec3): { x: number; y: number; visible: boolean } {
     return this.picker.project(p)
   }

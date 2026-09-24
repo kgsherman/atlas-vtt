@@ -11,6 +11,7 @@ import {
   Check,
   Copy,
   Crown,
+  Dices,
   Eye,
   EyeOff,
   Footprints,
@@ -103,10 +104,11 @@ import { TOKEN_KIND_LABELS, tokenDisplayName } from "@/play"
 
 import { StatusDot } from "../hud"
 import { TokenAvatar } from "../TokenAvatar"
+import { CombatTab } from "./CombatTab"
 import type { HostActions } from "./hostActions"
 import { duplicateNames, playerLabels } from "./playerLabels"
 
-export type SessionTab = "players" | "tokens" | "table" | "assets"
+export type SessionTab = "players" | "tokens" | "combat" | "table" | "assets"
 
 export interface SessionPanelProps {
   snap: HostSnapshot
@@ -120,6 +122,8 @@ export interface SessionPanelProps {
   onPreviewToken(id: Id): void
   onKick(userId: string): Promise<void>
   onTakeOver(): void
+  /** The level shown on the map (Combat: "everyone on this level"). */
+  activeLevelId: Id | null
 }
 
 export function SessionPanel(props: SessionPanelProps) {
@@ -129,7 +133,7 @@ export function SessionPanel(props: SessionPanelProps) {
   return (
     <aside
       aria-label="Session"
-      className="flex w-80 shrink-0 flex-col border-l bg-card/40"
+      className="flex w-[22.5rem] shrink-0 flex-col border-l bg-card/40"
     >
       <RoomCodeCard roomCode={snap.roomCode || state.roomCode} />
       {snap.status === "standby" ? (
@@ -151,6 +155,15 @@ export function SessionPanel(props: SessionPanelProps) {
             <TabsTrigger value="tokens" className="gap-1 text-[0.6875rem]">
               <Swords /> Tokens
             </TabsTrigger>
+            <TabsTrigger value="combat" className="gap-1 text-[0.6875rem]">
+              <Dices /> Combat
+              {state.table?.combat ? (
+                <span
+                  className="size-1.5 rounded-full bg-sidebar-primary"
+                  aria-label="(running)"
+                />
+              ) : null}
+            </TabsTrigger>
             <TabsTrigger value="table" className="gap-1 text-[0.6875rem]">
               <Crown /> Table
             </TabsTrigger>
@@ -167,6 +180,17 @@ export function SessionPanel(props: SessionPanelProps) {
         <TabsContent value="tokens" className="min-h-0 flex-1">
           <ScrollArea className="h-full">
             <TokensTab {...props} />
+          </ScrollArea>
+        </TabsContent>
+        <TabsContent value="combat" className="min-h-0 flex-1">
+          <ScrollArea className="h-full">
+            <CombatTab
+              state={state}
+              actions={props.actions}
+              selectedTokenId={props.selectedTokenId}
+              activeLevelId={props.activeLevelId}
+              onFocusToken={props.onFocusToken}
+            />
           </ScrollArea>
         </TabsContent>
         <TabsContent value="table" className="min-h-0 flex-1">
@@ -576,6 +600,9 @@ function TokensTab({
   }
   const labels = playerLabels(Object.values(state.players))
   const playerName = (uid: string) => labels.get(uid) ?? "Player"
+  const inCombat = new Set(
+    (state.table?.combat?.entries ?? []).map((e) => e.tokenId)
+  )
   if (Object.keys(scene.tokens).length === 0) {
     return (
       <Empty className="m-3 border border-dashed">
@@ -688,6 +715,21 @@ function TokensTab({
                       <DropdownMenuItem onClick={() => onPreviewToken(t.id)}>
                         <ScanEye /> Preview its vision
                       </DropdownMenuItem>
+                      {inCombat.has(t.id) ? (
+                        <DropdownMenuItem
+                          onClick={() =>
+                            actions.removeFromCombat({ tokenId: t.id })
+                          }
+                        >
+                          <Dices /> Remove from combat
+                        </DropdownMenuItem>
+                      ) : (
+                        <DropdownMenuItem
+                          onClick={() => actions.addToCombat([t.id])}
+                        >
+                          <Dices /> Add to combat
+                        </DropdownMenuItem>
+                      )}
                       <DropdownMenuSub>
                         <DropdownMenuSubTrigger>
                           <Layers /> Move to level

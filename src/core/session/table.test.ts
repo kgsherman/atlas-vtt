@@ -112,7 +112,11 @@ describe("table messages", () => {
   it("the DM whispers to one player, or rolls in secret", () => {
     let { state } = game()
     state = dm(state, { t: "table-post", message: dmMessage({ stamp: stamp("w1"), kind: "chat", to: [BOB], text: "You hear a click" }) })
-    const roll = { formula: "1d20", total: 17, terms: [{ kind: "dice" as const, sign: 1 as const, count: 1, sides: 20, explode: false, keep: null, rolls: [17], dropped: [] }] }
+    const roll = {
+      formula: "1d20",
+      total: 17,
+      terms: [{ kind: "dice" as const, sign: 1 as const, count: 1, sides: 20, explode: false, keep: null, rolls: [17], dropped: [] }],
+    }
     state = dm(state, { t: "table-post", message: dmMessage({ stamp: stamp("s1", 6000), kind: "roll", to: [], text: "Stealth", roll }) })
     expect(state.table!.log).toHaveLength(2)
     expect(messages(filterForPlayer(state, ALICE, sees()))).toEqual([])
@@ -143,7 +147,12 @@ describe("table messages", () => {
     let { state } = game()
     for (let k = 0; k < TABLE_LIMITS.maxLog + 15; k++) {
       // The same clock reading for every message: times still strictly increase.
-      state = request(state, k % 2 ? ALICE : BOB, { t: "say", reqId: `r${k}`, text: `m${k}`, to: "all" }, { now: 1000, newId: () => `id${k}`, rng: fixedDice(1) }).state
+      state = request(
+        state,
+        k % 2 ? ALICE : BOB,
+        { t: "say", reqId: `r${k}`, text: `m${k}`, to: "all" },
+        { now: 1000, newId: () => `id${k}`, rng: fixedDice(1) }
+      ).state
     }
     const log = state.table!.log
     expect(log).toHaveLength(TABLE_LIMITS.maxLog)
@@ -297,7 +306,11 @@ describe("combat", () => {
     const g = game()
     let { state } = g
     const { pip, aldric, goblin } = g
-    state = dm(state, { t: "combat-start", entries: [entry(pip, "c1"), entry(goblin, "c3", { initiative: 12 }), entry(aldric, "c2", { hidden: true })], stamp: stamp("n1") })
+    state = dm(state, {
+      t: "combat-start",
+      entries: [entry(pip, "c1"), entry(goblin, "c3", { initiative: 12 }), entry(aldric, "c2", { hidden: true })],
+      stamp: stamp("n1"),
+    })
     expect(request(state, ALICE, { t: "initiative", reqId: "r", tokenId: goblin, formula: "d20" }).result.reason).toBe("not-owner")
     expect(request(state, BOB, { t: "initiative", reqId: "r", tokenId: aldric, formula: "d20" }).result.reason).toBe("cannot")
     expect(request(state, ALICE, { t: "initiative", reqId: "r", tokenId: pip, formula: "plus d20" }).result.reason).toBe("bad-formula")
@@ -343,7 +356,11 @@ describe("table on the wire and in storage", () => {
     const { pip, goblin } = g
     state = request(state, ALICE, { t: "roll", reqId: "r1", formula: "4d6dl1 stats", to: "all" }, ctx(1000, fixedDice(3, 5, 1, 6))).state
     state = request(state, BOB, { t: "say", reqId: "r2", text: "Hi DM 👋", to: "dm" }, ctx(2000)).state
-    state = dm(state, { t: "combat-start", entries: [entry(pip, "c1", { initiative: 11 }), entry(goblin, "c3", { initiative: 9, modifier: 2 }), entry(null, "c7", { name: "Lair" })], stamp: stamp("n1") })
+    state = dm(state, {
+      t: "combat-start",
+      entries: [entry(pip, "c1", { initiative: 11 }), entry(goblin, "c3", { initiative: 9, modifier: 2 }), entry(null, "c7", { name: "Lair" })],
+      stamp: stamp("n1"),
+    })
     state = dm(state, { t: "combat-turn", delta: 1, stamp: stamp("n2") })
     return { state, pip, goblin }
   }
@@ -424,7 +441,13 @@ describe("protocol and pings", () => {
     // Nothing explored: the level is at most a stub.
     expect(pingForPlayer(ping, view)).toBeNull()
     expect(pingForPlayer(ping, null)).toBeNull()
-    const known: PlayerView = { ...view, scene: { ...view.scene, levels: { [ground]: { id: ground, known: true, name: "G", elevation: 0, height: 10, floorThickness: 1, terrainResolution: null } } } }
+    const known: PlayerView = {
+      ...view,
+      scene: {
+        ...view.scene,
+        levels: { [ground]: { id: ground, known: true, name: "G", elevation: 0, height: 10, floorThickness: 1, terrainResolution: null } },
+      },
+    }
     expect(pingForPlayer(ping, known)).toEqual(ping)
     expect(pingForPlayer({ ...ping, levelId: "elsewhere" }, known)).toBeNull()
     expect(pingForPlayer({ ...ping, x: NaN }, known)).toBeNull()
@@ -459,7 +482,11 @@ describe("DM command builders", () => {
     expect(state.table!.log[1]).toMatchObject({ from: null, to: [], text: "Perception (goblin)", roll: { total: 13 } })
 
     expect(npcInitiativeCommand(state, null, ctx())).toBeNull()
-    state = dm(state, { t: "combat-start", entries: [entry(pip, "c1"), entry(goblin, "c3", { modifier: 2 }), entry(ogre, "c4", { initiative: 5 }), entry(null, "c9", { name: "Lair" })], stamp: stamp("n1") })
+    state = dm(state, {
+      t: "combat-start",
+      entries: [entry(pip, "c1"), entry(goblin, "c3", { modifier: 2 }), entry(ogre, "c4", { initiative: 5 }), entry(null, "c9", { name: "Lair" })],
+      stamp: stamp("n1"),
+    })
     const cmd = npcInitiativeCommand(state, null, { rng: fixedDice(7) })
     expect(cmd).toEqual({
       t: "combat-update",

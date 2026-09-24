@@ -1,6 +1,18 @@
 import { describe, expect, it } from "vitest"
 
-import { cleanText, cryptoDiceRng, DICE_LIMITS, describeRoll, isFormula, naturalD20, parseRoll, roll, rollFormula, type DiceFormula, type DiceRng } from "./index"
+import {
+  cleanText,
+  cryptoDiceRng,
+  DICE_LIMITS,
+  describeRoll,
+  isFormula,
+  naturalD20,
+  parseRoll,
+  roll,
+  rollFormula,
+  type DiceFormula,
+  type DiceRng,
+} from "./index"
 
 /** Replays fixed values (mod sides, 1-based), then repeats the last. */
 function fixed(...values: number[]): DiceRng {

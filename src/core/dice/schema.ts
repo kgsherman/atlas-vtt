@@ -19,7 +19,14 @@ const diceTerm = z
     explode: z.boolean(),
     keep: z.strictObject({ mode: z.enum(["kh", "kl", "dh", "dl"]), n: z.int().min(1).max(DICE_LIMITS.maxDice) }).nullable(),
     rolls: z.array(z.int().min(1).max(DICE_LIMITS.maxSides)).min(1).max(MAX_ROLLS),
-    dropped: z.array(z.int().min(0).max(MAX_ROLLS - 1)).max(MAX_ROLLS),
+    dropped: z
+      .array(
+        z
+          .int()
+          .min(0)
+          .max(MAX_ROLLS - 1)
+      )
+      .max(MAX_ROLLS),
   })
   .refine((t) => t.rolls.every((v) => v <= t.sides) && t.dropped.every((k) => k < t.rolls.length), "dice out of range")
 
@@ -31,5 +38,8 @@ const MAX_TOTAL = 10_000_000
 export const rollResultSchema: z.ZodType<RollResult> = z.strictObject({
   formula: z.string().max(400),
   total: z.int().min(-MAX_TOTAL).max(MAX_TOTAL),
-  terms: z.array(z.discriminatedUnion("kind", [diceTerm, constTerm])).min(1).max(DICE_LIMITS.maxTerms),
+  terms: z
+    .array(z.discriminatedUnion("kind", [diceTerm, constTerm]))
+    .min(1)
+    .max(DICE_LIMITS.maxTerms),
 })
