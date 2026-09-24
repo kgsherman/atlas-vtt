@@ -43,7 +43,7 @@ import {
 import { bytesToBase64, createHeightmap, denseHeights, writeHeights } from "@/core/scene/heightmap"
 import { parseScene } from "@/core/scene/schema"
 import { validateReferences } from "@/core/scene/integrity"
-import { effectiveFloorRects, floorRects, groundHeightAt, hasGroundAt, levelGround, sortedLevels, type Opening } from "@/core/scene/queries"
+import { effectiveFloorRects, floorRects, floorThickness, groundHeightAt, hasGroundAt, levelGround, sortedLevels, type Opening } from "@/core/scene/queries"
 import { SAMPLE_SCENES, sampleById } from "@/core/scene/samples"
 import { bakeRegion, baseLattice, blockShape, cylinderShape, rampShape, translateShape, writeTerrain } from "@/core/scene/terrainShapes"
 import type {
@@ -598,30 +598,41 @@ function grow(e: Extent, b: Extent): void {
 }
 
 /** Per-object vertex extents of one render bucket's merged meshes (from userData.ranges), plus walkable triangle counts. */
-function renderExtents(scene: Scene, bucket: "floors" | "connectors"): { extents: Map<Id, Extent>; walkable: Map<Id, number> } {
+function renderExtents(scene: Scene, bucket: "floors" | "connectors"): { extents: Map<Id, Extent>; walkable: Map<Id, number>; topMinY: Map<Id, number> } {
   const extents = new Map<Id, Extent>()
   const walkable = new Map<Id, number>()
+  const topMinY = new Map<Id, number>()
   const ctx = new RenderContext(scene)
   for (const level of sortedLevels(scene)) {
     for (const m of buildLevel(ctx, level.id)[bucket].meshes) {
       if (m.kind !== "merged") continue
       const pos = m.geometry.getAttribute("position")
       const surf = m.geometry.getAttribute("aSurf")
+      // Vertex of triangle corner k (terrain meshes are indexed).
+      const index = m.geometry.index
+      const vtx = (k: number) => (index ? index.getX(k) : k)
       for (const r of m.geometry.userData.ranges as { id: string; start: number; count: number }[]) {
         const e = extents.get(r.id) ?? emptyExtent()
-        for (let k = r.start * 3; k < (r.start + r.count) * 3; k++) {
+        for (let c = r.start * 3; c < (r.start + r.count) * 3; c++) {
+          const k = vtx(c)
           grow(e, { minX: pos.getX(k), maxX: pos.getX(k), minY: pos.getY(k), maxY: pos.getY(k), minZ: pos.getZ(k), maxZ: pos.getZ(k) })
         }
         extents.set(r.id, e)
         if (m.terrainOffsets && surf) {
           let n = 0
-          for (let t = r.start; t < r.start + r.count; t++) if (surf.getX(t * 3) === SURF.WALKABLE) n++
+          let low = topMinY.get(r.id) ?? Infinity
+          for (let t = r.start; t < r.start + r.count; t++) {
+            if (surf.getX(vtx(t * 3)) !== SURF.WALKABLE) continue
+            n++
+            for (let c = 0; c < 3; c++) low = Math.min(low, pos.getY(vtx(t * 3 + c)))
+          }
           walkable.set(r.id, (walkable.get(r.id) ?? 0) + n)
+          topMinY.set(r.id, low)
         }
       }
     }
   }
-  return { extents, walkable }
+  return { extents, walkable, topMinY }
 }
 
 /** Union of primitiveBounds per source id. */
@@ -639,7 +650,7 @@ describe("render builders agree with core/occlusion: floors, connectors, pillars
   for (const [name, scene] of SCENES) {
     it(`${name}: floor / terrain slabs have the occluders' extents; terrain top cells = heightfield solid cells`, () => {
       const occ = occluderExtents(scene)
-      const { extents, walkable } = renderExtents(scene, "floors")
+      const { extents, walkable, topMinY } = renderExtents(scene, "floors")
       const solid = new Map<Id, number>()
       for (const p of buildOcclusionWorld(scene).primitives) if (p.shape === "heightfield") solid.set(p.sourceId, p.solid.reduce((a, b) => a + b, 0))
       let checked = 0
@@ -649,7 +660,12 @@ describe("render builders agree with core/occlusion: floors, connectors, pillars
         const b = occ.get(o.id)
         expect(r === undefined, `${o.id}: rendered ${r !== undefined}, occluder ${b !== undefined}`).toBe(b === undefined)
         if (!r || !b) continue
-        for (const k of ["minX", "maxX", "minY", "maxY", "minZ", "maxZ"] as const) expect(r[k], `${o.id} ${k}`).toBeCloseTo(b[k], 3)
+        // Terrain meshes draw no bottom (skirts only): their slab bottom is the lowest top − thickness.
+        const terrain = topMinY.get(o.id)
+        for (const k of ["minX", "maxX", "minY", "maxY", "minZ", "maxZ"] as const) {
+          const v = k === "minY" && terrain !== undefined ? terrain - floorThickness(scene, o) : r[k]
+          expect(v, `${o.id} ${k}`).toBeCloseTo(b[k], 3)
+        }
         if (solid.has(o.id)) expect(walkable.get(o.id), `${o.id} walkable triangles / 2`).toBe(2 * solid.get(o.id)!)
         checked++
       }

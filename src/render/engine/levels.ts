@@ -10,7 +10,7 @@ import type { DoorState, Id } from "@/core/scene/types"
 
 import { DOOR_MARKER_ACCENT, doorLeafPose, type DoorLeaf } from "../builders/doors"
 import { isSharedGeometry } from "../builders/shared"
-import { BUCKETS, type BucketBuild, type BucketKind, type FlameAnimation, type MeshBuild } from "../builders/types"
+import { BUCKETS, type BucketBuild, type BucketKind, type FlameAnimation, type MeshBuild, type TerrainRows } from "../builders/types"
 import type { TriRange } from "../builders/writer"
 import { LAYER } from "../internal"
 import { disposeCachedEdges, type ObjectMeshRef } from "../overlays/highlight"
@@ -53,7 +53,7 @@ export interface DoorLeafState {
 export interface TerrainMesh {
   mesh: THREE.Mesh
   offsets: Float32Array
-  rows: Int32Array | null
+  rows: TerrainRows | null
 }
 
 /** userData.slot of door markers (drawn with the world material, shown only in top-down views). */

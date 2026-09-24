@@ -1,7 +1,9 @@
 /**
- * MeshWriter accumulates non-indexed triangles with the world-mesh attributes (position, normal,
- * linear `color`, `aSurf`, `aMat`) and records which triangles belong to which scene object, so merged
- * per-level meshes can still be picked and highlighted per object (userData.ranges).
+ * MeshWriter accumulates triangles with the world-mesh attributes (position, normal, linear `color`,
+ * `aSurf`, `aMat`) and records which triangles belong to which scene object, so merged per-level meshes
+ * can still be picked and highlighted per object (userData.ranges). Non-indexed by default; an indexed
+ * writer (terrain) shares vertices between triangles (addVertex / indexedTriangle), and its plain
+ * triangle() calls write three vertices of their own.
  *
  * `aMat` is the procedural surface material (MAT ids in materials/surface.ts) of the vertices written
  * while `material` is set; the world shader adds per-material detail (grout, planks, grain, ripples).
@@ -19,6 +21,34 @@ export interface TriRange {
   id: string
   start: number
   count: number
+}
+
+/** Growable Uint32Array. */
+export class U32 {
+  a: Uint32Array
+  n = 0
+  constructor(capacity = 1024) {
+    this.a = new Uint32Array(capacity)
+  }
+  private reserve(extra: number): void {
+    if (this.n + extra <= this.a.length) return
+    const next = new Uint32Array(Math.max(this.a.length * 2, this.n + extra))
+    next.set(this.a.subarray(0, this.n))
+    this.a = next
+  }
+  push1(x: number): void {
+    this.reserve(1)
+    this.a[this.n++] = x
+  }
+  push3(x: number, y: number, z: number): void {
+    this.reserve(3)
+    this.a[this.n++] = x
+    this.a[this.n++] = y
+    this.a[this.n++] = z
+  }
+  toArray(): Uint32Array {
+    return this.a.slice(0, this.n)
+  }
 }
 
 /** Growable Float32Array. */
@@ -81,17 +111,23 @@ export class MeshWriter {
   readonly surf = new F32(512)
   readonly mats = new F32(512)
   readonly ranges: TriRange[] = []
+  /** Triangle vertex indices (indexed writers only). */
+  readonly indices: U32 | null
   /** Procedural surface material of the vertices written from now on (MAT.NONE = plain albedo). */
   material: number = MAT.NONE
   private openId: string | null = null
   private openStart = 0
+
+  constructor(opts: { indexed?: boolean } = {}) {
+    this.indices = opts.indexed ? new U32() : null
+  }
 
   get vertexCount(): number {
     return this.positions.n / 3
   }
 
   get triangleCount(): number {
-    return this.positions.n / 9
+    return this.indices ? this.indices.n / 3 : this.positions.n / 9
   }
 
   isEmpty(): boolean {
@@ -113,11 +149,29 @@ export class MeshWriter {
   }
 
   private vertex(p: V3, n: V3, c: RGB, s: number): void {
+    this.indices?.push1(this.vertexCount)
     this.positions.push3(p[0], p[1], p[2])
     this.normals.push3(n[0], n[1], n[2])
     this.colors.push3(c[0], c[1], c[2])
     this.surf.push1(s)
     this.mats.push1(this.material)
+  }
+
+  /** Indexed writers: a vertex for indexedTriangle; returns its index. */
+  addVertex(p: V3, n: V3, c: RGB, s: number): number {
+    const i = this.vertexCount
+    this.positions.push3(p[0], p[1], p[2])
+    this.normals.push3(n[0], n[1], n[2])
+    this.colors.push3(c[0], c[1], c[2])
+    this.surf.push1(s)
+    this.mats.push1(this.material)
+    return i
+  }
+
+  /** Indexed writers: triangle over vertices from addVertex, counter-clockwise seen from the front. */
+  indexedTriangle(a: number, b: number, c: number): void {
+    if (!this.indices) throw new Error("indexedTriangle on a non-indexed MeshWriter")
+    this.indices.push3(a, b, c)
   }
 
   /** Flat triangle; winding a→b→c counter-clockwise seen from the front. `n` defaults to the winding normal. */
@@ -142,7 +196,7 @@ export class MeshWriter {
     this.triangle(a, c, d, color, surf, nn)
   }
 
-  /** BufferGeometry with position/normal/color/aSurf/aMat, `userData.ranges`; null when empty. */
+  /** BufferGeometry with position/normal/color/aSurf/aMat (+ index), `userData.ranges`; null when empty. */
   build(): THREE.BufferGeometry | null {
     this.end()
     if (this.isEmpty()) return null
@@ -152,6 +206,7 @@ export class MeshWriter {
     g.setAttribute("color", new THREE.BufferAttribute(this.colors.toArray(), 3))
     g.setAttribute("aSurf", new THREE.BufferAttribute(this.surf.toArray(), 1))
     g.setAttribute("aMat", new THREE.BufferAttribute(this.mats.toArray(), 1))
+    if (this.indices) g.setIndex(new THREE.BufferAttribute(this.indices.toArray(), 1))
     g.userData.ranges = this.ranges.slice()
     g.computeBoundingSphere()
     g.computeBoundingBox()

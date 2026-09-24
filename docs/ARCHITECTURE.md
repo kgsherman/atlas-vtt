@@ -89,7 +89,9 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
 - Object Y values are relative to the ground at the object's anchor. Extended objects on terrain
   (the "Terrain rule"). Here "ground" is the **terrain** ground `levelGround` = elevation + heightmap
   (NOT `groundHeightAt`'s stairs interpolation, or a wall along a stair run would float):
-  - Floor slab: top = ground surface (displaced by the heightmap), bottom = top − thickness.
+  - Floor slab: top = ground surface (displaced by the heightmap), bottom = top − thickness (the drawn
+    terrain mesh has no bottom, only skirts down to it: the cameras never look up at it; the occluder
+    proxies are closed solids).
   - Walls, their openings and closed doors: **Walls on terrain** below.
   - Pillars/props resting on the ground (`y = 0`): top = ground(centre) + y + height; bottom = min ground
     over the footprint. Stairs/ramp occluder bottoms: min lower-level ground over the rect − 0.05 ft.
@@ -622,10 +624,11 @@ Per level, the engine expands `HostLevelMasks` into R8 layers of `DataArrayTextu
   committed terrain change replaces it (`updateScene` drops it, so a tool must not clear after a commit that
   changed the heightmap: the old terrain would flash). Contract: between calls the lattice changes only
   inside `dirty`; the engine keeps the union of every `dirty` since the preview began (`previewDirty`, null =
-  everywhere). The terrain mesh moves in place (`builders/floors.ts` `updateTerrainGeometry`): a per
-  lattice-row triangle table built with the mesh (`MergedBuild.terrainRows`: (row, first, end) triangles
-  per floor and cell row) limits the work to the rows and cells around `dirty`, heights are read straight
-  from the lattice, each attribute gets ONE upload range per call (first to last touched triangle, merged
+  everywhere). The terrain mesh (indexed: the top shares its vertices within each grid cell, whose tint is
+  its own) moves in place (`builders/floors.ts` `updateTerrainGeometry`): a per lattice-row vertex table
+  built with the mesh (`MergedBuild.terrainRows`: the vertices by sample row, each row in ascending x)
+  limits the work to the rows and samples around `dirty`, heights are read straight from the lattice, the
+  tops' smooth normals are recomputed, each attribute gets ONE upload range per call (first to last touched vertex, merged
   with any range not uploaded yet: several updates can run before a render; per-row `bufferSubData` calls
   into a buffer of tens of MB cost a whole-buffer copy each on some drivers) and the bounds grow by union;
   the floors bucket is rebuilt only when the level has no terrain mesh yet or it was built on another

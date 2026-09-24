@@ -166,8 +166,12 @@ not yet part of `e2e/perf.mjs`.
   takes ≈ 1–2 ms in the worst case (1000 shapes overlapping in one chain); the Inspector runs it on each
   render of its action buttons. `hasPaintedBase` (the Levels panel's Flatten) reads chunk keys only.
 
+- **Terrain meshes are indexed and bottomless.** The top shares its vertices within each grid cell and the
+  slab's underside is not drawn (skirts only). On the lodge test map (26×40 cells at resolution 16) the
+  ground floor went from 3.2M vertices / 1.07M triangles / ~154 MB of attributes and a 409 ms build to
+  309k vertices / 537k triangles / 21 MB and ≈ 85 ms.
 - **Terrain previews move the mesh in place** (`Engine.previewTerrain`, ARCHITECTURE §4.6). A per lattice-row
-  triangle table built with the terrain mesh limits an update to the rows and cells around the dirty rect,
+  vertex table built with the terrain mesh limits an update to the rows and samples around the dirty rect,
   heights are read straight from the lattice and the bounds grow by union (before: a scan of every terrain
   triangle and a bounding-sphere recompute over the whole mesh per pointer move). Budget ≤ 4 ms per update for
   a 100×100 ft dirty rect on a 200×200-cell resolution-4 level (2.57M triangles): measured ≈ 1.0–1.2 ms steady

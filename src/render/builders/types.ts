@@ -26,7 +26,20 @@ export type MaterialSlot =
   /** Emissive light-fixture flames (unlit, light colour). */
   | "flame"
 
-/** A merged, non-indexed geometry (position, normal, color, aSurf; userData.ranges → object ids). */
+/**
+ * The vertices of a terrain mesh by lattice sample row (floors.ts updateTerrainGeometry): the vertices on
+ * sample row sz are order[rowStart[sz − sz0] .. rowStart[sz − sz0 + 1]), in ascending x.
+ */
+export interface TerrainRows {
+  sz0: number
+  rowStart: Int32Array
+  order: Uint32Array
+}
+
+/**
+ * A merged geometry (position, normal, color, aSurf; userData.ranges → object ids, by triangle).
+ * Non-indexed, except terrain meshes, whose tops share vertices.
+ */
 export interface MergedBuild {
   kind: "merged"
   name: string
@@ -34,11 +47,8 @@ export interface MergedBuild {
   geometry: THREE.BufferGeometry
   /** Terrain floors only: per-vertex Y offset from the ground, for in-place terrain previews. */
   terrainOffsets?: Float32Array
-  /**
-   * Terrain floors only: (sz, first triangle, end triangle) triples, one per floor and lattice cell row sz;
-   * inside a row the triangles are in ascending x of their first vertex (floors.ts updateTerrainGeometry).
-   */
-  terrainRows?: Int32Array
+  /** Terrain floors only: the vertices by lattice row, for in-place terrain previews. */
+  terrainRows?: TerrainRows
 }
 
 /** Per-instance flicker of a fixture flame (visual only; radii never flicker). */

@@ -90,13 +90,17 @@ function expectWindingMatchesNormals(g: THREE.BufferGeometry): void {
   const a = new THREE.Vector3()
   const b = new THREE.Vector3()
   const c = new THREE.Vector3()
-  for (let t = 0; t < p.count / 3; t++) {
-    a.fromBufferAttribute(p, t * 3)
-    b.fromBufferAttribute(p, t * 3 + 1)
-    c.fromBufferAttribute(p, t * 3 + 2)
+  const idx = g.index
+  const vtx = (k: number) => (idx ? idx.getX(k) : k)
+  const triangles = (idx ? idx.count : p.count) / 3
+  for (let t = 0; t < triangles; t++) {
+    const [i, j, k] = [vtx(t * 3), vtx(t * 3 + 1), vtx(t * 3 + 2)]
+    a.fromBufferAttribute(p, i)
+    b.fromBufferAttribute(p, j)
+    c.fromBufferAttribute(p, k)
     const face = new THREE.Vector3().subVectors(b, a).cross(new THREE.Vector3().subVectors(c, a))
     if (face.lengthSq() < 1e-12) continue
-    const avg = new THREE.Vector3(nrm.getX(t * 3) + nrm.getX(t * 3 + 1) + nrm.getX(t * 3 + 2), nrm.getY(t * 3) + nrm.getY(t * 3 + 1) + nrm.getY(t * 3 + 2), nrm.getZ(t * 3) + nrm.getZ(t * 3 + 1) + nrm.getZ(t * 3 + 2))
+    const avg = new THREE.Vector3(nrm.getX(i) + nrm.getX(j) + nrm.getX(k), nrm.getY(i) + nrm.getY(j) + nrm.getY(k), nrm.getZ(i) + nrm.getZ(j) + nrm.getZ(k))
     expect(face.dot(avg)).toBeGreaterThan(0)
   }
 }
@@ -607,6 +611,41 @@ describe("level builders", () => {
     expectWindingMatchesNormals(b.geometry)
   })
 
+  it("builds terrain as an indexed top (vertices shared within each grid cell) and boundary skirts, no bottom", () => {
+    // 4×4 cells at resolution 2: 8×8 lattice cells, one floor over the whole grid.
+    const { scene, lv } = terrainScene((x, z) => Math.sin(x / 4) + z / 10, 4)
+    const b = buildLevel(new BuildContext(scene), lv).floors.meshes[0]
+    if (b.kind !== "merged" || !b.terrainOffsets || !b.terrainRows) throw new Error("no terrain mesh")
+    const g = b.geometry
+    expectWorldGeometry(g)
+    expectWindingMatchesNormals(g)
+    expect(g.index).toBeTruthy()
+    const surf = g.getAttribute("aSurf")
+    const nrm = g.getAttribute("normal")
+    let tops = 0
+    for (let k = 0; k < surf.count; k++) {
+      if (surf.getX(k) === SURF.WALKABLE) tops++
+      // Nothing faces down: the slab has no bottom.
+      expect(nrm.getY(k)).toBeGreaterThan(-0.5)
+    }
+    // Tops: (2 + 1)² vertices per grid cell (its own tint), 2 triangles per lattice cell.
+    expect(tops).toBe(16 * 9)
+    // Skirts: one quad (4 vertices, 2 triangles) per boundary lattice edge.
+    expect(surf.count - tops).toBe(32 * 4)
+    expect(g.index!.count / 3).toBe(64 * 2 + 32 * 2)
+    // The row table lists every vertex once, rows in ascending z, each in ascending x.
+    const { sz0, rowStart, order } = b.terrainRows
+    expect(order.length).toBe(surf.count)
+    expect(new Set(order).size).toBe(surf.count)
+    const pos = g.getAttribute("position")
+    for (let r = 0; r + 1 < rowStart.length; r++) {
+      for (let k = rowStart[r]; k < rowStart[r + 1]; k++) {
+        expect(Math.round(pos.getZ(order[k]) / 2.5)).toBe(sz0 + r)
+        if (k > rowStart[r]) expect(pos.getX(order[k])).toBeGreaterThanOrEqual(pos.getX(order[k - 1]))
+      }
+    }
+  })
+
   it("smooth-shades terrain tops with the lattice normals, before and after a preview update", () => {
     const { scene, lv } = terrainScene((x, z) => 3 * Math.sin(x / 7) * Math.cos(z / 5), 12)
     const built = () => {
@@ -614,14 +653,14 @@ describe("level builders", () => {
       if (b.kind !== "merged" || !b.terrainOffsets || !b.terrainRows) throw new Error("no terrain mesh")
       return b as typeof b & { terrainOffsets: Float32Array; terrainRows: Int32Array }
     }
-    /** Top vertices by lattice sample: every copy of a sample carries the same normal, normalAt's. */
+    /** Top vertices by lattice sample: every vertex of a sample carries the same normal, normalAt's. */
     const expectSmoothTops = (b: ReturnType<typeof built>, g: GroundSampler) => {
       const pos = b.geometry.getAttribute("position")
       const nrm = b.geometry.getAttribute("normal")
+      const surf = b.geometry.getAttribute("aSurf")
       let tops = 0
       for (let k = 0; k < pos.count; k++) {
-        const t = k - (k % 3)
-        if (b.terrainOffsets[t] !== 0 || b.terrainOffsets[t + 1] !== 0 || b.terrainOffsets[t + 2] !== 0) continue
+        if (surf.getX(k) !== SURF.WALKABLE) continue
         const n = g.normalAt(Math.round(pos.getX(k) / g.spacing), Math.round(pos.getZ(k) / g.spacing))
         expect(nrm.getX(k)).toBeCloseTo(n[0], 5)
         expect(nrm.getY(k)).toBeCloseTo(n[1], 5)

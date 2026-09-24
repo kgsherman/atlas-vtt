@@ -15,16 +15,34 @@ export type ObjectMeshRef =
   | { kind: "instance"; mesh: THREE.InstancedMesh; index: number }
   | { kind: "whole"; mesh: THREE.Mesh }
 
-/** Positions of the given triangle ranges of a non-indexed geometry. */
+/** Copy triangle t's 9 position floats (through the index, if any) to out[o..o+9). */
+function copyTriangle(src: Float32Array, index: ArrayLike<number> | null, t: number, out: Float32Array, o: number): void {
+  if (!index) {
+    out.set(src.subarray(t * 9, t * 9 + 9), o)
+    return
+  }
+  for (let c = 0; c < 3; c++) {
+    const q = index[t * 3 + c] * 3
+    out[o + c * 3] = src[q]
+    out[o + c * 3 + 1] = src[q + 1]
+    out[o + c * 3 + 2] = src[q + 2]
+  }
+}
+
+/** Positions of the given triangle ranges of a geometry (indexed or not), as a non-indexed geometry. */
 export function extractTriangles(geometry: THREE.BufferGeometry, ranges: readonly TriRange[]): THREE.BufferGeometry {
   const src = geometry.getAttribute("position").array as Float32Array
+  const index = geometry.index?.array ?? null
   let total = 0
   for (const r of ranges) total += r.count
   const out = new Float32Array(total * 9)
   let o = 0
   for (const r of ranges) {
-    out.set(src.subarray(r.start * 9, (r.start + r.count) * 9), o)
-    o += r.count * 9
+    if (index) for (let t = r.start; t < r.start + r.count; t++, o += 9) copyTriangle(src, index, t, out, o)
+    else {
+      out.set(src.subarray(r.start * 9, (r.start + r.count) * 9), o)
+      o += r.count * 9
+    }
   }
   const g = new THREE.BufferGeometry()
   g.setAttribute("position", new THREE.BufferAttribute(out, 3))
@@ -154,10 +172,12 @@ export function moveCachedEdges(g: THREE.BufferGeometry, rect: Rect | null, reac
 function patchRangeEdges(g: THREE.BufferGeometry, entry: RangeEdges, moved: Bounds2, reach: number): void {
   entry.moved = null
   const src = g.getAttribute("position").array as Float32Array
+  const index = g.index?.array ?? null
   const r1 = { x0: moved.x0 - reach, z0: moved.z0 - reach, x1: moved.x1 + reach, z1: moved.z1 + reach }
   const r2 = { x0: r1.x0 - reach, z0: r1.z0 - reach, x1: r1.x1 + reach, z1: r1.z1 + reach }
   const in2 = (k: number) => src[k] >= r2.x0 && src[k] <= r2.x1 && src[k + 2] >= r2.z0 && src[k + 2] <= r2.z1
-  const nearTriangle = (t: number) => in2(t * 9) || in2(t * 9 + 3) || in2(t * 9 + 6)
+  const corner = (t: number, c: number) => (index ? index[t * 3 + c] * 3 : t * 9 + c * 3)
+  const nearTriangle = (t: number) => in2(corner(t, 0)) || in2(corner(t, 1)) || in2(corner(t, 2))
   const midIn1 = (pairs: Float32Array, k: number) => {
     const x = (pairs[k] + pairs[k + 3]) / 2
     const z = (pairs[k + 2] + pairs[k + 5]) / 2
@@ -171,7 +191,7 @@ function patchRangeEdges(g: THREE.BufferGeometry, entry: RangeEdges, moved: Boun
   for (const r of entry.ranges) {
     for (let t = r.start; t < r.start + r.count; t++) {
       if (!nearTriangle(t)) continue
-      near.set(src.subarray(t * 9, t * 9 + 9), o)
+      copyTriangle(src, index, t, near, o)
       o += 9
     }
   }
