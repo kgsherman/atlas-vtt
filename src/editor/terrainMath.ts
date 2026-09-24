@@ -13,6 +13,9 @@ import {
   collapseEdge,
   elementVertexIndices,
   isValidTerrainShape,
+  remapInnerEdges,
+  shapeEdgeCount,
+  shapeEdgeEnds,
   rayHitShape,
   shapeBounds,
   type TerrainElementMode,
@@ -324,20 +327,22 @@ export function vertexHits(
   return out.sort((a, b) => a.distance - b.distance)
 }
 
-/** Top edges of `shapes` within `radiusPx` of the cursor on screen, nearest first. */
+/** Top edges of `shapes` (outline and inner edges; `outlineOnly`: outline only) within `radiusPx` of the cursor on screen, nearest first. */
 export function edgeHits(
   shapes: readonly TerrainShape[],
   elevation: number,
   project: Projector,
   cursor: ScreenPoint,
-  radiusPx = ELEMENT_PICK_PX
+  radiusPx = ELEMENT_PICK_PX,
+  outlineOnly = false
 ): ElementHit[] {
   const out: ElementHit[] = []
   for (const s of shapes) {
-    const n = s.points.length
-    for (let k = 0; k < n; k++) {
-      const a = vertexWorld(s, k, elevation)
-      const b = vertexWorld(s, (k + 1) % n, elevation)
+    const count = outlineOnly ? s.points.length : shapeEdgeCount(s)
+    for (let k = 0; k < count; k++) {
+      const [i, j] = shapeEdgeEnds(s, k)!
+      const a = vertexWorld(s, i, elevation)
+      const b = vertexWorld(s, j, elevation)
       const pa = projectPoint(project, a)
       const pb = projectPoint(project, b)
       if (!pa || !pb) continue
@@ -385,7 +390,7 @@ function projectedInside(project: Projector, p: Vec3, r: ScreenRect): boolean {
 }
 
 /**
- * Elements of `mode` whose projection lies inside the screen rect: vertices by position, edges with both
+ * Elements of `mode` whose projection lies inside the screen rect: vertices by position, edges (outline and inner) with both
  * ends inside, side faces with their four corners inside, the top face with every top vertex inside.
  */
 export function elementsInScreenRect(
@@ -402,7 +407,10 @@ export function elementsInScreenRect(
     if (mode === "vertex") {
       for (let k = 0; k < n; k++) if (top[k]) out.push({ shapeId: s.id, kind: "vertex", index: k })
     } else if (mode === "edge") {
-      for (let k = 0; k < n; k++) if (top[k] && top[(k + 1) % n]) out.push({ shapeId: s.id, kind: "edge", index: k })
+      for (let k = 0, m = shapeEdgeCount(s); k < m; k++) {
+        const [i, j] = shapeEdgeEnds(s, k)!
+        if (top[i] && top[j]) out.push({ shapeId: s.id, kind: "edge", index: k })
+      }
     } else {
       const base = s.points.map((p) => projectedInside(project, { x: p.x, y: elevation + s.base, z: p.z }, r))
       if (top.every(Boolean)) out.push({ shapeId: s.id, kind: "face", index: "top" })
@@ -494,7 +502,8 @@ export function allElements(shapes: readonly TerrainShape[], mode: TerrainElemen
   const out: TerrainElementRef[] = []
   for (const s of shapes) {
     if (mode === "face") out.push({ shapeId: s.id, kind: "face", index: "top" })
-    for (let k = 0; k < s.points.length; k++) out.push(mode === "face" ? { shapeId: s.id, kind: "face", index: k } : { shapeId: s.id, kind: mode, index: k })
+    const count = mode === "edge" ? shapeEdgeCount(s) : s.points.length
+    for (let k = 0; k < count; k++) out.push(mode === "face" ? { shapeId: s.id, kind: "face", index: k } : { shapeId: s.id, kind: mode, index: k })
   }
   return out
 }
@@ -548,9 +557,10 @@ export function verticesCentroid(shapes: ReadonlyMap<Id, TerrainShape>, indices:
 }
 
 /**
- * Collapse the given top edges: every chain of consecutive selected edges merges into one vertex at the
- * mean of its vertices (a single edge: core collapseEdge, the midpoint in the edge's slot). Null when fewer
- * than 3 vertices would remain or the result is invalid.
+ * Collapse the given top outline edges: every chain of consecutive selected edges merges into one vertex at
+ * the mean of its vertices (a single edge: core collapseEdge, the midpoint in the edge's slot); inner edges
+ * are re-indexed (those losing an end or merging dropped). Indices ≥ n (inner edges) are ignored. Null when
+ * fewer than 3 vertices would remain or the result is invalid.
  */
 export function collapseEdges(shape: TerrainShape, edges: readonly number[]): TerrainShape | null {
   const n = shape.points.length
@@ -562,6 +572,7 @@ export function collapseEdges(shape: TerrainShape, edges: readonly number[]): Te
   let start = 0
   while (sel.has((start + n - 1) % n)) start++
   const points: Vec3[] = []
+  const map: number[] = []
   let k = start
   for (let visited = 0; visited < n;) {
     let x = 0
@@ -570,6 +581,7 @@ export function collapseEdges(shape: TerrainShape, edges: readonly number[]): Te
     let count = 0
     for (;;) {
       const p = shape.points[k]
+      map[k] = points.length
       x += p.x
       y += p.y
       z += p.z
@@ -582,5 +594,8 @@ export function collapseEdges(shape: TerrainShape, edges: readonly number[]): Te
     points.push({ x: x / count, y: y / count, z: z / count })
   }
   const out: TerrainShape = { ...shape, points }
+  delete out.innerEdges
+  const inner = remapInnerEdges(shape.innerEdges, map, points.length)
+  if (inner.length > 0) out.innerEdges = inner
   return isValidTerrainShape(out) ? out : null
 }

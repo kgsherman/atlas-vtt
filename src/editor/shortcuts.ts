@@ -45,7 +45,7 @@ export type ShortcutAction =
   /** Only tools use it (finish a wall chain or ruler, confirm a terrain shape's height). */
   | { type: "confirm" }
   /** Terrain tool + sub-tool; "cycle-create" steps block → ramp → cylinder → polygon. */
-  | { type: "terrain-sub"; sub: "select" | "brush" | "cycle-create" }
+  | { type: "terrain-sub"; sub: "select" | "brush" | "loopcut" | "cycle-create" }
   /** Only the terrain tool uses these: toggle the advanced (element) mode, pick the element kind, constrain a drag to an axis. */
   | { type: "terrain-advanced" }
   | { type: "terrain-element"; element: "vertex" | "edge" | "face" }
@@ -151,6 +151,7 @@ export const EDITOR_COMMANDS: EditorCommand[] = [
   { id: "confirm", label: "Finish a wall chain or ruler; confirm a terrain shape", group: "Editing", keys: ["Enter"], action: { type: "confirm" } },
   { id: "terrain.select", label: "Select terrain shapes", group: "Terrain", keys: ["Q"], action: { type: "terrain-sub", sub: "select" } },
   { id: "terrain.brush", label: "Terrain brush", group: "Terrain", keys: ["Shift+B"], action: { type: "terrain-sub", sub: "brush" } },
+  { id: "terrain.loopcut", label: "Terrain loop cut", group: "Terrain", keys: ["Shift+C"], action: { type: "terrain-sub", sub: "loopcut" } },
   {
     id: "terrain.create",
     label: "Terrain block / ramp / cylinder / polygon (cycles)",
@@ -204,6 +205,7 @@ export const EDITOR_POINTER_HELP: { keys: string; label: string }[] = [
   { keys: "Drag, then move and click (terrain)", label: "Block / ramp / cylinder: draw the base, then set the height" },
   { keys: "Click, then right-click or Enter (terrain)", label: "Polygon: place the corners, then set the height" },
   { keys: "Right-click (terrain)", label: "Cancel the shape being drawn (polygon: finish the outline)" },
+  { keys: "Click a shape's side (terrain loop cut)", label: "Cut across the top; [ / ] set the number of cuts" },
   { keys: "Shift / Ctrl-click (terrain)", label: "Add to / toggle the shape or element selection" },
   { keys: "Drag on empty ground (terrain, advanced)", label: "Select vertices / edges / faces in a box" },
   { keys: "Drag an arrow (terrain)", label: "Move the selection along one axis" },
@@ -222,7 +224,7 @@ export function editorBindings(overrides: KeyOverrides = {}): EditorBinding[] {
  * from another tool it re-enters the remembered creation sub-tool (block if none), so the first press
  * only switches to the terrain tool.
  */
-export function terrainSubFor(sub: "select" | "brush" | "cycle-create", current: TerrainSubTool, inTerrainTool: boolean): TerrainSubTool {
+export function terrainSubFor(sub: "select" | "brush" | "loopcut" | "cycle-create", current: TerrainSubTool, inTerrainTool: boolean): TerrainSubTool {
   if (sub !== "cycle-create") return sub
   const k = TERRAIN_CREATE_SUB_TOOLS.indexOf(current)
   if (k < 0) return TERRAIN_CREATE_SUB_TOOLS[0]

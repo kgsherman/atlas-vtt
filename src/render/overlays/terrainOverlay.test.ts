@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import { GIZMO_SHAFT_END_PX, GIZMO_SHAFT_START_PX, gizmoHandles, type GizmoAxis, type Projector } from "@/core/geometry/gizmo"
 import { createScene } from "@/core/scene/factory"
-import { bakeRegion, blockShape, cylinderShape, rampShape, translateVertices, triangulateFootprint } from "@/core/scene/terrainShapes"
+import { bakeRegion, blockShape, cylinderShape, loopCut, rampShape, translateVertices, triangulateFootprint } from "@/core/scene/terrainShapes"
 import type { TerrainShape, Vec3 } from "@/core/scene/types"
 
 import { GroundSampler } from "../builders/ground"
@@ -422,6 +422,31 @@ describe("terrain overlay", () => {
     expect(crossing.slice(0, 2).map((m) => m.color)).toEqual([C.draft, C.draft])
     expect(crossing.slice(2, 4).map((m) => m.color)).toEqual([C.invalid, C.invalid])
     expect(new Set(build({ points: pts, valid: false, closing: "none" }).map((m) => m.color))).toEqual(new Set([C.invalid]))
+    res.dispose()
+  })
+
+  it("draws inner edges (loop cuts), meshes the top along them, and previews cuts in the element colour", () => {
+    const cut = loopCut(blockShape("k", { x: 0, z: 0, w: 20, d: 10 }, 0, 4, 0), 0, [0.5])!.shape
+    const ridge = translateVertices(cut, [1, 4], { x: 0, y: 3, z: 0 })!
+    const p = shapePrism(ridge, 0)
+    // 6 top edges + 6 verticals + 6 base edges + the inner edge.
+    expect(segments(p.edges)).toBe(19)
+    const last = Array.from(p.edges.slice(-6))
+    expect(last).toEqual([10, 7, 0, 10, 7, 10])
+    // Every top triangle lies on one side of the ridge.
+    for (let t = 0; t < p.top.length; t += 9) {
+      const xs = [p.top[t], p.top[t + 3], p.top[t + 6]]
+      expect(xs.every((x) => x <= 10) || xs.every((x) => x >= 10)).toBe(true)
+    }
+    const res = new TerrainOverlayResources()
+    const a = { x: 10, y: 4, z: 0 }
+    const b = { x: 10, y: 4, z: 10 }
+    const colors = (valid: boolean) =>
+      meshes(buildTerrainOverlay(overlay({ shapes: [], cuts: { segments: [[a, b]], valid } }), 0, SPACING, res)).map(
+        (m) => "#" + (m.material as THREE.ShaderMaterial).uniforms.uColor.value.getHexString()
+      )
+    expect(colors(true)).toEqual([TERRAIN_OVERLAY_COLORS.element, TERRAIN_OVERLAY_COLORS.element])
+    expect(colors(false)).toEqual([TERRAIN_OVERLAY_COLORS.invalid, TERRAIN_OVERLAY_COLORS.invalid])
     res.dispose()
   })
 

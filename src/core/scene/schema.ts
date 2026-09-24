@@ -20,6 +20,7 @@ import { MAX_TERRAIN_HEIGHT } from "./heightmapBrush"
 import { validateReferences } from "./integrity"
 import { migrateToCurrent } from "./migrations"
 import { signedArea } from "./polygon"
+import { innerEdgesValid } from "./terrainShapes"
 import { TOKEN_MODEL_REF_RE } from "./tokenModel"
 import { SCENE_SCHEMA_VERSION, TERRAIN_RESOLUTIONS, type GridSettings, type Scene } from "./types"
 
@@ -235,8 +236,16 @@ const terrainShapeSchema = z
     order: z.int().min(0).max(1_000_000),
     points: z.array(z.strictObject({ x: num, y: terrainY, z: num })).min(3).max(SCENE_LIMITS.maxTerrainShapePoints),
     base: terrainY,
+    innerEdges: z
+      .array(z.tuple([z.int().min(0), z.int().min(0)]))
+      .max(SCENE_LIMITS.maxTerrainShapePoints - 3)
+      .optional(),
   })
   .refine((s) => signedArea(s.points) > MIN_SHAPE_AREA, { message: "footprint must have a positive (canonical) signed area", path: ["points"] })
+  .refine((s) => innerEdgesValid(s.points, s.innerEdges), {
+    message: "inner edges must be ascending pairs of non-adjacent vertices, each a diagonal inside the footprint, none crossing",
+    path: ["innerEdges"],
+  })
 
 const terrainEditsSchema = z.strictObject({
   shapes: z.record(idSchema, terrainShapeSchema).refine((r) => Object.keys(r).length > 0, "terrain edits need at least one shape"),

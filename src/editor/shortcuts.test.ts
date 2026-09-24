@@ -38,7 +38,7 @@ describe("editor keymap", () => {
       expect(resolve(k.toUpperCase())).toEqual({ type: "tool", tool })
     }
     expect(resolve("c", { alt: true })).toBeNull()
-    expect(resolve("C", { shift: true })).toBeNull()
+    expect(resolve("C", { shift: true })).toEqual({ type: "terrain-sub", sub: "loopcut" })
   })
 
   it("maps editing and view keys", () => {
@@ -123,9 +123,9 @@ describe("editor keymap", () => {
   })
 
   it("applies remaps (and unbinding)", () => {
-    const bindings = editorBindings({ "tool.wall": ["Shift+C"], undo: [] })
+    const bindings = editorBindings({ "tool.wall": ["Shift+J"], undo: [] })
     expect(bindings.some((b) => b.hotkey === "C")).toBe(false)
-    expect(bindings.find((b) => b.hotkey === "Shift+C")?.action).toEqual({ type: "tool", tool: "wall" })
+    expect(bindings.find((b) => b.hotkey === "Shift+J")?.action).toEqual({ type: "tool", tool: "wall" })
     expect(bindings.some((b) => b.action.type === "undo")).toBe(false)
   })
 })
@@ -165,6 +165,7 @@ describe("runShortcut: terrain actions", () => {
 
   it("terrainSubFor", () => {
     expect(terrainSubFor("select", "ramp", true)).toBe("select")
+    expect(terrainSubFor("loopcut", "ramp", false)).toBe("loopcut")
     expect(terrainSubFor("cycle-create", "select", true)).toBe("block")
     expect(terrainSubFor("cycle-create", "brush", false)).toBe("block")
     expect(terrainSubFor("cycle-create", "cylinder", true)).toBe("polygon")

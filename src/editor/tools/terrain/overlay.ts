@@ -66,6 +66,7 @@ export function createOverlayComposer(): OverlayComposer {
         label: parts.label,
         marquee: parts.marquee,
         outline: parts.outline,
+        cuts: parts.cuts,
       }
     },
   }

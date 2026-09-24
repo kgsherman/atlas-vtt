@@ -4,7 +4,7 @@
  * controller.toolHint, e.g. the terrain tool's "Move to set the height, click to confirm") show it here.
  */
 import * as React from "react"
-import { Box, Cylinder, Magnet, MousePointer2, Paintbrush, Pentagon, RotateCcw, RotateCw, TriangleRight, Undo2 } from "lucide-react"
+import { Box, Cylinder, Magnet, MousePointer2, Paintbrush, Pentagon, RotateCcw, RotateCw, SquareSplitHorizontal, TriangleRight, Undo2 } from "lucide-react"
 
 import { CommandKbd } from "@/components/keybindings/CommandKbd"
 import { useCommandLabel } from "@/components/keybindings/keymapStore"
@@ -26,6 +26,7 @@ import {
   BRUSH_STRENGTH,
   TERRAIN_CYLINDER_SIDES_MAX,
   TERRAIN_CYLINDER_SIDES_MIN,
+  TERRAIN_LOOP_CUTS_MAX,
   type TerrainSubTool,
   type ToolSettings,
 } from "@/editor/settings"
@@ -419,6 +420,7 @@ function TerrainOptions() {
   const selectKey = useCommandLabel("editor", "terrain.select")
   const brushKey = useCommandLabel("editor", "terrain.brush")
   const createKey = useCommandLabel("editor", "terrain.create")
+  const loopCutKey = useCommandLabel("editor", "terrain.loopcut")
   const elementKeys = [
     useCommandLabel("editor", "terrain.element.vertex"),
     useCommandLabel("editor", "terrain.element.edge"),
@@ -431,6 +433,7 @@ function TerrainOptions() {
     subOption("ramp", "Ramp", <TriangleRight />, createKey),
     subOption("cylinder", "Cylinder", <Cylinder />, createKey),
     subOption("polygon", "Polygon", <Pentagon />, createKey),
+    subOption("loopcut", "Loop cut", <SquareSplitHorizontal />, loopCutKey),
   ]
   // The advanced (vertex / edge / face) mode is effective only with shapes selected. The switch and the
   // element picker go through the tool (like Tab and 1 / 2 / 3), which explains when nothing is selected.
@@ -468,6 +471,20 @@ function TerrainOptions() {
             precision={0}
             onCommit={(n) => set({ cylinderSides: Math.round(n) })}
             aria-label="Cylinder sides"
+          />
+        </Opt>
+      ) : null}
+      {t.sub === "loopcut" ? (
+        <Opt label="Cuts">
+          <NumberInput
+            className="w-16"
+            value={t.loopCuts}
+            min={1}
+            max={TERRAIN_LOOP_CUTS_MAX}
+            step={1}
+            precision={0}
+            onCommit={(n) => set({ loopCuts: Math.round(n) })}
+            aria-label="Loop cuts"
           />
         </Opt>
       ) : null}

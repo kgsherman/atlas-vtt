@@ -38,6 +38,8 @@ export const MIGRATIONS: Readonly<Record<number, Migration>> = Object.freeze({
   2: wallsFollowTerrain,
   // v4 added heightmap resolutions 8 and 16 and the "polygon" terrain shape kind; v3 documents are valid v4 documents.
   3: (doc: unknown) => doc,
+  // v5 added the optional TerrainShape.innerEdges (loop cuts); v4 documents are valid v5 documents.
+  4: (doc: unknown) => doc,
 })
 
 export type MigrateResult =

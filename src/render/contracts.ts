@@ -129,6 +129,8 @@ export interface TerrainOverlay {
    * with fewer than three points. Absent or null: none.
    */
   outline?: { points: readonly Vec3[]; valid: boolean; closing: "none" | "ok" | "crossing" } | null
+  /** Loop cut preview (world segments across the top); `valid` false draws them red. Absent or null: none. */
+  cuts?: { segments: readonly (readonly [Vec3, Vec3])[]; valid: boolean } | null
 }
 
 export type ToolPreview =

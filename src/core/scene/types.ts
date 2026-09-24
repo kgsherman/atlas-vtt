@@ -14,7 +14,7 @@
  *    session. Live play state lives in the session's GameState copy (core/session).
  */
 
-export const SCENE_SCHEMA_VERSION = 4 as const
+export const SCENE_SCHEMA_VERSION = 5 as const
 
 export type Id = string
 
@@ -129,7 +129,8 @@ export type TerrainShapeOp = "add" | "carve"
  * Editable terrain geometry (ARCHITECTURE §3 "Terrain edits"), baked into Level.heightmap. A prism over a
  * simple polygon footprint: points[k] is footprint vertex k (x, z in world feet) with the height of the
  * shape's TOP at that vertex (y, feet relative to level.elevation). The top surface is the footprint
- * triangulated by core/scene/terrainShapes `triangulateFootprint`, with per-vertex heights.
+ * triangulated by core/scene/terrainShapes `shapeTopTriangles` (split along `innerEdges`, each part
+ * ear-clipped by `triangulateFootprint`), with per-vertex heights.
  *  - Orientation is canonical: the signed area Σ(x_k·z_{k+1} − x_{k+1}·z_k)/2 is > 0.
  *  - Baking: shapes apply in ascending (order, id) over the painted terrain; "add" → max(terrain, top),
  *    "carve" → min(terrain, top), per lattice sample inside the footprint.
@@ -147,6 +148,12 @@ export interface TerrainShape {
   order: number
   points: Vec3[]
   base: number
+  /**
+   * Inner top edges (loop cuts): pairs [a, b] of point indices, a < b, not adjacent, each a diagonal inside
+   * the footprint, none crossing another. The top is split along them before it is triangulated, so a
+   * raised inner edge makes a crisp ridge. Absent or empty: none.
+   */
+  innerEdges?: [number, number][]
 }
 
 /**

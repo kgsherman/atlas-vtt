@@ -72,15 +72,15 @@ function v1Doc(): Record<string, any> {
 
 describe("migrateToCurrent", () => {
   it("has one migration per version step", () => {
-    expect(SCENE_SCHEMA_VERSION).toBe(4)
-    expect(Object.keys(MIGRATIONS)).toEqual(["1", "2", "3"])
+    expect(SCENE_SCHEMA_VERSION).toBe(5)
+    expect(Object.keys(MIGRATIONS)).toEqual(["1", "2", "3", "4"])
   })
 
   it("migrates v1 documents (no token models) to v2 unchanged", () => {
     const doc = { schemaVersion: 1, name: "x", tokens: { t: { id: "t" } } }
     expect(MIGRATIONS[1](structuredClone(doc))).toEqual(doc)
     const res = migrateToCurrent(doc)
-    expect(res).toEqual({ ok: true, doc: { schemaVersion: 4, name: "x", tokens: { t: { id: "t" } } }, from: 1 })
+    expect(res).toEqual({ ok: true, doc: { schemaVersion: SCENE_SCHEMA_VERSION, name: "x", tokens: { t: { id: "t" } } }, from: 1 })
     expect(doc.schemaVersion).toBe(1)
   })
 
@@ -167,7 +167,7 @@ describe("v2 → v3 (walls follow terrain)", () => {
     expect(res.ok).toBe(true)
     if (!res.ok) return
     expect(res.migratedFrom).toBe(1)
-    expect(res.scene.schemaVersion).toBe(4)
+    expect(res.scene.schemaVersion).toBe(SCENE_SCHEMA_VERSION)
     expect(res.scene.objects.wallG).toMatchObject({ type: "wall", followTerrain: true })
     expect(res.scene.objects.wallU).toMatchObject({ type: "wall", followTerrain: true, name: "Upper wall" })
     // Nothing else changes: levels keep no terrain edits, other objects are identical.
@@ -217,8 +217,17 @@ describe("v3 → v4 (resolutions 8 / 16, polygon shapes)", () => {
     expect(res.ok).toBe(true)
     if (!res.ok) return
     expect(res.migratedFrom).toBe(3)
-    expect(res.scene.schemaVersion).toBe(4)
+    expect(res.scene.schemaVersion).toBe(SCENE_SCHEMA_VERSION)
     expect(res.scene.levels).toEqual(v3.levels)
     expect(res.scene.objects).toEqual(v3.objects)
+  })
+})
+
+describe("v4 → v5 (terrain shape inner edges)", () => {
+  it("leaves v4 documents unchanged", () => {
+    const v4: Record<string, any> = { ...(MIGRATIONS[2](v1Doc()) as Record<string, any>), schemaVersion: 4 }
+    expect(MIGRATIONS[4](structuredClone(v4))).toEqual(v4)
+    const res = parseScene(v4)
+    expect(res.ok && res.migratedFrom).toBe(4)
   })
 })

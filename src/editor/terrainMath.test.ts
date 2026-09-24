@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 
-import { blockShape, cylinderShape, isValidTerrainShape } from "@/core/scene/terrainShapes"
+import { blockShape, cylinderShape, isValidTerrainShape, loopCut } from "@/core/scene/terrainShapes"
 import type { GridSettings } from "@/core/scene/types"
 
 import {
@@ -216,5 +216,28 @@ describe("terrain math: elements and edits", () => {
     expect(collapseEdges(c, [0, 1, 2, 3, 4, 5])).toBeNull()
     expect(collapseEdges(blockShape("b", { x: 0, z: 0, w: 5, d: 5 }, 0, 1, 0), [0, 2])).toBeNull()
     expect(collapseEdges(c, [])).toBe(c)
+  })
+
+  it("treats inner edges (loop cuts) as edges n + c: picking, lists, rects; collapses re-index them", () => {
+    // 20 × 10 block cut at x 20: points (10,10) (20,10) (30,10) (30,20) (20,20) (10,20), inner edge 6 = [1, 4].
+    const cut = loopCut(blockShape("a", { x: 10, z: 10, w: 20, d: 10 }, 0, 5, 0), 0, [0.5])!.shape
+    expect(allElements([cut], "edge").map((e) => e.index)).toEqual([0, 1, 2, 3, 4, 5, 6])
+    const cam = orthoCamera({ tilt: 0, scale: 10 })
+    const mid = cam.project({ x: 20, y: 5, z: 15 })
+    expect(edgeHits([cut], 0, cam.project, { x: mid.x + 2, y: mid.y })[0].ref).toEqual({ shapeId: "a", kind: "edge", index: 6 })
+    // Outline edges only (the loop cut tool's fallback).
+    expect(edgeHits([cut], 0, cam.project, { x: mid.x + 2, y: mid.y }, 8, true)).toEqual([])
+    const all = screenRect({ x: 0, y: 0 }, { x: cam.width, y: cam.height })
+    expect(elementsInScreenRect([cut], 0, cam.project, all, "edge").map((x) => x.index)).toEqual([0, 1, 2, 3, 4, 5, 6])
+    expect(elementVerticesByShape({ a: cut }, [{ shapeId: "a", kind: "edge", index: 6 }]).get("a")).toEqual([1, 4])
+    // Collapsing the outline edges 2 and 3 (vertices 2, 3, 4 merge) re-indexes the inner edge's far end.
+    const collapsed = collapseEdges(cut, [2, 3])!
+    expect(collapsed.points).toHaveLength(4)
+    expect(collapsed.innerEdges).toBeUndefined()
+    const other = collapseEdges(cut, [4, 5])!
+    expect(other.innerEdges).toBeUndefined()
+    const keep = collapseEdges(loopCut(cut, 0, [0.5])!.shape, [3])!
+    expect(keep.innerEdges).toHaveLength(2)
+    expect(isValidTerrainShape(keep)).toBe(true)
   })
 })

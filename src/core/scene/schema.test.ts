@@ -293,6 +293,27 @@ describe("parseScene", () => {
       expect(parseScene(ok).ok).toBe(true)
     })
 
+    it("accept valid inner edges (loop cuts) only", () => {
+      const hex = (d: Record<string, any>, innerEdges?: unknown) => {
+        mound(d).points = [
+          { x: 20, y: 2, z: 20 },
+          { x: 30, y: 2, z: 20 },
+          { x: 40, y: 2, z: 20 },
+          { x: 40, y: 2, z: 30 },
+          { x: 30, y: 2, z: 30 },
+          { x: 20, y: 2, z: 30 },
+        ]
+        if (innerEdges !== undefined) mound(d).innerEdges = innerEdges
+      }
+      const ok = json(fullScene())
+      hex(ok, [[1, 4]])
+      const parsed = parseScene(ok)
+      expect(parsed.ok && Object.values(parsed.scene.levels).find((l) => l.terrainEdits)!.terrainEdits!.shapes.mound.innerEdges).toEqual([[1, 4]])
+      for (const bad of [[[4, 1]], [[1, 2]], [[0, 2]], [[0, 3], [2, 5]], [[1, 9]], [[1, 4, 5]], [[-1, 3]], "x"]) {
+        rejects((d) => hex(d, bad), /innerEdges/)
+      }
+    })
+
     it("require the canonical orientation and a non-degenerate footprint", () => {
       rejects((d) => mound(d).points.reverse(), /signed area/)
       rejects((d) => {

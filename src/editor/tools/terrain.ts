@@ -23,6 +23,7 @@ import { activeLevel, activeSelection, editMode, type SubTool, type TerrainToolC
 import { createShapeSubTool } from "./terrain/create"
 import { terrainKey } from "./terrain/keys"
 import { createOverlayComposer } from "./terrain/overlay"
+import { createLoopCutSubTool } from "./terrain/loopcut"
 import { createSelectSubTool } from "./terrain/select"
 import type { ToolDeps } from "./shared"
 import type { Tool } from "./types"
@@ -83,6 +84,7 @@ export function createTerrainTool(deps: ToolDeps): TerrainTool {
     ramp: createShapeSubTool(ctx, "ramp"),
     cylinder: createShapeSubTool(ctx, "cylinder"),
     polygon: createShapeSubTool(ctx, "polygon"),
+    loopcut: createLoopCutSubTool(ctx),
     select: createSelectSubTool(ctx, actions),
   }
   const composer = createOverlayComposer()
@@ -142,7 +144,11 @@ export function createTerrainTool(deps: ToolDeps): TerrainTool {
         levelId: a.levelId,
         shapes: a.level.terrainEdits?.shapes ?? null,
         selection: activeSelection(s),
-        elementMode: editMode(s) ? s.toolSettings.terrain.element : null,
+        // The loop cut leaves its new edges selected in the advanced mode: shown there too.
+        elementMode:
+          editMode(s) || (s.toolSettings.terrain.sub === "loopcut" && s.toolSettings.terrain.advanced && activeSelection(s))
+            ? s.toolSettings.terrain.element
+            : null,
         parts: subOf(s).parts(),
       })
     }
@@ -192,6 +198,9 @@ export function createTerrainTool(deps: ToolDeps): TerrainTool {
           return actions.escape()
         case "confirm":
         case "axis":
+          return sub.key(k)
+        case "brush-size":
+          // The loop cut's cut count; declined, the keymap changes the brush size.
           return sub.key(k)
         case "rotate":
           if (busy) sub.key(k)

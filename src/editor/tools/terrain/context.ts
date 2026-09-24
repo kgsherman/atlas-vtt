@@ -4,6 +4,7 @@
  * readers of the store state the sub-tools need.
  */
 import type { SnapMode } from "@/core/grid/grid"
+import { DEFAULT_TERRAIN_RESOLUTION, sampleSpacing } from "@/core/scene/heightmap"
 import type { TerrainElementRef } from "@/core/scene/terrainShapes"
 import type { Id, Level, TerrainShape, Vec2, Vec3 } from "@/core/scene/types"
 import type { TerrainOverlay } from "@/render/contracts"
@@ -39,6 +40,8 @@ export interface OverlayParts {
   marquee: NonNullable<TerrainOverlay["marquee"]> | null
   /** Outline of the polygon being drawn. */
   outline: NonNullable<TerrainOverlay["outline"]> | null
+  /** Loop cut preview. */
+  cuts: NonNullable<TerrainOverlay["cuts"]> | null
 }
 
 export const NO_PARTS: OverlayParts = {
@@ -51,6 +54,7 @@ export const NO_PARTS: OverlayParts = {
   label: null,
   marquee: null,
   outline: null,
+  cuts: null,
 }
 
 /** One sub-tool of the terrain mode (brush, creation, select). */
@@ -142,3 +146,8 @@ export const groundOf = (e: ToolPointerEvent): Vec3 | null => e.pick.ground ?? n
 
 /** The camera is being dragged (right = orbit, middle = pan) during this move. */
 export const cameraDragging = (e: ToolPointerEvent) => ((e.buttons ?? 0) & 6) !== 0
+
+/** Tolerance (ft) before a shape hit counts as hidden behind the baked terrain (the bake follows the lattice). */
+export function buriedTolerance(level: Level, cellSize: number): number {
+  return Math.max(0.5, 1.5 * sampleSpacing(cellSize, level.heightmap?.resolution ?? DEFAULT_TERRAIN_RESOLUTION))
+}

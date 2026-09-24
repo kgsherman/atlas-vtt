@@ -4,8 +4,8 @@
  * elements, the shape being created, the translate gizmo and a value label (the brush ring is the brush
  * preview's, drawn by previews.ts).
  *
- * A shape's prism: the top is its footprint triangulated with core/scene/terrainShapes triangulateFootprint
- * (the bake's triangulation) at the per-vertex top heights, the sides run from the top down (or up, for a
+ * A shape's prism: the top is its footprint triangulated with core/scene/terrainShapes shapeTopTriangles
+ * (the bake's triangulation, split along the shape's inner edges) at the per-vertex top heights, the sides run from the top down (or up, for a
  * pit) to the base; world Y = level elevation + value. There is no base cap (the base is not an element).
  * Faces are drawn twice: depth-tested with a polygon offset (tops coincide with the baked terrain) and as
  * a dim x-ray pass without depth test, so buried shapes and carved pits stay visible. A non-planar top
@@ -28,6 +28,7 @@
  * The gizmo and the label are persistent objects (`decor`, attached once to the overlay root by the
  * OverlayManager) updated every frame by `frame()`: the arrows are drawn in screen space from
  * core/geometry/gizmo gizmoHandles, the same handles the tool hit-tests, so what is drawn is what is grabbed.
+ * The loop cut preview is a set of element-coloured segments across the top (owned, rebuilt with each overlay).
  * The polygon being drawn is an outline of anti-aliased lines and corner dots (owned, rebuilt with each overlay).
  * The select sub-tool's marquee is a screen-space rect (canvas CSS px, the frame the tool tests vertices
  * and shapes in), drawn by its own tiny shader over everything else.
@@ -35,7 +36,7 @@
 import * as THREE from "three"
 
 import { gizmoHandles, gizmoRing, GIZMO_RING_SEGMENTS, ringPoint, type GizmoAxis, type Projector } from "@/core/geometry/gizmo"
-import { signedArea, triangulateFootprint, type TerrainElementRef } from "@/core/scene/terrainShapes"
+import { shapeEdgeCount, shapeEdgeEnds, shapeTopTriangles, signedArea, type TerrainElementRef } from "@/core/scene/terrainShapes"
 import type { Id, TerrainShape } from "@/core/scene/types"
 
 import type { TerrainOverlay } from "../contracts"
@@ -104,7 +105,7 @@ export interface ShapePrism {
   sides: Float32Array
   /** Side face k is sides[sideStart[k] .. sideStart[k + 1]) (floats); n + 1 entries. */
   sideStart: Uint32Array
-  /** Edge segment pairs (6 floats each): the top outline, the vertical edges, the base outline. */
+  /** Edge segment pairs (6 floats each): the top outline, the vertical edges, the base outline, the inner (loop cut) edges. */
   edges: Float32Array
   /** Top vertex positions (3 floats each), in the shape's point order. */
   vertices: Float32Array
@@ -193,8 +194,8 @@ function buildPrism(shape: TerrainShape, elevation: number, spacing: number): Sh
   const pts = shape.points
   const n = pts.length
   const baseY = elevation + shape.base
-  const tris = triangulateFootprint(pts)
-  // triangulateFootprint's triples have cross(b − a, c − a) > 0 in (x, z), i.e. a −Y normal: reversed.
+  const tris = shapeTopTriangles(shape)
+  // shapeTopTriangles' triples have cross(b − a, c − a) > 0 in (x, z), i.e. a −Y normal: reversed.
   const top = new Float32Array(tris.length * 3)
   for (let t = 0; t + 2 < tris.length; t += 3) {
     putPoint(top, t * 3, pts[tris[t]], elevation)
@@ -210,7 +211,8 @@ function buildPrism(shape: TerrainShape, elevation: number, spacing: number): Sh
   const onBase = (k: number) => Math.abs(pts[k].y - shape.base) <= FLAT_EPS
   const sides = new Float32Array(n * 18)
   const sideStart = new Uint32Array(n + 1)
-  const edges = new Float32Array(n * 18)
+  const inner = shape.innerEdges ?? []
+  const edges = new Float32Array(n * 18 + inner.length * 6)
   const vertices = new Float32Array(n * 3)
   const orientation = signedArea(pts) < 0 ? -1 : 1
   let s = 0
@@ -239,6 +241,11 @@ function buildPrism(shape: TerrainShape, elevation: number, spacing: number): Sh
     const b = pts[(k + 1) % n]
     // A base edge under a top edge lying on the base is that top edge.
     if (!onBase(k) || !onBase((k + 1) % n)) e = putSegment(edges, e, a.x, baseY, a.z, b.x, baseY, b.z)
+  }
+  for (const [i, j] of inner) {
+    const a = pts[i]
+    const b = pts[j]
+    e = putSegment(edges, e, a.x, elevation + a.y, a.z, b.x, elevation + b.y, b.z)
   }
   return { top, sides: trim(sides, s), sideStart, edges: trim(edges, e), vertices, topLift: lift, liftedTop }
 }
@@ -303,11 +310,12 @@ function writeOutward(
   return o + 9
 }
 
-/** Top edge k of a shape (segment pair). */
+/** Top edge element k of a shape (outline or inner edge; segment pair, [] out of range). */
 function topEdgePair(shape: TerrainShape, elevation: number, k: number): number[] {
-  const n = shape.points.length
-  const a = shape.points[k]
-  const b = shape.points[(k + 1) % n]
+  const ends = shapeEdgeEnds(shape, k)
+  if (!ends) return []
+  const a = shape.points[ends[0]]
+  const b = shape.points[ends[1]]
   return [a.x, elevation + a.y, a.z, b.x, elevation + b.y, b.z]
 }
 
@@ -751,6 +759,7 @@ export function buildTerrainOverlay(p: TerrainOverlay, elevation: number, spacin
 
   if (p.elements && selected.length > 0) addElements(root, res, p.elements, byId, selectedIds, elevation, spacing)
   if (p.outline) addOutline(root, res, p.outline)
+  if (p.cuts) addCuts(root, res, p.cuts)
   const marquee = p.marquee ? marqueeMesh(p.marquee) : null
   if (marquee) root.add(marquee)
 
@@ -795,7 +804,8 @@ function addElements(
         outlines.push(...faceOutline(shape, elevation, ref.index))
         continue
       }
-      if (!(Number.isInteger(ref.index) && ref.index >= 0 && ref.index < n)) continue
+      const count = ref.kind === "edge" ? shapeEdgeCount(shape) : n
+      if (!(Number.isInteger(ref.index) && ref.index >= 0 && ref.index < count)) continue
       if (ref.kind === "vertex") {
         const v = shape.points[ref.index]
         dots.push(v.x, elevation + v.y, v.z)
@@ -840,6 +850,20 @@ function addOutline(root: THREE.Object3D, res: TerrainOverlayResources, outline:
     lines(new Float32Array([a.x, a.y, a.z, b.x, b.y, b.z]), outline.closing === "ok" ? C.draft : C.invalid, 0.45)
   }
   add(aaPointGeometry(pts.flatMap((q) => [q.x, q.y, q.z])), res.dot(outline.valid ? C.vertex : C.invalid, 7), O.dot + 0.04)
+}
+
+/** The loop cut preview: its segments in the element colour (red when invalid), x-ray and depth-tested. Owned geometry. */
+function addCuts(root: THREE.Object3D, res: TerrainOverlayResources, cuts: NonNullable<TerrainOverlay["cuts"]>): void {
+  if (cuts.segments.length === 0) return
+  const pairs = new Float32Array(cuts.segments.length * 6)
+  cuts.segments.forEach(([a, b], k) => pairs.set([a.x, a.y, a.z, b.x, b.y, b.z], k * 6))
+  const g = aaLineGeometry(pairs)
+  const color = cuts.valid ? TERRAIN_OVERLAY_COLORS.element : TERRAIN_OVERLAY_COLORS.invalid
+  const xray = new THREE.Mesh(g, res.line(color, 0.55, 2, true))
+  xray.renderOrder = TERRAIN_OVERLAY_ORDER.elementEdge
+  const lines = new THREE.Mesh(g, res.line(color, 1, 3, false))
+  lines.renderOrder = TERRAIN_OVERLAY_ORDER.elementEdge + 0.005
+  root.add(xray, lines)
 }
 
 // ---------------------------------------------------------------------------

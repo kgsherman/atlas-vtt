@@ -35,7 +35,6 @@ import {
   type HeightFollowState,
   type ScreenPoint,
 } from "@/core/geometry/gizmo"
-import { DEFAULT_TERRAIN_RESOLUTION, sampleSpacing } from "@/core/scene/heightmap"
 import { elementVertexIndices, rotateShape, translateShape, translateVertices, type TerrainElementRef } from "@/core/scene/terrainShapes"
 import type { Id, Level, Rect, TerrainShape, Vec2, Vec3 } from "@/core/scene/types"
 
@@ -70,6 +69,7 @@ import type { ToolPointerEvent } from "../types"
 import {
   activeLevel,
   activeSelection,
+  buriedTolerance,
   cameraDragging,
   canvasOf,
   editMode,
@@ -228,10 +228,6 @@ const shapeTied = (h: ShapeHit, front: ShapeHit) => h.hidden === front.hidden &&
 const elementTied = (c: ElementHit, front: ElementHit) => near(c.distance, front.distance)
 const shapeOnGround = (h: ShapeHit) => h.onGround
 
-/** Tolerance (ft) before a shape hit counts as hidden behind the baked terrain (the bake follows the lattice). */
-function buriedTolerance(level: Level, cellSize: number): number {
-  return Math.max(0.5, 1.5 * sampleSpacing(cellSize, level.heightmap?.resolution ?? DEFAULT_TERRAIN_RESOLUTION))
-}
 
 export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<ShapeActions, "select">): SubTool {
   const { store, deps } = ctx

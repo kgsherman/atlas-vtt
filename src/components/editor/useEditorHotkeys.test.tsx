@@ -132,10 +132,10 @@ describe("useEditorHotkeys", () => {
 
   it("follows remaps live", () => {
     render()
-    act(() => setKeyOverrides("editor", { "tool.wall": ["Shift+C"] }))
+    act(() => setKeyOverrides("editor", { "tool.wall": ["Shift+J"] }))
     press("c")
     expect(controller.store.getState().tool).toBe("select")
-    press("C", { shiftKey: true })
+    press("J", { shiftKey: true })
     expect(controller.store.getState().tool).toBe("wall")
   })
 

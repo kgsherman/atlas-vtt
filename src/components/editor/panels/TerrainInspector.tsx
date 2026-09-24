@@ -199,6 +199,7 @@ function SingleShape({ shape, levelId }: { shape: TerrainShape; levelId: Id }) {
             </Badge>
             <OpBadge op={shape.op} />
             {plural(shape.points.length, "vertex", "vertices")}
+            {shape.innerEdges?.length ? ` · ${plural(shape.innerEdges.length, "loop cut")}` : ""}
           </>
         }
       />
@@ -290,7 +291,7 @@ function SingleShape({ shape, levelId }: { shape: TerrainShape; levelId: Id }) {
         {elements > 0 ? (
           <Hint>
             {element === "vertex" ? plural(elements, "vertex", "vertices") : plural(elements, element)} selected: drag {elements === 1 ? "it" : "them"} in the viewport; Delete{" "}
-            {element === "face" ? "works on whole shapes (Tab: object mode)" : element === "edge" ? "collapses edges" : "dissolves vertices"}.
+            {element === "face" ? "works on whole shapes (Tab: object mode)" : element === "edge" ? "collapses edges (removes loop cuts)" : "dissolves vertices"}.
           </Hint>
         ) : null}
       </PanelSection>

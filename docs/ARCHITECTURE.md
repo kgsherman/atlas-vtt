@@ -195,10 +195,11 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
 
 ## 3. Scene document & versioning
 
-- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 4` (v2 added the
+- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 5` (v2 added the
   optional `Token.model`, the v1 → v2 migration is the identity; v3: terrain shapes, `Level.terrainEdits`,
   `WallObject.followTerrain`; v4 widened enums only, heightmap resolutions 8 and 16 and the `polygon` shape
-  kind, so the v3 → v4 migration is the identity and older apps open v4 documents read-only as too-new).
+  kind, so the v3 → v4 migration is the identity and older apps open v4 documents read-only as too-new; v5
+  added the optional `TerrainShape.innerEdges` (loop cuts), again an identity migration).
 - `Token.model` (optional): the 3D figure the token is drawn with, a reference `free:<assetId>` into the
   free asset catalog (category `token-models`, §6.4; `core/scene/tokenModel.ts`). The schema accepts only
   that form (`^free:[a-z0-9][a-z0-9-]{0,63}$`), never a URL, so a document cannot make clients fetch an
@@ -223,7 +224,8 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
   - terrain edits (below): ≤ 1000 shapes per level, 3..64 points per shape, ≤ 16000 points per level
     (`maxTerrainShapesPerLevel`, `maxTerrainShapePoints`, `maxTerrainPointsPerLevel`, counted on the raw input
     by `terrainSizeIssue`); strict shapes (kind / op enums, integer `order` 0..1e6, `name` ≤ 2k, points and
-    `base` y within ±500 ft, canonical signed area > 1e-6 ft²); record key == shape id (`validateReferences`;
+    `base` y within ±500 ft, canonical signed area > 1e-6 ft², `innerEdges` valid by `innerEdgesValid`);
+    record key == shape id (`validateReferences`;
     ids are level-scoped, not claimed scene-wide); `baseChunks` keys and payloads like heightmap chunks at
     the level's resolution, plus `""`; `terrainEdits` requires a heightmap; shape points within the extent
     ± 50 ft. The schema checks shape and range only, not the bake invariant.
@@ -255,7 +257,8 @@ Base UI primitives, zinc/emerald, Outfit + Roboto Slab, lucide). Dark theme firs
 `Level.terrainEdits` (DM-only editing data, never sent to players or to the vision worker) holds what it is
 baked from: `shapes` (`TerrainShape`: `kind` block / ramp / cylinder / polygon is a label; `op` add / carve; integer
 `order`; `points` = simple polygon footprint in canonical orientation, each with its top height y relative
-to the elevation; `base`, the other end of the prism's sides in the editor, not baked) and `baseChunks`
+to the elevation; `base`, the other end of the prism's sides in the editor, not baked; optional
+`innerEdges`, see below) and `baseChunks`
 (the painted terrain, "base", where it differs from the baked heightmap).
 - Invariant, per heightmap chunk K: base_K = decode(`baseChunks[K]`) if present (`""` = all zero), else
   decode(`heightmap.chunks[K]`) (zeros if absent); `heightmap.chunks[K]` = encode(bake(base_K, shapes))
@@ -266,7 +269,8 @@ to the elevation; `base`, the other end of the prism's sides in the editor, not 
 - Bake (`bakeRegion`; deterministic: + − × ÷, sqrt for edge lengths and `Math.fround` only, so a
   whole-level rebake reproduces an incrementally written heightmap bit for bit): shapes apply in ascending
   (order, id) (plain string compare), add → max(terrain, top), carve → min(terrain, top). A shape's top is
-  its footprint triangulated by `triangulateFootprint` (own ear clipping, robust for 3..64 vertices
+  its footprint split along its inner edges (`topFaces`) and each part triangulated by `triangulateFootprint`
+  (`shapeTopTriangles`; own ear clipping, robust for 3..64 vertices
   including collinear and repeated points; zero-area ears dropped; an ear whose diagonal passes within
   `VERTEX_EPS` (1e-6 ft) of another remaining vertex, away from its ends, is clipped only when no other ear
   is left, so simple footprints are covered whole; a stalled clipping returns the triangles found so far,
@@ -292,9 +296,21 @@ to the elevation; `base`, the other end of the prism's sides in the editor, not 
   every shape earlier in bake order whose bounds (grown by 1e-3 ft) overlap one already taken: base :=
   bake(base, closure in bake order) inside its bounds, then the closure is deleted, so the heightmap never
   changes) and the element edits (`translateVertices`, `translateShape`, `rotateShapeQuarter`,
-  `dissolveVertices`, `collapseEdge`: null instead of an invalid shape) are pure; every document write of
+  `dissolveVertices`, `collapseEdge`, `removeInnerEdges`, `loopCut`: null instead of an invalid shape) are pure; every document write of
   terrain goes through the editor store's terrain actions (§7). `hasPaintedBase(level)`: the base is non-zero
   somewhere (reads chunk keys only, by the invariant; nothing is decoded).
+- Inner edges (loop cuts): `innerEdges` holds pairs [a, b] of point indices, a < b, ascending, never
+  adjacent, each a proper diagonal inside the footprint (no other vertex within 1e-6 ft, crossing no outline
+  edge, midpoint inside), none crossing another, at most n − 3 (`innerEdgesValid`). The top is split along
+  them before it is triangulated, so a raised inner edge is a crisp ridge. Edge element k < n is outline
+  edge k, n + c is inner edge c (`shapeEdgeEnds`, `shapeEdgeCount`; picking, box selection, select all and
+  the element display include them). Edits that re-index vertices re-index them (`withVertexMap`,
+  `remapInnerEdges`: an edge losing an end, merging its ends or becoming an outline edge is dropped).
+  `loopCutOpposite(shape, k)`: the side of the top face holding outline edge k opposite it (the face has an
+  even number of sides m and the side m/2 further round is on the outline; otherwise null, since a loop
+  through an inner edge would need a vertex inside the top). `loopCut(shape, k, ts)`: for each t a vertex on
+  edge k at t and one on the opposite edge at 1 − t (heights interpolated, so a planar face keeps its
+  form), joined by a new inner edge; returns the shape and the new edges' element indices.
 - Factories: `blockShape`, `rampShape` (dir 0 = +Z, 1 = +X, 2 = −Z, 3 = −X ascending; low edge y0, high
   edge y0 + height), `cylinderShape` (a 3..64-gon inscribed in the circle), `polygonShape` (a flat top
   over a drawn footprint, stored canonical); base y0, op carve when the height is negative. Factories do not
@@ -1172,6 +1188,16 @@ script checks that it is off.
     `components/editor/CursorKeys`, mounted in the editor and host viewports: rows of mouse input and keymap
     commands shown with their current keys, placed by writing a transform on pointer moves, flipped left
     near the right edge, hidden off the canvas).
+  - Loop cut (`terrain/loopcut.ts`, Shift+C): hovering a shape picks a side (over the top: the outline side
+    of the top face under the pointer nearest to it, preferring cuttable sides; over a side face: that side;
+    else an outline edge near the pointer on screen) and previews the cut (`TerrainOverlay.cuts`, element
+    colour, red with a reason in the hint where there is no loop, too many vertices or the cut would leave
+    the shape) with a label ("5 | 15 ft", or "3 cuts"). One cut follows the pointer along the side, snapped
+    to eighths (Alt / free snapping: free); `loopCuts` (options bar "Cuts", 1..16; [ / ] step it while the
+    loop cut is active, the `brush-size` action) spaces several evenly. A click commits ("Loop cut terrain
+    shape", one undo step) and leaves the new inner edges selected in the advanced edge mode (shown in the
+    loop cut too), ready to raise with Select. Delete on selected inner edges removes them ("Remove terrain
+    loop cuts"). Keys float next to the cursor while a cut is possible.
   - Select, object mode: click selects (Shift / Ctrl toggles; shapes are hit by ray, nearest first), a
     click on nothing clears, a drag on nothing marquee-selects in screen space, a press on a shape selects
     and drags it. A press without Shift / Ctrl on an already selected shape keeps it when it is, in this
@@ -1216,7 +1242,8 @@ script checks that it is off.
     selects elements and Mod+A all of the current kind; a drag on a selected element moves the selection
     (one vertex: absolute edge snapping; else by anchor), Y moves top heights only; a move that would make a
     shape invalid (not simple, flipped) is refused and the drag keeps its last valid state. Delete dissolves
-    vertices or collapses edges (a shape keeps ≥ 3 vertices); face mode deletes nothing (hint). The gizmo
+    vertices or collapses edges (a shape keeps ≥ 3 vertices; selected inner edges are removed instead); face
+    mode deletes nothing (hint). The gizmo
     appears only with elements selected (at their centroid) and never when read-only.
   - Escape order in Select: gesture → elements → advanced mode → shape selection → false. In the other
     sub-tools one Escape (after the gesture) clears the shape selection, and with it the advanced flag.
@@ -1303,7 +1330,7 @@ script checks that it is off.
   active tool sees the key first, with the action as `ToolKeyEvent.action` (tools match actions, so
   remapped keys work), then `runShortcut`. Tool-only actions (`confirm`, `terrain-advanced`,
   `terrain-element`, `axis`) do nothing in `runShortcut`, so an unused key keeps its browser default.
-  Commands may declare `repeat: false` (fire once per press). The "Terrain" group: Q select, Shift+B brush (B toggles dark vision),
+  Commands may declare `repeat: false` (fire once per press). The "Terrain" group: Q select, Shift+B brush (B toggles dark vision), Shift+C loop cut,
   E block → ramp → cylinder → polygon (from another tool it re-enters the last creation sub-tool), Tab advanced mode,
   1 / 2 / 3 element kind, X / Y / Z axis constraint (all but Q and Shift+B without auto-repeat); Enter confirms a
   shape's height (`confirm`). Alt for free placement comes from the library's key-state tracker. Map views turn off the theme provider's "D" hotkey

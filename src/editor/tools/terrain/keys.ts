@@ -27,6 +27,8 @@ export type TerrainKey =
   | { type: "advanced" }
   | { type: "element"; mode: TerrainElementMode }
   | { type: "axis"; axis: GizmoAxis }
+  /** The brush size keys ([ / ]): factor > 1 = larger. */
+  | { type: "brush-size"; factor: number }
   | { type: "other" }
 
 const ELEMENT_MODES: readonly TerrainElementMode[] = ["vertex", "edge", "face"]
@@ -55,6 +57,8 @@ function fromAction(a: ShortcutAction): TerrainKey {
       return { type: "element", mode: a.element }
     case "axis":
       return { type: "axis", axis: a.axis }
+    case "brush-size":
+      return { type: "brush-size", factor: a.factor }
     default:
       return { type: "other" }
   }

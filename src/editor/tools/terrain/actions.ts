@@ -9,6 +9,7 @@ import {
   compareShapeOrder,
   dissolveVertices,
   nextShapeOrder,
+  removeInnerEdges,
   rotateShapeQuarter,
   translateShape,
   translateVertices,
@@ -96,21 +97,29 @@ export function createShapeActions(ctx: TerrainToolContext): ShapeActions {
         return
       }
       const upsert: TerrainShape[] = []
+      let collapsed = false
       for (const sh of selected(sel, rec)) {
         const ks = sel.elements.filter((x) => x.shapeId === sh.id && x.kind === mode).map((x) => x.index as number)
         if (ks.length === 0) continue
-        const next = mode === "vertex" ? dissolveVertices(sh, ks) : collapseEdges(sh, ks)
+        // Edge mode: selected inner edges (loop cuts) are removed, selected outline edges collapsed.
+        const n = sh.points.length
+        const inner = mode === "edge" ? ks.filter((k) => k >= n).map((k) => k - n) : []
+        const outline = mode === "edge" ? ks.filter((k) => k < n) : ks
+        const trimmed = inner.length > 0 ? removeInnerEdges(sh, inner) : sh
+        const next = !trimmed ? null : mode === "vertex" ? dissolveVertices(sh, ks) : outline.length > 0 ? collapseEdges(trimmed, outline) : trimmed
         if (!next || !shapeInExtent(next, s.scene.grid)) {
-          ctx.notify(sh.points.length - new Set(ks).size < 3 ? NEED_THREE_VERTICES : "That would make the shape cross itself")
+          ctx.notify(n - new Set(outline).size < 3 ? NEED_THREE_VERTICES : "That would make the shape cross itself")
           return
         }
+        collapsed ||= outline.length > 0
         upsert.push(next)
       }
       if (upsert.length === 0) {
         ctx.notify(mode === "vertex" ? "Select vertices to dissolve" : "Select edges to collapse")
         return
       }
-      if (edit(a.levelId, { upsert }, mode === "vertex" ? "Dissolve terrain vertices" : "Collapse terrain edges")) {
+      const label = mode === "vertex" ? "Dissolve terrain vertices" : collapsed ? "Collapse terrain edges" : "Remove terrain loop cuts"
+      if (edit(a.levelId, { upsert }, label)) {
         const now = activeSelection(store.getState())
         if (now) select({ ...now, elements: [] })
       }

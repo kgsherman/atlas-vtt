@@ -88,7 +88,7 @@ export interface BrushToolSettings {
 }
 
 /** Sub-tools of the terrain editing mode (ToolId "terrain"). */
-export type TerrainSubTool = "select" | "brush" | "block" | "ramp" | "cylinder" | "polygon"
+export type TerrainSubTool = "select" | "brush" | "block" | "ramp" | "cylinder" | "polygon" | "loopcut"
 
 /** The shape-creating sub-tools, in the order the "cycle-create" key (E) steps through them. */
 export const TERRAIN_CREATE_SUB_TOOLS: readonly TerrainSubTool[] = ["block", "ramp", "cylinder", "polygon"]
@@ -102,10 +102,13 @@ export interface TerrainToolSettings {
   heightStep: number
   /** Sides of new cylinders (6..64). */
   cylinderSides: number
+  /** Parallel cuts the loop cut sub-tool makes at once (1..TERRAIN_LOOP_CUTS_MAX; 1 follows the pointer). */
+  loopCuts: number
 }
 
 export const TERRAIN_CYLINDER_SIDES_MIN = 6
 export const TERRAIN_CYLINDER_SIDES_MAX = 64
+export const TERRAIN_LOOP_CUTS_MAX = 16
 
 export interface TokenToolSettings {
   size: CreatureSize
@@ -146,7 +149,7 @@ export function defaultToolSettings(): ToolSettings {
     prop: { kind: "crate", rotationY: 0 },
     light: { preset: "torch" },
     brush: { mode: "raise", radius: 10, strength: BRUSH_STRENGTH.default, falloff: "smooth" },
-    terrain: { sub: "brush", advanced: false, element: "vertex", heightStep: 0.5, cylinderSides: 24 },
+    terrain: { sub: "brush", advanced: false, element: "vertex", heightStep: 0.5, cylinderSides: 24, loopCuts: 1 },
     token: { size: "medium", kind: "pc" },
   }
 }
