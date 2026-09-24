@@ -107,6 +107,44 @@ export function applyHealing(hp: TokenHp, amount: number): TokenHp {
   return { ...hp, current: Math.min(hp.max, hp.current + heal) }
 }
 
+/**
+ * A change of hit points, applied to the current value when it arrives: concurrent changes (the DM's
+ * damage while a player adds temporary hit points, two quick clicks) add up instead of overwriting each
+ * other. Temporary hit points don't stack: the higher value is kept. `max` is the DM's alone.
+ */
+export type HpAmountChange = { kind: "damage" | "heal" | "temp"; amount: number }
+export type HpChange = HpAmountChange | { kind: "max"; max: number }
+
+export function applyHpChange(hp: TokenHp, change: HpChange): TokenHp {
+  switch (change.kind) {
+    case "damage":
+      return applyDamage(hp, change.amount)
+    case "heal":
+      return applyHealing(hp, change.amount)
+    case "temp":
+      return { ...hp, temp: Math.max(hp.temp, clampInt(change.amount, 0, HP_LIMITS.max)) }
+    case "max":
+      return withMaxHp(hp, change.max)
+  }
+}
+
+/** Conditions to add and to remove, applied to the current list (a condition in both is removed). */
+export interface ConditionChange {
+  add?: readonly TokenCondition[]
+  remove?: readonly TokenCondition[]
+}
+
+export function applyConditionChange(list: readonly TokenCondition[], change: ConditionChange): TokenCondition[] {
+  const remove = new Set<unknown>(change.remove ?? [])
+  return normalizeConditions([...list, ...(change.add ?? [])].filter((c) => !remove.has(c)))
+}
+
+/** A change to a token's health: hit points and/or conditions. */
+export interface TokenStatusChange {
+  hp?: HpChange
+  conditions?: ConditionChange
+}
+
 /** The coarse band: 0 is down, at most half is bloodied, below max is wounded. Temporary hit points don't count. */
 export function healthBand(hp: TokenHp): HealthBand {
   if (hp.current <= 0) return "down"

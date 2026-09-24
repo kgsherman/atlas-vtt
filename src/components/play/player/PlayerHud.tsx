@@ -40,7 +40,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import type { TokenCondition, TokenHp } from "@/core/scene/tokenStatus"
+import type { TokenStatusChange } from "@/core/scene/tokenStatus"
 import type { Id, SceneLike, Token } from "@/core/scene/types"
 import { cn } from "@/lib/utils"
 import type { PlayerClientSnapshot } from "@/net/player"
@@ -97,11 +97,8 @@ export interface PlayerHudProps {
   onEndTurn(): void
   onRollInitiative(tokenId: Id, modifier: number): void
   onFocusToken(tokenId: Id): void
-  /** Change one of our characters' hit points (current and temporary) or conditions. */
-  onTokenStatus(
-    tokenId: Id,
-    status: { hp?: TokenHp; conditions?: TokenCondition[] }
-  ): void
+  /** Change one of our characters' hit points (damage, healing, temporary) or conditions. */
+  onTokenStatus(tokenId: Id, change: TokenStatusChange): void
 }
 
 export function PlayerHud({
@@ -153,7 +150,7 @@ export function PlayerHud({
             snap={snap}
             climbs={climbs}
             tool={tool}
-            onStatus={(status) => onTokenStatus(selected.id, status)}
+            onStatus={(change) => onTokenStatus(selected.id, change)}
             statusDisabled={chat.disabledReason !== null}
           />
         ) : null}
@@ -481,7 +478,7 @@ function CharacterCard({
   snap: PlayerClientSnapshot
   climbs: ClimbOption[]
   tool: PlayTool
-  onStatus(status: { hp?: TokenHp; conditions?: TokenCondition[] }): void
+  onStatus(change: TokenStatusChange): void
   statusDisabled: boolean
 }) {
   const view = snap.view!
@@ -530,11 +527,8 @@ function CharacterCard({
         key={token.id}
         hp={pt?.hp ?? null}
         conditions={pt?.conditions ?? []}
-        dm={false}
         disabled={statusDisabled}
-        onChange={({ hp, conditions }) =>
-          onStatus({ hp: hp ?? undefined, conditions })
-        }
+        onChange={onStatus}
       />
       <p className="text-[0.6875rem] leading-relaxed text-muted-foreground">
         {cardHint(tool, climbs)}

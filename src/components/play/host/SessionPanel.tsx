@@ -864,7 +864,7 @@ function TableTab({ state, actions }: SessionPanelProps) {
         <ToggleRow
           icon={<HeartPulse />}
           title="Show wounds to players"
-          description="Players see whether other creatures are wounded, bloodied or down (never their hit points)."
+          description="Players see whether creatures they don't control are wounded, bloodied or down. Hit points go only to a creature's players (and the party, with shared vision)."
           checked={!(state.hideWounds ?? false)}
           onChange={(v) => actions.setHideWounds(!v)}
         />

@@ -261,8 +261,12 @@ export function SelectedTokenCard({
         key={t.id}
         hp={t.hp ?? null}
         conditions={t.conditions ?? []}
-        dm
-        onChange={(status) => actions.setTokenStatus(t.id, status)}
+        onChange={(change) => actions.changeTokenStatus(t.id, change)}
+        onTrack={(max) =>
+          actions.setTokenStatus(t.id, {
+            hp: max === null ? null : { current: max, max, temp: 0 },
+          })
+        }
       />
       <div className="flex gap-1">
         <Button

@@ -35,7 +35,7 @@ import { normalizeAngle } from "@/editor/transform"
 import { tokenModelAsset, tokenModelChoices, useFreeAssets } from "@/app/freeAssets"
 import { ConditionChips, ConditionMenu } from "@/components/play/table/health"
 import { freeTokenModelRef } from "@/core/scene/tokenModel"
-import { clampHp, HP_LIMITS, withMaxHp, type TokenCondition } from "@/core/scene/tokenStatus"
+import { applyConditionChange, clampHp, HP_LIMITS, withMaxHp, type TokenCondition } from "@/core/scene/tokenStatus"
 
 import { FreeAssetScopeContext, useEditorActions, useEditorContext, useEditorShallow, useEditorState } from "../context"
 import { ColorInput, FieldPair, FieldRow, Hint, NotesInput, NumberInput, PanelSection, Segmented, SelectInput, SliderInput, SwitchField, TextInput, type Option } from "../fields"
@@ -624,7 +624,7 @@ function TokenHealthFields({ t, readOnly, onChange }: { t: Token; readOnly: bool
         ) : null
       }
     >
-      <FieldRow label="Max HP" hint="Hit points at full health. Leave empty to not track them.">
+      <FieldRow label="Max HP" hint="Hit points at full health. Setting it starts tracking them; Stop tracking removes them.">
         <NumberInput value={hp?.max ?? null} min={1} max={HP_LIMITS.max} precision={0} placeholder="Not tracked" disabled={readOnly} onCommit={(max) => onChange({ hp: withMaxHp(hp, max) })} />
       </FieldRow>
       {hp ? (
@@ -638,7 +638,7 @@ function TokenHealthFields({ t, readOnly, onChange }: { t: Token; readOnly: bool
       <FieldRow label="Conditions">
         <div className="flex flex-col items-start gap-1.5">
           <ConditionChips conditions={conditions} onRemove={readOnly ? undefined : (c) => setConditions(conditions.filter((x) => x !== c))} />
-          <ConditionMenu conditions={conditions} disabled={readOnly} onChange={setConditions} />
+          <ConditionMenu conditions={conditions} disabled={readOnly} onChange={(change) => setConditions(applyConditionChange(conditions, change))} />
         </div>
       </FieldRow>
     </PanelSection>

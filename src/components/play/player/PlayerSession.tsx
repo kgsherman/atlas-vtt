@@ -518,8 +518,8 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
               client.rollInitiative(tokenId, bonus)
             }
             onFocusToken={(id) => focusToken(id)}
-            onTokenStatus={(tokenId, status) =>
-              client.setTokenStatus(tokenId, status)
+            onTokenStatus={(tokenId, change) =>
+              client.changeTokenStatus(tokenId, change)
             }
             camera={{
               onRotate: (q) => engine?.rotateCamera(q),

@@ -3,7 +3,7 @@
  * and a player's `token-status` request for their own tokens. Both are play actions (like moves): they
  * change GameState.scene without marking the map edited, and change no player's vision.
  */
-import { clampHp, HP_LIMITS, normalizeConditions, type TokenCondition, type TokenHp } from "../scene/tokenStatus"
+import { applyConditionChange, applyHpChange, clampHp, normalizeConditions, type TokenCondition, type TokenHp } from "../scene/tokenStatus"
 import type { Token } from "../scene/types"
 import { emptyDelta, ownsToken, tokenExistsForPlayers, type RequestOutcome } from "./state"
 import type { ClientToHost, GameState, RejectReason } from "./types"
@@ -38,20 +38,22 @@ function reject(state: GameState, reqId: string, reason: RejectReason): RequestO
 }
 
 /**
- * A player updates one of their own tokens: current / temporary hit points (only when the DM tracks
- * its hit points: max stays the DM's) and/or conditions. Ownership is checked before anything is
+ * A player changes one of their own tokens: damage, healing or temporary hit points (only when the DM
+ * tracks its hit points: max stays the DM's) and/or conditions to add and remove, applied to the token
+ * as it is now (never a stale copy from the player's view). Ownership is checked before anything is
  * looked up, like moves.
  */
 export function reduceTokenStatus(state: GameState, userId: string, msg: StatusRequest): RequestOutcome {
   if (!ownsToken(state, userId, msg.tokenId)) return reject(state, msg.reqId, "not-owner")
   const t = tokenExistsForPlayers(state, msg.tokenId)
-  if (!t) return reject(state, msg.reqId, "cannot")
+  if (!t) return reject(state, msg.reqId, "unknown-token")
   let hp: TokenHp | undefined
   if (msg.hp) {
     if (!t.hp) return reject(state, msg.reqId, "cannot")
-    hp = clampHp({ current: msg.hp.current, max: t.hp.max, temp: Math.min(msg.hp.temp, HP_LIMITS.max) })
+    hp = applyHpChange(t.hp, msg.hp)
   }
-  const next = tokenWithStatus(t, hp, msg.conditions)
+  const conditions = msg.conditions ? applyConditionChange(t.conditions ?? [], msg.conditions) : undefined
+  const next = tokenWithStatus(t, hp, conditions)
   const result = { reqId: msg.reqId, ok: true }
   if (next === t) return { state, delta: emptyDelta(), dirtyPlayers: [], result, visited: [], tokenId: null }
   return {

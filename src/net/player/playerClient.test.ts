@@ -863,6 +863,33 @@ describe("PlayerClient: the table and pings", () => {
     expect(describeRequestResult(byId(long)!)).toBe("Those dice can't be read (try 1d20+5)")
   })
 
+  it("sends token status as relative changes, and keeps back what it may not send", async () => {
+    const newTab = tabs()
+    const { sim, token } = world()
+    const host = fakeHost(newTab(), sim)
+    const client = makeClient(newTab())
+    await client.start()
+    await waitFor(() => client.getSnapshot().status === "live", "live")
+    const prone = client.changeTokenStatus(token.id, { conditions: { add: ["prone", "prone", "sleepy" as never] } })
+    const heal = client.changeTokenStatus(token.id, { hp: { kind: "heal", amount: 4.4 } })
+    // Max is the DM's; an empty change says nothing.
+    const max = client.changeTokenStatus(token.id, { hp: { kind: "max", max: 30 } })
+    const empty = client.changeTokenStatus(token.id, { conditions: { add: [] } })
+    await waitFor(() => client.getSnapshot().results.length === 4, "results")
+    expect(host.received.map((r) => r.msg).filter((m) => m.t === "token-status")).toEqual([
+      { t: "token-status", reqId: prone, tokenId: token.id, conditions: { add: ["prone"] } },
+      { t: "token-status", reqId: heal, tokenId: token.id, hp: { kind: "heal", amount: 4 } },
+    ])
+    const byId = (id: string) => client.getSnapshot().results.find((r) => r.reqId === id)!
+    expect(byId(max)).toMatchObject({ ok: false, local: "invalid", kind: "token-status" })
+    expect(byId(empty)).toMatchObject({ ok: false, local: "invalid", kind: "token-status" })
+    expect(byId(prone)).toMatchObject({ ok: true, kind: "token-status" })
+    // The DM does not track this token's hit points.
+    expect(byId(heal)).toMatchObject({ ok: false, reason: "cannot", kind: "token-status" })
+    expect(describeRequestResult(byId(heal))).toBe("The DM doesn't track that character's hit points")
+    await waitFor(() => client.getSnapshot().view?.tokens[token.id]?.conditions?.[0] === "prone", "prone in the view")
+  })
+
   it("sends pings on known levels only, draws its own at once, and takes the host's", async () => {
     const newTab = tabs()
     const { sim, ground } = world()

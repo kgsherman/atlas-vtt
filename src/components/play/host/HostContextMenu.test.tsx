@@ -111,9 +111,9 @@ describe("HostContextMenuContent", () => {
   it("ticks a condition from the Conditions submenu", () => {
     const { state, tokenId } = fixture()
     state.scene.tokens[tokenId].conditions = ["prone"]
-    const setTokenStatus = vi.fn()
+    const changeTokenStatus = vi.fn()
     const errors = vi.spyOn(console, "error").mockImplementation(() => {})
-    renderMenu(state, { kind: "token", id: tokenId }, { setTokenStatus })
+    renderMenu(state, { kind: "token", id: tokenId }, { changeTokenStatus })
     const item = (role: string, text: string) =>
       [...document.querySelectorAll(`[role="${role}"]`)].find((el) =>
         el.textContent?.includes(text)
@@ -123,8 +123,12 @@ describe("HostContextMenuContent", () => {
       item("menuitemcheckbox", "Prone")?.getAttribute("aria-checked")
     ).toBe("true")
     act(() => item("menuitemcheckbox", "Poisoned")!.click())
-    expect(setTokenStatus).toHaveBeenCalledWith(tokenId, {
-      conditions: ["poisoned", "prone"],
+    act(() => item("menuitemcheckbox", "Prone")!.click())
+    expect(changeTokenStatus).toHaveBeenCalledWith(tokenId, {
+      conditions: { add: ["poisoned"] },
+    })
+    expect(changeTokenStatus).toHaveBeenCalledWith(tokenId, {
+      conditions: { remove: ["prone"] },
     })
     expect(errors).not.toHaveBeenCalled()
     errors.mockRestore()

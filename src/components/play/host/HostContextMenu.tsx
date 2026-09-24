@@ -165,10 +165,8 @@ export function HostContextMenuContent({
                     checked={conditions.has(c)}
                     closeOnClick={false}
                     onCheckedChange={(on) =>
-                      actions.setTokenStatus(t.id, {
-                        conditions: TOKEN_CONDITIONS.filter((x) =>
-                          x === c ? on : conditions.has(x)
-                        ),
+                      actions.changeTokenStatus(t.id, {
+                        conditions: on ? { add: [c] } : { remove: [c] },
                       })
                     }
                   >

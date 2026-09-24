@@ -23,16 +23,16 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip"
 import {
-  applyDamage,
-  applyHealing,
   CONDITION_LABELS,
   healthBand,
   HP_LIMITS,
   TOKEN_CONDITIONS,
+  type ConditionChange,
   type HealthBand,
+  type HpChange,
   type TokenCondition,
   type TokenHp,
-  withMaxHp,
+  type TokenStatusChange,
 } from "@/core/scene/tokenStatus"
 import { cn } from "@/lib/utils"
 
@@ -123,14 +123,17 @@ export function ConditionChips({
   )
 }
 
-/** A button opening the list of conditions to tick. */
+/**
+ * A button opening the list of conditions to tick. Emits the one condition ticked or unticked (not the
+ * whole list), so two quick ticks both count even before the first comes back from the host.
+ */
 export function ConditionMenu({
   conditions,
   onChange,
   disabled,
 }: {
   conditions: readonly TokenCondition[]
-  onChange(next: TokenCondition[]): void
+  onChange(change: ConditionChange): void
   disabled?: boolean
 }) {
   const have = new Set(conditions)
@@ -154,9 +157,7 @@ export function ConditionMenu({
                 checked={have.has(c)}
                 closeOnClick={false}
                 onCheckedChange={(on) =>
-                  onChange(
-                    TOKEN_CONDITIONS.filter((x) => (x === c ? on : have.has(x)))
-                  )
+                  onChange(on ? { add: [c] } : { remove: [c] })
                 }
               >
                 <Icon /> {CONDITION_LABELS[c]}
@@ -170,7 +171,8 @@ export function ConditionMenu({
 }
 
 /**
- * Hit points with quick damage and healing. `canSetMax`: the DM also edits max (and can stop tracking);
+ * Hit points with quick damage and healing, emitted as relative changes (applied to the hit points as
+ * they are when the change arrives). `canSetMax`: the DM also edits max (and can stop tracking);
  * players change current and temporary hit points only.
  */
 export function HpEditor({
@@ -181,7 +183,7 @@ export function HpEditor({
   disabled,
 }: {
   hp: TokenHp
-  onChange(next: TokenHp): void
+  onChange(change: HpChange): void
   canSetMax: boolean
   onUntrack?: () => void
   disabled?: boolean
@@ -192,13 +194,7 @@ export function HpEditor({
   const valid = amount.trim() !== "" && Number.isFinite(n) && n > 0
   const apply = (kind: "damage" | "heal" | "temp") => {
     if (!valid) return
-    onChange(
-      kind === "damage"
-        ? applyDamage(hp, n)
-        : kind === "heal"
-          ? applyHealing(hp, n)
-          : { ...hp, temp: Math.min(HP_LIMITS.max, Math.max(hp.temp, n)) }
-    )
+    onChange({ kind, amount: Math.min(HP_LIMITS.max, n) })
     setAmount("")
   }
   return (
@@ -318,7 +314,7 @@ function MaxField({
   disabled,
 }: {
   hp: TokenHp
-  onChange(next: TokenHp): void
+  onChange(change: HpChange): void
   disabled?: boolean
 }) {
   const [draft, setDraft] = React.useState<string | null>(null)
@@ -327,7 +323,7 @@ function MaxField({
     const n = Math.round(Number(draft))
     setDraft(null)
     if (!Number.isFinite(n) || n < 1 || n === hp.max) return
-    onChange(withMaxHp(hp, n))
+    onChange({ kind: "max", max: Math.min(HP_LIMITS.max, n) })
   }
   return (
     <Input
@@ -399,19 +395,20 @@ export function TrackHp({
 
 /**
  * A token's health section: the hit point editor (or "Track hit points" for the DM), the conditions as
- * removable chips and the conditions menu. `dm`: sets max and starts/stops tracking.
+ * removable chips and the conditions menu. Changes are relative (`onChange`); `onTrack` (the DM only)
+ * starts tracking hit points at a max, or stops (null), and lets the editor set max.
  */
 export function TokenHealth({
   hp,
   conditions,
-  dm,
   onChange,
+  onTrack,
   disabled,
 }: {
   hp: TokenHp | null
   conditions: readonly TokenCondition[]
-  dm: boolean
-  onChange(status: { hp?: TokenHp | null; conditions?: TokenCondition[] }): void
+  onChange(change: TokenStatusChange): void
+  onTrack?: (max: number | null) => void
   disabled?: boolean
 }) {
   return (
@@ -419,16 +416,13 @@ export function TokenHealth({
       {hp ? (
         <HpEditor
           hp={hp}
-          canSetMax={dm}
+          canSetMax={onTrack !== undefined}
           disabled={disabled}
-          onChange={(next) => onChange({ hp: next })}
-          onUntrack={dm ? () => onChange({ hp: null }) : undefined}
+          onChange={(change) => onChange({ hp: change })}
+          onUntrack={onTrack ? () => onTrack(null) : undefined}
         />
-      ) : dm ? (
-        <TrackHp
-          disabled={disabled}
-          onTrack={(max) => onChange({ hp: { current: max, max, temp: 0 } })}
-        />
+      ) : onTrack ? (
+        <TrackHp disabled={disabled} onTrack={(max) => onTrack(max)} />
       ) : null}
       <div className="flex flex-wrap items-center gap-1">
         <ConditionChips
@@ -437,14 +431,13 @@ export function TokenHealth({
           onRemove={
             disabled
               ? undefined
-              : (c) =>
-                  onChange({ conditions: conditions.filter((x) => x !== c) })
+              : (c) => onChange({ conditions: { remove: [c] } })
           }
         />
         <ConditionMenu
           conditions={conditions}
           disabled={disabled}
-          onChange={(next) => onChange({ conditions: next })}
+          onChange={(change) => onChange({ conditions: change })}
         />
       </div>
     </div>

@@ -114,29 +114,60 @@ describe("token status: changes", () => {
     expect(reduceDm(state, { t: "set-token-status", tokenId: "nope", conditions: [] }).error).toBe("unknown token")
   })
 
-  it("a player updates only their own token, within the DM's max", () => {
+  it("a player changes only their own token, within the DM's max", () => {
     const g = game()
     const req = (uid: string, msg: Omit<Extract<StateRequest, { t: "token-status" }>, "t" | "reqId">, state: GameState = g.state) =>
       reduceRequest(state, uid, { t: "token-status", reqId: "r", ...msg }, { world: null as never, currentView: null, perceivedByPlayer: () => false })
-    expect(req(ALICE, { tokenId: g.orc, conditions: [] }).result.reason).toBe("not-owner")
-    expect(req(ALICE, { tokenId: g.bram, conditions: [] }).result.reason).toBe("not-owner")
-    const out = req(ALICE, { tokenId: g.pip, hp: { current: 99, temp: 4 }, conditions: ["concentrating"] })
-    expect(out.result).toEqual({ reqId: "r", ok: true })
-    expect(out.state.scene.tokens[g.pip]).toMatchObject({ hp: { current: 12, max: 12, temp: 4 }, conditions: ["concentrating"] })
-    // Hit points the DM does not track cannot be set by the player.
+    expect(req(ALICE, { tokenId: g.orc, conditions: { remove: ["poisoned"] } }).result.reason).toBe("not-owner")
+    expect(req(ALICE, { tokenId: g.bram, conditions: { add: ["prone"] } }).result.reason).toBe("not-owner")
+    // Pip: 9 / 12, 2 temporary, prone.
+    const healed = req(ALICE, { tokenId: g.pip, hp: { kind: "heal", amount: 99 }, conditions: { add: ["concentrating"], remove: ["prone"] } })
+    expect(healed.result).toEqual({ reqId: "r", ok: true })
+    expect(healed.state.scene.tokens[g.pip]).toMatchObject({ hp: { current: 12, max: 12, temp: 2 }, conditions: ["concentrating"] })
+    expect(req(ALICE, { tokenId: g.pip, hp: { kind: "damage", amount: 5 } }).state.scene.tokens[g.pip].hp).toEqual({ current: 6, max: 12, temp: 0 })
+    expect(req(ALICE, { tokenId: g.pip, hp: { kind: "temp", amount: 1 } }).state).toBe(g.state)
+    // Hit points the DM does not track cannot be changed by the player.
     const untracked = reduceDm(g.state, { t: "set-token-status", tokenId: g.pip, hp: null }).state
-    expect(req(ALICE, { tokenId: g.pip, hp: { current: 5, temp: 0 } }, untracked).result.reason).toBe("cannot")
-    expect(req(ALICE, { tokenId: g.pip, conditions: ["prone"] }, untracked).state).toBe(untracked)
+    expect(req(ALICE, { tokenId: g.pip, hp: { kind: "heal", amount: 5 } }, untracked).result.reason).toBe("cannot")
+    expect(req(ALICE, { tokenId: g.pip, conditions: { add: ["prone"] } }, untracked).state).toBe(untracked)
+    // A hidden token is gone as far as its player knows.
+    const tokens = g.state.scene.tokens
+    const hidden: GameState = { ...g.state, scene: { ...g.state.scene, tokens: { ...tokens, [g.pip]: { ...tokens[g.pip], hidden: true } } } }
+    expect(req(ALICE, { tokenId: g.pip, conditions: { add: ["prone"] } }, hidden).result.reason).toBe("unknown-token")
+  })
+
+  it("changes made from the same stale view both count, and never undo the DM's", () => {
+    const g = game()
+    const ctx = { world: null as never, currentView: null, perceivedByPlayer: () => false }
+    const req = (state: GameState, msg: Omit<Extract<StateRequest, { t: "token-status" }>, "t" | "reqId">) =>
+      reduceRequest(state, ALICE, { t: "token-status", reqId: "r", ...msg }, ctx).state
+    // Two quick ticks in the conditions menu, both sent before the first result came back.
+    let s = req(g.state, { tokenId: g.pip, conditions: { add: ["poisoned"] } })
+    s = req(s, { tokenId: g.pip, conditions: { add: ["blinded"] } })
+    expect(s.scene.tokens[g.pip].conditions).toEqual(["blinded", "poisoned", "prone"])
+    // The DM deals 8 damage while the player adds temporary hit points: both stand.
+    s = reduceDm(s, { t: "set-token-status", tokenId: g.pip, hp: { current: 1, max: 12, temp: 0 } }).state
+    s = req(s, { tokenId: g.pip, hp: { kind: "temp", amount: 5 } })
+    expect(s.scene.tokens[g.pip].hp).toEqual({ current: 1, max: 12, temp: 5 })
+    // Two quick damage entries both land.
+    s = req(req(s, { tokenId: g.pip, hp: { kind: "damage", amount: 3 } }), { tokenId: g.pip, hp: { kind: "damage", amount: 3 } })
+    expect(s.scene.tokens[g.pip].hp).toEqual({ current: 0, max: 12, temp: 0 })
   })
 
   it("accepts only well-formed requests on the wire", () => {
-    expect(parseClientMessage({ t: "token-status", reqId: "r", tokenId: "t1", hp: { current: 3, temp: 0 } })).not.toBeNull()
-    expect(parseClientMessage({ t: "token-status", reqId: "r", tokenId: "t1", conditions: ["prone"] })).not.toBeNull()
+    expect(parseClientMessage({ t: "token-status", reqId: "r", tokenId: "t1", hp: { kind: "damage", amount: 3 } })).not.toBeNull()
+    expect(parseClientMessage({ t: "token-status", reqId: "r", tokenId: "t1", conditions: { add: ["prone"] } })).not.toBeNull()
+    expect(parseClientMessage({ t: "token-status", reqId: "r", tokenId: "t1", conditions: { remove: ["prone"], add: ["dead"] } })).not.toBeNull()
     for (const bad of [
       { t: "token-status", reqId: "r", tokenId: "t1" },
-      { t: "token-status", reqId: "r", tokenId: "t1", hp: { current: 3, temp: 0, max: 99 } },
-      { t: "token-status", reqId: "r", tokenId: "t1", hp: { current: -1, temp: 0 } },
-      { t: "token-status", reqId: "r", tokenId: "t1", conditions: ["zombified"] },
+      { t: "token-status", reqId: "r", tokenId: "t1", hp: { current: 3, temp: 0 } },
+      { t: "token-status", reqId: "r", tokenId: "t1", hp: { kind: "max", amount: 99 } },
+      { t: "token-status", reqId: "r", tokenId: "t1", hp: { kind: "damage", amount: 0 } },
+      { t: "token-status", reqId: "r", tokenId: "t1", hp: { kind: "heal", amount: 2.5 } },
+      { t: "token-status", reqId: "r", tokenId: "t1", hp: { kind: "damage", amount: 3, max: 99 } },
+      { t: "token-status", reqId: "r", tokenId: "t1", conditions: ["prone"] },
+      { t: "token-status", reqId: "r", tokenId: "t1", conditions: {} },
+      { t: "token-status", reqId: "r", tokenId: "t1", conditions: { add: ["zombified"] } },
     ]) {
       expect(parseClientMessage(bad), JSON.stringify(bad)).toBeNull()
     }

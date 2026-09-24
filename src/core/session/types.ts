@@ -1,7 +1,7 @@
 import type { Patch } from "immer"
 
 import type { RollResult } from "../dice/dice"
-import type { HealthBand, TokenCondition, TokenHp } from "../scene/tokenStatus"
+import type { HealthBand, HpAmountChange, TokenCondition, TokenHp } from "../scene/tokenStatus"
 import type { MoveRejectReason, PathStep } from "../movement/types"
 import type {
   ConnectorObject,
@@ -372,10 +372,11 @@ export type ClientToHost =
   /** Point at a spot (ephemeral: no result, never stored). Only on levels the player knows. */
   | { t: "ping"; levelId: Id; x: number; z: number }
   /**
-   * Update one of the player's own tokens: current and temporary hit points (only when the DM tracks its
-   * hit points; max stays the DM's), and/or its conditions.
+   * Change one of the player's own tokens: damage, healing or temporary hit points (only when the DM
+   * tracks its hit points; max stays the DM's), and/or conditions to add and remove. Relative: the host
+   * applies it to the token as it is then, so a change made meanwhile is never overwritten.
    */
-  | { t: "token-status"; reqId: string; tokenId: Id; hp?: { current: number; temp: number }; conditions?: TokenCondition[] }
+  | { t: "token-status"; reqId: string; tokenId: Id; hp?: HpAmountChange; conditions?: { add?: TokenCondition[]; remove?: TokenCondition[] } }
 
 /**
  * host → player on topic `session:{sid}:view:{uid}`. `epoch` changes on every host start;

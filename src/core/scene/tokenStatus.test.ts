@@ -1,6 +1,17 @@
 import { describe, expect, it } from "vitest"
 
-import { applyDamage, applyHealing, clampHp, healthBand, hpFraction, normalizeConditions, TOKEN_CONDITIONS, withMaxHp } from "./tokenStatus"
+import {
+  applyConditionChange,
+  applyDamage,
+  applyHealing,
+  applyHpChange,
+  clampHp,
+  healthBand,
+  hpFraction,
+  normalizeConditions,
+  TOKEN_CONDITIONS,
+  withMaxHp,
+} from "./tokenStatus"
 
 describe("token status", () => {
   it("normalizes conditions: known ones, once, in catalog order", () => {
@@ -33,6 +44,24 @@ describe("token status", () => {
     expect(applyDamage(hp, -5)).toEqual(hp)
     expect(applyHealing(hp, 7)).toEqual({ current: 17, max: 20, temp: 4 })
     expect(applyHealing(hp, 70)).toEqual({ current: 20, max: 20, temp: 4 })
+  })
+
+  it("relative changes: damage, healing, temporary hit points keep the higher, max", () => {
+    const hp = { current: 10, max: 20, temp: 4 }
+    expect(applyHpChange(hp, { kind: "damage", amount: 6 })).toEqual({ current: 8, max: 20, temp: 0 })
+    expect(applyHpChange(hp, { kind: "heal", amount: 50 })).toEqual({ current: 20, max: 20, temp: 4 })
+    expect(applyHpChange(hp, { kind: "temp", amount: 3 })).toEqual(hp)
+    expect(applyHpChange(hp, { kind: "temp", amount: 9 })).toEqual({ current: 10, max: 20, temp: 9 })
+    expect(applyHpChange(hp, { kind: "max", max: 25 })).toEqual({ current: 15, max: 25, temp: 4 })
+    // Two changes made from the same stale value both count.
+    expect(applyHpChange(applyHpChange(hp, { kind: "damage", amount: 5 }), { kind: "damage", amount: 5 })).toEqual({ current: 4, max: 20, temp: 0 })
+  })
+
+  it("condition changes add and remove against the current list", () => {
+    expect(applyConditionChange(["prone"], { add: ["poisoned"] })).toEqual(["poisoned", "prone"])
+    expect(applyConditionChange(["poisoned", "prone"], { remove: ["prone"] })).toEqual(["poisoned"])
+    expect(applyConditionChange(["prone"], { add: ["prone", "blinded"], remove: ["prone"] })).toEqual(["blinded"])
+    expect(applyConditionChange([], {})).toEqual([])
   })
 
   it("bands: down, bloodied at half or less, wounded, unhurt", () => {

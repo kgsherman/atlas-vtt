@@ -98,14 +98,19 @@ const initiativeSchema = z.strictObject({
 })
 const endTurnSchema = z.strictObject({ t: z.literal("end-turn"), reqId: tokenSchema, entryId: idSchema })
 const pingSchema = z.strictObject({ t: z.literal("ping"), levelId: idSchema, x: worldCoord, z: worldCoord })
-const hpValue = z.int().min(0).max(HP_LIMITS.max)
+const conditionList = z.array(z.enum(TOKEN_CONDITIONS)).max(TOKEN_CONDITIONS.length)
+// Relative changes (core/scene/tokenStatus.ts HpChange, ConditionChange): the host applies them to the
+// token as it is when they arrive, so concurrent changes never overwrite each other.
 const tokenStatusSchema = z
   .strictObject({
     t: z.literal("token-status"),
     reqId: tokenSchema,
     tokenId: idSchema,
-    hp: z.strictObject({ current: hpValue, temp: hpValue }).optional(),
-    conditions: z.array(z.enum(TOKEN_CONDITIONS)).max(TOKEN_CONDITIONS.length).optional(),
+    hp: z.strictObject({ kind: z.enum(["damage", "heal", "temp"]), amount: z.int().min(1).max(HP_LIMITS.max) }).optional(),
+    conditions: z
+      .strictObject({ add: conditionList.optional(), remove: conditionList.optional() })
+      .refine((c) => (c.add?.length ?? 0) + (c.remove?.length ?? 0) > 0, "no condition to change")
+      .optional(),
   })
   .refine((m) => m.hp !== undefined || m.conditions !== undefined, "nothing to change")
 
