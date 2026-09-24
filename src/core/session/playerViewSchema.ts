@@ -5,8 +5,10 @@
  */
 import { z } from "zod"
 
+import { rollResultSchema } from "../dice/schema"
 import { TOKEN_MODEL_REF_RE } from "../scene/tokenModel"
 import { TERRAIN_RESOLUTIONS } from "../scene/types"
+import { TABLE_LIMITS } from "./table"
 import { PLAYER_VIEW_VERSION, type PlayerView } from "./types"
 
 const MAX_ID = 64
@@ -253,6 +255,41 @@ function keyedRecord<T extends z.ZodType<{ id: string }>>(key: z.ZodString | z.Z
   return z.record(key, value).refine((rec) => Object.entries(rec).every(([k, v]) => (v as { id: string }).id === k), "record key must equal the entry id")
 }
 
+const tableMessage = z.strictObject({
+  id,
+  at: z.int().min(0),
+  kind: z.enum(["chat", "roll", "system"]),
+  name: z.string().max(TABLE_LIMITS.maxName * 2),
+  color,
+  mine: z.boolean(),
+  dm: z.boolean(),
+  whisper: z.boolean(),
+  // cleanText keeps maxText code points: up to twice as many UTF-16 units.
+  text: z.string().max(TABLE_LIMITS.maxText * 2),
+  roll: rollResultSchema.optional(),
+})
+
+const combatEntry = z.strictObject({
+  id,
+  tokenId: id.nullable(),
+  name: text,
+  initiative: z.number().min(-TABLE_LIMITS.maxInitiative).max(TABLE_LIMITS.maxInitiative).nullable(),
+})
+
+/** Chat log and combat as one player sees them (filter.ts playerTable): no user ids fit. */
+export const playerTableSchema = z.strictObject({
+  log: keyedRecord(id, tableMessage).refine((rec) => Object.keys(rec).length <= TABLE_LIMITS.maxViewLog, "too many messages"),
+  combat: z
+    .strictObject({
+      round: z.int().min(1).max(TABLE_LIMITS.maxRound),
+      activeId: id.nullable(),
+      entries: z.array(combatEntry).max(TABLE_LIMITS.maxCombatants),
+    })
+    .nullable(),
+})
+
+export const playerPingSchema = z.strictObject({ levelId: id, x: num, z: num, name: z.string().max(TABLE_LIMITS.maxName * 2), color, focus: z.boolean() })
+
 export const playerViewSchema = z.strictObject({
   viewVersion: z.literal(PLAYER_VIEW_VERSION),
   sessionId: text,
@@ -271,6 +308,7 @@ export const playerViewSchema = z.strictObject({
   controlledTokenIds: z.array(id),
   visionTokenIds: z.array(id),
   flags: z.strictObject({ movementLocked: z.boolean(), sharedVision: z.boolean(), enforceSpeed: z.boolean(), freeMovement: z.boolean().optional() }),
+  table: playerTableSchema.optional(),
 })
 
 /** Validate an untrusted PlayerView (e.g. a player_views row). null when it does not match exactly. */

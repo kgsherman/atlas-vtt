@@ -14,6 +14,7 @@ import { remapExplored } from "./masks"
 import { sanitizeObject } from "./sanitize"
 import { staticLightWorldY } from "./memory"
 import { attachedLightIds, emptyDelta, nextPlayerColor, own, type ReduceResult, type SceneDelta } from "./state"
+import { isTableCommand, rebindTable, reduceTableDm, tableOf } from "./table"
 import type { DmCommand, GameState, PlayerObject } from "./types"
 
 enablePatches()
@@ -155,6 +156,8 @@ function targets(state: GameState, userId: string | undefined): string[] {
 }
 
 export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
+  // Chat, dice and combat (core/session/table.ts).
+  if (isTableCommand(cmd)) return reduceTableDm(state, cmd)
   switch (cmd.t) {
     case "move-token": {
       const t = own(state.scene.tokens, cmd.tokenId)
@@ -281,6 +284,8 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
       // Another map: the old origin no longer applies.
       const origin = cmd.origin ? { sceneId: cmd.origin.sceneId, version: cmd.origin.version, dirty: cmd.origin.dirty } : null
       const next: GameState = { ...state, scene: cmd.scene, owners, explored: {}, memory: {}, revealed: {}, seq: state.seq + 1, origin }
+      // Combat is about the old map's tokens; the table log stays.
+      if (state.table?.combat) next.table = { ...tableOf(state), combat: null }
       const delta: SceneDelta = {
         objects: sorted([...Object.keys(prev.objects), ...Object.keys(cmd.scene.objects)]),
         tokens: sorted([...Object.keys(prev.tokens), ...Object.keys(cmd.scene.tokens)]),
@@ -340,6 +345,7 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
         owners,
         seq: state.seq + 1,
       }
+      if (state.table) next.table = rebindTable(state.table, from, to)
       return { state: next, delta: emptyDelta(), dirtyPlayers: [from, to] }
     }
     case "reset-fog": {

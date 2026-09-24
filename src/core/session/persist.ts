@@ -15,13 +15,15 @@
  */
 import { z } from "zod"
 
+import { rollResultSchema } from "../dice/schema"
 import { base64ToBytes } from "../scene/heightmap"
 import { idSchema, parseScene } from "../scene/schema"
 import type { Id } from "../scene/types"
 import type { EncodedMask } from "../vision/types"
 import { normalizeFreeAssetCategories } from "./freeAssets"
 import { memoryObjectSchema } from "./playerViewSchema"
-import { GAME_STATE_VERSION, type GameState, type PlayerObject, type SessionPlayer } from "./types"
+import { TABLE_LIMITS } from "./table"
+import { GAME_STATE_VERSION, type GameState, type PlayerObject, type SessionPlayer, type TableState } from "./types"
 
 export const GAME_STATE_LIMITS = {
   maxPlayers: 256,
@@ -116,6 +118,38 @@ function boundedRecord<K extends z.ZodType<string>, V extends z.ZodType>(key: K,
     .pipe(z.record(key, value))
 }
 
+const tableMessageSchema = z.strictObject({
+  id: idSchema,
+  at: z.int().min(0).max(Number.MAX_SAFE_INTEGER),
+  kind: z.enum(["chat", "roll", "system"]),
+  from: userIdSchema.nullable(),
+  name: z.string().max(TABLE_LIMITS.maxName * 2),
+  color: colorSchema,
+  to: z.union([z.literal("all"), z.array(userIdSchema).max(GAME_STATE_LIMITS.maxPlayers)]),
+  text: z.string().max(TABLE_LIMITS.maxText * 2),
+  roll: rollResultSchema.optional(),
+})
+
+const combatEntrySchema = z.strictObject({
+  id: idSchema,
+  tokenId: idSchema.nullable(),
+  name: z.string().max(TABLE_LIMITS.maxName * 2),
+  initiative: z.number().min(-TABLE_LIMITS.maxInitiative).max(TABLE_LIMITS.maxInitiative).nullable(),
+  modifier: z.int().min(-TABLE_LIMITS.maxModifier).max(TABLE_LIMITS.maxModifier),
+  hidden: z.boolean(),
+})
+
+const tableSchema = z.strictObject({
+  log: z.array(tableMessageSchema).max(TABLE_LIMITS.maxLog),
+  combat: z
+    .strictObject({
+      round: z.int().min(1).max(TABLE_LIMITS.maxRound),
+      activeId: idSchema.nullable(),
+      entries: z.array(combatEntrySchema).max(TABLE_LIMITS.maxCombatants),
+    })
+    .nullable(),
+})
+
 const gameStateShape = z.strictObject({
   stateVersion: z.literal(GAME_STATE_VERSION),
   sessionId: z.string().min(1).max(GAME_STATE_LIMITS.maxSessionIdLength),
@@ -140,6 +174,8 @@ const gameStateShape = z.strictObject({
   freeAssets: z.array(z.string().max(64)).max(16).optional(),
   // Optional too (absent: players are forced to the grid).
   freeMovement: z.boolean().optional(),
+  // Optional too (absent: no chat yet, no combat).
+  table: tableSchema.optional(),
 })
 
 export type ParseGameStateResult = { ok: true; state: GameState } | { ok: false; issues: string[] }
@@ -217,6 +253,21 @@ export function parseGameStateDetailed(json: unknown): ParseGameStateResult {
     if (isPlayer(uid)) memory[uid] = out
   }
 
+  // ---- table: combat entries of tokens that no longer exist are dropped ----------------------------
+  let table: TableState | undefined
+  if (raw.table !== undefined) {
+    const c = raw.table.combat
+    const entries = c ? c.entries.filter((e) => e.tokenId === null || Object.hasOwn(scene.tokens, e.tokenId)) : []
+    table = {
+      log: raw.table.log.map((m) => ({ ...m, to: m.to === "all" ? "all" : [...m.to] })),
+      combat: c && {
+        round: c.round,
+        activeId: c.activeId !== null && entries.some((e) => e.id === c.activeId) ? c.activeId : null,
+        entries: entries.map((e) => ({ ...e })),
+      },
+    }
+  }
+
   // ---- revealed: players only, sorted and unique --------------------------------------------
   const revealed = {} as Record<string, Id[]>
   for (const [uid, ids] of Object.entries(raw.revealed)) {
@@ -243,6 +294,7 @@ export function parseGameStateDetailed(json: unknown): ParseGameStateResult {
       ...(raw.origin !== undefined ? { origin: raw.origin && { sceneId: raw.origin.sceneId, version: raw.origin.version, dirty: raw.origin.dirty } } : {}),
       ...(raw.freeAssets !== undefined ? { freeAssets: normalizeFreeAssetCategories(raw.freeAssets) } : {}),
       ...(raw.freeMovement !== undefined ? { freeMovement: raw.freeMovement } : {}),
+      ...(table !== undefined ? { table } : {}),
     },
   }
 }
@@ -287,5 +339,6 @@ export function serializeGameState(state: GameState): string {
   if (state.origin !== undefined) ordered.origin = state.origin
   if (state.freeAssets !== undefined) ordered.freeAssets = state.freeAssets
   if (state.freeMovement !== undefined) ordered.freeMovement = state.freeMovement
+  if (state.table !== undefined) ordered.table = state.table
   return JSON.stringify(ordered)
 }

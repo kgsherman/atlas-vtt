@@ -447,7 +447,7 @@ describe("PlayerClient: stored views", () => {
     const reqId = client.requestMove(token.id, [{ cell: { i: 2, j: 2 }, levelId: token.levelId }, { cell: { i: 3, j: 2 }, levelId: token.levelId }])
     await Promise.resolve()
     expect(client.getSnapshot().pending).toEqual([])
-    expect(client.getSnapshot().results.at(-1)).toEqual({ reqId, ok: false, local: "host-offline" })
+    expect(client.getSnapshot().results.at(-1)).toEqual({ reqId, ok: false, local: "host-offline", kind: "move" })
 
     const second = new FakeHost({ transport: newTab(), sessionId: realSid, sim, dmUserId: DM, persist: { repo, hostEpoch } })
     cleanups.push(() => second.stop())
@@ -608,7 +608,7 @@ describe("PlayerClient: requests", () => {
     const path = [{ cell: { i: 2, j: 2 }, levelId: lvl }]
     const ids = Array.from({ length: 9 }, () => client.requestMove(token.id, path))
     expect(client.getSnapshot().pending.map((p) => p.reqId)).toEqual(ids.slice(0, 8))
-    expect(client.getSnapshot().results.at(-1)).toEqual({ reqId: ids[8], ok: false, reason: "rate-limited", local: "rate-limited" })
+    expect(client.getSnapshot().results.at(-1)).toEqual({ reqId: ids[8], ok: false, reason: "rate-limited", local: "rate-limited", kind: "move" })
     await waitFor(() => host.received.filter((r) => r.msg.t === "move").length === 8, "8 sent")
     const empty = client.requestMove(token.id, [])
     expect(client.getSnapshot().results.at(-1)).toMatchObject({ reqId: empty, ok: false, reason: "empty-path", local: "invalid" })
@@ -626,7 +626,7 @@ describe("PlayerClient: requests", () => {
     expect(client.getSnapshot().pending).toHaveLength(1)
     await waitFor(() => client.getSnapshot().pending.length === 0, "expired", 2000)
     const snap = client.getSnapshot()
-    expect(snap.results.at(-1)).toEqual({ reqId, ok: false, local: "timeout" })
+    expect(snap.results.at(-1)).toEqual({ reqId, ok: false, local: "timeout", kind: "door" })
     expect(snap.hostUnresponsive).toBe(true)
     expect(describeRequestResult(snap.results.at(-1)!)).toBe("DM not responding")
     // Any word from the host clears the flag.
@@ -682,10 +682,10 @@ describe("PlayerClient: requests", () => {
     let snap = client.getSnapshot()
     expect(snap.networkOffline).toBe(true)
     expect(snap.pending).toEqual([])
-    expect(snap.results.at(-1)).toEqual({ reqId: pending, ok: false, local: "not-connected" })
+    expect(snap.results.at(-1)).toEqual({ reqId: pending, ok: false, local: "not-connected", kind: "move" })
     const refused = client.requestDoor("door-1", "open")
     snap = client.getSnapshot()
-    expect(snap.results.at(-1)).toEqual({ reqId: refused, ok: false, local: "not-connected" })
+    expect(snap.results.at(-1)).toEqual({ reqId: refused, ok: false, local: "not-connected", kind: "door" })
     expect(snap.hostUnresponsive).toBe(false)
     host.autoReply = true
     setOnline(true)
@@ -709,7 +709,7 @@ describe("PlayerClient: requests", () => {
     await waitFor(() => client.getSnapshot().status === "kicked", "kicked")
     expect(client.getSnapshot().error).toBe("Removed by the DM")
     const reqId = client.requestMove(token.id, [{ cell: { i: 2, j: 2 }, levelId: token.levelId }])
-    expect(client.getSnapshot().results.at(-1)).toEqual({ reqId, ok: false, local: "closed" })
+    expect(client.getSnapshot().results.at(-1)).toEqual({ reqId, ok: false, local: "closed", kind: "move" })
     // Channels are closed: the host can no longer reach us.
     const before = client.getSnapshot()
     await host.send(P1, { t: "snapshot", epoch: "x", seq: 9, view: host.lastView(P1)! })
@@ -731,7 +731,7 @@ describe("PlayerClient: requests", () => {
     const reqId = client.requestMove(token.id, [{ cell: { i: 2, j: 2 }, levelId: token.levelId }])
     await client.stop()
     expect(client.getSnapshot().pending).toEqual([])
-    expect(client.getSnapshot().results.at(-1)).toEqual({ reqId, ok: false, local: "closed" })
+    expect(client.getSnapshot().results.at(-1)).toEqual({ reqId, ok: false, local: "closed", kind: "move" })
     expect(tiles.dispose).toHaveBeenCalledTimes(1)
   })
 })
@@ -822,5 +822,77 @@ describe("sceneChangeFromOps", () => {
     expect(sceneChangeFromOps([{ op: "set", path: ["scene", "levels", "l2"], value: {} }], view, view)).toEqual({ structure: true })
     expect(sceneChangeFromOps([{ op: "set", path: ["scene", "name"], value: "x" }], view, view)).toBe("none")
     expect(sceneChangeFromOps([{ op: "set", path: [], value: view }], view, view)).toBeNull()
+  })
+})
+
+describe("PlayerClient: the table and pings", () => {
+  it("says, rolls and ends turns through the host; results carry their kind", async () => {
+    const newTab = tabs()
+    const { sim } = world()
+    const host = fakeHost(newTab(), sim)
+    const client = makeClient(newTab())
+    await client.start()
+    await waitFor(() => client.getSnapshot().status === "live", "live")
+    const said = client.say("  Hello  ", "all")
+    const rolled = client.roll("2d6+1 damage", "dm")
+    const endTurn = client.endTurn()
+    await waitFor(() => client.getSnapshot().results.length === 3, "results")
+    expect(host.received.map((r) => r.msg)).toEqual(
+      expect.arrayContaining([
+        { t: "say", reqId: said, text: "Hello", to: "all" },
+        { t: "roll", reqId: rolled, formula: "2d6+1 damage", to: "dm" },
+        { t: "end-turn", reqId: endTurn },
+      ])
+    )
+    const results = client.getSnapshot().results
+    expect(results.find((r) => r.reqId === said)).toMatchObject({ ok: true, kind: "say" })
+    const refused = results.find((r) => r.reqId === endTurn)!
+    expect(refused).toMatchObject({ ok: false, reason: "cannot", kind: "end-turn" })
+    expect(describeRequestResult(refused)).toBe("It isn't your turn")
+    await waitFor(() => Object.keys(client.getSnapshot().view?.table?.log ?? {}).length === 2, "log in the view")
+    const log = Object.values(client.getSnapshot().view!.table!.log).sort((a, b) => a.at - b.at)
+    expect(log.map((m) => [m.kind, m.text, m.whisper, m.mine])).toEqual([
+      ["chat", "Hello", false, true],
+      ["roll", "damage", true, true],
+    ])
+    // Refused locally: nothing to send.
+    const empty = client.say("   ", "all")
+    const long = client.roll("d".repeat(500), "all")
+    const byId = (id: string) => client.getSnapshot().results.find((r) => r.reqId === id)
+    expect(byId(empty)).toMatchObject({ ok: false, local: "invalid", kind: "say" })
+    expect(describeRequestResult(byId(long)!)).toBe("Those dice can't be read (try 1d20+5)")
+  })
+
+  it("sends pings on known levels only, draws its own at once, and takes the host's", async () => {
+    const newTab = tabs()
+    const { sim, ground } = world()
+    const host = rawHost(newTab())
+    const client = makeClient(newTab())
+    const got: unknown[] = []
+    client.onPing((ev) => got.push(ev))
+    await client.start()
+    await waitFor(() => host.hellos().length === 1, "hello")
+    // Nothing known yet (no view): refused.
+    expect(client.ping(ground, { x: 1, z: 2 })).toBe(false)
+    const view = sim.refresh(P1).view
+    expect(view.scene.levels[ground].known).toBe(true)
+    await host.send({ t: "snapshot", epoch: "e1", seq: 1, view, nonce: host.hellos()[0].nonce })
+    await waitFor(() => client.getSnapshot().status === "live", "live")
+    expect(client.ping("elsewhere", { x: 1, z: 2 })).toBe(false)
+    expect(client.ping(ground, { x: 1, z: 2 })).toBe(true)
+    // At most one per PING_GAP_MS.
+    expect(client.ping(ground, { x: 3, z: 4 })).toBe(false)
+    await waitFor(() => host.requests.some((r) => r.t === "ping"), "ping sent")
+    expect(host.requests.filter((r) => r.t === "ping")).toEqual([{ t: "ping", levelId: ground, x: 1, z: 2 }])
+    expect(got).toEqual([{ levelId: ground, x: 1, z: 2, name: "", color: "", focus: false, mine: true }])
+
+    const ping = { levelId: ground, x: 20, z: 5, name: "DM", color: "#e0a526", focus: true }
+    await host.send({ t: "ping", epoch: "e1", ping })
+    await host.send({ t: "ping", epoch: "other-epoch", ping: { ...ping, x: 99 } })
+    await host.send({ t: "ping", epoch: "e1", ping: { ...ping, x: "far" } } as never)
+    await host.send({ t: "ping", epoch: "e1", ping: { ...ping, extra: 1 } } as never)
+    await waitFor(() => got.length >= 2, "host ping")
+    await sleep(40)
+    expect(got).toEqual([expect.objectContaining({ mine: true }), { ...ping, mine: false }])
   })
 })

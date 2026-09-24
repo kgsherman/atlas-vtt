@@ -16,11 +16,16 @@
  *  - levels: explored ("known") levels + stubs for levels referenced by sent connectors, tokens, lights;
  *  - terrain chunks overlapping explored cells with unexplored samples zeroed; masks;
  *  - backdrops: placement only (rect, opacity, tintWalls, tile size) for known levels with a map image —
- *    never the asset id, its name or any pixels (tiles of explored cells travel separately, net/assets).
+ *    never the asset id, its name or any pixels (tiles of explored cells travel separately, net/assets);
+ *  - table (`playerTable`): the messages this player may read (public ones, their own, whispers to them)
+ *    without any user id; the combat entries not hidden by the DM whose token is in this view (or custom
+ *    entries), named like the view's tokens, and the acting entry only when it is one of them.
+ * Pings (`pingForPlayer`, sent outside the view) reach a player only on levels they know.
  * Masked floors are clipped by their covered rects (floorRects) and sent as plain rect pieces: a floor
  * mask never reaches a player.
  * Precondition: updateKnowledge(state, uid, vis) has been applied for the same `vis`.
  */
+import type { RolledTerm, RollResult } from "../dice/dice"
 import { TerrainSampler } from "../occlusion/terrain"
 import { sampleSpacing } from "../scene/heightmap"
 import { groundHeightAt, levelById, lightEffectivelyHidden, lightWorldPosition, sortedLevels, wallLength } from "../scene/queries"
@@ -35,6 +40,7 @@ import { connectorsOnly, rememberedFootprint } from "./memory"
 import { MAX_TERRAIN_PROFILE } from "./playerViewSchema"
 import { sanitizeLight, type MemoryFloor } from "./sanitize"
 import { controlledTokenIds, movementLockedFor, own, tokenExistsForPlayers, viewerTokenIds } from "./state"
+import { canRead, TABLE_LIMITS } from "./table"
 import {
   PLAYER_VIEW_VERSION,
   type GameState,
@@ -44,12 +50,17 @@ import {
   type PlayerFloor,
   type PlayerLevel,
   type PlayerLevelMasks,
+  type PlayerCombat,
   type PlayerLight,
   type PlayerObject,
+  type PlayerPing,
+  type PlayerTable,
+  type PlayerTableMessage,
   type PlayerToken,
   type PlayerView,
   type PlayerWall,
   type PlayerWindow,
+  type TableMessage,
 } from "./types"
 import { playerBackdrop } from "./backdrop"
 import { pieceId, sortedKeys } from "./util"
@@ -555,5 +566,117 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
     },
   }
   if (Object.keys(backdrops).length > 0) view.backdrops = backdrops
+  const table = playerTable(state, userId, tokens, full)
+  if (table) view.table = table
   return view
+}
+
+// ---------------------------------------------------------------------------
+// The table (chat, dice, combat) and pings
+// ---------------------------------------------------------------------------
+
+function copyRoll(r: RollResult): RollResult {
+  return {
+    formula: r.formula,
+    total: r.total,
+    terms: r.terms.map(
+      (t): RolledTerm =>
+        t.kind === "const"
+          ? { kind: "const", sign: t.sign, value: t.value }
+          : {
+              kind: "dice",
+              sign: t.sign,
+              count: t.count,
+              sides: t.sides,
+              explode: t.explode,
+              keep: t.keep ? { mode: t.keep.mode, n: t.keep.n } : null,
+              rolls: [...t.rolls],
+              dropped: [...t.dropped],
+            }
+    ),
+  }
+}
+
+/** Wire messages per (message, reader): the same object across flushes, so diffs compare by identity. */
+const messageCache = new WeakMap<TableMessage, Map<string, PlayerTableMessage>>()
+
+function playerMessage(m: TableMessage, userId: string): PlayerTableMessage {
+  let byUser = messageCache.get(m)
+  if (!byUser) messageCache.set(m, (byUser = new Map()))
+  let out = byUser.get(userId)
+  if (!out) {
+    out = {
+      id: m.id,
+      at: m.at,
+      kind: m.kind,
+      name: m.name,
+      color: m.color,
+      mine: m.from === userId,
+      dm: m.from === null && m.kind !== "system",
+      whisper: m.to !== "all",
+      text: m.text,
+    }
+    if (m.roll) out.roll = copyRoll(m.roll)
+    byUser.set(userId, out)
+  }
+  return out
+}
+
+/**
+ * What a player may see of the table: messages they may read (newest TABLE_LIMITS.maxViewLog), and
+ * combat entries not hidden by the DM that are custom or a token in this view (`tokens`: the view's
+ * tokens; `full`: those whose DM name the player may see). null when there is nothing to show.
+ */
+function playerTable(state: GameState, userId: string, tokens: Record<Id, PlayerToken>, full: ReadonlySet<Id>): PlayerTable | null {
+  const table = state.table
+  if (!table) return null
+  const log: Record<Id, PlayerTableMessage> = {}
+  let n = 0
+  for (let k = table.log.length - 1; k >= 0 && n < TABLE_LIMITS.maxViewLog; k--) {
+    const m = table.log[k]
+    if (!canRead(m, userId)) continue
+    log[m.id] = playerMessage(m, userId)
+    n++
+  }
+  let combat: PlayerCombat | null = null
+  const c = table.combat
+  if (c) {
+    const entries: PlayerCombat["entries"] = []
+    for (const e of c.entries) {
+      if (e.hidden) continue
+      if (e.tokenId === null) {
+        entries.push({ id: e.id, tokenId: null, name: e.name, initiative: e.initiative })
+        continue
+      }
+      const t = own(tokens, e.tokenId)
+      if (!t) continue
+      const name = (full.has(e.tokenId) ? t.name : null) ?? t.label ?? ""
+      entries.push({ id: e.id, tokenId: e.tokenId, name, initiative: e.initiative })
+    }
+    const activeId = c.activeId !== null && entries.some((e) => e.id === c.activeId) ? c.activeId : null
+    combat = { round: c.round, activeId, entries }
+  }
+  if (n === 0 && combat === null) return null
+  return { log, combat }
+}
+
+/** A ping as the host holds it (the sender's name and colour resolved by the host, never from a payload). */
+export interface TablePing {
+  levelId: Id
+  x: number
+  z: number
+  name: string
+  color: string
+  focus: boolean
+}
+
+/**
+ * What a player is sent of a ping: nothing unless its level is one they know (explored), so a ping never
+ * reveals a level. `view`: the view last sent to that player.
+ */
+export function pingForPlayer(ping: TablePing, view: PlayerView | null): PlayerPing | null {
+  if (!view || !Number.isFinite(ping.x) || !Number.isFinite(ping.z)) return null
+  const level = own(view.scene.levels, ping.levelId)
+  if (!level || !level.known) return null
+  return { levelId: ping.levelId, x: ping.x, z: ping.z, name: ping.name, color: ping.color, focus: ping.focus }
 }

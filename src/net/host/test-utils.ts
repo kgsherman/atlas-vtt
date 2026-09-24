@@ -20,7 +20,7 @@ import { createLocalScenesRepo } from "../scenesRepo"
 import { createLocalSessionsRepo, type SessionsRepo } from "../sessionsRepo"
 import type { PlayerChannels, Transport } from "../transport"
 import { createHostRunner } from "./index"
-import type { CreateHostRunnerOptions } from "./hostRunner"
+import type { CreateHostRunnerOptions, LockManagerLike } from "./hostRunner"
 import { createInThreadVisionClient, type WorkerLike } from "./visionClient"
 import { responseTransferables, VisionWorkerCore, type VisionRequest } from "./visionProtocol"
 
@@ -353,4 +353,38 @@ export function startHost(fx: SessionFixture, extra: Partial<CreateHostRunnerOpt
     ...extra,
   })
   return { host, logs }
+}
+
+/**
+ * In-memory Web Locks (the `ifAvailable` and `steal` requests the host makes), for runtimes without
+ * navigator.locks (Node < 24). Like the real API: a request's promise settles when its callback's
+ * promise does, and a stolen lock's request rejects with an AbortError while its callback keeps running.
+ */
+export function fakeLocks(): LockManagerLike {
+  const held = new Map<string, { abort(err: unknown): void }>()
+  return {
+    request(name, options, callback) {
+      const current = held.get(name)
+      if (current && options.ifAvailable) return Promise.resolve(callback(null))
+      if (current && !options.steal) return Promise.reject(new Error("fakeLocks: waiting for a lock is not supported"))
+      if (current) {
+        held.delete(name)
+        current.abort(Object.assign(new Error("The lock was stolen"), { name: "AbortError" }))
+      }
+      return new Promise((resolve, reject) => {
+        const entry = { abort: reject }
+        held.set(name, entry)
+        Promise.resolve(callback({ name, mode: "exclusive" })).then(
+          (v) => {
+            if (held.get(name) === entry) held.delete(name)
+            resolve(v)
+          },
+          (err: unknown) => {
+            if (held.get(name) === entry) held.delete(name)
+            reject(err)
+          }
+        )
+      })
+    },
+  }
 }

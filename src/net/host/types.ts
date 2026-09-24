@@ -4,9 +4,10 @@
  */
 import type { Patch } from "immer"
 
+import type { TablePing } from "@/core/session/filter"
 import type { ReduceResult } from "@/core/session/state"
 import type { DmCommand, GameState } from "@/core/session/types"
-import type { Id } from "@/core/scene/types"
+import type { Id, Vec2 } from "@/core/scene/types"
 import type { VisibilityResult } from "@/core/vision/types"
 import type { AtlasIdentity } from "../auth"
 import type { ScenesRepo } from "../scenesRepo"
@@ -63,6 +64,12 @@ export interface HostSnapshot {
    * edited since. null: none (started from a file, or the library scene was deleted).
    */
   library: { sceneId: string; version: number | null; dirty: boolean } | null
+}
+
+/** A ping seen by the host: a player's (`from`: their user id) or the DM's own (`from`: null). */
+export interface HostPingEvent {
+  ping: TablePing
+  from: string | null
 }
 
 export interface HostRunnerOptions {
@@ -129,6 +136,13 @@ export interface HostRunner {
   saveMapToLibrary(opts?: { force?: boolean }): Promise<number>
   /** End the session for everyone. */
   endSession(): Promise<void>
+  /**
+   * Point at a spot for every player who knows its level (filter.ts pingForPlayer). `focus`: ask their
+   * clients to centre the camera on it. Ephemeral: nothing is stored.
+   */
+  ping(levelId: Id, point: Vec2, opts?: { focus?: boolean }): void
+  /** Pings as they happen: players' (to show the DM) and the DM's own. */
+  onPing(cb: (ev: HostPingEvent) => void): () => void
 }
 
 export type CreateHostRunner = (opts: HostRunnerOptions) => HostRunner
