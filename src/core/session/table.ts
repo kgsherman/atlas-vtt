@@ -276,9 +276,11 @@ const changed = (state: GameState, table: TableState, dirtyPlayers: string[] | "
 })
 
 /** A DM-built message, bounded (the DM is trusted, but the state must stay loadable). */
-function cleanDmMessage(m: TableMessage): TableMessage | null {
+function cleanDmMessage(state: GameState, m: TableMessage): TableMessage | null {
   if (typeof m.id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(m.id) || !finite(m.at)) return null
-  const to = m.to === "all" ? "all" : Array.isArray(m.to) ? [...new Set(m.to.filter((u) => typeof u === "string"))].sort() : null
+  // Recipients: players of this game (nobody else could read it; the saved state stays loadable).
+  const to =
+    m.to === "all" ? "all" : Array.isArray(m.to) ? [...new Set(m.to.filter((u) => typeof u === "string" && Object.hasOwn(state.players, u)))].sort() : null
   if (to === null) return null
   const out: TableMessage = {
     id: m.id,
@@ -301,7 +303,7 @@ export function reduceTableDm(state: GameState, cmd: TableCommand): ReduceResult
   const combat = table.combat
   switch (cmd.t) {
     case "table-post": {
-      const m = cleanDmMessage(cmd.message)
+      const m = cleanDmMessage(state, cmd.message)
       if (!m) return unchanged(state, "invalid message")
       return changed(state, appendMessage(table, m), readers(state, m))
     }

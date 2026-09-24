@@ -133,7 +133,7 @@ export function SessionPanel(props: SessionPanelProps) {
   return (
     <aside
       aria-label="Session"
-      className="flex w-[22.5rem] shrink-0 flex-col border-l bg-card/40"
+      className="flex w-80 shrink-0 flex-col border-l bg-card/40"
     >
       <RoomCodeCard roomCode={snap.roomCode || state.roomCode} />
       {snap.status === "standby" ? (
@@ -146,17 +146,18 @@ export function SessionPanel(props: SessionPanelProps) {
       >
         <div className="shrink-0 border-b px-2 py-2">
           <TabsList className="w-full">
+            {/* Five tabs in 20rem: labels without icons. */}
             <TabsTrigger value="players" className="gap-1 text-[0.6875rem]">
-              <Users /> Players
+              Players
               <Badge variant="secondary" className="h-4 px-1.5 tabular-nums">
                 {online}/{players.length}
               </Badge>
             </TabsTrigger>
-            <TabsTrigger value="tokens" className="gap-1 text-[0.6875rem]">
-              <Swords /> Tokens
+            <TabsTrigger value="tokens" className="text-[0.6875rem]">
+              Tokens
             </TabsTrigger>
             <TabsTrigger value="combat" className="gap-1 text-[0.6875rem]">
-              <Dices /> Combat
+              Combat
               {state.table?.combat ? (
                 <span
                   className="size-1.5 rounded-full bg-sidebar-primary"
@@ -164,11 +165,11 @@ export function SessionPanel(props: SessionPanelProps) {
                 />
               ) : null}
             </TabsTrigger>
-            <TabsTrigger value="table" className="gap-1 text-[0.6875rem]">
-              <Crown /> Table
+            <TabsTrigger value="table" className="text-[0.6875rem]">
+              Table
             </TabsTrigger>
-            <TabsTrigger value="assets" className="gap-1 text-[0.6875rem]">
-              <Package /> Assets
+            <TabsTrigger value="assets" className="text-[0.6875rem]">
+              Assets
             </TabsTrigger>
           </TabsList>
         </div>

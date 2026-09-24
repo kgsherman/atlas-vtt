@@ -1081,9 +1081,22 @@ export class HostRunnerImpl implements HostRunner {
     const epoch = this.wireEpoch
     if (!epoch || this.status !== "hosting") return
     for (const conn of this.conns.values()) {
-      if (conn.closed || conn.userId === except || !conn.link?.isReady()) continue
+      const link = conn.link
+      if (conn.closed || conn.userId === except || !link?.isReady()) continue
       const out = pingForPlayer(ping, conn.lastSent)
-      if (out) void this.send(conn, { t: "ping", epoch, ping: out }).catch(() => undefined)
+      if (!out) continue
+      // Best-effort and outside the seq order: unlike send(), a ping neither postpones the idle sync
+      // (lastMessageAt) nor flags the link for a resume when it fails.
+      const msg: HostToClient = { t: "ping", epoch, ping: out }
+      void link
+        .send(msg)
+        .then((res) => {
+          if (!res.ok) return
+          this.stats.messagesSent++
+          this.stats.bytesSent += jsonBytes(msg)
+          this.statsChanged()
+        })
+        .catch(() => undefined)
     }
     const ev: HostPingEvent = { ping, from: except }
     for (const cb of [...this.pingListeners]) {

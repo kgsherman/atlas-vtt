@@ -463,6 +463,10 @@ describe("DM messages", () => {
     expect(reduceDm(state, { t: "table-post", message: dmMessage({ stamp: stamp("d2"), kind: "chat", to: "all", text: "   " }) }).error).toBe("invalid message")
     expect(reduceDm(state, { t: "table-post", message: dmMessage({ stamp: stamp("d3"), kind: "roll", to: "all", text: "x" }) }).error).toBe("invalid message")
     expect(reduceDm(state, { t: "table-post", message: { ...long, id: "bad id!" } }).error).toBe("invalid message")
+    // Whispers only reach players of the game.
+    const w = reduceDm(state, { t: "table-post", message: dmMessage({ stamp: stamp("d4"), kind: "chat", to: [BOB, "not a player", BOB], text: "hi" }) })
+    expect(w.state.table!.log[0].to).toEqual([BOB])
+    expect(w.dirtyPlayers).toEqual([BOB])
   })
 })
 

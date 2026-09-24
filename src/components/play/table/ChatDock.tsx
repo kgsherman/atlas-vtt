@@ -5,7 +5,7 @@
  * closed, the newest message from someone else shows briefly above the toggle.
  */
 import * as React from "react"
-import { EyeOff, MessageSquare, SendHorizontal, X } from "lucide-react"
+import { Crown, EyeOff, MessageSquare, SendHorizontal, X } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -134,8 +134,11 @@ export function ChatDock({
   }
 
   // ---- open / focus -------------------------------------------------------------------------------
+  // Only new requests: a dock mounted again (e.g. after the DM's Edit map) must not reopen itself.
+  const handledSignal = React.useRef(focusSignal)
   React.useEffect(() => {
-    if (focusSignal === 0) return
+    if (focusSignal === handledSignal.current) return
+    handledSignal.current = focusSignal
     setOpen(true)
     // After the panel mounts.
     const t = setTimeout(() => inputRef.current?.focus(), 0)
@@ -412,6 +415,13 @@ function ChatLine({
           aria-hidden
         />
         <span className="truncate font-medium">{e.name}</span>
+        {e.fromDm ? (
+          // The host sets this; a player named "DM" gets no crown.
+          <Crown
+            className="size-3 shrink-0 translate-y-0.5 text-sidebar-primary"
+            aria-label="(the DM)"
+          />
+        ) : null}
         {e.privacy ? (
           <span className="flex shrink-0 items-center gap-0.5 text-[0.625rem] text-sidebar-primary">
             <EyeOff className="size-2.5" /> {e.privacy}
