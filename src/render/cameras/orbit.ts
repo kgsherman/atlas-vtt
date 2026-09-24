@@ -15,6 +15,8 @@ import type { CameraController } from "./types"
 
 const FOV = 50
 const ANIM_LAMBDA = 10
+/** Key panning eases in and out: the velocity approaches its goal at this rate (1/s). */
+const PAN_LAMBDA = 8
 
 export class OrbitCameraController implements CameraController {
   readonly kind = "orbit" as const
@@ -27,6 +29,8 @@ export class OrbitCameraController implements CameraController {
   private goalAzimuth: number | null = null
   private cssHeight = 1
   private readonly panKeys = new HeldPanKeys()
+  /** Ground velocity of key panning (world units / s), eased toward the held keys' goal. */
+  private readonly panVelocity = new THREE.Vector3()
   private readonly keyListeners: [string, EventListener][] = [
     ["keydown", (e) => this.panKeys.keyDown(e as KeyboardEvent, this.controls.enabled)],
     ["keyup", (e) => this.panKeys.keyUp(e as KeyboardEvent)],
@@ -52,6 +56,7 @@ export class OrbitCameraController implements CameraController {
     c.target.set(60, 0, 60)
     // Any user interaction cancels programmatic camera animations.
     c.addEventListener("start", () => {
+      this.panVelocity.set(0, 0, 0)
       this.goalTarget = null
       this.goalDistance = null
       this.goalAzimuth = null
@@ -101,21 +106,7 @@ export class OrbitCameraController implements CameraController {
 
   update(dt: number): void {
     const c = this.controls
-    const pan = c.enabled ? this.panKeys.direction() : null
-    if (pan) {
-      // Along the ground, relative to the view's azimuth: W moves away from the camera, D to its right.
-      // Speed scales with the distance, so the view crosses about its own height per second.
-      const theta = new THREE.Spherical().setFromVector3(this.camera.position.clone().sub(c.target)).theta
-      const speed = this.camera.position.distanceTo(c.target) * 0.9 * dt
-      const move = new THREE.Vector3(
-        Math.cos(theta) * pan.x - Math.sin(theta) * pan.y,
-        0,
-        -Math.sin(theta) * pan.x - Math.cos(theta) * pan.y
-      ).multiplyScalar(speed)
-      c.target.add(move)
-      this.camera.position.add(move)
-      this.goalTarget = null
-    }
+    this.updateKeyPan(dt)
     if (this.goalTarget || this.goalDistance !== null || this.goalAzimuth !== null) {
       const offset = this.camera.position.clone().sub(c.target)
       const sph = new THREE.Spherical().setFromVector3(offset)
@@ -152,6 +143,34 @@ export class OrbitCameraController implements CameraController {
     this.camera.updateMatrixWorld()
   }
 
+  /**
+   * Held WASD pans along the ground, relative to the view's azimuth: W moves away from the camera, D to
+   * its right. The speed scales with the distance, so the view crosses about its own height per second;
+   * the velocity eases in when a key goes down and glides to a stop after release.
+   */
+  private updateKeyPan(dt: number): void {
+    const c = this.controls
+    const pan = c.enabled ? this.panKeys.direction() : null
+    const goal = new THREE.Vector3()
+    if (pan) {
+      const theta = new THREE.Spherical().setFromVector3(this.camera.position.clone().sub(c.target)).theta
+      const speed = this.camera.position.distanceTo(c.target) * 0.9
+      goal.set(Math.cos(theta) * pan.x - Math.sin(theta) * pan.y, 0, -Math.sin(theta) * pan.x - Math.cos(theta) * pan.y).multiplyScalar(speed)
+      this.goalTarget = null
+    } else if (this.goalTarget) {
+      // A programmatic move (focus, level change) takes over from a glide.
+      this.panVelocity.set(0, 0, 0)
+    }
+    const v = this.panVelocity
+    v.set(damp(v.x, goal.x, PAN_LAMBDA, dt), 0, damp(v.z, goal.z, PAN_LAMBDA, dt))
+    // Stop once the glide is under a pixel per second.
+    if (!pan && v.length() < this.worldPerPixel()) v.set(0, 0, 0)
+    if (v.x === 0 && v.z === 0) return
+    const move = v.clone().multiplyScalar(dt)
+    c.target.add(move)
+    this.camera.position.add(move)
+  }
+
   getTarget(): Vec3 {
     const t = this.goalTarget ?? this.controls.target
     return { x: t.x, y: t.y, z: t.z }
@@ -164,6 +183,7 @@ export class OrbitCameraController implements CameraController {
       this.controls.target.copy(goal)
       this.camera.position.copy(goal).add(offset)
       this.goalTarget = null
+      this.panVelocity.set(0, 0, 0)
       this.controls.update()
     } else {
       this.goalTarget = goal
@@ -198,6 +218,7 @@ export class OrbitCameraController implements CameraController {
       this.controls.target.set(target.x, target.y, target.z)
       this.camera.position.set(target.x, target.y, target.z).addScaledVector(dir, distance)
       this.goalTarget = null
+      this.panVelocity.set(0, 0, 0)
       this.goalDistance = null
       this.controls.update()
     } else {

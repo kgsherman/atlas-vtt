@@ -458,7 +458,7 @@ Per level, the engine expands `HostLevelMasks` into R8 layers of `DataArrayTextu
 ### 4.5 Cameras & quality
 
 - Editor: perspective orbit (near 0.5 ft, far = 4× scene diagonal), focus on selection, optional top view.
-  Held WASD pans either camera along the ground relative to the view.
+  Held WASD pans either camera along the ground relative to the view, easing in and gliding to a stop.
   The top view never follows the selection: dragging or editing a selected token must not move the camera
   (the ground point under the cursor would shift and the drag would run away).
 - Player: orthographic, tilt 0–35° (default 15°), pan/zoom, rotate by 90°. Only the player and dm-play views
