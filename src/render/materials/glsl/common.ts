@@ -5,7 +5,7 @@
  * Every identifier here is prefixed `at`/`AT_`/`u` so nothing collides with those.
  *
  * TypeScript mirrors (keep in sync): render/shadows/octahedral.ts (atOctEncode, atPcf, normal offset),
- * render/lighting/lightModel.ts (atLightFalloff, atSoftLambert, atLambertDir, atLuma), render/lighting/uniforms.ts
+ * render/lighting/lightModel.ts (atLightFalloff, atSoftLambert, atLambertDir, atLambertGate, atLuma), render/lighting/uniforms.ts
  * (uLights / uViewers layouts), render/fog/maskExpand.ts (uMasks channels).
  */
 
@@ -164,11 +164,17 @@ float atSoftLambert(float ndl) {
   return atSmoothstepSafe(0.0, 0.2, ndl) * (0.6 + 0.4 * min(ndl, 1.0));
 }
 
-// Direction a point light's diffuse term is evaluated with (lightModel.ts lambertDirection): never lower
-// than atan(AT_LAMBERT_MIN_SLOPE) above the horizontal. Shadows and falloff keep the true direction.
+// Direction a point light's diffuse brightness is evaluated with (lightModel.ts lambertDirection): never
+// lower than atan(AT_LAMBERT_MIN_SLOPE) above the horizontal. The gate, shadows and falloff keep the true one.
 #define AT_LAMBERT_MIN_SLOPE 0.35
 vec3 atLambertDir(vec3 L) {
   return normalize(vec3(L.x, max(L.y, AT_LAMBERT_MIN_SLOPE * length(L.xz)), L.z));
+}
+// Faces turned from the true direction stay unlit (self-shadowed), fading in over N·L ∈ [0, AT_LAMBERT_GATE]
+// (lightModel.ts lambertGate).
+#define AT_LAMBERT_GATE 0.03
+float atLambertGate(float ndl) {
+  return atSmoothstepSafe(0.0, AT_LAMBERT_GATE, ndl);
 }
 
 // Octahedral encoding with −Y at the centre (octahedral.ts octEncode).
@@ -405,8 +411,7 @@ vec3 atPointLights(vec3 p, vec3 n, vec3 nb, bool shadows, bool cap, out float li
     float inRange = 1.0 - atSmoothstepSafe(l0.w - 0.5, l0.w, d);
     vec4 l2 = uLights[i * 4 + 2];
     vec3 L = toL / max(d, 1e-4);
-    vec3 Lh = atLambertDir(L);
-    float lam = atSoftLambert(dot(n, Lh));
+    float lam = atLambertGate(dot(n, L)) * atSoftLambert(dot(n, atLambertDir(L)));
     if (lam <= 0.0) {
       // No light term. By the rules an unshadowed light still counts (it shines through everything); a
       // shadowed one would have to come through the surface's own solid.
@@ -414,7 +419,7 @@ vec3 atPointLights(vec3 p, vec3 n, vec3 nb, bool shadows, bool cap, out float li
       continue;
     }
 #if AT_TIER >= 2
-    lam = atSoftLambert(dot(nb, Lh)) * min(1.0, lam * 8.0);
+    lam = atSoftLambert(dot(nb, atLambertDir(L))) * min(1.0, lam * 8.0);
 #endif
     vec4 l1 = uLights[i * 4 + 1];
     float fall = atLightFalloff(d, l1.w, l0.w);

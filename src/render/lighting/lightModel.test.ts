@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
 import { flickerFactor, flickerSeed, valueNoise } from "./flicker"
-import { DARKVISION_MAX_GAIN, darkvisionRaise, directionToSun, LAMBERT_MIN_SLOPE, lambertDirection, lightFalloff, luma, softLambert } from "./lightModel"
+import { DARKVISION_MAX_GAIN, darkvisionRaise, directionToSun, LAMBERT_MIN_SLOPE, lambertDirection, lambertGate, lightFalloff, luma, softLambert } from "./lightModel"
 
 describe("lightFalloff", () => {
   it("is 1 at the source, 0.5 at the bright radius and 0 at the dim radius", () => {
@@ -65,13 +65,19 @@ describe("lambertDirection", () => {
   it("keeps a torch 1 ft above bumpy ground from swinging between dark and lit", () => {
     // Floor 20 ft away; ground tilted ±3° toward / away from the torch.
     const l = dir(20, 1, 0)
-    const lit = (tilt: number) => softLambert(dot([Math.sin(tilt), Math.cos(tilt), 0], lambertDirection(l)))
+    const lit = (tilt: number) => {
+      const n = [Math.sin(tilt), Math.cos(tilt), 0]
+      return lambertGate(dot(n, l)) * softLambert(dot(n, lambertDirection(l)))
+    }
     const raw = (tilt: number) => softLambert(dot([Math.sin(tilt), Math.cos(tilt), 0], l))
-    const t = (3 * Math.PI) / 180
-    expect(raw(-t)).toBe(0)
-    expect(raw(t)).toBeGreaterThan(0.3)
-    expect(lit(-t)).toBeGreaterThan(0.6)
-    expect(lit(t) - lit(-t)).toBeLessThan(0.05)
+    // Tilts toward the torch or away by less than its ~2.9° elevation (true N·L ≥ 0.03 up to ~1.2°).
+    const deg = Math.PI / 180
+    expect(raw(-1 * deg)).toBeLessThan(0.15)
+    expect(raw(3 * deg)).toBeGreaterThan(0.3)
+    expect(lit(-1 * deg)).toBeGreaterThan(0.6)
+    expect(lit(3 * deg) - lit(-1 * deg)).toBeLessThan(0.05)
+    // Turned away from the true direction: self-shadowed, however high the lifted one.
+    expect(lit(-4 * deg)).toBe(0)
   })
 })
 

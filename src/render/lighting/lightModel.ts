@@ -40,8 +40,8 @@ export function softLambert(ndl: number): number {
  * A torch 1 ft above the ground reaches the floor 20 ft away at ~3°, where N·L sits in softLambert's
  * steep [0, 0.2] ramp: a ground slope of a few degrees then swings it between dark and fully lit, and
  * terrain (flat-sided terrain shapes above all) reads as hard-edged bright and dark bands. Lifted, the
- * same slopes vary the light by a few percent. Only the diffuse term: shadows and falloff use the true
- * direction.
+ * same slopes vary the light by a few percent. Only the brightness: whether a face is lit at all still
+ * follows the true direction (lambertGate), and shadows and falloff use it too.
  */
 export const LAMBERT_MIN_SLOPE = 0.35
 
@@ -50,6 +50,18 @@ export function lambertDirection(l: readonly [number, number, number]): [number,
   const y = Math.max(l[1], LAMBERT_MIN_SLOPE * Math.hypot(l[0], l[2]))
   const len = Math.hypot(l[0], y, l[2])
   return [l[0] / len, y / len, l[2] / len]
+}
+
+/**
+ * N·L (true direction) over which a face fades in. Faces turned from the light are self-shadowed: lit
+ * through the lifted direction instead, the far side of a crest would get its light from the shadow map
+ * alone, whose tests at grazing angles leave radial comb teeth along the crest's shadow.
+ */
+export const LAMBERT_GATE = 0.03
+
+/** Diffuse factor of a face from the true N·L (atLambertGate), multiplying softLambert of the lifted one. */
+export function lambertGate(ndl: number): number {
+  return smoothstepSafe(0, LAMBERT_GATE, ndl)
 }
 
 /** Visual fill added for a rules light level (ambient under cover / sky). */
