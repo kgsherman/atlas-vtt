@@ -39,6 +39,7 @@ import {
   rampShape,
   rayHitShape,
   resampleTerrain,
+  rotateShape,
   rotateShapeQuarter,
   shapeBounds,
   shapeTopAt,
@@ -1049,6 +1050,34 @@ describe("elements", () => {
     expect(shapeTopAt(r, 20, -5)).toBeCloseTo(4, 9)
     expect(shapeTopAt(r, 0, -5)).toBeCloseTo(0, 9)
     expect(rotateShapeQuarter(b, { x: 3, z: 3 }, 4)).toBe(b)
+  })
+
+  it("rotates by any angle about a vertical axis (the rotate ring), quarter turns exactly", () => {
+    const blk = blockShape("q", { x: 0, z: 0, w: 10, d: 4 }, 0, 3, 0)
+    const pivot = { x: 5, z: 2 }
+    expect(rotateShape(blk, pivot, Math.PI / 2)).toEqual(rotateShapeQuarter(blk, pivot, 1))
+    expect(rotateShape(blk, pivot, -Math.PI)).toEqual(rotateShapeQuarter(blk, pivot, 2))
+    // 30°: area, heights, base and the pivot-centred distances are kept; the sense is +Z towards +X.
+    const r = rotateShape(blk, pivot, Math.PI / 6)!
+    expect(signedArea(r.points)).toBeCloseTo(40, 9)
+    expect(r.base).toBe(blk.base)
+    r.points.forEach((p, k) => {
+      expect(p.y).toBe(blk.points[k].y)
+      expect(Math.hypot(p.x - pivot.x, p.z - pivot.z)).toBeCloseTo(Math.hypot(blk.points[k].x - pivot.x, blk.points[k].z - pivot.z), 9)
+    })
+    // The general (trigonometric) path turns the same way as the quarter turns.
+    const nearQuarter = rotateShape(blk, pivot, Math.PI / 2 + 1e-9)!
+    const quarter = rotateShapeQuarter(blk, pivot, 1)!
+    nearQuarter.points.forEach((p, k) => {
+      expect(p.x).toBeCloseTo(quarter.points[k].x, 6)
+      expect(p.z).toBeCloseTo(quarter.points[k].z, 6)
+    })
+    // Rotating some vertices only; a partial turn that folds the footprint is refused.
+    const partial = rotateShape(blk, { x: 10, z: 2 }, 0.2, [1, 2])!
+    expect(partial.points[0]).toEqual(blk.points[0])
+    expect(partial.points[3]).toEqual(blk.points[3])
+    expect(rotateShape(blk, { x: 10, z: 2 }, Math.PI, [1, 2])).toBe(null)
+    expect(rotateShape(blk, pivot, Number.NaN)).toBe(null)
   })
 
   it("dissolves vertices and collapses edges, keeping at least 3 vertices", () => {

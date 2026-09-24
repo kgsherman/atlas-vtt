@@ -23,6 +23,7 @@ import type { TerrainElementMode } from "@/core/scene/terrainShapes"
 import {
   BRUSH_RADIUS_MAX,
   BRUSH_RADIUS_MIN,
+  BRUSH_STRENGTH,
   TERRAIN_CYLINDER_SIDES_MAX,
   TERRAIN_CYLINDER_SIDES_MIN,
   type TerrainSubTool,
@@ -372,7 +373,15 @@ function BrushOptions() {
         <SliderInput className="w-36" value={s.radius} min={BRUSH_RADIUS_MIN} max={BRUSH_RADIUS_MAX} step={0.5} onChange={(radius) => set({ radius })} format={(v) => formatFeet(v, 1)} />
       </Opt>
       <Opt label="Strength">
-        <SliderInput className="w-32" value={s.strength} min={0.05} max={s.mode === "raise" || s.mode === "lower" ? 5 : 1} step={0.05} onChange={(strength) => set({ strength })} />
+        <SliderInput
+          className="w-32"
+          value={s.strength}
+          min={BRUSH_STRENGTH.min}
+          max={s.mode === "raise" || s.mode === "lower" ? BRUSH_STRENGTH.maxRaise : BRUSH_STRENGTH.maxBlend}
+          step={BRUSH_STRENGTH.step}
+          format={(v) => trimNumber(v, 3)}
+          onChange={(strength) => set({ strength })}
+        />
       </Opt>
       <SelectInput className="w-32 shrink-0" value={s.falloff} options={FALLOFF_OPTIONS} onValueChange={(falloff) => set({ falloff })} aria-label="Brush falloff" />
     </>

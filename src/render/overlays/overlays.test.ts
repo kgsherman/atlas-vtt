@@ -297,7 +297,7 @@ describe("OverlayManager", () => {
     const arrows = () => {
       const out: Record<string, THREE.Mesh> = {}
       m.root.traverse((o) => {
-        if (o.name.startsWith("gizmo:") && o.name !== "gizmo:centre") out[o.name.slice(6)] = o as THREE.Mesh
+        if (o.name.startsWith("gizmo:") && o.name !== "gizmo:centre" && o.name !== "gizmo:rotate") out[o.name.slice(6)] = o as THREE.Mesh
       })
       return out
     }
@@ -307,6 +307,11 @@ describe("OverlayManager", () => {
     expect(arrows().y.visible).toBe(false)
     expect(dir("x")).toEqual([1, 0])
     expect(dir("z")).toEqual([0, 1])
+    // The rotate ring: seen from straight above, a circle 88 px across its radius (10 px per ft here).
+    const ring = m.root.getObjectByName("gizmo:rotate")!
+    expect(ring.visible).toBe(true)
+    expect(ring.scale.x).toBeCloseTo(8.8)
+    expect(ring.position.toArray()).toEqual([2.5, 2, 2.5])
     // Every frame follows the camera (here: a mirrored view).
     scale = -10
     m.update()
@@ -326,6 +331,7 @@ describe("OverlayManager", () => {
     m.update()
     expect(disposed.size).toBe(cached.size)
     expect(Object.values(arrows()).some((a) => a.visible)).toBe(false)
+    expect(ring.visible).toBe(false)
     m.dispose()
   })
 

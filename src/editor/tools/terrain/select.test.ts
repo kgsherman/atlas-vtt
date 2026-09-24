@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest"
 
-import { gizmoHandles, heightFollowParams, type GizmoAxis } from "@/core/geometry/gizmo"
-import { blockShape, cylinderShape } from "@/core/scene/terrainShapes"
+import { gizmoHandles, gizmoRing, heightFollowParams, ringPoint, type GizmoAxis } from "@/core/geometry/gizmo"
+import { blockShape, cylinderShape, rotateShape } from "@/core/scene/terrainShapes"
 import type { Vec3 } from "@/core/scene/types"
 
 import type { ShortcutAction } from "../../shortcuts"
@@ -466,6 +466,54 @@ describe("terrain select: object mode", () => {
     ])
   })
 
+  it("the green rotate ring turns the selection about the vertical axis in 15° steps (Alt: free), one undo step", () => {
+    const t = setup()
+    const { tool, a, store } = t
+    click(t, t.at(15, 5, 15))
+    const at = t.overlay().gizmo!.at
+    const orig = t.shape(a)
+    const ring = gizmoRing(t.camera.project, at)
+    expect(ring.visible).toBe(true)
+    // A point of the ring at `deg` (from +Z towards +X, the ring's sense), aimed at on the ring's plane.
+    const onRing = (deg: number) => {
+      const q = ringPoint(at, ring.radius, (deg / 360) * 64)
+      return t.at(q.x, q.y, q.z)
+    }
+    const press = onRing(0)
+    tool.onPointerMove!(press)
+    expect(t.overlay().gizmo?.hover).toBe("rotate")
+    expect(tool.cursor!()).toBe("grab")
+    tool.onPointerDown!(press)
+    expect(t.overlay().gizmo?.active).toBe("rotate")
+    // 47° snaps to 45°; the arrows' X / Y / Z keys do nothing while rotating.
+    tool.onPointerMove!(onRing(47))
+    expect(t.overlay().label?.text).toBe("+45°")
+    expect(act(t, { type: "axis", axis: "x" }, "x")).toBe(true)
+    expect(t.overlay().label?.text).toBe("+45°")
+    tool.onPointerUp!(onRing(47))
+    const want = rotateShape(orig, { x: 15, z: 15 }, Math.PI / 4)!
+    expect(t.shape(a).points.map((p) => [p.x, p.y, p.z])).toEqual(want.points.map((p) => [p.x, p.y, p.z]))
+    expect(store.getState().history.undoLabel).toBe("Rotate terrain shape")
+    expect(store.getState().history.undoDepth).toBe(3)
+    // A quarter turn back to the original shape is exact; Alt rotates freely.
+    store.getState().undo()
+    tool.onPointerDown!(onRing(0))
+    tool.onPointerMove!({ ...onRing(-31), alt: true })
+    expect(t.overlay().label?.text).toBe("−31°")
+    tool.onPointerUp!({ ...onRing(-31), alt: true })
+    const free = rotateShape(orig, { x: 15, z: 15 }, (-31 * Math.PI) / 180)!
+    t.shape(a).points.forEach((p, k) => {
+      expect(p.x).toBeCloseTo(free.points[k].x, 6)
+      expect(p.z).toBeCloseTo(free.points[k].z, 6)
+    })
+    // Esc mid-rotation cancels without an undo step.
+    const depth = store.getState().history.undoDepth
+    tool.onPointerDown!(onRing(0))
+    tool.onPointerMove!(onRing(90))
+    act(t, { type: "escape" }, "Escape")
+    expect(store.getState().history.undoDepth).toBe(depth)
+  })
+
   it("X / Y / Z keys toggle an axis constraint mid-drag and recompute right away", () => {
     const t = setup()
     const { tool, a, store } = t
@@ -622,6 +670,8 @@ describe("terrain select: advanced mode", () => {
     expect(t.sel()?.elements).toEqual([{ shapeId: a, kind: "face", index: "top" }])
     // The near side (under edge 2, facing the camera), raised with the Y axis: its two top vertices move.
     const side = t.at(15, 2.5, 20)
+    // Deselect the top face first: its gizmo's rotate ring runs along this block's edges in this view.
+    expect(act(t, { type: "escape" }, "Escape")).toBe(true)
     click(t, side)
     expect(t.sel()?.elements).toEqual([{ shapeId: a, kind: "face", index: 2 }])
     tool.onPointerDown!(side)

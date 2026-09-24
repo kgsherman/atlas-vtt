@@ -2,7 +2,7 @@
  * Public API of the render layer. React components, the editor and play controllers talk to the
  * renderer ONLY through this interface (see docs/ARCHITECTURE.md §4).
  */
-import type { GizmoAxis } from "@/core/geometry/gizmo"
+import type { GizmoAxis, GizmoPart } from "@/core/geometry/gizmo"
 import type { PathStep } from "@/core/movement/types"
 import type { BrushMode } from "@/core/scene/heightmapBrush"
 import type { TerrainElementMode, TerrainElementRef } from "@/core/scene/terrainShapes"
@@ -88,8 +88,8 @@ export interface ViewState {
 // Overlays: transient visuals driven by tools / play controllers
 // ---------------------------------------------------------------------------
 
-/** Translate-gizmo axis (world X / Y / Z), shared with the tools' gizmo math. */
-export type { GizmoAxis }
+/** Translate-gizmo axis (world X / Y / Z) and gizmo handle (an axis or the rotate ring), shared with the tools' gizmo math. */
+export type { GizmoAxis, GizmoPart }
 
 /**
  * The terrain editing mode's overlay (ARCHITECTURE §7 "Terrain tools"): the active level's shapes as editable
@@ -109,8 +109,11 @@ export interface TerrainOverlay {
   elements: { mode: TerrainElementMode; selected: readonly TerrainElementRef[]; hover: TerrainElementRef | null } | null
   /** Shape being created (a zero-height prism during the base phase); `valid` false draws it red. */
   draft: { shape: TerrainShape; valid: boolean } | null
-  /** Translate gizmo at the selection's pivot: the axis being dragged and the one under the pointer. */
-  gizmo: { at: Vec3; active: GizmoAxis | null; hover: GizmoAxis | null } | null
+  /**
+   * Gizmo at the selection's pivot: the translate arrows plus the ring that rotates about the vertical axis
+   * (core/geometry/gizmo gizmoHandles / gizmoRing); the part being dragged and the one under the pointer.
+   */
+  gizmo: { at: Vec3; active: GizmoPart | null; hover: GizmoPart | null } | null
   brush: { center: Vec2; radius: number; mode: BrushMode } | null
   /** Live value next to the cursor (e.g. "+7.5 ft · Add"). */
   label: { at: Vec3; text: string } | null

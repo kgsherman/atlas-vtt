@@ -129,6 +129,12 @@ export interface ToolSettings {
 export const BRUSH_RADIUS_MIN = 1
 export const BRUSH_RADIUS_MAX = 100
 
+/**
+ * Brush strength range and step (same units as BrushToolSettings.strength: feet per dab for raise / lower,
+ * blend factor per dab for smooth / flatten). Dabs land every quarter radius, so a stroke applies many.
+ */
+export const BRUSH_STRENGTH = { min: 0.001, step: 0.001, maxRaise: 0.1, maxBlend: 0.02, default: 0.01 } as const
+
 export function defaultToolSettings(): ToolSettings {
   return {
     wall: { height: DEFAULT_LEVEL_HEIGHT, thickness: DEFAULT_WALL_THICKNESS, material: "stone", followTerrain: true },
@@ -139,7 +145,7 @@ export function defaultToolSettings(): ToolSettings {
     pillar: { shape: "round", size: 2, height: null, material: "stone" },
     prop: { kind: "crate", rotationY: 0 },
     light: { preset: "torch" },
-    brush: { mode: "raise", radius: 10, strength: 0.5, falloff: "smooth" },
+    brush: { mode: "raise", radius: 10, strength: BRUSH_STRENGTH.default, falloff: "smooth" },
     terrain: { sub: "brush", advanced: false, element: "vertex", heightStep: 0.5, cylinderSides: 24 },
     token: { size: "medium", kind: "pc" },
   }

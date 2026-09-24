@@ -5,10 +5,16 @@ import {
   GIZMO_SHAFT_END_PX,
   GIZMO_SHAFT_START_PX,
   gizmoHandles,
+  gizmoRing,
+  GIZMO_RING_PX,
   heightFollowParams,
   heightFromPointer,
   hitGizmo,
   pointToSegmentDistancePx,
+  ringAngle,
+  ringDistancePx,
+  ringPoint,
+  wrapAngle,
   type HeightFollowState,
   type Projector,
   type ScreenPoint,
@@ -162,6 +168,45 @@ describe("gizmoHandles", () => {
     // Nearest shaft wins where two radii overlap.
     expect(hitGizmo(g, { x: o.x + 13, y: o.y + 15 }, 20)).toBe("z")
     expect(hitGizmo(g, { x: o.x + 15, y: o.y + 13 }, 20)).toBe("x")
+  })
+})
+
+describe("rotate ring", () => {
+  const at = { x: 10, y: 4, z: -3 }
+
+  it("is a horizontal circle of constant screen size, hidden when seen edge-on", () => {
+    const top = gizmoRing(ortho(at, 0, 10).project, at)
+    expect(top.visible).toBe(true)
+    expect(top.radius).toBeCloseTo(GIZMO_RING_PX / 10, 9)
+    const o = px(ortho(at, 0, 10), at)
+    for (const q of top.points) expect(Math.hypot(q.x - o.x, q.y - o.y)).toBeCloseTo(GIZMO_RING_PX, 6)
+    expect(gizmoRing(ortho(at, 0, 40).project, at).radius).toBeCloseTo(GIZMO_RING_PX / 40, 9)
+    expect(gizmoRing(ortho(at, 35, 10).project, at).visible).toBe(true)
+    expect(gizmoRing(perspective(at, 45, 80).project, at).visible).toBe(true)
+    // Almost level with the ring: an ellipse too flat to drag around.
+    expect(gizmoRing(ortho(at, 85, 10).project, at).visible).toBe(false)
+  })
+
+  it("hit-tests its polyline and measures the pointer's angle on its plane (+Z towards +X)", () => {
+    for (const cam of [ortho(at, 15, 10), perspective(at, 45, 80)]) {
+      const ring = gizmoRing(cam.project, at)
+      const k = 64 / 8 // 45°
+      const onRing = px(cam, ringPoint(at, ring.radius, k))
+      expect(ringDistancePx(ring, onRing)).toBeLessThan(0.5)
+      expect(ringDistancePx(ring, px(cam, at))).toBeGreaterThan(40)
+      expect(ringAngle(cam.ray(onRing), at)).toBeCloseTo(Math.PI / 4, 6)
+      expect(ringAngle(cam.ray(px(cam, ringPoint(at, ring.radius, 48))), at)).toBeCloseTo(-Math.PI / 2, 6)
+    }
+    expect(ringDistancePx({ visible: false, radius: 0, points: [] }, { x: 0, y: 0 })).toBe(Infinity)
+    // A ray parallel to the plane has no angle.
+    expect(ringAngle({ origin: { x: 0, y: 4, z: 0 }, direction: { x: 1, y: 0, z: 0 } }, at)).toBe(null)
+  })
+
+  it("wraps angles into (−π, π]", () => {
+    expect(wrapAngle(Math.PI)).toBeCloseTo(Math.PI, 12)
+    expect(wrapAngle(-Math.PI)).toBeCloseTo(Math.PI, 12)
+    expect(wrapAngle((3 * Math.PI) / 2)).toBeCloseTo(-Math.PI / 2, 12)
+    expect(wrapAngle(-0.25)).toBeCloseTo(-0.25, 12)
   })
 })
 

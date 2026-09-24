@@ -10,6 +10,9 @@ import type { Vec3 } from "../scene/types"
 /** Translate-gizmo axis (world X / Y / Z); the same union as render/contracts GizmoAxis. */
 export type GizmoAxis = "x" | "y" | "z"
 
+/** A gizmo handle: a translate arrow, or the ring that rotates about the vertical (Y, green) axis. */
+export type GizmoPart = GizmoAxis | "rotate"
+
 /** Canvas-relative CSS pixels (y grows downward). */
 export interface ScreenPoint {
   x: number
@@ -141,6 +144,95 @@ export function hitGizmo(handles: GizmoHandles, p: ScreenPoint, radiusPx = GIZMO
     }
   }
   return best
+}
+
+// ---------------------------------------------------------------------------
+// Rotate ring (turns the selection about the vertical axis through the gizmo centre)
+// ---------------------------------------------------------------------------
+
+/** The rotate ring's radius on screen (px, along the longer projected horizontal axis): around the arrows. */
+export const GIZMO_RING_PX = 88
+/** Segments of the ring's polyline (drawn and hit-tested). */
+export const GIZMO_RING_SEGMENTS = 64
+/**
+ * The ring is hidden when seen nearly edge-on: its projected ellipse's short axis below this fraction of
+ * its long axis (a horizontal circle seen from the side cannot be dragged around).
+ */
+export const GIZMO_RING_MIN_ASPECT = 0.2
+
+export interface GizmoRing {
+  /** false: not drawn and not hit (seen edge-on, off screen or the centre not projectable). */
+  visible: boolean
+  /** World radius (ft) of the horizontal circle through `at` that projects to GIZMO_RING_PX. */
+  radius: number
+  /** The circle's projected polyline (closed: the last point joins the first); empty when not visible. */
+  points: ScreenPoint[]
+}
+
+/** Point k of the ring's world circle: angle θ = 2πk/n measured like `ringAngle` (from +Z towards +X). */
+export function ringPoint(at: Vec3, radius: number, k: number, n = GIZMO_RING_SEGMENTS): Vec3 {
+  const t = (2 * Math.PI * k) / n
+  return { x: at.x + radius * Math.sin(t), y: at.y, z: at.z + radius * Math.cos(t) }
+}
+
+/**
+ * The rotate ring at world point `at`: a horizontal circle whose projection reaches GIZMO_RING_PX along the
+ * longer of the projected X / Z axes (constant screen size), with its projected polyline for hit tests.
+ */
+export function gizmoRing(project: Projector, at: Vec3): GizmoRing {
+  const hidden: GizmoRing = { visible: false, radius: 0, points: [] }
+  const o = projectVisible(project, at)
+  const px = o && projectVisible(project, addScaled(at, axisVector("x"), 1))
+  const pz = o && projectVisible(project, addScaled(at, axisVector("z"), 1))
+  if (!o || !px || !pz) return hidden
+  const unit = Math.max(Math.hypot(px.x - o.x, px.y - o.y), Math.hypot(pz.x - o.x, pz.y - o.y))
+  if (!(unit > 0)) return hidden
+  const radius = GIZMO_RING_PX / unit
+  const points: ScreenPoint[] = []
+  let dMin = Infinity
+  let dMax = 0
+  for (let k = 0; k < GIZMO_RING_SEGMENTS; k++) {
+    const q = projectVisible(project, ringPoint(at, radius, k))
+    if (!q) return hidden
+    const d = Math.hypot(q.x - o.x, q.y - o.y)
+    dMin = Math.min(dMin, d)
+    dMax = Math.max(dMax, d)
+    points.push(q)
+  }
+  if (!(dMax > 0) || dMin < GIZMO_RING_MIN_ASPECT * dMax) return hidden
+  return { visible: true, radius, points }
+}
+
+/** Distance (px) from `p` to the visible ring's polyline (Infinity when hidden). */
+export function ringDistancePx(ring: GizmoRing, p: ScreenPoint): number {
+  if (!ring.visible) return Infinity
+  const n = ring.points.length
+  let best = Infinity
+  for (let k = 0; k < n; k++) best = Math.min(best, pointToSegmentDistancePx(p, ring.points[k], ring.points[(k + 1) % n]))
+  return best
+}
+
+/**
+ * Angle (radians) of the pointer ray's hit on the horizontal plane through `center`, measured about the
+ * vertical axis from +Z towards +X — the sense of core/scene/terrainShapes rotateShape, so a drag's rotation
+ * is ringAngle(now) − ringAngle(at the press). Null when the ray is parallel to the plane, meets it behind its
+ * origin, or passes (almost) through the axis.
+ */
+export function ringAngle(ray: { origin: Vec3; direction: Vec3 }, center: Vec3): number | null {
+  const d = ray.direction
+  if (Math.abs(d.y) < 1e-9) return null
+  const t = (center.y - ray.origin.y) / d.y
+  if (!(t >= 0)) return null
+  const x = ray.origin.x + d.x * t - center.x
+  const z = ray.origin.z + d.z * t - center.z
+  if (x * x + z * z < 1e-12) return null
+  return Math.atan2(x, z)
+}
+
+/** Wrap an angle into (−π, π]. */
+export function wrapAngle(a: number): number {
+  const t = a - 2 * Math.PI * Math.floor((a + Math.PI) / (2 * Math.PI))
+  return t <= -Math.PI ? t + 2 * Math.PI : t
 }
 
 /**

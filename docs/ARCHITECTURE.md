@@ -18,7 +18,7 @@ src/
                         terrain, shared by render / occlusion / filter), polygon (signed area shared with the schema)
     grid/               Cell math, snapping, distance rules, supercover rasterisation
     geometry/           Vector / box / segment / ray / polygon-clip math shared by occlusion, movement, filter;
-                        gizmo (translate-gizmo handles and height-follow math shared by the terrain tool and overlay)
+                        gizmo (translate arrows, rotate ring and height-follow math shared by the terrain tool and overlay)
     occlusion/          CPU occluder model (boxes, cylinders, heightfields, wall strips) + ray queries  ← single source of blocking truth
     vision/             Authoritative visibility: light field, per-viewer LOS, perception masks, observation
     movement/           Move validation (walls/doors/windows/props, connectors), ruler measurement
@@ -552,7 +552,11 @@ Per level, the engine expands `HostLevelMasks` into R8 layers of `DataArrayTextu
     count) the one with the shorter projected foot hidden, so the arrow drawn is the arrow hit (the hidden
     axis stays reachable with X / Y / Z). `OverlayManager.update` re-aims them every frame through
     `OverlayHost.project` (the engine passes `picker.project`; without it no gizmo is drawn), so they keep a
-    constant screen size and match the hit test exactly. The value label ("+7.5 ft · Add") keeps a constant
+    constant screen size and match the hit test exactly. The rotate ring (green, like the Y arrow it turns
+    about) is a horizontal circle through the gizmo centre whose projection reaches 88 px along the longer
+    projected horizontal axis (`gizmoRing`: a unit circle mesh scaled per frame; hidden when its ellipse's
+    short axis is under 0.2 × its long axis, i.e. seen nearly edge-on), hit within 7 px of its projected
+    polyline (`ringDistancePx`, after the arrows). The value label ("+7.5 ft · Add") keeps a constant
     pixel size (placement: §7). The brush ring is the brush preview's. The select sub-tool's marquee
     (`TerrainOverlay.marquee`, canvas CSS px, the frame the tool tests vertices and shapes in) is a
     screen-space rect drawn by its own small shader over everything else.
@@ -1113,7 +1117,9 @@ script checks that it is off.
     during a gesture only cancel it. Read-only: shapes can be selected, nothing else.
   - Brush: paints the BASE (`baseLattice`); the preview shows the baked result of each dirty rect (the bake is
     skipped on levels without shapes); pointerup commits `{base: {lattice, rects: [dirty]}}`. Flatten
-    targets the baked height under the stroke start. Hint: "The brush paints the ground under shapes; use
+    targets the baked height under the stroke start. Strength (`editor/settings` `BRUSH_STRENGTH`): 0.001–0.1 ft
+    per dab for raise / lower, 0.001–0.02 blend per dab for smooth / flatten, default 0.01 (dabs every
+    quarter radius, so a stroke applies many). Hint: "The brush paints the ground under shapes; use
     Apply to terrain to sculpt a shape".
   - Block / ramp / cylinder (Blender-style creation): press and drag the base on the plane through y0, the
     baked ground under the snapped first corner (block / ramp corners snap like floor edges, the cylinder's
@@ -1151,7 +1157,12 @@ script checks that it is off.
     gizmo (hit first) and X / Y / Z (toggled during a drag) constrain to an axis; Y moves tops and base
     together, snapped to the height step, following the cursor like the height phase (`heightFromPointer`
     from the press): on the drawn Y handle u is the handle's direction, toggled by key it is screen up
-    while k is at the floor. Delete; Mod+D duplicates
+    while k is at the floor. A drag on the rotate ring turns the selection about the vertical axis through
+    the gizmo centre (`terrainShapes` `rotateShape`) by the pointer's angle on the ring's plane since the
+    press (`ringAngle`, +Z towards +X, the sense of R's quarter turns), in 15° steps (Alt or the free snap
+    mode: free; quarter turns exact), labelled "+45°"; X / Y / Z do nothing while rotating; one undo step
+    ("Rotate terrain shape(s)"). In advanced mode it turns the selected elements' vertices about their
+    centroid (refused when the footprint would fold). Delete; Mod+D duplicates
     one cell away (new orders); Mod+A selects the level's shapes; arrows nudge one cell (Shift: 1 ft),
     coalesced in history like object nudges; R / Shift+R rotate ±90° about the selection's `boundsPivot`
     (the `rotationPivot` rule; a lone cylinder about its own centre).

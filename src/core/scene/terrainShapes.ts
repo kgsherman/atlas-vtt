@@ -1099,6 +1099,28 @@ export function rotateShapeQuarter(shape: TerrainShape, pivot: Vec2, quarterTurn
   return withPoints(shape, points)
 }
 
+/**
+ * Rotate the top vertices `indices` (null: the whole shape) by `angle` radians about the vertical axis
+ * through `pivot`, in the sense of rotateShapeQuarter (+π/2 = one quarter turn: (x, z) → (z, −x) about the
+ * pivot; the rotate ring's ringAngle sense). Heights and `base` are kept. Multiples of a quarter turn are
+ * exact. Null when the result is invalid (a partial rotation that makes the footprint self-intersect).
+ */
+export function rotateShape(shape: TerrainShape, pivot: Vec2, angle: number, indices: readonly number[] | null = null): TerrainShape | null {
+  if (!Number.isFinite(angle)) return null
+  const quarters = angle / (Math.PI / 2)
+  if (indices === null && Math.abs(quarters - Math.round(quarters)) < 1e-12) return rotateShapeQuarter(shape, pivot, Math.round(quarters))
+  const c = Math.cos(angle)
+  const sn = Math.sin(angle)
+  const set = indices === null ? null : new Set(indices)
+  const points = shape.points.map((p, k) => {
+    if (set && !set.has(k)) return { ...p }
+    const x = p.x - pivot.x
+    const z = p.z - pivot.z
+    return { x: pivot.x + x * c + z * sn, y: p.y, z: pivot.z - x * sn + z * c }
+  })
+  return withPoints(shape, points)
+}
+
 /** Remove the given vertices. Null when fewer than 3 would remain or the result is invalid. */
 export function dissolveVertices(shape: TerrainShape, indices: readonly number[]): TerrainShape | null {
   const set = new Set(indices)

@@ -23,14 +23,20 @@ import {
   axisVector,
   closestPointOnAxis,
   gizmoHandles,
+  gizmoRing,
+  GIZMO_HIT_RADIUS_PX,
+  ringAngle,
+  ringDistancePx,
+  wrapAngle,
   heightFromPointer,
   hitGizmo,
   type GizmoAxis,
+  type GizmoPart,
   type HeightFollowState,
   type ScreenPoint,
 } from "@/core/geometry/gizmo"
 import { DEFAULT_TERRAIN_RESOLUTION, sampleSpacing } from "@/core/scene/heightmap"
-import { elementVertexIndices, translateShape, translateVertices, type TerrainElementRef } from "@/core/scene/terrainShapes"
+import { elementVertexIndices, rotateShape, translateShape, translateVertices, type TerrainElementRef } from "@/core/scene/terrainShapes"
 import type { Id, Level, Rect, TerrainShape, Vec2, Vec3 } from "@/core/scene/types"
 
 import type { TerrainSelection } from "../../store"
@@ -83,12 +89,22 @@ import { createShapePreview, type ShapePreview } from "./lattice"
 
 /** Pointer travel (CSS px) before a press turns into a drag or a marquee. */
 const DRAG_THRESHOLD_PX = 4
+/** Snapping step of rotate-ring drags (radians; Alt or the free snap mode rotate freely). */
+const ROTATE_STEP = Math.PI / 12
+
+/** A rotation for the label: whole degrees when snapped, one decimal when free ("+45°", "−7.5°"). */
+function angleLabel(angle: number): string {
+  const deg = (angle * 180) / Math.PI
+  const r = Math.round(deg * 10) / 10
+  const text = Number.isInteger(r) ? String(Math.abs(r)) : Math.abs(r).toFixed(1)
+  return `${r < 0 ? "−" : "+"}${text}°`
+}
 
 const UP: Vec3 = { x: 0, y: 1, z: 0 }
 const ZERO: Vec3 = { x: 0, y: 0, z: 0 }
 
 type Target =
-  { kind: "shape"; shapeId: Id; point: Vec3 } | { kind: "element"; ref: TerrainElementRef; point: Vec3 } | { kind: "gizmo"; axis: GizmoAxis; point: Vec3 }
+  { kind: "shape"; shapeId: Id; point: Vec3 } | { kind: "element"; ref: TerrainElementRef; point: Vec3 } | { kind: "gizmo"; part: GizmoPart; point: Vec3 }
 
 /** The candidates under a press on an already selected one (a click's release cycles through them). */
 type Recycle = { kind: "shape"; at: ScreenPoint; hits: readonly ShapeHit[] } | { kind: "element"; at: ScreenPoint; hits: readonly ElementHit[] }
@@ -127,6 +143,11 @@ interface Drag {
   follow: HeightFollowState | null
   /** Last valid (accepted) offset. */
   delta: Vec3
+  /**
+   * Drag on the rotate ring: the selection turns about the vertical axis through `pivot` by the pointer's
+   * angle on the ring's plane (ringAngle) since the press, in `step` increments (0 = free). Null: a move.
+   */
+  rotate: { pivot: Vec2; center: Vec3; start: number; angle: number } | null
   /** Moved versions of the changed shapes (null while nothing moved). */
   current: Map<Id, TerrainShape> | null
   preview: ShapePreview
@@ -157,7 +178,7 @@ function marqueeBox(m: Pick<Marquee, "start" | "end">): { from: ScreenPoint; to:
 interface Hover {
   shapeId: Id | null
   element: TerrainElementRef | null
-  gizmo: GizmoAxis | null
+  gizmo: GizmoPart | null
 }
 
 const NO_HOVER: Hover = { shapeId: null, element: null, gizmo: null }
@@ -256,13 +277,14 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
   }
 
   /** The gizmo handle under the cursor (null without a projector, a selection or a hit). */
-  const gizmoHit = (e: ToolPointerEvent): { axis: GizmoAxis; at: Vec3 } | null => {
+  const gizmoHit = (e: ToolPointerEvent): { part: GizmoPart; at: Vec3 } | null => {
     const cursor = canvasOf(e)
     if (!cursor || !deps.project) return null
     const at = gizmoAt(null)
     if (!at) return null
     const axis = hitGizmo(gizmoHandles(deps.project, at), cursor)
-    return axis ? { axis, at } : null
+    if (axis) return { part: axis, at }
+    return ringDistancePx(gizmoRing(deps.project, at), cursor) <= GIZMO_HIT_RADIUS_PX ? { part: "rotate", at } : null
   }
 
   /** Candidates of the current element kind among the selected shapes, best first. */
@@ -303,7 +325,7 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
     const a = activeLevel(s)
     if (!ray || !a) return NO_HOVER
     const g = gizmoHit(e)
-    if (g) return { shapeId: null, element: null, gizmo: g.axis }
+    if (g) return { shapeId: null, element: null, gizmo: g.part }
     const rec = levelShapes(a.level)
     const all = Object.values(rec)
     const at = canvasOf(e) ?? { x: e.clientX, y: e.clientY }
@@ -332,6 +354,15 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
   }
 
   // ---- drags ---------------------------------------------------------------
+
+  /** A press on the rotate ring: the pivot (the gizmo centre) and the pointer's angle on the ring plane. */
+  const rotateStart = (p: Pending): Drag["rotate"] => {
+    if (p.target.kind !== "gizmo" || p.target.part !== "rotate") return null
+    const ray = rayOf(p.down)
+    const center = p.target.point
+    const start = ray ? ringAngle(ray, center) : null
+    return start === null ? null : { pivot: { x: center.x, z: center.z }, center, start, angle: 0 }
+  }
 
   const startDrag = (p: Pending): Drag | null => {
     const s = store.getState()
@@ -369,6 +400,9 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
         anchor = { x: grabbed.points[0].x, z: grabbed.points[0].z }
       }
     }
+    const rotate = rotateStart(p)
+    // A ring press whose ray misses the ring's plane cannot turn anything (and must not become a move).
+    if (!rotate && p.target.kind === "gizmo" && p.target.part === "rotate") return null
     // The next click starts a new cycle.
     cycle = null
     return {
@@ -381,10 +415,11 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
       edgeSnap,
       down: p.down,
       last: p.down,
-      axis: p.target.kind === "gizmo" ? p.target.axis : null,
-      axisFromHandle: p.target.kind === "gizmo",
+      axis: p.target.kind === "gizmo" && p.target.part !== "rotate" ? p.target.part : null,
+      axisFromHandle: p.target.kind === "gizmo" && p.target.part !== "rotate",
       follow: null,
       delta: ZERO,
+      rotate,
       current: null,
       preview: createShapePreview(deps, s.scene, a.levelId),
     }
@@ -451,18 +486,16 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
   }
 
   /** Shapes of the drag moved by `delta` (null: refused — some shape would be invalid or off the map). */
-  const moved = (d: Drag, delta: Vec3): Map<Id, TerrainShape> | null => {
+  const moved = (d: Drag, delta: Vec3, angle = 0): Map<Id, TerrainShape> | null => {
     const grid = store.getState().scene.grid
     const out = new Map<Id, TerrainShape>()
     for (const [id, orig] of d.originals) {
       let next: TerrainShape | null
-      if (d.indices) {
-        const ks = d.indices.get(id)
-        if (!ks) continue
-        next = translateVertices(orig, ks, delta)
-      } else {
-        next = translateShape(orig, delta)
-      }
+      const ks = d.indices ? d.indices.get(id) : null
+      if (d.indices && !ks) continue
+      if (d.rotate) next = rotateShape(orig, d.rotate.pivot, angle, ks ?? null)
+      else if (ks) next = translateVertices(orig, ks, delta)
+      else next = translateShape(orig, delta)
       if (!next || !shapeInExtent(next, grid)) return null
       out.set(id, next)
     }
@@ -476,7 +509,7 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
     const shapes = Object.values(levelShapes(level)).map((sh) => cur?.get(sh.id) ?? sh)
     let footprint: Rect | null = null
     if (cur) footprint = shapesBounds([...[...cur.keys()].map((id) => d.originals.get(id)!), ...cur.values()])
-    d.preview.update(shapes, footprint, `${d.delta.x},${d.delta.y},${d.delta.z}`)
+    d.preview.update(shapes, footprint, d.rotate ? `r${d.rotate.angle}` : `${d.delta.x},${d.delta.y},${d.delta.z}`)
   }
 
   /** Move the drag to `delta` unless that is refused (the drag then keeps its last valid state). */
@@ -495,8 +528,39 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
     return true
   }
 
+  /** Turn the drag to `angle` unless that is refused (the drag then keeps its last valid state). */
+  const applyAngle = (d: Drag, r: NonNullable<Drag["rotate"]>, angle: number): boolean => {
+    if (angle === r.angle) return false
+    if (angle === 0) d.current = null
+    else {
+      const next = moved(d, ZERO, angle)
+      if (!next) return false
+      d.current = next
+    }
+    r.angle = angle
+    previewDrag(d)
+    return true
+  }
+
+  /** The rotate ring's angle for this event: since the press, snapped to ROTATE_STEP unless free (Alt / free snap). */
+  const dragAngle = (r: NonNullable<Drag["rotate"]>, e: ToolPointerEvent): number | null => {
+    const ray = rayOf(e)
+    const now = ray ? ringAngle(ray, r.center) : null
+    if (now === null) return null
+    const raw = wrapAngle(now - r.start)
+    if (snapModeOf(store, e) === "free") return raw
+    const q = Math.round(raw / ROTATE_STEP) * ROTATE_STEP
+    // Exact quarter turns (rotateShape rotates them without float noise); −0 → 0.
+    return q === 0 ? 0 : q
+  }
+
   const dragTo = (d: Drag, e: ToolPointerEvent) => {
     d.last = e
+    if (d.rotate) {
+      const angle = dragAngle(d.rotate, e)
+      if (angle !== null && applyAngle(d, d.rotate, angle)) ctx.changed()
+      return
+    }
     const delta = dragDelta(d, e)
     if (delta && applyDelta(d, delta)) ctx.changed()
   }
@@ -509,7 +573,8 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
       return
     }
     const upsert = [...cur.values()]
-    const label = d.indices ? "Move terrain vertices" : upsert.length === 1 ? "Move terrain shape" : "Move terrain shapes"
+    const verb = d.rotate ? "Rotate" : "Move"
+    const label = d.indices ? `${verb} terrain vertices` : upsert.length === 1 ? `${verb} terrain shape` : `${verb} terrain shapes`
     const before = store.getState().scene.levels[d.levelId]?.heightmap
     const ok = ctx.write(() => store.getState().applyTerrainEdit(d.levelId, { upsert }, label))
     const after = store.getState().scene.levels[d.levelId]?.heightmap
@@ -659,7 +724,7 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
       const sel = activeSelection(s)
       const g = gizmoHit(e)
       if (g) {
-        gesture = { kind: "pending", levelId: a.levelId, target: { kind: "gizmo", axis: g.axis, point: g.at }, down: e, recycle: null }
+        gesture = { kind: "pending", levelId: a.levelId, target: { kind: "gizmo", part: g.part, point: g.at }, down: e, recycle: null }
       } else if (editMode(s)) {
         pressElement(e, ray, a.levelId, a.level, sel!)
       } else {
@@ -722,6 +787,7 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
         gesture = d
       }
       const d = gesture
+      if (d.rotate) return true
       d.axis = d.axis === k.axis ? null : k.axis
       d.axisFromHandle = false
       d.follow = null
@@ -746,9 +812,15 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
       const drag = gesture?.kind === "drag" ? gesture : null
       const subs = drag?.current ?? null
       const at = gizmoAt(subs)
-      const active = drag?.axis ?? (gesture?.kind === "pending" && gesture.target.kind === "gizmo" ? gesture.target.axis : null)
+      const active: GizmoPart | null = drag?.rotate ? "rotate" : (drag?.axis ?? (gesture?.kind === "pending" && gesture.target.kind === "gizmo" ? gesture.target.part : null))
       const gizmo = at ? { at, active, hover: gesture ? null : hover.gizmo } : null
-      const label = drag && !isZero(drag.delta) ? { at: at ?? drag.grab, text: offsetLabel(drag.delta) } : null
+      const label = drag?.rotate
+        ? drag.rotate.angle !== 0
+          ? { at: at ?? drag.grab, text: angleLabel(drag.rotate.angle) }
+          : null
+        : drag && !isZero(drag.delta)
+          ? { at: at ?? drag.grab, text: offsetLabel(drag.delta) }
+          : null
       return {
         ...NO_PARTS,
         substitutes: subs,
@@ -764,6 +836,7 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
       if (gesture?.kind === "drag") return "grabbing"
       if (gesture?.kind === "marquee") return "crosshair"
       if (store.getState().readOnly) return hover.shapeId || hover.element ? "pointer" : null
+      if (hover.gizmo === "rotate") return "grab"
       if (hover.gizmo || hover.element) return "move"
       if (hover.shapeId) return activeSelection(store.getState())?.shapeIds.includes(hover.shapeId) ? "move" : "pointer"
       return null
@@ -773,6 +846,7 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
       const s = store.getState()
       if (gesture?.kind === "drag") {
         if (gesture.preview.offFloor()) return "No floor here: terrain is drawn only under floors"
+        if (gesture.rotate) return "Drag around the ring to rotate (15° steps, Alt: free) · Esc cancels"
         return "X / Y / Z constrain the move · Esc cancels"
       }
       const sel = activeSelection(s)
@@ -781,7 +855,7 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
         const kind = s.toolSettings.terrain.element
         return `Editing ${kind === "vertex" ? "vertices" : kind === "edge" ? "edges" : "faces"}: click or drag a box to select, drag to move (1 / 2 / 3 switch, Tab: object mode)`
       }
-      return "Drag to move, R rotates · Tab: edit vertices/edges/faces"
+      return "Drag to move, drag the green ring to rotate (R: 90°) · Tab: edit vertices/edges/faces"
     },
   }
 }

@@ -33,13 +33,13 @@
  */
 import * as THREE from "three"
 
-import { gizmoHandles, type GizmoAxis, type Projector } from "@/core/geometry/gizmo"
+import { gizmoHandles, gizmoRing, GIZMO_RING_SEGMENTS, ringPoint, type GizmoAxis, type Projector } from "@/core/geometry/gizmo"
 import { signedArea, triangulateFootprint, type TerrainElementRef } from "@/core/scene/terrainShapes"
 import type { Id, TerrainShape } from "@/core/scene/types"
 
 import type { TerrainOverlay } from "../contracts"
 import { LAYER } from "../internal"
-import { aaLineGeometry, createAALineMaterial } from "../materials/aaLineMaterial"
+import { aaLineGeometry, createAALineMaterial, polylinePairs } from "../materials/aaLineMaterial"
 import { aaPointGeometry, createAAPointMaterial } from "../materials/aaPointMaterial"
 import { createGizmoArrowMaterial, gizmoArrowGeometry, GIZMO_SHAFT_HALF_PX } from "../materials/gizmoMaterial"
 import { TextLabel } from "./label"
@@ -466,6 +466,9 @@ export class TerrainOverlayResources {
   /** Gizmo arrow meshes (screen-space; `frame()` sets their direction and visibility). */
   readonly arrows: Record<GizmoAxis, THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>>
   readonly gizmoCentre: THREE.Mesh
+  /** Rotate ring (a unit horizontal circle, scaled per frame to gizmoRing's radius). */
+  readonly ring: THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>
+  private readonly ringMaterials: { normal: THREE.ShaderMaterial; lit: THREE.ShaderMaterial }
   private label: TextLabel | null = null
   private gizmo: TerrainOverlay["gizmo"] = null
   private readonly materials = new Map<string, THREE.Material>()
@@ -475,7 +478,9 @@ export class TerrainOverlayResources {
     this.decor.name = "terrain-overlay-decor"
     const arrowGeometry = gizmoArrowGeometry()
     const centreGeometry = aaPointGeometry([0, 0, 0])
-    this.decorGeometries = [arrowGeometry, centreGeometry]
+    const unitRing = Array.from({ length: GIZMO_RING_SEGMENTS }, (_, k) => ringPoint({ x: 0, y: 0, z: 0 }, 1, k))
+    const ringGeometry = aaLineGeometry(polylinePairs(unitRing, true))
+    this.decorGeometries = [arrowGeometry, centreGeometry, ringGeometry]
     for (const g of this.decorGeometries) g.userData.shared = true
     const arrows = {} as Record<GizmoAxis, THREE.Mesh<THREE.BufferGeometry, THREE.ShaderMaterial>>
     for (const axis of AXES) {
@@ -494,6 +499,15 @@ export class TerrainOverlayResources {
     this.gizmoCentre.name = "gizmo:centre"
     this.gizmoCentre.renderOrder = TERRAIN_OVERLAY_ORDER.gizmoCentre
     this.decor.add(this.gizmoCentre)
+    // Green like the Y arrow: it turns the selection about the vertical (Y) axis.
+    this.ringMaterials = {
+      normal: createAALineMaterial(TERRAIN_OVERLAY_COLORS.gizmo.y, { opacity: 0.85, width: 2, depthTest: false }),
+      lit: createAALineMaterial(TERRAIN_OVERLAY_COLORS.gizmoLight.y, { opacity: 1, width: 3.5, depthTest: false }),
+    }
+    this.ring = new THREE.Mesh(ringGeometry, this.ringMaterials.normal)
+    this.ring.name = "gizmo:rotate"
+    this.ring.renderOrder = TERRAIN_OVERLAY_ORDER.gizmo
+    this.decor.add(this.ring)
     this.decor.traverse(decorate)
     this.setDecor(null, null)
   }
@@ -564,6 +578,11 @@ export class TerrainOverlayResources {
     }
     if (gizmo) this.gizmoCentre.position.set(gizmo.at.x, gizmo.at.y, gizmo.at.z)
     this.gizmoCentre.visible = false
+    const ringLit = gizmo !== null && (gizmo.active === "rotate" || (gizmo.active === null && gizmo.hover === "rotate"))
+    this.ring.material = ringLit ? this.ringMaterials.lit : this.ringMaterials.normal
+    this.ringMaterials.normal.uniforms.uOpacity.value = gizmo?.active && gizmo.active !== "rotate" ? 0.3 : 0.85
+    if (gizmo) this.ring.position.set(gizmo.at.x, gizmo.at.y, gizmo.at.z)
+    this.ring.visible = false
     if (label && label.text.length > 0) {
       if (!this.label) {
         this.label = new TextLabel()
@@ -578,7 +597,8 @@ export class TerrainOverlayResources {
 
   /**
    * Per frame (OverlayManager.update): the gizmo arrows follow gizmoHandles (screen direction, axes seen
-   * end-on or off screen hidden; no projector: hidden), the label keeps a constant pixel size.
+   * end-on or off screen hidden; no projector: hidden), the rotate ring follows gizmoRing (constant screen
+   * radius, hidden edge-on), the label keeps a constant pixel size.
    */
   frame(project: Projector | null, worldPerPixelAt: (p: THREE.Vector3) => number): void {
     const g = this.gizmo
@@ -592,10 +612,14 @@ export class TerrainOverlayResources {
         mesh.material.uniforms.uDir.value.set(h.dir.x, h.dir.y)
         any ||= h.visible
       }
-      this.gizmoCentre.visible = any
+      const ring = gizmoRing(project, g.at)
+      this.ring.visible = ring.visible
+      if (ring.visible) this.ring.scale.set(ring.radius, 1, ring.radius)
+      this.gizmoCentre.visible = any || ring.visible
     } else {
       for (const axis of AXES) this.arrows[axis].visible = false
       this.gizmoCentre.visible = false
+      this.ring.visible = false
     }
     const label = this.label
     if (label?.sprite.visible) label.updateScale(worldPerPixelAt(label.sprite.position))
@@ -613,6 +637,8 @@ export class TerrainOverlayResources {
     for (const m of this.materials.values()) m.dispose()
     this.materials.clear()
     for (const axis of AXES) this.arrows[axis].material.dispose()
+    this.ringMaterials.normal.dispose()
+    this.ringMaterials.lit.dispose()
     ;(this.gizmoCentre.material as THREE.Material).dispose()
     for (const g of this.decorGeometries) g.dispose()
     if (this.label) {
