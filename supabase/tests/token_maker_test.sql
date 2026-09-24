@@ -154,18 +154,17 @@ begin
   perform pg_temp.login(v);
   perform pg_temp.eq('select: other users'' objects are not listed',
     pg_temp.val($q$select count(*) from storage.objects where bucket_id = 'token-images'$q$), '0');
-  perform pg_temp.eq('delete: not other users'' objects',
-    pg_temp.val($q$with x as (delete from storage.objects where bucket_id = 'token-images' returning 1) select count(*) from x$q$), '0');
 
-  perform pg_temp.login(u);
-  perform pg_temp.eq('delete: own objects',
-    pg_temp.val(format($q$with x as (delete from storage.objects where bucket_id = 'token-images' and name = %L returning 1) select count(*) from x$q$, u || '/hero.png')), '1');
-
-  -- quota: 300 objects
+  -- Storage refuses DELETE from SQL ("use the Storage API"), so the delete rule is checked on the policy.
   perform pg_temp.logout();
+  perform pg_temp.check('delete: own folder only (policy)',
+    (select qual from pg_policies where schemaname = 'storage' and tablename = 'objects' and policyname = 'atlas_objects_delete')
+      like '%bucket_id = ''token-images''::text) AND (split_part(name, ''/''::text, 1) = (( SELECT auth.uid() AS uid))::text)%');
+
+  -- quota: 300 objects (u has 2 already)
   insert into storage.objects (bucket_id, name, metadata)
   select 'token-images', format('%s/img%s.webp', u, g), jsonb_build_object('size', 1000)
-  from generate_series(1, 298) g;
+  from generate_series(1, 297) g;
   perform pg_temp.login(u);
   perform pg_temp.eq('quota: the 300th image is fine',
     pg_temp.try(format($q$insert into storage.objects (bucket_id, name) values ('token-images', %L)$q$, u || '/last.webp')), 'ok');
