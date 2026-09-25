@@ -250,7 +250,7 @@
    a modifier such as atlas-framed-warm can change them without competing for the same declarations. */
 @utility atlas-framed {
   border-color: var(--framed-edge, color-mix(in oklch, var(--gilt) 42%, transparent));
-  color: var(--framed-text, color-mix(in oklch, var(--foreground) 85%, var(--gilt)));
+  color: var(--framed-text, color-mix(in oklab, var(--foreground) 85%, var(--gilt)));
   background-image:
     var(--weave),
     linear-gradient(to bottom, var(--framed-top, var(--lacquer)), var(--framed-bottom, var(--lacquer-lo)));
