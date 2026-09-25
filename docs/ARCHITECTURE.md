@@ -217,13 +217,14 @@ and the End session dialog).
 
 ## 3. Scene document & versioning
 
-- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 7` (v2 added the
+- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 8` (v2 added the
   optional `Token.model`, the v1 → v2 migration is the identity; v3: terrain shapes, `Level.terrainEdits`,
   `WallObject.followTerrain`; v4 widened enums only, heightmap resolutions 8 and 16 and the `polygon` shape
   kind, so the v3 → v4 migration is the identity and older apps open v4 documents read-only as too-new; v5
   added the optional `TerrainShape.innerEdges` (loop cuts), again an identity migration; v6 added the
   optional `Token.hp` and `Token.conditions`, the v5 → v6 migration is the identity; v7 added the optional
-  `TerrainShape.innerPoints`, interior top vertices where loop cuts cross, again an identity migration).
+  `TerrainShape.innerPoints`, interior top vertices where loop cuts cross, again an identity migration; v8 removed `meta.author` and
+  `meta.description`, which the v7 → v8 migration deletes).
 - `Token.hp` / `Token.conditions` (optional; `core/scene/tokenStatus.ts`): hit points `{current, max,
   temp}` (integers, 1 ≤ max ≤ 99 999, 0 ≤ current ≤ max, temp ≥ 0: `tokenHpSchema`; absent = not tracked)
   and conditions from a fixed catalog (`TOKEN_CONDITIONS`: the SRD's fourteen, exhaustion, concentrating,

@@ -9,7 +9,7 @@ import type { EnvironmentUpdate } from "@/editor/store"
 import { cn } from "@/lib/utils"
 
 import { useEditorContext, useEditorState } from "../context"
-import { ColorInput, FieldPair, FieldRow, Hint, NotesInput, NumberInput, PanelSection, Segmented, SelectInput, SliderInput, SwitchField, TextInput, type Option } from "../fields"
+import { ColorInput, FieldPair, FieldRow, Hint, NumberInput, PanelSection, Segmented, SelectInput, SliderInput, SwitchField, type Option } from "../fields"
 import { ENV_PRESETS, SUN_DEFAULTS, type EnvPresetId } from "../lib/environmentPresets"
 import { degrees, radians, trimNumber } from "../lib/format"
 
@@ -233,7 +233,6 @@ export function ScenePanel() {
   const finest = useEditorState((s) => finestTerrainResolution(s.scene.levels))
   const maxCells = Math.min(SCENE_LIMITS.maxGridCells, finest === null ? Infinity : maxCellsForResolution(finest))
   const env = useEditorState((s) => s.scene.environment)
-  const meta = useEditorState((s) => s.scene.meta)
   const setEnv = (partial: EnvironmentUpdate) => store.getState().updateEnvironment(partial)
 
   return (
@@ -283,16 +282,6 @@ export function ScenePanel() {
       </PanelSection>
 
       <SunSection env={env} />
-
-      <PanelSection title="About this scene">
-        <FieldRow label="Author">
-          <TextInput value={meta.author} placeholder="Your name" disabled={readOnly} onCommit={(author) => store.getState().updateSceneInfo({ meta: { author } })} />
-        </FieldRow>
-        <div className="flex flex-col gap-1.5">
-          <span className="text-xs text-muted-foreground">Description</span>
-          <NotesInput value={meta.description} placeholder="What is this place?" onCommit={(description) => store.getState().updateSceneInfo({ meta: { description } })} />
-        </div>
-      </PanelSection>
     </div>
   )
 }

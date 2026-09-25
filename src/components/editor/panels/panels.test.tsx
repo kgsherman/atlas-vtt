@@ -13,7 +13,7 @@ import { makeStore } from "@/editor/test-utils"
 
 import { EditorActionsContext, EditorContext, type EditorActions } from "../context"
 import { createToolExtrasStore } from "../lib/toolExtras"
-import { TerrainSection } from "./LevelsPanel"
+import { LevelList, TerrainSection } from "./LevelsPanel"
 import { TerrainInspector } from "./TerrainInspector"
 
 let root: Root | null = null
@@ -79,6 +79,36 @@ describe("LevelsPanel terrain section", () => {
     expect(trigger!.matches(":disabled")).toBe(false)
     act(() => void trigger!.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false })))
     expect(document.body.textContent).toContain("The painted ground is already flat")
+  })
+})
+
+describe("LevelsPanel level list", () => {
+  const nameSpan = (el: HTMLElement, name: string) => [...el.querySelectorAll("[role=radio] span")].find((s) => s.textContent === name)!
+  const type = (input: HTMLInputElement, value: string) => {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(input, value)
+    input.dispatchEvent(new Event("input", { bubbles: true }))
+  }
+
+  it("renames a level in place on double-click; Escape cancels", () => {
+    const store = makeStore(createScene({ width: 12, depth: 12 }))
+    const g = store.getState().activeLevelId
+    const before = store.getState().scene.levels[g].name
+    const el = render(store, <LevelList />)
+
+    act(() => void nameSpan(el, before).dispatchEvent(new MouseEvent("dblclick", { bubbles: true })))
+    let input = el.querySelector<HTMLInputElement>("input[aria-label='Level name']")!
+    expect(document.activeElement).toBe(input)
+    act(() => type(input, "Scrap"))
+    act(() => void input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })))
+    expect(el.querySelector("input[aria-label='Level name']")).toBeNull()
+    expect(store.getState().scene.levels[g].name).toBe(before)
+
+    act(() => void nameSpan(el, before).dispatchEvent(new MouseEvent("dblclick", { bubbles: true })))
+    input = el.querySelector<HTMLInputElement>("input[aria-label='Level name']")!
+    act(() => type(input, "  Courtyard  "))
+    act(() => void input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })))
+    expect(el.querySelector("input[aria-label='Level name']")).toBeNull()
+    expect(store.getState().scene.levels[g].name).toBe("Courtyard")
   })
 })
 

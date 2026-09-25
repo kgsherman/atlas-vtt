@@ -260,14 +260,13 @@ export function CameraControls() {
           render={
             <Button
               variant={darkVision ? "secondary" : "ghost"}
-              size="icon-sm"
-              aria-label="Dark vision"
+              size="sm"
               aria-pressed={darkVision}
               onClick={() => store.getState().toggleDarkVision()}
             />
           }
         >
-          <MoonStar />
+          <MoonStar /> Dark Vision
         </TooltipTrigger>
         <TooltipContent side="bottom">
           Dark vision {darkVision ? "on" : "off"}: see dark areas while you build (what it lifts is tinted blue and striped){" "}

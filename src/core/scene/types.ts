@@ -16,7 +16,7 @@
 
 import type { TokenCondition, TokenHp } from "./tokenStatus"
 
-export const SCENE_SCHEMA_VERSION = 7 as const
+export const SCENE_SCHEMA_VERSION = 8 as const
 
 export type Id = string
 
@@ -504,8 +504,6 @@ export interface SceneAsset {
 }
 
 export interface SceneMeta {
-  description: string
-  author: string
   tags: string[]
 }
 

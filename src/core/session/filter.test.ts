@@ -65,7 +65,7 @@ function know(state: GameState, vis: VisibilityResult, uid = "p1") {
 function sentinelFixture() {
   const { scene, ground } = flatScene(24, 12)
   scene.name = "Tavern"
-  scene.meta.description = "SENTINEL_META_DESCRIPTION"
+  scene.meta.tags = ["SENTINEL_META_TAG"]
   scene.levels[ground].name = "Ground"
   // Room A: x 0–50, z 0–30.
   add(scene, createWall(ground, { x: 0, z: 0 }, { x: 50, z: 0 }))

@@ -174,12 +174,7 @@ function buildCrookedLantern(): Scene {
     },
     backgroundColor: "#080a11",
   }
-  scene.meta = {
-    description:
-      "A crooked old roadside tavern on a moonlit night: smugglers' cellar, common room with a roaring hearth, bedrooms and a balcony overlooking a walled courtyard where a hill giant waits.",
-    author: "Atlas VTT",
-    tags: ["sample", "tavern", "multi-level", "night"],
-  }
+  scene.meta = { tags: ["sample", "tavern", "multi-level", "night"] }
 
   const EXT = { thickness: 0.5 }
   const G = ground.id
@@ -476,11 +471,7 @@ function buildStressTest(): Scene {
   const basement = b.level({ name: "Basement", elevation: -10 })
   const upper = b.level({ name: "Upper", elevation: 10 })
   scene.environment = { ...defaultEnvironment(), skyLevel: "dark", ambientLevel: "dark" }
-  scene.meta = {
-    description: "Benchmark scene: 3 levels, 20 shadow-casting lights, 15 tokens, ~150 walls, pillars and props.",
-    author: "Atlas VTT",
-    tags: ["sample", "benchmark"],
-  }
+  scene.meta = { tags: ["sample", "benchmark"] }
   const ROOM = 60
   const presets: LightPreset[] = ["torch", "lantern", "brazier", "magical", "candle"]
   const doorStates: DoorState[] = ["open", "closed", "locked", "open"]

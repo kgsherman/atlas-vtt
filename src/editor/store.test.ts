@@ -61,7 +61,7 @@ describe("editor store: apply / undo / redo", () => {
     s.updateSceneInfo({ name: "A" })
     s.markSaved()
     expect(store.getState().dirty).toBe(false)
-    store.getState().updateSceneInfo({ meta: { author: "me" } })
+    store.getState().updateSceneInfo({ meta: { tags: ["me"] } })
     expect(store.getState().dirty).toBe(true)
     store.getState().undo()
     expect(store.getState().dirty).toBe(false)

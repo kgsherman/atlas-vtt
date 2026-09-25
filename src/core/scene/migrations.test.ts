@@ -73,8 +73,8 @@ function v1Doc(): Record<string, any> {
 
 describe("migrateToCurrent", () => {
   it("has one migration per version step", () => {
-    expect(SCENE_SCHEMA_VERSION).toBe(7)
-    expect(Object.keys(MIGRATIONS)).toEqual(["1", "2", "3", "4", "5", "6"])
+    expect(SCENE_SCHEMA_VERSION).toBe(8)
+    expect(Object.keys(MIGRATIONS)).toEqual(["1", "2", "3", "4", "5", "6", "7"])
   })
 
   it("migrates v1 documents (no token models) to v2 unchanged", () => {
@@ -270,5 +270,17 @@ describe("v6 → v7 (terrain shape inner points)", () => {
     expect(MIGRATIONS[6](structuredClone(v6))).toEqual(v6)
     const res = parseScene(v6)
     expect(res.ok && res.migratedFrom).toBe(6)
+  })
+})
+
+describe("v7 → v8 (scene author and description removed)", () => {
+  it("drops meta.author and meta.description, keeping the tags", () => {
+    const v7: Record<string, any> = { ...(MIGRATIONS[2](v1Doc()) as Record<string, any>), schemaVersion: 7 }
+    v7.meta = { description: "A keep", author: "Someone", tags: ["keep"] }
+    const res = parseScene(v7)
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.migratedFrom).toBe(7)
+    expect(res.scene.meta).toEqual({ tags: ["keep"] })
   })
 })

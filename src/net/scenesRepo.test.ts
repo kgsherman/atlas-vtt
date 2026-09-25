@@ -70,16 +70,16 @@ describe("local scenes repo", () => {
     const { id } = await repo.create(scene)
     scene.name = "Crypt (lit)"
     expect(await repo.saveVersion(id, scene)).toBe(2)
-    scene.meta.description = "third"
+    scene.meta.tags = ["third"]
     expect(await repo.saveVersion(id, scene)).toBe(3)
     expect((await repo.get(id))?.latestVersion).toBe(3)
     expect((await repo.listVersions(id)).map((v) => v.version)).toEqual([3, 2, 1])
     const v1 = await repo.load(id, 1)
-    expect(v1.parsed.ok && v1.parsed.scene.meta.description).toBe("")
+    expect(v1.parsed.ok && v1.parsed.scene.meta.tags).toEqual([])
     // A version never changes after it was written, even when the caller mutates its object.
-    scene.meta.description = "mutated after save"
+    scene.meta.tags = ["mutated after save"]
     const v3 = await repo.load(id, 3)
-    expect(v3.parsed.ok && v3.parsed.scene.meta.description).toBe("third")
+    expect(v3.parsed.ok && v3.parsed.scene.meta.tags).toEqual(["third"])
   })
 
   it("rejects a save based on a stale version", async () => {

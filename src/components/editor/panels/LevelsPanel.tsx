@@ -12,6 +12,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
+import { Input } from "@/components/ui/input"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
@@ -33,11 +34,43 @@ import { formatBytes, formatElevation, trimNumber } from "../lib/format"
 import { imagePixelsForTrace, loadLevelImage } from "../lib/levelImages"
 import { levelBelowElevation, levelsTopDown } from "../lib/levelOps"
 
-function LevelRow({ level, active, visible, count, onActivate }: { level: Level; active: boolean; visible: boolean; count: number; onActivate(): void }) {
+/** Inline rename field for a level row: Enter or blur commits, Escape cancels. */
+function LevelNameInput({ level, onDone }: { level: Level; onDone(): void }) {
+  const { store } = useEditorContext()
+  const done = React.useRef(false)
+  const finish = (raw: string | null) => {
+    if (done.current) return
+    done.current = true
+    const name = raw?.trim()
+    if (name && name !== level.name) store.getState().updateLevel(level.id, { name })
+    onDone()
+  }
+  return (
+    <Input
+      aria-label="Level name"
+      className="h-7 min-w-0 flex-1 px-1.5 text-xs"
+      defaultValue={level.name}
+      maxLength={200}
+      autoFocus
+      onFocus={(e) => e.currentTarget.select()}
+      onClick={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+      onBlur={(e) => finish(e.currentTarget.value)}
+      onKeyDown={(e) => {
+        e.stopPropagation()
+        if (e.key === "Enter") finish(e.currentTarget.value)
+        else if (e.key === "Escape") finish(null)
+      }}
+    />
+  )
+}
+
+function LevelRow({ level, active, visible, onActivate }: { level: Level; active: boolean; visible: boolean; onActivate(): void }) {
   const { store } = useEditorContext()
   const actions = useEditorActions()
   const readOnly = useEditorState((s) => s.readOnly)
   const levelCount = useEditorState((s) => Object.keys(s.scene.levels).length)
+  const [renaming, setRenaming] = React.useState(false)
 
   // The radio is the name/elevation part only, so the row's buttons are not nested inside it
   // (nested-interactive); a click anywhere on the row still activates the level.
@@ -68,27 +101,40 @@ function LevelRow({ level, active, visible, count, onActivate }: { level: Level;
         </TooltipTrigger>
         <TooltipContent side="left">{visible ? "Hide in the editor" : "Show in the editor"}</TooltipContent>
       </Tooltip>
-      <span
-        role="radio"
-        aria-checked={active}
-        tabIndex={0}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault()
-            onActivate()
-          }
-        }}
-        className="flex h-full min-w-0 flex-1 items-center gap-1.5 outline-none"
-      >
-        <span className={cn("size-1.5 shrink-0 rounded-full", active ? "bg-primary" : "bg-transparent")} />
-        <span className={cn("min-w-0 flex-1 truncate", active ? "font-medium text-foreground" : "text-foreground/80", !visible && "opacity-50")}>{level.name}</span>
-        {level.backdrop ? <ImageIcon className="size-3 shrink-0 text-muted-foreground" aria-label="Has a map image" /> : null}
-        {level.heightmap ? <Mountain className="size-3 shrink-0 text-muted-foreground" aria-label="Has terrain" /> : null}
-        <span className="w-14 shrink-0 text-right text-[0.6875rem] text-muted-foreground tabular-nums">{formatElevation(level.elevation)}</span>
-        <span className="w-6 shrink-0 text-right text-[0.625rem] text-muted-foreground tabular-nums" title={`${count} objects`}>
-          {count}
+      {renaming ? (
+        <div className="flex h-full min-w-0 flex-1 items-center gap-1.5">
+          <span className={cn("size-1.5 shrink-0 rounded-full", active ? "bg-primary" : "bg-transparent")} />
+          <LevelNameInput level={level} onDone={() => setRenaming(false)} />
+          <span className="w-14 shrink-0 text-right text-[0.6875rem] text-muted-foreground tabular-nums">{formatElevation(level.elevation)}</span>
+        </div>
+      ) : (
+        <span
+          role="radio"
+          aria-checked={active}
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault()
+              onActivate()
+            }
+          }}
+          className="flex h-full min-w-0 flex-1 items-center gap-1.5 outline-none"
+        >
+          <span className={cn("size-1.5 shrink-0 rounded-full", active ? "bg-primary" : "bg-transparent")} />
+          <span
+            className={cn("min-w-0 flex-1 truncate", active ? "font-medium text-foreground" : "text-foreground/80", !visible && "opacity-50")}
+            title={readOnly ? undefined : "Double-click to rename"}
+            onDoubleClick={() => {
+              if (!readOnly) setRenaming(true)
+            }}
+          >
+            {level.name}
+          </span>
+          {level.backdrop ? <ImageIcon className="size-3 shrink-0 text-muted-foreground" aria-label="Has a map image" /> : null}
+          {level.heightmap ? <Mountain className="size-3 shrink-0 text-muted-foreground" aria-label="Has terrain" /> : null}
+          <span className="w-14 shrink-0 text-right text-[0.6875rem] text-muted-foreground tabular-nums">{formatElevation(level.elevation)}</span>
         </span>
-      </span>
+      )}
       <DropdownMenu>
         <DropdownMenuTrigger
           render={<Button variant="ghost" size="icon-sm" aria-label={`${level.name} actions`} className="text-muted-foreground opacity-60 group-hover:opacity-100" onClick={(e) => e.stopPropagation()} />}
@@ -117,7 +163,7 @@ function LevelRow({ level, active, visible, count, onActivate }: { level: Level;
   )
 }
 
-function LevelList() {
+export function LevelList() {
   const { store } = useEditorContext()
   const actions = useEditorActions()
   const { levels, activeLevelId, visibility, ghost, readOnly } = useEditorShallow((s) => ({
@@ -129,13 +175,6 @@ function LevelList() {
   }))
   const ordered = levelsTopDown({ levels })
   const full = ordered.length >= SCENE_LIMITS.maxLevels
-  // Objects per level, counted once per document change (not per row per store update).
-  const objects = useEditorState((s) => s.scene.objects)
-  const counts = React.useMemo(() => {
-    const m = new Map<Id, number>()
-    for (const o of Object.values(objects)) m.set(o.levelId, (m.get(o.levelId) ?? 0) + 1)
-    return m
-  }, [objects])
 
   return (
     <PanelSection
@@ -166,7 +205,7 @@ function LevelList() {
     >
       <div role="radiogroup" aria-label="Active level" className="flex flex-col gap-0.5">
         {ordered.map((l) => (
-          <LevelRow key={l.id} level={l} active={l.id === activeLevelId} visible={visibility[l.id] !== false} count={counts.get(l.id) ?? 0} onActivate={() => store.getState().setActiveLevel(l.id)} />
+          <LevelRow key={l.id} level={l} active={l.id === activeLevelId} visible={visibility[l.id] !== false} onActivate={() => store.getState().setActiveLevel(l.id)} />
         ))}
       </div>
       <SwitchField label="Ghost adjacent levels" description="Show the levels above and below the active one as translucent ghosts." checked={ghost} onCheckedChange={() => store.getState().toggleGhostAdjacent()} />
@@ -577,7 +616,7 @@ function BackdropSection({ level }: { level: Level }) {
   const pxPerCell = asset ? asset.width / Math.max(1, b.rect.w / cellSize) : null
 
   return (
-    <PanelSection title="Map image" action={asset ? <Badge variant="outline" className="font-normal">{asset.mime.replace("image/", "").toUpperCase()}</Badge> : null}>
+    <PanelSection title="Map image">
       <BackdropThumb sceneId={sceneId} assetId={b.assetId} aspect={b.rect.w / Math.max(0.01, b.rect.d)} />
       {asset ? (
         <Hint>

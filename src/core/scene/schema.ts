@@ -552,8 +552,6 @@ const sceneShape = z.strictObject({
   tokens: z.record(idSchema, tokenSchema),
   assets: z.record(idSchema, assetSchema).optional(),
   meta: z.strictObject({
-    description: text,
-    author: text,
     tags: z.array(z.string().max(64)).max(SCENE_LIMITS.maxTags),
   }),
 })

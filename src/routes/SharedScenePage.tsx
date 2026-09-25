@@ -178,8 +178,6 @@ function SharedView({ shared }: { shared: SharedScene }) {
             Shared scene · v{shared.version}
           </Badge>
           <h1 className="font-heading text-3xl font-semibold tracking-tight text-balance">{shared.name}</h1>
-          {scene?.meta.author && <p className="text-sm text-muted-foreground">by {scene.meta.author}</p>}
-          {scene?.meta.description && <p className="text-sm/relaxed text-pretty text-muted-foreground">{scene.meta.description}</p>}
         </div>
 
         {digest && scene && (

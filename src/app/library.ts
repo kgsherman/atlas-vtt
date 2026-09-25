@@ -104,7 +104,6 @@ export async function createFromSample(services: AppServices, sampleId: string):
   if (!sample) throw new LibraryError("That sample scene does not exist.")
   const scene = sample.build()
   scene.name = sample.name
-  if (!scene.meta.description) scene.meta.description = sample.description
   return { summary: await services.scenes.create(scene), warnings: [] }
 }
 

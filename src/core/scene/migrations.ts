@@ -31,6 +31,15 @@ function wallsFollowTerrain(doc: unknown): unknown {
   return doc
 }
 
+/** v7 → v8: the scene's author and description were removed; only `meta.tags` remains. */
+function dropMetaAuthorDescription(doc: unknown): unknown {
+  if (isRecord(doc) && isRecord(doc.meta)) {
+    delete doc.meta.author
+    delete doc.meta.description
+  }
+  return doc
+}
+
 /** vN → vN+1 migrations keyed by N. */
 export const MIGRATIONS: Readonly<Record<number, Migration>> = Object.freeze({
   // v2 added the optional Token.model; v1 documents are valid v2 documents.
@@ -44,6 +53,7 @@ export const MIGRATIONS: Readonly<Record<number, Migration>> = Object.freeze({
   5: (doc: unknown) => doc,
   // v7 added the optional TerrainShape.innerPoints (where loop cuts cross); v6 documents are valid v7 documents.
   6: (doc: unknown) => doc,
+  7: dropMetaAuthorDescription,
 })
 
 export type MigrateResult =

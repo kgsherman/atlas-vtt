@@ -91,7 +91,7 @@ export function createScene(partial: Partial<Pick<Scene, "name">> & { width?: nu
     levels: { [ground.id]: ground },
     objects: {},
     tokens: {},
-    meta: { description: "", author: "", tags: [] },
+    meta: { tags: [] },
   }
   if (partial.groundFloor !== false) {
     const floor = createFloor(ground.id, { x: 0, z: 0, w: width * DEFAULT_CELL_SIZE, d: depth * DEFAULT_CELL_SIZE }, "grass")
