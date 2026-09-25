@@ -1510,8 +1510,7 @@ doors, not a change of mode; closing them disconnects the players and keeps the 
   every 5 s and starts a new client once the doors open (a new client: its first snapshot of the new epoch is
   taken as is), or shows the ended / removed screen. The join page says "The table isn't open".
 - **The screen** (`HostSession`, top bar in `HostChrome`): File / Edit / View / Level / Help (Play keeps File
-  and Help), the map's name (renames the live map and its library entry), the table's state ("Table open · 2
-  players", "Table closed · only you"), Edit | Play in the middle, undo / redo (Edit) or Preview vision
+  and Help), the map's name (renames the live map and its library entry), Edit | Play in the middle, undo / redo (Edit) or Preview vision
   (Play), the Token Maker, Change map, the side panel and the doors: "Open the table", or "Table open · CODE"
   with the code, the invite link and "Close the table…" (`TableDialogs`: players disconnected, the same code
   when it opens again). Edit shows the editor's tool rail, options bar, sidebar and overlays on the host's

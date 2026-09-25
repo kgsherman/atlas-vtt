@@ -1,5 +1,5 @@
 /**
- * The map screen's top bar (ARCHITECTURE §6.8): the menus, the map's name and its table's state, the
+ * The map screen's top bar (ARCHITECTURE §6.8): the menus, the map's name, the
  * Edit / Play switch (Tab), undo / redo in Edit or vision preview in Play, the Token Maker, Change map,
  * the side panel and the table's doors (open / close); and the bottom status bar (host pipeline stats,
  * save state, frame rate).
@@ -71,34 +71,6 @@ import { StatusDot } from "../hud"
 
 export type HostMode = "play" | "edit"
 
-/** The line under the map's name: who can reach the table right now. */
-function tableStatus(snap: HostSnapshot): {
-  tone: "ok" | "warn" | "bad" | "off"
-  label: string
-} {
-  switch (snap.status) {
-    case "hosting": {
-      if (!snap.tableOpen)
-        return { tone: "off", label: "Table closed · only you" }
-      const online = snap.members.filter(
-        (m) => m.status === "active" && m.online
-      ).length
-      return {
-        tone: "ok",
-        label: `Table open · ${online === 0 ? "no players yet" : online === 1 ? "1 player" : `${online} players`}`,
-      }
-    }
-    case "starting":
-      return { tone: "warn", label: "Starting…" }
-    case "standby":
-      return { tone: "off", label: "Open in another tab" }
-    case "ended":
-      return { tone: "off", label: "Ended" }
-    default:
-      return { tone: "bad", label: "Error" }
-  }
-}
-
 export function HostTopBar({
   snap,
   sceneName,
@@ -136,7 +108,6 @@ export function HostTopBar({
   onOpenTable(): Promise<void>
   onCloseTable(): void
 }) {
-  const st = tableStatus(snap)
   const hosting = snap.status === "hosting"
   return (
     <header className="flex h-11 shrink-0 items-center gap-2 border-b bg-card/60 px-2">
@@ -158,20 +129,11 @@ export function HostTopBar({
         </Tooltip>
         {menus ? <EditorMenus doc={doc} mode={mode} /> : null}
         <Separator orientation="vertical" className="mx-1 h-5 self-center" />
-        <div className="flex min-w-0 flex-col leading-tight">
-          <SceneName
-            name={sceneName}
-            disabled={!hosting || !menus}
-            onRename={doc.rename}
-          />
-          <span className="flex items-center gap-1.5 px-2 text-[0.6875rem] text-muted-foreground">
-            <StatusDot
-              tone={st.tone}
-              pulse={snap.status === "starting" || (hosting && snap.tableOpen)}
-            />
-            {st.label}
-          </span>
-        </div>
+        <SceneName
+          name={sceneName}
+          disabled={!hosting || !menus}
+          onRename={doc.rename}
+        />
         <ModeBadge className="ml-1" />
       </div>
       <ModeSwitch mode={mode} onMode={onMode} disabled={!hosting || !menus} />
