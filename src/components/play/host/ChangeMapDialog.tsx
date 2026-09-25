@@ -370,24 +370,14 @@ function ChangeMapSteps({
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       ) : null}
-      <DialogFooter>
-        <Button
-          variant="ghost"
-          className="sm:mr-auto"
-          disabled={busy !== null}
-          onClick={() => setStep("party")}
-        >
-          <ArrowLeft data-icon="inline-start" /> Back
-        </Button>
-        <Button
-          variant="outline"
-          disabled={busy !== null}
-          onClick={() => onOpenChange(false)}
-        >
-          Keep playing here
-        </Button>
+      {/* Event-style options (as the End session dialog): the decision first, backing out last. */}
+      <div className="mt-1 flex flex-col gap-1.5">
         {choice.kind === "clean" ? (
-          <Button disabled={blocked} onClick={() => void confirm(false)}>
+          <Button
+            variant="decision"
+            disabled={blocked}
+            onClick={() => void confirm(false)}
+          >
             {busy === "change" ? (
               <Spinner data-icon="inline-start" />
             ) : (
@@ -397,16 +387,9 @@ function ChangeMapSteps({
           </Button>
         ) : (
           <>
-            <Button
-              variant="destructive"
-              disabled={blocked}
-              onClick={() => void confirm(false)}
-            >
-              {busy === "change" ? <Spinner data-icon="inline-start" /> : null}
-              Change without saving
-            </Button>
             {choice.kind === "offer" || choice.kind === "looking-up" ? (
               <Button
+                variant="decision"
                 disabled={blocked || choice.kind !== "offer"}
                 onClick={() => void confirm(true)}
               >
@@ -418,9 +401,32 @@ function ChangeMapSteps({
                 Save map & change
               </Button>
             ) : null}
+            <Button
+              variant="decision"
+              className="text-destructive hover:text-destructive"
+              disabled={blocked}
+              onClick={() => void confirm(false)}
+            >
+              {busy === "change" ? <Spinner data-icon="inline-start" /> : null}
+              Change without saving
+            </Button>
           </>
         )}
-      </DialogFooter>
+        <Button
+          variant="decision"
+          disabled={busy !== null}
+          onClick={() => setStep("party")}
+        >
+          <ArrowLeft data-icon="inline-start" /> Change who comes along
+        </Button>
+        <Button
+          variant="decision"
+          disabled={busy !== null}
+          onClick={() => onOpenChange(false)}
+        >
+          Keep playing here
+        </Button>
+      </div>
     </>
   )
 }

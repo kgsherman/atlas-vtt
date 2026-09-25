@@ -1446,9 +1446,9 @@ players keep playing without rejoining.
   (`app/library` `loadLibraryScene`: too-new and invalid documents are refused, as is one with the live
   `Scene.id`); (2) who comes along (PCs and every player's token ticked by default) and where they arrive
   (a level and a point on its thumbnail, by default the middle of what the thumbnail frames); (3) a
-  summary of what stays and what resets, with the unsaved-edits guard read when the DM confirms: "Save map
-  & change" saves the live map to its library scene first and stays open if that fails, "Change without
-  saving" discards the edits. The console leaves Edit map before the swap (the editor's undo history
+  summary of what stays and what resets, with the unsaved-edits guard read when the DM confirms, its
+  choices as event-style decisions (as the End session dialog): "Save map & change" saves the live map to
+  its library scene first and stays open if that fails, "Change without saving" discards the edits. The console leaves Edit map before the swap (the editor's undo history
   belongs to the old map), clears the selection, shows the arrival level and focuses the arrival point;
   `HostViewport` reframes and reloads level images keyed by the document (`play/host` `levelImageKey`,
   `backdropFolders`) and drops the old map's cached images.
