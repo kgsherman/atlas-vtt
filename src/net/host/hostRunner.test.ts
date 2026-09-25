@@ -1109,6 +1109,66 @@ describe("host runner — link rejoins and lost results", () => {
   })
 })
 
+describe("host runner — world characters", () => {
+  it("a character token belongs to the players the world gives it, in step with the roster", async () => {
+    const k = keep()
+    const { fx, h } = await hosted(k.scene, [P1, P2])
+    expect(h.getSnapshot().world).toEqual({ id: fx.worldId, name: "My world" })
+    const aria = await fx.worlds.createCharacter(fx.worldId, { name: "Aria" })
+    await fx.worlds.setCharacterPlayers(aria, [P1])
+    // The DM links Ada to the character in Edit; the roster is read again.
+    const [, patches] = produceWithPatches(h.getSnapshot().state!.scene, (d: Scene) => {
+      d.tokens[k.ada.id].characterId = aria.id
+    })
+    h.applyScenePatches(patches)
+    await h.refreshRoster()
+    expect(h.getSnapshot().state!.characters).toEqual({ [aria.id]: { name: "Aria", players: [P1] } })
+    expect(h.getSnapshot().state!.owners[k.ada.id]).toEqual([P1])
+    const m1 = mirror(fx, P1)
+    const m2 = mirror(fx, P2)
+    await settle(h, [
+      [P1, m1],
+      [P2, m2],
+    ])
+    expect(m1.view!.controlledTokenIds).toEqual([k.ada.id])
+    // The table cannot hand the character out; the world can.
+    expect(h.dispatch({ t: "assign-token", tokenId: k.ada.id, userId: P2, assigned: true })?.error).toMatch(/world/)
+    await fx.worlds.setCharacterPlayers(aria, [P2])
+    await h.refreshRoster()
+    await settle(h, [
+      [P1, m1],
+      [P2, m2],
+    ])
+    expect(m1.view!.controlledTokenIds).toEqual([])
+    expect(m2.view!.controlledTokenIds).toEqual([k.ada.id])
+    // The roster is saved with the game.
+    await h.save()
+    const row = await fx.dmRepo.loadSessionState(fx.sessionId)
+    const saved = row?.content.kind === "game" ? parseGameStateDetailed(row.content.state) : null
+    expect(saved?.ok && saved.state.characters?.[aria.id].players).toEqual([P2])
+  })
+})
+
+describe("host runner — the table's world", () => {
+  it("a closed table whose scene moved to another world follows it: its world, code and players", async () => {
+    const k = keep()
+    const { fx, h } = await hosted(k.scene, [P1])
+    const m1 = mirror(fx, P1)
+    await settle(h, [[P1, m1]])
+    expect(Object.keys(h.getSnapshot().state!.players)).toEqual([P1])
+    await h.setTableOpen(false)
+    const other = await fx.worlds.create("Storm King's Thunder")
+    const sceneId = (await fx.dmRepo.listMySessions()).find((s) => s.id === fx.sessionId)!.sceneId!
+    await createLocalScenesRepo(fx.store).moveToWorld(sceneId, other.id)
+    await h.refreshRoster()
+    expect(h.getSnapshot().world).toEqual({ id: other.id, name: "Storm King's Thunder" })
+    expect(h.getSnapshot().roomCode).toBe(other.roomCode)
+    // The first world's player is not a player of this one.
+    expect(h.getSnapshot().state!.players).toEqual({})
+    expect(h.getSnapshot().members).toEqual([])
+  })
+})
+
 describe("host runner — membership and hosting", () => {
   it("a kicked player gets {t:'kicked'} and nothing further", async () => {
     const k = keep()
@@ -1214,6 +1274,22 @@ describe("host runner — membership and hosting", () => {
     await waitFor(() => a.getSnapshot().status === "standby", "first tab stands down")
     const m = mirror(fx, P1)
     await settle(b, [[P1, m]])
+  })
+
+  it("back to the same table on this page: the new host waits for the old one to stop, it is not another tab", async () => {
+    const k = keep()
+    const fx = await fixture(k.scene, [P1])
+    const locks = (globalThis.navigator as { locks?: unknown } | undefined)?.locks ? undefined : fakeLocks()
+    const a = host(fx, { locks }).host
+    await a.start()
+    expect(a.getSnapshot().status).toBe("hosting")
+    // The DM leaves for the world page (the old host saves and lets go) and comes straight back.
+    const stopping = a.stop()
+    const b = host(fx, { locks }).host
+    await b.start()
+    await stopping
+    expect(b.getSnapshot().status).toBe("hosting")
+    expect(a.getSnapshot().status).toBe("standby")
   })
 
   it("ending the session tells everyone", async () => {
@@ -2212,7 +2288,7 @@ describe("host runner — the table's doors", () => {
     expect(h.getSnapshot().library?.dirty).toBe(true)
   })
 
-  it("a map change moves the table to the new map; a table with players there refuses it", async () => {
+  it("a map change moves the table to the new map; a table open there refuses it", async () => {
     const { k, fx, h, scenes, sceneId } = await table()
     const t = meadow()
     const meadowId = (await scenes.create(t.scene)).id
@@ -2227,9 +2303,11 @@ describe("host runner — the table's doors", () => {
     expect((await fx.dmRepo.sessionInfo(idle.sessionId))?.status).toBe("ended")
     expect((await fx.dmRepo.listMySessions()).find((s) => s.id === fx.sessionId)?.sceneId).toBe(meadowId)
     expect(await fx.dmRepo.openMap(meadowId)).toMatchObject({ sessionId: fx.sessionId, created: false })
-    // The keep is free again; players sit at its new table.
+    // The keep is free again; players sit at its new table (a world has one open table: this one closes first).
     const keepTable = await fx.dmRepo.openMap(sceneId)
     expect(keepTable.created).toBe(true)
+    await expect(fx.dmRepo.setTableOpen(keepTable.sessionId, true)).rejects.toMatchObject({ code: "world_table_open" })
+    await h.setTableOpen(false)
     await fx.dmRepo.setTableOpen(keepTable.sessionId, true)
     await fx.repoOf(P2).joinSession(keepTable.roomCode, "Player a2")
     const before = h.getSnapshot().state!

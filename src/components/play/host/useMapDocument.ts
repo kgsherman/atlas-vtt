@@ -63,7 +63,7 @@ export function useMapDocument({
   saveMap,
   go,
 }: {
-  snap: Pick<HostSnapshot, "library" | "state">
+  snap: Pick<HostSnapshot, "library" | "state" | "world">
   editor: HostEditor | null
   saveMap: Pick<SaveMap, "library" | "dirty" | "save">
   /** Leave this map for another page (restore point and the open-table question first). */
@@ -113,7 +113,7 @@ export function useMapDocument({
       const ok = await confirm({
         title: `Restore version ${v.version}?`,
         description:
-          "The map goes back to how it was then — tokens, doors and lights included — for everyone at the table. The map as it is now is kept as a restore point, and you can undo this.",
+          "The scene goes back to how it was then — tokens, doors and lights included — for everyone at the table. The scene as it is now is kept as a restore point, and you can undo this.",
         confirmLabel: "Restore",
       })
       if (!ok) return
@@ -131,9 +131,10 @@ export function useMapDocument({
           replaceMap(store, loaded.parsed.scene, `Restore version ${v.version}`)
         )
           toast.success(`Restored version ${v.version}`, {
-            description: "Undo puts the map back as it was.",
+            description: "Undo puts the scene back as it was.",
           })
-        else toast.info(`The map is already as it was in version ${v.version}`)
+        else
+          toast.info(`The scene is already as it was in version ${v.version}`)
       } catch (err) {
         toast.error("Could not restore the version", {
           description: userMessage(err),
@@ -149,7 +150,9 @@ export function useMapDocument({
     async (visibility, opts = {}) => {
       if (!libraryId) return null
       if (visibility === "link" && !(await keepRestorePoint()))
-        throw new Error("The map could not be saved to your library first.")
+        throw new Error(
+          "A restore point of the scene could not be saved first."
+        )
       const slug = await scenes.setVisibility(libraryId, visibility, opts)
       setSummary((s) =>
         s && s.id === libraryId ? { ...s, visibility, shareSlug: slug } : s
@@ -185,13 +188,16 @@ export function useMapDocument({
       try {
         const { summary: created, warnings } = await importSceneFile(
           services,
-          file
+          file,
+          live.current.snap.world?.id
         )
         toast.success(`Imported “${created.name}”`, {
-          description: "Added to your library as a new map.",
+          description: live.current.snap.world
+            ? `Added to ${live.current.snap.world.name} as a new scene.`
+            : "Added as a new scene.",
         })
         for (const w of warnings) toast.warning(w)
-        go(paths.map(created.id))
+        go(paths.scene(created.id))
       } catch (err) {
         toast.error("Import failed", { description: userMessage(err) })
       } finally {
@@ -202,8 +208,11 @@ export function useMapDocument({
   )
 
   const newMap = React.useCallback(
-    (opts: { importImages?: boolean } = {}) =>
-      go(opts.importImages ? paths.newFromImages() : paths.newScene()),
+    (opts: { importImages?: boolean } = {}) => {
+      // A new scene of the same world.
+      const world = live.current.snap.world?.id
+      go(opts.importImages ? paths.newFromImages(world) : paths.newScene(world))
+    },
     [go]
   )
 
@@ -214,7 +223,7 @@ export function useMapDocument({
       scenes.rename(libraryId, name).then(
         (s) => setSummary(s),
         (err: unknown) =>
-          toast.error("The library entry kept its old name", {
+          toast.error("The scene kept its old name in its world", {
             description: userMessage(err),
           })
       )
@@ -227,7 +236,7 @@ export function useMapDocument({
       const store = live.current.editor?.ctx.store
       if (!store) return
       const before = store.getState().scene.name
-      replaceMap(store, scene, "Build the map from map images")
+      replaceMap(store, scene, "Build the scene from map images")
       if (scene.name !== before) renameEntry(scene.name)
     },
     [renameEntry]

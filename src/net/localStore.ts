@@ -1,11 +1,11 @@
 /**
- * Small IndexedDB key-value wrapper for local-only data: the offline scene library, autosave drafts
- * and local-mode sessions. When IndexedDB is unavailable (Vitest/Node, some private modes) it falls
+ * Small IndexedDB key-value wrapper for local-only data: the offline scene library, worlds, autosave
+ * drafts and local-mode sessions. When IndexedDB is unavailable (Vitest/Node, some private modes) it falls
  * back to an in-memory store with the same semantics (values are structured-cloned on the way in
  * and out, so callers never alias stored objects).
  */
 
-export const STORE_NAMES = ["scenes", "sceneVersions", "drafts", "sessions"] as const
+export const STORE_NAMES = ["scenes", "sceneVersions", "drafts", "sessions", "worlds"] as const
 export type StoreName = (typeof STORE_NAMES)[number]
 
 export interface LocalStore {
@@ -23,7 +23,8 @@ export interface LocalStore {
 }
 
 const DB_NAME = "atlas-vtt"
-const DB_VERSION = 1
+/** 2: the "worlds" store (ARCHITECTURE §6.9). Upgrades create missing stores and keep the others. */
+const DB_VERSION = 2
 
 // ---------------------------------------------------------------------------
 // In-memory backend

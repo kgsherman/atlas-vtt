@@ -82,6 +82,10 @@ export const SERVER_ERROR_CODES = [
   "name_taken",
   "table_closed",
   "map_in_use",
+  "world_table_open",
+  "world_not_empty",
+  "table_open",
+  "other_world",
 ] as const
 
 export type ServerErrorCode = (typeof SERVER_ERROR_CODES)[number]
@@ -190,31 +194,39 @@ export function describeNetError(code: NetErrorCode): string {
     case "session_ended":
       return "This session has ended."
     case "session_not_found":
-      return "No active session uses that room code."
+      return "No world uses that room code."
     case "invalid_room_code":
       return "Room codes are 8 letters and digits."
     case "invalid_display_name":
       return "Names must be 1 to 32 characters."
     case "is_dm":
-      return "You are the DM of this session: open it from your scene library instead."
+      return "You are the DM of this world: open it from your worlds instead."
     case "kicked":
-      return "The DM removed you from this session."
+      return "The DM removed you from this world."
     case "session_full":
-      return "This session is full."
+      return "This world has as many players as it can take."
     case "too_many_sessions":
-      return "You have too many maps open at tables."
+      return "You have too many scenes open at tables."
     case "room_code_unavailable":
       return "Could not allocate a room code. Try again."
     case "not_member":
-      return "That player is not an active member of the session."
+      return "That player is not an active member of the world."
     case "quota_exceeded":
-      return "You have reached your storage limit. Delete old scenes, versions or map images first."
+      return "You have reached a limit of your account (worlds, scenes, characters or storage). Delete some first."
     case "name_taken":
-      return "That name is taken in this session (by another player or the DM). Pick another one."
+      return "That name is taken in this world (by another player or the DM). Pick another one."
     case "table_closed":
-      return "The DM hasn't opened this table yet."
+      return "The DM hasn't opened a table in this world yet."
     case "map_in_use":
-      return "Players are at another table on this map."
+      return "Players are at another table on this scene."
+    case "world_table_open":
+      return "Another scene of this world has its table open. Close it there first (or change scene at that table)."
+    case "world_not_empty":
+      return "The world still has scenes. Delete or move them first."
+    case "table_open":
+      return "The scene's table is open. Close it first."
+    case "other_world":
+      return "That scene is in another world."
     case "unsupported_offline":
       return "This needs an online connection (Supabase)."
     case "unknown":

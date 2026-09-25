@@ -1,13 +1,14 @@
-// The map screen and its table, end to end (local mode, The Crooked Lantern; ARCHITECTURE §6.8):
+// The scene screen and its table, end to end (local mode, a copy of The Crooked Lantern in a new world;
+// ARCHITECTURE §6.8):
 //
-//   1. Opening a map: Edit, its table closed. Tab switches Edit ↔ Play; undo survives the round trip.
-//   2. Restore points: a crate added in Edit, Ctrl+S → a new library version holding it.
+//   1. Opening a scene: Edit, its table closed. Tab switches Edit ↔ Play; undo survives the round trip.
+//   2. Restore points: a crate added in Edit, Ctrl+S → a new saved version of the scene holding it.
 //   3. The table's doors: open → a player joins; close → the player's page says so and the DM keeps
 //      editing (a second crate); open again → the player is back without doing anything.
-//   4. Leaving with the table open asks; "Leave it open" → the library, the player waits. The map card's
-//      Play opens the same table, in Play, with both crates.
+//   4. Leaving with the table open asks; "Leave it open" → the world's page, the player waits. The scene
+//      card's Play opens the same table, in Play, with both crates.
 //   5. Version history: restoring version 1 takes the crates away for the table; undo brings them back.
-//   6. "Close the table and leave" keeps a restore point: the library has the map as it was left.
+//   6. "Close the table and leave" keeps a restore point: the saved scene is as it was left.
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/map-table-local.mjs
 import {
@@ -28,7 +29,7 @@ const logs = []
 const browser = await openBrowser()
 let dm = null
 
-/** Add a crate (a copy of one of the map's own) at a cell of the active level, in Edit. */
+/** Add a crate (a copy of one of the scene's own) at a cell of the active level, in Edit. */
 async function addCrate(dm, name, [dx, dz] = [0, 0]) {
   await waitFor(
     dm,
@@ -93,8 +94,8 @@ async function evaluateRetry(page, fn, arg, tries = 3) {
   }
 }
 
-/** The library scene's latest version (local mode repositories, as the DM). */
-async function libraryScene(page, sceneId) {
+/** The saved scene's latest version (local mode repositories, as the DM). */
+async function savedScene(page, sceneId) {
   return page.evaluate(async (sceneId) => {
     const m = await import("/src/app/createServices.ts")
     const s = await m.createServices({ mode: "local" })
@@ -108,7 +109,7 @@ async function libraryScene(page, sceneId) {
   }, sceneId)
 }
 
-/** The live map's object ids (the host's GameState). */
+/** The live scene's object ids (the host's GameState). */
 const liveObjects = (page) =>
   page.evaluate(() =>
     Object.keys(window.__atlasHost.runner.getSnapshot().state.scene.objects)
@@ -121,11 +122,13 @@ try {
   dm = await context.newPage()
   watchPage(dm, "dm", logs)
 
-  checks.step("Open a map: Edit, the table closed; Tab switches")
+  checks.step("Open a scene: Edit, the table closed; Tab switches")
   const sceneId = await openSceneInEditor(dm, { mode: "local" })
-  const sessionId = await dm.evaluate(
-    () => window.__atlasHost.runner.getSnapshot().sessionId
-  )
+  const { sessionId, worldId } = await dm.evaluate(() => {
+    const snap = window.__atlasHost.runner.getSnapshot()
+    return { sessionId: snap.sessionId, worldId: snap.world?.id ?? null }
+  })
+  checks.ok(worldId !== null, "the table knows its world")
   checks.eq(
     await dm.evaluate(() => window.__atlasHost.runner.getSnapshot().tableOpen),
     false,
@@ -147,7 +150,7 @@ try {
   await sleep(200)
   checks.ok(
     !(await liveObjects(dm)).includes(first),
-    "undo after the round trip removes the crate from the live map"
+    "undo after the round trip removes the crate from the live scene"
   )
   await dm.keyboard.press("Control+Shift+z")
   await sleep(200)
@@ -164,10 +167,10 @@ try {
     null,
     { label: "restore point" }
   )
-  const v2 = await libraryScene(dm, sceneId)
+  const v2 = await savedScene(dm, sceneId)
   checks.ok(
     v2.version === 2 && v2.objectIds.includes(first),
-    "the library's version 2 holds the crate",
+    "the saved version 2 holds the crate",
     v2
   )
 
@@ -219,12 +222,14 @@ try {
 
   checks.step("Leave with the table open, come back through Play")
   await dm.bringToFront()
-  await dm.getByRole("button", { name: "Back to library" }).click()
+  await dm.getByRole("button", { name: "Back to the world" }).click()
   await dm
     .getByRole("alertdialog")
     .getByRole("button", { name: "Leave it open" })
     .click()
-  await waitFor(dm, () => location.pathname === "/", null, { label: "library" })
+  await waitFor(dm, (id) => location.pathname === `/world/${id}`, worldId, {
+    label: "the world page",
+  })
   await waitFor(
     player.page,
     () => window.__atlasPlayer?.client.getSnapshot().status === "host-offline",
@@ -259,7 +264,7 @@ try {
   const back = await liveObjects(dm)
   checks.ok(
     back.includes(first) && back.includes(second),
-    "both crates are on the map"
+    "both crates are in the scene"
   )
   await waitFor(
     player.page,
@@ -335,21 +340,21 @@ try {
   )
 
   checks.step("Close the table and leave: a restore point")
-  await dm.getByRole("button", { name: "Back to library" }).click()
+  await dm.getByRole("button", { name: "Back to the world" }).click()
   await dm
     .getByRole("alertdialog")
     .getByRole("button", { name: "Close the table and leave" })
     .click()
-  await waitFor(dm, () => location.pathname === "/", null, {
+  await waitFor(dm, (id) => location.pathname === `/world/${id}`, worldId, {
     timeout: 20000,
-    label: "library",
+    label: "the world page",
   })
-  const last = await libraryScene(dm, sceneId)
+  const last = await savedScene(dm, sceneId)
   checks.ok(
     last.version > 2 &&
       last.objectIds.includes(first) &&
       last.objectIds.includes(second),
-    "the library has the map as it was left",
+    "the saved scene is as it was left",
     last
   )
   await waitFor(

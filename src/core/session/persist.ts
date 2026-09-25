@@ -21,6 +21,7 @@ import { base64ToBytes } from "../scene/heightmap"
 import { idSchema, parseScene } from "../scene/schema"
 import type { Id } from "../scene/types"
 import type { EncodedMask } from "../vision/types"
+import { normalizeCharacters } from "./characters"
 import { normalizeFreeAssetCategories } from "./freeAssets"
 import { memoryObjectSchema } from "./playerViewSchema"
 import { TABLE_LIMITS } from "./table"
@@ -41,6 +42,8 @@ export const GAME_STATE_LIMITS = {
   maxRevealedPerPlayer: 20_000,
   /** Grids are ≤ 200×200 cells. */
   maxMaskSide: 200,
+  /** Characters of a world (the database allows 100). */
+  maxCharacters: 1000,
 } as const
 
 const FORBIDDEN_KEYS = new Set(["__proto__", "prototype", "constructor"])
@@ -205,6 +208,12 @@ const gameStateShape = z.strictObject({
   // Optional too (absent: no areas of effect on the map). Entries are validated one by one below: a
   // template that does not parse is dropped, never the game.
   templates: z.array(z.unknown()).max(TEMPLATE_LIMITS.max).optional(),
+  // Optional too (absent: no world roster known; ARCHITECTURE §6.9).
+  characters: boundedRecord(
+    idSchema,
+    z.strictObject({ name: z.string().max(200), players: z.array(userIdSchema).max(GAME_STATE_LIMITS.maxOwnersPerToken) }),
+    GAME_STATE_LIMITS.maxCharacters
+  ).optional(),
 })
 
 export type ParseGameStateResult = { ok: true; state: GameState } | { ok: false; issues: string[] }
@@ -336,6 +345,7 @@ export function parseGameStateDetailed(json: unknown): ParseGameStateResult {
       ...(raw.hideWounds !== undefined ? { hideWounds: raw.hideWounds } : {}),
       ...(raw.mapSerial !== undefined ? { mapSerial: raw.mapSerial } : {}),
       ...(templates.length > 0 ? { templates } : {}),
+      ...(raw.characters !== undefined ? { characters: normalizeCharacters(raw.characters) } : {}),
     },
   }
 }
@@ -384,5 +394,6 @@ export function serializeGameState(state: GameState): string {
   if (state.hideWounds !== undefined) ordered.hideWounds = state.hideWounds
   if (state.mapSerial !== undefined) ordered.mapSerial = state.mapSerial
   if (state.templates !== undefined) ordered.templates = state.templates
+  if (state.characters !== undefined) ordered.characters = state.characters
   return JSON.stringify(ordered)
 }

@@ -74,7 +74,7 @@ export function sceneNameFromFiles(names: readonly string[]): string {
     const text = nameFromWords(fileNameWords(name, STOREY_WORD))
     if (text) return text
   }
-  return "Imported Map"
+  return "Imported scene"
 }
 
 /** World rect an image covers once imported with these settings. */

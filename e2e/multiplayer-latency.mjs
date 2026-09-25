@@ -100,7 +100,7 @@ try {
     const summary = await services.scenes.create(scene)
     return { sceneId: summary.id, tokens }
   }, SIZE)
-  await dm.goto(`${BASE}/editor/${made.sceneId}?local=1`, {
+  await dm.goto(`${BASE}/scene/${made.sceneId}?local=1`, {
     waitUntil: "domcontentloaded",
   })
   await waitEditor(dm, 60000)

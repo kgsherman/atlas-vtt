@@ -316,6 +316,16 @@ export type AreaTemplateInput = AreaGeometry & Pick<AreaTemplate, "label" | "col
 export const GAME_STATE_VERSION = 1 as const
 
 /**
+ * A world character as a table knows it (ARCHITECTURE §6.9): its name and the world players who play it.
+ * DM-only (never sent to players); the host keeps it in step with the world's roster.
+ */
+export interface TableCharacter {
+  name: string
+  /** User ids, sorted and unique. */
+  players: string[]
+}
+
+/**
  * The library scene the table's live map comes from: restore points (library versions) of the map as it
  * is now are saved to it (ARCHITECTURE §6.8).
  */
@@ -372,6 +382,13 @@ export interface GameState {
   templates?: AreaTemplate[]
   /** Maps played so far in this game besides the first (bumped by every `load-scene`; absent: 0). */
   mapSerial?: number
+  /**
+   * The world's characters (ARCHITECTURE §6.9), kept in step with the world by the host. A token linked to
+   * one (Token.characterId) is controlled by that character's players: its `owners` entry is derived from
+   * here (core/session/characters.ts) and cannot be assigned at the table. Absent: no roster known (every
+   * token is handed out at the table).
+   */
+  characters?: Record<Id, TableCharacter>
 }
 
 // ===========================================================================
@@ -490,7 +507,10 @@ export type DmCommand =
   | { t: "set-shared-vision"; enabled: boolean }
   | { t: "set-enforce-speed"; enabled: boolean }
   | { t: "set-free-movement"; enabled: boolean }
+  /** Hand a token to a player (or take it back). Character tokens are refused: their players come from the world. */
   | { t: "assign-token"; tokenId: Id; userId: string; assigned: boolean }
+  /** The world's characters and who plays them (GameState.characters); owners of character tokens follow. */
+  | { t: "set-characters"; characters: Record<Id, TableCharacter> }
   | { t: "reveal-object"; objectId: Id; userId?: string }
   /** Editor edits on the map screen (immer patches against GameState.scene). */
   | { t: "apply-scene-patches"; patches: Patch[] }

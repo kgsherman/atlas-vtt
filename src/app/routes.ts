@@ -20,11 +20,17 @@ export function preloadRoute(route: LazyRoute): void {
 
 export const paths = {
   home: () => "/",
-  /** One of the DM's maps, at its table (Edit / Play; `mode` picks one instead of the remembered one). */
-  map: (sceneId: string, opts: { mode?: "edit" | "play" } = {}) => `/map/${encodeURIComponent(sceneId)}${opts.mode ? `?mode=${opts.mode}` : ""}`,
-  newScene: () => "/map/new",
-  newFromImages: () => "/map/new?import=1",
-  /** A map's table by session id (where /map/:sceneId lands). */
+  /** One of the DM's worlds: its scenes, characters and players (ARCHITECTURE §6.9). */
+  world: (worldId: string) => `/world/${encodeURIComponent(worldId)}`,
+  /** A player's way into a world: its open table, or the wait for the DM to open one. */
+  worldPlay: (worldId: string) => `/world/${encodeURIComponent(worldId)}/play`,
+  /** One of the DM's scenes, at its table (Edit / Play; `mode` picks one instead of the remembered one). */
+  scene: (sceneId: string, opts: { mode?: "edit" | "play" } = {}) => `/scene/${encodeURIComponent(sceneId)}${opts.mode ? `?mode=${opts.mode}` : ""}`,
+  /** A new blank scene in a world (default: the first one). */
+  newScene: (worldId?: string) => `/scene/new${worldId ? `?world=${encodeURIComponent(worldId)}` : ""}`,
+  /** A new scene built from battlemap images, in a world (default: the first one). */
+  newFromImages: (worldId?: string) => `/scene/new?import=1${worldId ? `&world=${encodeURIComponent(worldId)}` : ""}`,
+  /** A scene's table by session id (where /scene/:sceneId lands). */
   host: (sessionId: string) => `/host/${encodeURIComponent(sessionId)}`,
   play: (sessionId: string) => `/play/${encodeURIComponent(sessionId)}`,
   join: (code?: string) => (code ? `/join/${encodeURIComponent(code)}` : "/join"),

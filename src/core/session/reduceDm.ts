@@ -17,6 +17,7 @@ import { sanitizeObject } from "./sanitize"
 import { staticLightWorldY } from "./memory"
 import { attachedLightIds, emptyDelta, nextPlayerColor, own, type ReduceResult, type SceneDelta } from "./state"
 import { carriedOwners } from "./changeMap"
+import { isCharacterToken, normalizeCharacters, sameCharacters, syncCharacterOwners, withoutUnlinkedOwners } from "./characters"
 import { appendSystemNotice, isTableCommand, pruneCombat, rebindTable, reduceTableDm, tableOf } from "./table"
 import { isTemplateCommand, pruneTemplates, rebindTemplates, reduceTemplateDm, withoutPlayerTemplates } from "./templates"
 import type { DmCommand, GameState, PlayerObject } from "./types"
@@ -159,6 +160,19 @@ function targets(state: GameState, userId: string | undefined): string[] {
   return Object.hasOwn(state.players, userId) ? [userId] : []
 }
 
+/**
+ * The result with the owners of character tokens derived from the world's roster (§6.9): after anything
+ * that can change which tokens are characters, who is a player, or the roster itself. Players whose control
+ * changed are dirty too (everyone with shared vision).
+ */
+function withCharacterOwners(r: ReduceResult): ReduceResult {
+  if (r.error) return r
+  const { state, changed } = syncCharacterOwners(r.state)
+  if (changed.length === 0) return state === r.state ? r : { ...r, state }
+  const dirtyPlayers = r.dirtyPlayers === "all" || state.sharedVision ? "all" : [...new Set([...r.dirtyPlayers, ...changed])].sort()
+  return { ...r, state, dirtyPlayers }
+}
+
 export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
   // Chat, dice and combat (core/session/table.ts).
   if (isTableCommand(cmd)) return reduceTableDm(state, cmd)
@@ -238,7 +252,11 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
             )
       if (next === t) return noop(state)
       // A play action (like a move): no map edit, no undo entry; views change, vision does not.
-      return { state: { ...state, scene: { ...state.scene, tokens: { ...state.scene.tokens, [t.id]: next } }, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: "all" }
+      return {
+        state: { ...state, scene: { ...state.scene, tokens: { ...state.scene.tokens, [t.id]: next } }, seq: state.seq + 1 },
+        delta: emptyDelta(),
+        dirtyPlayers: "all",
+      }
     }
     case "set-hide-wounds":
       if ((state.hideWounds ?? false) === cmd.hidden) return noop(state)
@@ -251,6 +269,7 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
       return { state: { ...state, freeMovement: cmd.enabled, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: "all" }
     case "assign-token": {
       if (!own(state.scene.tokens, cmd.tokenId)) return noop(state, "unknown token")
+      if (isCharacterToken(state, cmd.tokenId)) return noop(state, "a character's players are chosen in its world")
       const current = own(state.owners, cmd.tokenId) ?? []
       const has = current.includes(cmd.userId)
       if (has === cmd.assigned) return noop(state)
@@ -294,15 +313,21 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
       if (state.origin && !state.origin.dirty) edited.origin = { ...state.origin, dirty: true }
       // Deleted tokens leave combat (the turn passes on if one was acting); templates on deleted levels or
       // carried by deleted tokens go.
-      const next = pruneTemplates(pruneCombat(reconcileKnowledge(edited, state.scene, scene)))
+      // A token unlinked from its character leaves the character's players (§6.9).
+      const next = withoutUnlinkedOwners(pruneTemplates(pruneCombat(reconcileKnowledge(edited, state.scene, scene))), state.scene)
       // Terrain-edit bookkeeping only (e.g. a shape renamed, or painting under a shape): no player view changes.
-      return { state: next, delta, dirtyPlayers: onlyTerrainEdits(cmd.patches) ? [] : "all" }
+      // A token linked to (or unlinked from) a character changes hands.
+      return withCharacterOwners({ state: next, delta, dirtyPlayers: onlyTerrainEdits(cmd.patches) ? [] : "all" })
     }
     case "set-origin": {
       const o = cmd.origin
       const cur = state.origin
       if (o === null ? cur === null : cur && cur.sceneId === o.sceneId && cur.version === o.version && cur.dirty === o.dirty) return noop(state)
-      return { state: { ...state, origin: o && { sceneId: o.sceneId, version: o.version, dirty: o.dirty }, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: [] }
+      return {
+        state: { ...state, origin: o && { sceneId: o.sceneId, version: o.version, dirty: o.dirty }, seq: state.seq + 1 },
+        delta: emptyDelta(),
+        dirtyPlayers: [],
+      }
     }
     case "load-scene": {
       const prev = state.scene
@@ -328,13 +353,27 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
         terrain: [],
         structure: true,
       }
-      return { state: next, delta, dirtyPlayers: "all" }
+      // Character tokens on the new map are their players' (carried or already there).
+      return withCharacterOwners({ state: next, delta, dirtyPlayers: "all" })
     }
     case "add-player": {
       const p = own(state.players, cmd.userId)
       if (p && p.displayName === cmd.displayName) return noop(state)
-      const player = p ? { ...p, displayName: cmd.displayName } : { userId: cmd.userId, displayName: cmd.displayName, color: nextPlayerColor(state), movementLocked: false }
-      return { state: { ...state, players: { ...state.players, [cmd.userId]: player }, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: [cmd.userId] }
+      const player = p
+        ? { ...p, displayName: cmd.displayName }
+        : { userId: cmd.userId, displayName: cmd.displayName, color: nextPlayerColor(state), movementLocked: false }
+      // A new player takes up the characters the world gave them.
+      return withCharacterOwners({
+        state: { ...state, players: { ...state.players, [cmd.userId]: player }, seq: state.seq + 1 },
+        delta: emptyDelta(),
+        dirtyPlayers: [cmd.userId],
+      })
+    }
+    case "set-characters": {
+      const characters = normalizeCharacters(cmd.characters)
+      if (sameCharacters(state.characters, characters)) return noop(state)
+      // DM-only data: only the players whose control changes see a difference.
+      return withCharacterOwners({ state: { ...state, characters, seq: state.seq + 1 }, delta: emptyDelta(), dirtyPlayers: [] })
     }
     case "remove-player": {
       if (!Object.hasOwn(state.players, cmd.userId)) return noop(state, "unknown player")
@@ -386,7 +425,12 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
       }
       if (state.table) next.table = rebindTable(state.table, from, to)
       if (state.templates) next.templates = rebindTemplates(state.templates, from, to)
-      return { state: next, delta: emptyDelta(), dirtyPlayers: [from, to] }
+      if (state.characters) {
+        const characters: NonNullable<GameState["characters"]> = {}
+        for (const [id, c] of Object.entries(state.characters)) characters[id] = { name: c.name, players: c.players.map((u) => (u === from ? to : u)) }
+        next.characters = normalizeCharacters(characters)
+      }
+      return withCharacterOwners({ state: next, delta: emptyDelta(), dirtyPlayers: [from, to] })
     }
     case "reset-fog": {
       const uids = cmd.userId === undefined ? Object.keys(state.players) : [cmd.userId]

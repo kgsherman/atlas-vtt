@@ -1,5 +1,5 @@
 /**
- * Pure helpers of the DM's "Change map" dialog (ChangeMapDialog): who comes along by default, where
+ * Pure helpers of the DM's "Change scene" dialog (ChangeMapDialog): who comes along by default, where
  * the party arrives, which save-or-discard choice the unsaved-edits guard offers, and the words for a
  * map change the host refused. No React, no DOM.
  */
@@ -112,11 +112,11 @@ export function frameCentre(
  * What happens to the map the table leaves (ARCHITECTURE §6.8: the table releases it, so what changed on
  * it since its last restore point must reach the library first). Read when the DM confirms: the map may
  * change or be saved while the dialog is open.
- * - clean: nothing to save; "Change map".
- * - offer: "Change map" saves a restore point first.
+ * - clean: nothing to save; "Change scene".
+ * - offer: "Change scene" saves a restore point first.
  * - looking-up: the same, disabled until the library scene is found.
  * - unavailable: the library can't be reached; only "Change without saving" (what changed is lost).
- * - deleted: the map left the library; "Change map" (nothing to save it to).
+ * - deleted: the scene was deleted; "Change scene" (nothing to save it to).
  */
 export type SaveChoice =
   | { kind: "clean" }
@@ -150,11 +150,11 @@ export function saveChoiceText(choice: SaveChoice): string | null {
     case "offer":
       return `“${choice.name}” keeps a restore point of how it is now.`
     case "looking-up":
-      return "Looking up this map in your library to keep a restore point of it…"
+      return "Looking up this scene to keep a restore point of it…"
     case "unavailable":
-      return `Your library can't be reached (${choice.error}), so this map can't keep a restore point: what changed on it since the last one is lost if you change now.`
+      return `Your scenes can't be reached (${choice.error}), so this scene can't keep a restore point: what changed on it since the last one is lost if you change now.`
     case "deleted":
-      return "This map is no longer in your library: what changed on it is lost when the table moves."
+      return "This scene has been deleted: what changed on it is lost when the table moves."
   }
 }
 
@@ -184,14 +184,14 @@ export function changeMapErrorText(
         ? `There's no room on that level for ${nameList(unplaced)}. Pick another level or arrival point, or leave ${unplaced.length === 1 ? "that token" : "them"} behind.`
         : "There's no room on that level for the party. Pick another level or arrival point, or bring fewer tokens."
     case "unknown-level":
-      return "The arrival level isn't on the new map. Pick the level again."
+      return "The arrival level isn't on the new scene. Pick the level again."
     case "too-many":
-      return `The new map can't hold that many tokens (at most ${SCENE_LIMITS.maxTokens.toLocaleString("en-US")} tokens and ${SCENE_LIMITS.maxObjects.toLocaleString("en-US")} objects). Bring fewer tokens.`
+      return `The new scene can't hold that many tokens (at most ${SCENE_LIMITS.maxTokens.toLocaleString("en-US")} tokens and ${SCENE_LIMITS.maxObjects.toLocaleString("en-US")} objects). Bring fewer tokens.`
     case "same-map":
-      return "That's the map you're playing. Pick another one."
+      return "That's the scene you're playing. Pick another one."
     case "not-hosting":
       return "This tab isn't hosting the table any more."
     case "map-in-use":
-      return "Players are at another table on that map. Close that table first, or duplicate the map and bring the party to the copy."
+      return "That scene's table is open. Close it first, or duplicate the scene and bring the party to the copy."
   }
 }

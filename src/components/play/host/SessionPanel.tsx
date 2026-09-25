@@ -1,6 +1,7 @@
 /**
  * The DM's session sidebar: room code + invite link, host status (with "Take over" on standby), and
- * four tabs — Players (online state, token assignment, per-player movement lock, fog reset, kick),
+ * five tabs — Players (online state, the world characters each plays and other tokens they control,
+ * per-player movement lock, fog reset, removal from the world),
  * Tokens (by level: hide/reveal, move to level, 3D model, preview vision, focus), Table (global locks,
  * party vision, speed rule, sun/moon, fog reset) and Assets (the free asset categories this game
  * loads, and their assets: token models go on the selected token).
@@ -33,6 +34,7 @@ import {
   UserMinus,
   UserPlus,
   Users,
+  UsersRound,
   Crosshair,
 } from "lucide-react"
 import { toast } from "sonner"
@@ -125,6 +127,8 @@ export interface SessionPanelProps {
   onFocusToken(id: Id): void
   onPreviewToken(id: Id): void
   onKick(userId: string): Promise<void>
+  /** Open the world's characters (who plays whom: ARCHITECTURE §6.9). */
+  onCharacters(): void
   onTakeOver(): void
   /** Open the table's doors (the room code card offers it while closed). */
   onOpenTable(): Promise<void>
@@ -374,36 +378,62 @@ function sortTokensForAssignment(tokens: Token[]): Token[] {
     )
 }
 
-function PlayersTab({ snap, state, actions, onKick }: SessionPanelProps) {
+function PlayersTab({
+  snap,
+  state,
+  actions,
+  onKick,
+  onCharacters,
+}: SessionPanelProps) {
   const confirm = useConfirm()
   const members = snap.members.filter((m) => m.status === "active")
+  const charactersButton = snap.world ? (
+    <Button
+      variant="outline"
+      size="sm"
+      className="w-full"
+      onClick={onCharacters}
+    >
+      <UsersRound data-icon="inline-start" /> Characters of {snap.world.name}…
+    </Button>
+  ) : null
   if (members.length === 0) {
     return (
-      <Empty className="m-3 border border-dashed">
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <UserPlus />
-          </EmptyMedia>
-          <EmptyTitle>No players yet</EmptyTitle>
-          <EmptyDescription>
-            {snap.tableOpen
-              ? "Share the room code above. Players appear here as they join, and you can hand them their characters."
-              : "Open the table and share the room code. Players appear here as they join, and you can hand them their characters."}
-          </EmptyDescription>
-        </EmptyHeader>
-      </Empty>
+      <div className="flex flex-col gap-2 p-2">
+        <Empty className="border border-dashed">
+          <EmptyHeader>
+            <EmptyMedia variant="icon">
+              <UserPlus />
+            </EmptyMedia>
+            <EmptyTitle>No players yet</EmptyTitle>
+            <EmptyDescription>
+              {snap.tableOpen
+                ? "Share the room code above: players join the world and appear here. Hand them their characters in the world."
+                : "Open the table and share the room code: players join the world and appear here. Hand them their characters in the world."}
+            </EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+        {charactersButton}
+      </div>
     )
   }
-  const tokens = sortTokensForAssignment(Object.values(state.scene.tokens))
+  // With the world's roster, character tokens are its players'; only the others are handed out here.
+  const roster = state.characters
+  const hasCharacters = !!roster && Object.keys(roster).length > 0
+  const tokens = sortTokensForAssignment(
+    Object.values(state.scene.tokens).filter((t) => !roster || !t.characterId)
+  )
+  const inScene = (characterId: Id) =>
+    Object.values(state.scene.tokens).find((t) => t.characterId === characterId)
   // Display names are free text: repeats get "(2)", "(3)" so the DM can tell players apart.
   const labels = playerLabels([...Object.values(state.players), ...members])
   const label = (m: HostMember) => labels.get(m.userId) ?? m.displayName
   const duplicates = duplicateNames(members)
   const kick = async (m: HostMember) => {
     const ok = await confirm({
-      title: `Remove ${label(m)}?`,
+      title: `Remove ${label(m)} from the world?`,
       description:
-        "They are disconnected, lose their characters and can't rejoin this session with the room code.",
+        "They are disconnected from every table of the world and can't join again with the room code. Let them back in from the world's Players.",
       confirmLabel: "Remove player",
       destructive: true,
     })
@@ -419,6 +449,7 @@ function PlayersTab({ snap, state, actions, onKick }: SessionPanelProps) {
   }
   return (
     <div className="flex flex-col gap-1.5 p-2">
+      {charactersButton}
       {duplicates.length > 0 ? (
         <Alert className="py-2 text-xs">
           <TriangleAlert />
@@ -435,6 +466,11 @@ function PlayersTab({ snap, state, actions, onKick }: SessionPanelProps) {
         const owned = tokens.filter((t) =>
           (state.owners[t.id] ?? []).includes(m.userId)
         )
+        const plays = roster
+          ? Object.entries(roster)
+              .filter(([, c]) => c.players.includes(m.userId))
+              .map(([id, c]) => ({ id, name: c.name, token: inScene(id) }))
+          : []
         const locked = state.movementLocked || (p?.movementLocked ?? false)
         return (
           <div
@@ -531,12 +567,41 @@ function PlayersTab({ snap, state, actions, onKick }: SessionPanelProps) {
                     variant="destructive"
                     onClick={() => void kick(m)}
                   >
-                    <UserMinus /> Remove from session…
+                    <UserMinus /> Remove from the world…
                   </DropdownMenuItem>
                 </DropdownMenuContent>
               </DropdownMenu>
             </div>
             <div className="flex flex-wrap items-center gap-1">
+              {plays.map((c) => (
+                <Tooltip key={c.id}>
+                  <TooltipTrigger
+                    render={
+                      <Badge
+                        variant="secondary"
+                        className={cn(
+                          "h-6 gap-1 pr-1.5 pl-0.5",
+                          !c.token && "pl-1.5 text-muted-foreground"
+                        )}
+                      />
+                    }
+                  >
+                    {c.token ? (
+                      <TokenAvatar
+                        token={c.token}
+                        size="sm"
+                        className="size-4 ring-1 ring-offset-0"
+                      />
+                    ) : null}
+                    <span className="max-w-24 truncate">{c.name}</span>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {c.token
+                      ? `Plays ${c.name} (their character in the world)`
+                      : `Plays ${c.name}, who has no token in this scene`}
+                  </TooltipContent>
+                </Tooltip>
+              ))}
               {owned.map((t) => (
                 <Badge
                   key={t.id}
@@ -573,13 +638,24 @@ function PlayersTab({ snap, state, actions, onKick }: SessionPanelProps) {
                   }
                 >
                   <UserPlus data-icon="inline-start" />{" "}
-                  {owned.length === 0 ? "Assign character" : "Assign"}
+                  {hasCharacters
+                    ? "Assign a token"
+                    : owned.length === 0
+                      ? "Assign character"
+                      : "Assign"}
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align="start" className="max-h-72 w-60">
                   <DropdownMenuGroup>
                     <DropdownMenuLabel>
-                      Characters {label(m)} controls
+                      {hasCharacters
+                        ? `Other tokens ${label(m)} controls here`
+                        : `Characters ${label(m)} controls`}
                     </DropdownMenuLabel>
+                    {tokens.length === 0 ? (
+                      <DropdownMenuItem disabled>
+                        No other tokens in this scene
+                      </DropdownMenuItem>
+                    ) : null}
                     {tokens.map((t) => (
                       <DropdownMenuCheckboxItem
                         key={t.id}
@@ -656,7 +732,7 @@ function TokensTab({
           <EmptyMedia variant="icon">
             <Swords />
           </EmptyMedia>
-          <EmptyTitle>No tokens on this map</EmptyTitle>
+          <EmptyTitle>No tokens in this scene</EmptyTitle>
           <EmptyDescription>
             Switch to Edit (Tab) and use the token tool (K) to place characters
             and monsters.

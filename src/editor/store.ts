@@ -1033,9 +1033,9 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
           (d) => {
             const t = d.tokens[id]
             Object.assign(t, rest)
-            // `undefined` means none (the default body, untracked hit points, no conditions): drop the key
+            // `undefined` means none (the default body, untracked hit points, no conditions, no character): drop the key
             // instead of storing undefined.
-            for (const k of ["model", "hp", "conditions"] as const) if (Object.hasOwn(rest, k) && rest[k] === undefined) delete t[k]
+            for (const k of ["model", "hp", "conditions", "characterId"] as const) if (Object.hasOwn(rest, k) && rest[k] === undefined) delete t[k]
             // Attached lights keep their stored level aligned with their carrier's.
             for (const o of Object.values(d.objects)) {
               if (o.type === "light" && o.attachedTokenId === id && o.levelId !== t.levelId) o.levelId = t.levelId

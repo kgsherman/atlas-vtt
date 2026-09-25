@@ -1,5 +1,5 @@
 /**
- * Full-viewport states over the map: joining, removed from the session, session ended, errors.
+ * Full-viewport states over the map: joining, removed from the world, table ended, errors.
  */
 import * as React from "react"
 import { Ban, DoorClosed, Home, RotateCcw, TriangleAlert } from "lucide-react"
@@ -81,8 +81,8 @@ export function KickedScreen() {
   return (
     <BlockingScreen
       icon={<Ban />}
-      title="You were removed from this session"
-      description="The DM removed you from the table. Ask them for a new invitation if this was a mistake."
+      title="You were removed from this world"
+      description="The DM removed you from the world and its tables. Ask them to let you back in if this was a mistake."
       actions={<HomeButton />}
     />
   )
@@ -92,8 +92,8 @@ export function EndedScreen({ who = "The DM" }: { who?: string }) {
   return (
     <BlockingScreen
       icon={<DoorClosed />}
-      title="This session has ended"
-      description={`${who} closed the table. Thanks for playing!`}
+      title="This table has ended"
+      description={`${who} ended the table. Thanks for playing!`}
       actions={<HomeButton />}
     />
   )

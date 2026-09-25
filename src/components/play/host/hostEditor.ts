@@ -71,7 +71,7 @@ export function createHostEditor(
   store.getState().setPatchSink((patches, meta) => {
     const r = runner.dispatch({ t: "apply-scene-patches", patches })
     if (!r || r.error) {
-      toast.error(`Couldn't apply “${meta.label}” to the map`, {
+      toast.error(`Couldn't apply “${meta.label}” to the scene`, {
         description: r?.error ?? "This tab isn't running the table.",
       })
       resync()

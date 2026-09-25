@@ -36,6 +36,7 @@ export {
   type CarryResult,
   type ChangeMapResult,
 } from "./changeMap"
+export { characterOwners, isCharacterToken, normalizeCharacters, sameCharacters, syncCharacterOwners } from "./characters"
 export { reduceRequest, segmentRectDistance, type RequestContext, type StateRequest } from "./reduceRequest"
 export { updateKnowledge } from "./memory"
 export { filterForPlayer, levelKnown, pingForPlayer, type TablePing } from "./filter"

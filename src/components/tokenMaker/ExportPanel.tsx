@@ -125,7 +125,7 @@ export function GameSection({ preferredSession, preferredToken }: { preferredSes
         )}
         {!game.ready ? <Hint>Waiting for that game to connect…</Hint> : null}
         {game.tokens.length === 0 ? (
-          <Hint>{game.role === "dm" ? "This map has no tokens yet." : "The DM hasn't given you a character yet."}</Hint>
+          <Hint>{game.role === "dm" ? "This scene has no tokens yet." : "The DM hasn't given you a character yet."}</Hint>
         ) : (
           <ul className="flex max-h-60 flex-col gap-0.5 overflow-y-auto" aria-label="Tokens">
             {game.tokens.map((t) => {

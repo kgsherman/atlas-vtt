@@ -323,7 +323,7 @@ export function CameraKindSwitch({
         onClick={() => onCamera("orbit")}
       />
       <HudButton
-        label="Frame the whole map"
+        label="Frame the whole scene"
         icon={<Maximize />}
         onClick={onFrame}
       />

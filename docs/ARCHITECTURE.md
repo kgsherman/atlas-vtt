@@ -46,16 +46,19 @@ src/
   play/                 Play-mode controllers (token selection, drag-to-move, ruler, level switching, the Template tool
                         and the templates' computed areas, §6.6)
   tokenMaker/           Token Maker (§11): Canvas 2D compositor, image import, editor store, draft, flows
-  net/                  Supabase client, auth, repositories, transports, host runner (+ vision worker), player client,
-                        free asset catalog (freeAssets.ts), token images, image tools, Token Maker link (§11)
+  net/                  Supabase client, auth, repositories (worlds §6.9, scenes, sessions, room codes), transports, host
+                        runner (+ vision worker), player client, free asset catalog (freeAssets.ts), token images,
+                        image tools, Token Maker link (§11)
     assets/             Map images: import (decode / resample / WebP), DM asset stores, per-player tile chunks
     host/               DM-side host runner, vision worker client, flush pipeline, persistence, backdrop tiler
     player/             Player client (sync rules, requests), backdrop compositor
   app/                  Service wiring (Supabase or local mode), router + lazy routes, library, scene digests
   lib/                  keymap (pure: remappable command tables, overrides), hotkeys (TanStack Hotkeys wrapper, key labels), utils
-  components/           React + shadcn UI (app shell, editor panels, play HUD, the map screen (play/host), lobby;
-                        play/table: chat, dice, turn order, map markers, areas of effect)
-  routes/               Page-level components (home, map → the map screen (host), play, join, shared scene, token maker)
+  components/           React + shadcn UI (app shell, editor panels, play HUD, the scene screen (play/host), lobby;
+                        world: a world's scenes, characters and players (§6.9); play/table: chat, dice, turn order,
+                        map markers, areas of effect)
+  routes/               Page-level components (home: worlds, world, world play (a player waiting), scene → the scene
+                        screen (host), play, join, shared scene, token maker)
   dev/                  Dev-only render harness (`dev/render.html`) and the Vineyard build helpers
   integration/          Cross-module consistency tests (render ↔ occlusion, vision ↔ movement, host → player, editor → session)
 supabase/migrations/    SQL: schema, RLS, RPCs, realtime policies
@@ -66,9 +69,9 @@ scripts/free-assets/    Build (STL → LOD GLB + thumbnail) and publish free tok
 
 Dependency rule: `core` imports nothing outside `core` (immer types allowed). `render` imports `core`.
 `editor`/`play`/`net` import `core` and `render/contracts.ts` (`editor`/`play` also the pure `lib/keymap`). `components`/`routes` import everything.
-Bundling: `/host` (the map screen), `/play` and `/tokens` are lazy routes (`app/routes.ts`), so three.js and the
-renderer load only in the first two; the home, map (`/map/:id` only finds the table), join, shared-scene and token
-maker routes never download them.
+Bundling: `/host` (the scene screen), `/play` and `/tokens` are lazy routes (`app/routes.ts`), so three.js and the
+renderer load only in the first two; the home, world, scene (`/scene/:id` only finds the table), join, shared-scene
+and token maker routes never download them.
 
 UI rule: compose from shadcn components in `src/components/ui` (preset `b5UKukPFuS` → style `base-mira`,
 Base UI primitives, Outfit + Roboto Slab, lucide). Dark theme first.
@@ -222,14 +225,17 @@ and the table dialogs).
 
 ## 3. Scene document & versioning
 
-- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 8` (v2 added the
+- Types `core/scene/types.ts`, presets `core/scene/defaults.ts`. `SCENE_SCHEMA_VERSION = 10` (v2 added the
   optional `Token.model`, the v1 → v2 migration is the identity; v3: terrain shapes, `Level.terrainEdits`,
   `WallObject.followTerrain`; v4 widened enums only, heightmap resolutions 8 and 16 and the `polygon` shape
   kind, so the v3 → v4 migration is the identity and older apps open v4 documents read-only as too-new; v5
   added the optional `TerrainShape.innerEdges` (loop cuts), again an identity migration; v6 added the
   optional `Token.hp` and `Token.conditions`, the v5 → v6 migration is the identity; v7 added the optional
   `TerrainShape.innerPoints`, interior top vertices where loop cuts cross, again an identity migration; v8 removed `meta.author` and
-  `meta.description`, which the v7 → v8 migration deletes).
+  `meta.description`, which the v7 → v8 migration deletes; v9 added `GridSettings.visionOrigin`, tokens seeing
+  from their whole square by default, which the v8 → v9 migration sets (§5.2 "Viewer eyes"); v10 added the
+  optional `Token.characterId`, the world character the token is (§6.9; an id like any other), an identity
+  migration).
 - `Token.hp` / `Token.conditions` (optional; `core/scene/tokenStatus.ts`): hit points `{current, max,
   temp}` (integers, 1 ≤ max ≤ 99 999, 0 ≤ current ≤ max, temp ≥ 0: `tokenHpSchema`; absent = not tracked)
   and conditions from a fixed catalog (`TOKEN_CONDITIONS`: the SRD's fourteen, exhaustion, concentrating,
@@ -278,7 +284,8 @@ and the table dialogs).
   terrain to the new lattice (`cropTerrainToGrid`: the painted base is cropped, samples beyond the lattice
   dropped, then everything is rebaked), so old painted heights cannot come back if the grid grows again,
   while shapes reappear where a grown grid re-exposes them.
-- Storage: `scenes` + immutable `scene_versions` in Supabase; `.atlas.json` export/import; import regenerates `Scene.id`.
+- Storage: `scenes` (each in a world, §6.9) + immutable `scene_versions` in Supabase; `.atlas.json` export/import;
+  import regenerates `Scene.id`.
 - Sharing: `visibility: 'private' | 'link'`. Link shares are read only through the `get_shared_scene(slug)` RPC and
   publish the FULL DM document (the UI warns). Scene ids are never capabilities; session membership never grants
   scene access.
@@ -948,9 +955,10 @@ exists (or became hidden) are deleted. Everything else is unchanged — DM edits
 ### 6.1 Roles, topics, transport
 
 - The DM's tab is the **host**: owns `GameState`, validates requests, runs vision (Worker), filters, diffs, sends.
-- A session is the **table** of one map (§6.8): its doors are open (`sessions.status` `active`) or closed
-  (`closed`: only the DM, no channel at all). The host runs either way; everything below about players is
-  about an open table.
+- A session is the **table** of one scene (§6.8) of a world (§6.9): its doors are open (`sessions.status`
+  `active`) or closed (`closed`: only the DM, no channel at all); at most one table per world is open. The host
+  runs either way; everything below about players is about an open table. Its members are the world's players
+  (`session_members` is the world's roster seated at the table, §6.9).
 - Single host: same browser via `navigator.locks` (`atlas-host:{sid}`); across devices via `claim_host(sid)`
   which bumps `sessions.host_epoch`. Each host start also creates a random `epoch` string used on the wire,
   formatted `${hostEpoch}.${uuid}` (`net/host/flush.ts` `makeWireEpoch`). Clients only compare wire epochs for
@@ -1174,17 +1182,24 @@ account starts with its Discord name if it has none, and after that the two are 
 
 Tables (RLS enabled on every table; default privileges revoke anon; functions revoke PUBLIC/anon execute):
 - `profiles(id → auth.users, display_name)` — own row only.
-- `scenes(id, owner_id, name, visibility 'private'|'link', share_slug (≥128-bit random), latest_version, …)` and
+- `worlds(id, owner_id, name, room_code, …)` — owner reads and renames; created / deleted by RPC (§6.9).
+  `world_members(world_id, user_id, display_name, status 'active'|'kicked', joined_at)` — the membership: own
+  rows or the world's owner read; written by RPCs only. `characters(id, world_id, name, color, image_url)` and
+  `character_players(character_id, world_id, user_id)` (FKs to the character of that world and to a player of
+  it) — the world's owner only, quotas by trigger.
+- `scenes(id, owner_id, world_id, name, visibility 'private'|'link', share_slug (≥128-bit random), latest_version, …)` and
   `scene_versions(scene_id, version, schema_version, data jsonb, created_at)` — owner only; versions immutable.
-- `sessions(id, dm_id not null, scene_id, room_code, status 'active'|'closed'|'ended', host_epoch, created_at)` —
-  a map's table (§6.8): `scene_id` is the map it holds (it follows map changes), at most one live (not
-  ended) table per map (`sessions_live_scene_key`), room codes unique among live tables
-  (`sessions_live_room_code_key`: a closed table keeps its code). DM full access; players no direct SELECT
-  (they use `session_info(sid)` RPC). Deleting a scene ends its table (trigger `scenes_end_tables`).
-- `session_members(session_id, user_id, display_name 1..32, status 'active'|'kicked', joined_at)` — SELECT own row
-  or DM; no client INSERT/UPDATE; writes via RPCs. A display name changes only by joining again
-  (`join_session`), which refuses (`name_taken`) names that pose as the DM ("DM", "GM", "Dungeon Master",
-  the DM's profile name, …) or that another member of the session uses (case-insensitive).
+- `sessions(id, dm_id not null, scene_id, world_id, room_code, status 'active'|'closed'|'ended', host_epoch, created_at)` —
+  a scene's table (§6.8): `scene_id` is the scene it holds (it follows map changes), at most one live (not
+  ended) table per scene (`sessions_live_scene_key`), `world_id` its world (live tables always have one), at
+  most one open table per world (`sessions_world_open_key`), `room_code` the world's. DM full access; players
+  no direct SELECT (they use `session_info(sid)` / `world_info(wid)`). Deleting a scene ends its table
+  (trigger `scenes_end_tables`).
+- `session_members(session_id, user_id, display_name 1..32, status 'active'|'kicked', joined_at)` — the world's
+  roster seated at each live table (§6.9: triggers on `world_members`, `open_map`, `move_scene`); SELECT own
+  row or DM; no client writes. A display name changes only by joining the world again (`join_world`), which
+  refuses (`name_taken`) names that pose as the DM ("DM", "GM", "Dungeon Master", the DM's profile name, …)
+  or that another player of the world uses (case-insensitive).
 - `session_state(session_id, epoch, state jsonb, updated_at)` — DM only; writes via `save_session_state`.
 - `player_views(session_id, user_id, epoch, seq, view jsonb, updated_at)` — player SELECT own row while active
   member; writes DM only via `upsert_player_view`.
@@ -1224,14 +1239,18 @@ then granted to authenticated only for the ones policies call, which are `securi
 RPCs (`security definer` unless noted, `search_path=''`, execute granted to authenticated
 only; return ids/booleans/small records, never whole rows; errors carry a stable MESSAGE code mapped by
 `net/supabase.ts`): `create_scene`, `save_scene_version` (optimistic `p_base_version`), `set_scene_visibility`,
-`set_display_name` (`security invoker`: own profile row under RLS), `open_map(scene_id, free_assets = '{}')`
+`set_display_name` (`security invoker`: own profile row under RLS), the worlds RPCs of §6.9 (`create_world`,
+`delete_world`, `move_scene`, `join_world`, `world_info`, `list_joined_worlds`, `set_world_member_status`;
+`create_scene` takes an optional world), `open_map(scene_id, free_assets = '{}')`
 (owner check; the map's live table, or a new closed one: copies the latest version into session_state,
 generates an 8-char Crockford room code; `free_assets`: the categories the game loads, validated against
 `private.free_asset_categories()`, stored de-duplicated and sorted in the seed's `freeAssets`),
-`set_table_open(sid, open)` (DM; active ↔ closed), `set_session_scene(sid, host_epoch, scene_id)` (DM,
-fenced: the table now holds that map; an idle table holding it ends, one with active members raises
-`map_in_use`), `create_session(scene_id, free_assets)` (older clients: `open_map` + open),
-`join_session(room_code, display_name)` (`table_closed` for a closed table), `session_info(sid)`,
+`set_table_open(sid, open)` (DM; active ↔ closed; `world_table_open` while another table of the world is
+open), `set_session_scene(sid, host_epoch, scene_id)` (DM, fenced: the table now holds that scene of its world,
+`other_world` otherwise; an idle table holding it ends, an open one raises `map_in_use`),
+`create_session(scene_id, free_assets)` (older clients: `open_map` + open), `join_session(room_code,
+display_name)` (older clients: `join_world`, then the open table or `table_closed`), `session_info(sid)` (with
+the table's world),
 `list_session_members(sid)` (DM; `security invoker`: it reads only rows the DM's RLS already allows),
 `set_member_status(sid, uid, status)` (DM), `claim_host(sid)` (open or closed tables),
 `save_session_state`, `upsert_player_view`, `end_session(sid)`, `get_shared_scene(slug)`, and (`security invoker`,
@@ -1242,7 +1261,8 @@ Quotas (migration `*_owner_quotas.sql`; anonymous sign-ins are free, so every wr
 database or Storage is capped per account or per session, and concurrent calls of one owner queue on an
 advisory lock). Sizes are `pg_column_size` (on-disk, compressed). Over a limit, an RPC raises the error code
 `quota_exceeded` and a Storage policy refuses the upload (an RLS error):
-- scenes: ≤ 50 library scenes and ≤ 200 MB of stored versions per owner (`create_scene`,
+- worlds: ≤ 20 per owner, ≤ 64 players each, ≤ 100 characters each, ≤ 8 players per character (§6.9);
+- scenes: ≤ 50 scenes and ≤ 200 MB of stored versions per owner (`create_scene`,
   `save_scene_version`); each scene's history keeps ≤ 50 versions and ≤ 100 MB, pruned oldest first (the
   latest version always stays);
 - sessions: one live table per map (so the scene quota bounds them; `open_map` also refuses beyond 50,
@@ -1462,16 +1482,16 @@ balcony's wall or the cellar under the paving.
 
 ### 6.7 Changing the map mid-game (`core/session/changeMap.ts`, `core/movement/arrival.ts`, `HostRunner.changeMap`)
 
-The party walks out of the tavern and into the sewers: the DM moves the game to another library scene and
-the chosen tokens come along, with their hit points, conditions, portraits, models, senses and the lights
+The party walks out of the tavern and into the sewers: the DM moves the game to another scene of the world
+(§6.9) and the chosen tokens come along, with their hit points, conditions, portraits, models, senses and the lights
 they carry. The room code, the players, the carried tokens' owners, the chat log and the free assets stay;
 players keep playing without rejoining.
 
 - **Carry** (`carryParty(source, target, {tokenIds, arrival})`, pure): the target scene plus copies of the
   chosen tokens of the current one, standing around `arrival = {levelId, x, z}` on the target. Token ids are
   kept, so owners, selections and anything keyed by token id follow them; a token of the target with the
-  same id (a duplicated map holds the same ids, `forkScene`) is replaced by the one arriving, with the lights
-  it carried. An id clashing with a level or object of the target is renamed (`carried`: old id → new id).
+  same id (a duplicated map holds the same ids, `forkScene`) or of the same world character (`characterId`,
+  §6.9) is replaced by the one arriving, with the lights it carried. An id clashing with a level or object of the target is renamed (`carried`: old id → new id).
   Attached lights travel with their carrier (same offset, its new level). Refusals: `unknown-level`,
   `no-room` (with the tokens that did not fit), `too-many` (`SCENE_LIMITS`). Neither scene is changed.
 - **Arrival** (`arrivalAnchors(scene, world, tokens, arrival, {standing})`, pure, deterministic): each token
@@ -1531,10 +1551,10 @@ players keep playing without rejoining.
   The page cancels any gesture, returns to Move, clears the template selection, moves the camera to the
   player's token and says "The party travels to …" (or "The DM moved the game to …" when the player has no
   token there). A stranded move whose level is gone is dismissed.
-- **DM** (`components/play/host/ChangeMapDialog`, `changeMapModel`): "Change map" in the top bar (disabled
-  while not hosting and while a restore point is being saved) opens three steps: (1) a library scene
-  (searchable, with the Home cards' thumbnails; the current one is marked and can't be picked; a sample is
-  first copied into the library, so the new map keeps restore points), loaded as it is now and migrated
+- **DM** (`components/play/host/ChangeMapDialog`, `changeMapModel`): "Change scene" in the top bar (disabled
+  while not hosting and while a restore point is being saved) opens three steps: (1) a scene of the table's
+  world (searchable, with the scene cards' thumbnails; the current one is marked and can't be picked; a
+  sample is first copied into the world, so the new scene keeps restore points), loaded as it is now and migrated
   (`app/library` `loadLiveMap`: its table's live copy when it has one, else the latest version; too-new and
   invalid documents are refused, as is one with the live `Scene.id`); (2) who comes along (PCs and every
   player's token ticked by default) and where they arrive (a level and a point on its thumbnail, by default
@@ -1553,11 +1573,12 @@ The DM works on a map in one place, the **map screen**: two views of the same li
 switches), while the map's **table** decides who else is there. Starting a game is opening the table's
 doors, not a change of mode; closing them disconnects the players and keeps the DM where they are.
 
-- **One table per map.** A session is the table of one map (`sessions.scene_id`, at most one live table per
-  map). `/map/:sceneId` (`routes/MapPage`) asks `open_map` for it — a new one starts closed, seeded from the
+- **One table per scene.** A session is the table of one scene (`sessions.scene_id`, at most one live table per
+  scene) of a world, and at most one table per world has its doors open (§6.9). `/scene/:sceneId`
+  (`routes/ScenePage`; the old `/map/` and `/editor/` links too) asks `open_map` for it — a new one starts closed, seeded from the
   map's latest version, with the free asset categories last chosen in the Assets tab on this browser
-  (`readStartFreeAssets`) — and replaces itself with `/host/:sessionId`. `/map/new` first adds a blank map to
-  the library (`createBlankMap`: one grassy level under a moonlit sky); `?import=1` then opens the map image
+  (`readStartFreeAssets`) — and replaces itself with `/host/:sessionId`. `/scene/new?world=` first adds a blank
+  scene to that world (`createBlankMap`: one grassy level under a moonlit sky); `?import=1` then opens the map image
   import in its "new" mode, whose result replaces the live map as one edit, keeping its document id (the
   images are stored under it). The old `/editor/:id` links land on `/map/:id`.
 - **The doors** (`sessions.status`): `active` = open (the room code works, members connect), `closed` = only
@@ -1574,9 +1595,9 @@ doors, not a change of mode; closing them disconnects the players and keeps the 
   the play page shows "The table is closed" (`components/play/player/ClosedTable`), asks `session_info`
   every 5 s and starts a new client once the doors open (a new client: its first snapshot of the new epoch is
   taken as is), or shows the ended / removed screen. The join page says "The table isn't open".
-- **The screen** (`HostSession`, top bar in `HostChrome`): File / Edit / View / Level / Help (Play keeps File
-  and Help), the map's name (renames the live map and its library entry), Edit | Play in the middle, undo / redo (Edit) or Preview vision
-  (Play), the Token Maker, Change map, the side panel and the doors: "Open the table", or "Table open · CODE"
+- **The screen** (`HostSession`, top bar in `HostChrome`): "Back to the world" (the logo), File / Edit / View /
+  Level / Help (Play keeps File and Help), the scene's name (renames the live scene and its entry), Edit | Play in
+  the middle, undo / redo (Edit) or Preview vision (Play), the Token Maker, Change scene, the side panel and the doors: "Open the table", or "Table open · CODE"
   with the code, the invite link and "Close the table…" (`TableDialogs`: players disconnected, the same code
   when it opens again). Edit shows the editor's tool rail, options bar, sidebar and overlays on the host's
   engine (`HostViewport` gets the editor only in Edit); Play shows the play HUD and the session panel, whose
@@ -1596,7 +1617,7 @@ doors, not a change of mode; closing them disconnects the players and keeps the 
   register together, `playCommandsFor(host)`).
 - **The map remembers.** A map has one version: its table's live `GameState.scene`, saved with the game
   (§6.3), which every change marks `origin.dirty` (§6.2). Restore points are library versions of it: Ctrl+S,
-  and quietly on the way when it changed — closing the table, leaving (the logo / File › Back to library;
+  and quietly on the way when it changed — closing the table, leaving (the logo / File › Back to the world;
   with the doors open the DM first picks "Close the table and leave", "Leave it open" or "Stay"), before a map
   change, before sharing (the link shows the map as it is) and before restoring. Version history
   (`VersionHistorySheet`) restores a version into the live map as one undoable edit (`useMapDocument`
@@ -1604,12 +1625,93 @@ doors, not a change of mode; closing them disconnects the players and keeps the 
   Library consumers (card thumbnails, share links, export and duplicate from a card) see the latest restore
   point; opening a map always goes through its table. Every token move is a play action there (never in
   undo), in Edit too.
-- **The library**: a scene card's Edit and Play open the map in that mode; "My sessions" lists the open
-  tables (open, copy invite) and the games joined (Open / Closed / Ended). Deleting a map ends its table
+- **The world page** (§6.9): a scene card's Edit and Play open the scene in that mode; the home page's "Tables &
+  games" lists the open tables (open, copy invite) and the worlds joined (Join / Wait). Deleting a map ends its table
   (players disconnected) and frees its images (`image_folders_to_free` ignores the table of the map being
   deleted; `unreferenced_scene_assets` keeps what closed tables use).
 - Migration `20260925154256_map_tables.sql` ended every game in progress (each held its own copy of its map).
   Older clients keep working: `create_session` opens the map's table, `end_session` ends open or closed ones.
+
+### 6.9 Worlds: scenes, characters and players (`net/worldsRepo`, `core/session/characters.ts`, `routes/WorldPage`)
+
+A DM running several campaigns keeps each in a **world** (Tyranny of Dragons for one group, Storm King's
+Thunder for another). A world holds its **scenes**, its **characters** and its **players**, and has one room
+code. Players join the world once; the DM hands them characters there, for every scene of the world, rather
+than at a table. Moving between scenes (§6.7) stays inside the world. The UI says "scene" for what a world
+holds (never "map", which now only means a battlemap image, §9) and "world" for the collection (no "library").
+
+- **Model** (migration `20260925200000_worlds.sql`, §6.4): `worlds(owner, name, room_code)`; every scene is in
+  one (`scenes.world_id`, not null; `create_scene`'s `p_world_id`, default the owner's first world, a "My
+  world" created when they have none; `move_scene` moves one, its closed table with it, and refuses
+  `table_open` while its doors are open); `world_members` (THE membership: display name per world, active /
+  kicked); `characters(world, name, colour, portrait)` and `character_players(character, player)`, written by the
+  world's owner under RLS, who plays a character set in one step by `set_character_players(character, users)`
+  (the character row locked, so quick ticks never lose a player; the roster UI also sends one write at a time
+  per character, the latest list). Limits: ≤ 100 characters per world, ≤ 8 players per character, ≤ 20 worlds
+  per owner, ≤ 64 active players per world (removed ones don't hold a seat; ≤ 512 roster rows in all), checked
+  under the join's advisory lock. `delete_world` deletes an empty world (`world_not_empty`; the app deletes its
+  scenes first, `app/library` `deleteWorld`, so their images are freed); its characters, players and ended
+  tables go with it. Local mode mirrors it in IndexedDB (store "worlds", DB version 2: `w:{id}` with its
+  members, `code:{code}`, `c:{id}`); local scenes from before worlds join the first world.
+- **Tables stay one per scene** (§6.8: a scene's table is its live copy, where it is edited), and belong to
+  their scene's world (`sessions.world_id`). **At most one table per world has its doors open**
+  (`sessions_world_open_key`; `set_table_open` refuses `world_table_open`): that is where the world's players
+  are. Every table of a world answers to the world's code (`sessions.room_code` mirrors it; codes are unique
+  per world, `worlds_room_code_key`, and kept for good). A map change (`set_session_scene`) accepts only scenes
+  of the table's world (`other_world`); `map_in_use` now means that scene's table has its doors open.
+- **Membership.** `session_members` is no longer written by joins: it is the world's roster seated at every
+  live table of the world, kept by triggers on `world_members` (insert / update / delete) and by `open_map`
+  and `move_scene` (`private.seat_table`). So every policy, stored view and tile rule written against
+  `session_members` / `is_active_member` (§6.1, §6.4, §9) holds unchanged, a player who joins the world is
+  seated at every table of it (closed ones too, and ones opened later), and a kick from the world
+  (`set_world_member_status`, or a table's `set_member_status`, which now kicks from its world) reaches every
+  table at once. Names are unique per world (`world_display_name_taken`: not the DM's, not another player's).
+- **Joining**: `join_world(code, name)` → the world and its open table (null while every table is closed: the
+  player waits); `join_session` (older clients) = `join_world`, then the open table or `table_closed`
+  (joining nothing). `world_info(world)`: the name, code, the caller's role and status, the DM's name, the
+  open table (for the DM and active players) and the names of the characters the caller plays;
+  `list_joined_worlds()` the same for every world the caller joined; `session_info` also names the table's
+  world. Client: `/join/:code` → `WorldsRepo.join` → `/play/:sid`, or `/world/:id/play` (`WorldPlayPage`: polls
+  `world_info` every 5 s, shows the characters the player was given, moves in when a table opens). The
+  closed / ended table screen (`ClosedTable`) polls the world too: when the DM opens another scene's table of
+  the world, the players are taken there.
+- **Characters at the table** (`Token.characterId`, scene schema v10, §3; `GameState.characters`): a token
+  linked to a character *is* that character in its scene. The host reads the world's roster
+  (`HostRunnerOptions.worlds.listCharacters`: at start, with every member refresh, on `refreshRoster()` —
+  the scene screen calls it after the DM edits the roster and on window focus) into `GameState.characters`
+  (`set-characters {characters: id → {name, players}}`, saved with the game, DM-only, never sent). The owners
+  of every character token are derived from it in one place, `syncCharacterOwners`: the character's players
+  who are players of the game, sorted; none when its character is not in the roster (deleted). The reducer
+  re-derives them after `set-characters`, `add-player` (a player takes up their characters when they come to
+  the table), `apply-scene-patches` (a token linked, unlinked or added), `load-scene` and `rebind-player`
+  (the roster's ids move too); `assign-token` refuses a character token ("a character's players are chosen in
+  its world"). A token unlinked from its character (an undone link, say) loses its owners
+  (`withoutUnlinkedOwners`): it is the table's again, handed out there if at all. The host also re-reads its
+  world on `refreshRoster` (a closed table moves with its scene) and drops players no longer of the world. Players whose control changed are dirty (everyone with shared vision). Without a roster
+  (`characters` absent: a game from before worlds) nothing is derived. Tokens that are not characters (a
+  summoned wolf, a charmed ogre) are still handed out at the table (Controlled by, "Assign a token"). The
+  filter sends neither the roster nor `characterId` (`PlayerToken` is an allowlist; tested).
+- **Changing scene** (§6.7) carries character tokens with their `characterId`; an arriving character
+  replaces the target's token of the same character (`carryParty`, like a token of the same id): a character
+  is never twice on a scene, and one the DM placed there beforehand gives way to the one arriving.
+- **UI.** Home (`HomePage`): "Your worlds" (cards: the latest scene's thumbnail, scene count, code, an open
+  table), "New world", "Try the sample" (a world holding a copy of the Crooked Lantern, opened in Edit), the
+  join box and "Tables & games" (my open tables; the worlds I joined, with Join / Wait). World page
+  (`WorldPage`, `components/world`): name, code and invite link, the open table ("Table open · scene"), rename /
+  delete, and tabs **Scenes** (the scene cards, new / from map images / import / drop, samples, "Move to
+  another world…"), **Characters** (add, edit, delete, "Played by" per character) and **Players** (their
+  characters, remove from the world / let back in). The scene screen: "Back to the world", Change scene (the
+  world's scenes), the Players tab's characters and "Characters of <world>…" (`WorldRosterDialog`: the same
+  lists, so a player who just joined gets a character without leaving the table), the token inspector's
+  **Character** field ("Played by …", "Make it a character": a new character from the token, whoever
+  controlled it playing it) and the token menu's Character submenu (`CharacterLinksContext`). A shared scene
+  is copied into a world of the visitor's choice.
+- Tests: `supabase/tests/worlds_test.sql` (worlds, joins, seating, kicks, one open table, map changes within
+  a world, characters' RLS and quotas, deleting), `core/session/characters.test.ts`, `net/worldsRepo.test.ts`,
+  the local repositories' world rules in `net/sessionsRepo.test.ts`, the host roster in
+  `net/host/hostRunner.test.ts` ("world characters"), and `e2e/worlds-local.mjs` (a world and characters, a
+  player joining and waiting, a character handed out and linked, the open table bringing them in, one open
+  table per world, Change scene within the world).
 
 ---
 
@@ -2113,6 +2215,26 @@ circle-cropped) and every avatar shows. Local mode has no token image store: dow
 
 ## Appendix: Implementation status (2026-09-23)
 
+**2026-09-25, worlds (§6.9).** Scenes, characters and players are grouped into worlds (campaigns) with one room
+code each; players join a world and the DM hands them characters there (`Token.characterId`, scene schema v10;
+`GameState.characters`); Change scene stays inside the world; the UI says "scene" (never "map" for one) and
+"world" (no "library"). A review pass added `set_character_players`, the seat rule (removed players free
+seats; the count under the join lock), unlinking taking a token back from the character's players, the host
+following a moved table's world, "Make it a character" reaching the table's roster before the link, and error
+states where loads could fail silently. Also fixed on the way: a host restarted on the same page right after leaving (world page
+and straight back) waited in standby as "open in another tab" — it now waits (≤ 5 s) for the runner still
+stopping there (`hostRunner` `stoppingHere`). Verification: `tsc -b`, `npx vitest run` and `npx eslint .` clean;
+the SQL suites on the linked project with the migration applied inside the rolled-back transaction (the
+migration itself not applied): `worlds_test` 113/113 (new), `map_tables_test` 37/37, `rls_test` 336/336,
+`guest_merge_test` 34/34, `quotas_test` 27/27, `scene_asset_cleanup_test` 10/10, `tile_chunks_test` 22/22,
+`assets_storage_test` 24/24, `free_assets_test` 17/17, `token_maker_test` 23/23, and a one-off backfill check
+(a DM with two live tables and a kicked player, 17/17); against a Vite dev server in local mode (NVIDIA):
+`worlds-local` 16/16 (new), `editor-smoke` 55/55, `map-table-local` 20/20, `multiplayer-local` 54/54,
+`change-map-local` 39/39, `table-local` 35/35, `templates-local` 30/30, `keybindings` 35/35, `engine-leak` 5/5,
+`multiplayer-latency` 7/7, `vineyard-build` 23/23, `firefox-smoke` 15/15; an IndexedDB v1 library (a scene from
+before worlds) upgrades to a "My world" holding it. Not run: `multiplayer-supabase`, `free-assets` (they need
+the migration applied), `perf`, `showcase`.
+
 **2026-09-25, one map screen (§6.8).** The standalone editor page and "Start / End session" gave way to the
 map screen: Edit / Play (Tab) on the table's live map, and doors that open and close. Verification: `tsc -b`,
 `npx vitest run` and `npx eslint .` clean; against a Vite dev server (local mode, NVIDIA): `editor-smoke`
@@ -2554,7 +2676,7 @@ Known gaps and deliberate limits:
   neighbouring texel passes under it. A smaller receiver epsilon did not help; deeper wall bottoms in
   `core/occlusion` (or a GPU-proxy-only extension, which would depart from the single blocking truth) would.
 - Browsers: Chromium is tested end to end, on NVIDIA and AMD through WSL d3d12 and on SwiftShader. Firefox
-  155 passes `e2e/firefox-smoke.mjs` (headless, WebGL2 on its software rasteriser: the library, the editor
+  155 passes `e2e/firefox-smoke.mjs` (headless, WebGL2 on its software rasteriser: home and a world, the editor
   on the Crooked Lantern at all four tiers, a local-mode player whose view equals the oracle, no console
   errors). Firefox on a GPU, the multiplayer scripts in Firefox, and Safari are untested.
 

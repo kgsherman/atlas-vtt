@@ -39,9 +39,10 @@ afterEach(() => {
   document.body.innerHTML = ""
 })
 
-function summary(id: string, name: string): SceneSummary {
+function summary(id: string, name: string, worldId = "w1"): SceneSummary {
   return {
     id,
+    worldId,
     name,
     visibility: "private",
     shareSlug: null,
@@ -82,12 +83,16 @@ function fakeServices(target: Scene): AppServices {
   const rows = [
     summary("row-1", "The Crooked Lantern"),
     summary("row-2", "The Sunken Crypt"),
+    summary("row-3", "The Giant Hall", "w2"),
   ]
   return {
     mode: "local",
     identity: { userId: "dm" },
     scenes: {
-      list: async () => rows,
+      list: async (opts: { worldId?: string } = {}) =>
+        rows.filter(
+          (r) => opts.worldId === undefined || r.worldId === opts.worldId
+        ),
       get: async (id: string) => rows.find((r) => r.id === id) ?? null,
       load: async (id: string) => {
         const row = rows.find((r) => r.id === id)!
@@ -155,6 +160,7 @@ async function mount(
         onOpenChange={onOpenChange}
         state={live}
         currentSceneId="row-1"
+        worldId="w1"
         saveMap={{ library: linked, dirty: false, saving: false }}
         {...props}
       />
@@ -193,19 +199,21 @@ function checked(tokenName: string): boolean {
 }
 
 describe("ChangeMapDialog", () => {
-  it("lists the library with the current map marked and not selectable", async () => {
+  it("lists the world's scenes with the current one marked and not selectable", async () => {
     await mount({ onChange: vi.fn() })
-    const current = button("The Crooked Lantern (the current map)")
+    const current = button("The Crooked Lantern (the current scene)")
     expect(current.disabled).toBe(true)
-    expect(current.textContent).toContain("Current map")
+    expect(current.textContent).toContain("Current scene")
     expect(button("Move the game to The Sunken Crypt").disabled).toBe(false)
-    // Each card is a button (no role of its own) inside an item of the "Your maps" list.
+    // Only this world's scenes.
+    expect(document.body.textContent).not.toContain("The Giant Hall")
+    // Each card is a button (no role of its own) inside an item of the world's scenes list.
     expect(current.hasAttribute("role")).toBe(false)
     expect(
       current
         .closest("[role=listitem]")
         ?.parentElement?.getAttribute("aria-label")
-    ).toBe("Your maps")
+    ).toBe("The world's scenes")
   })
 
   it("brings PCs and the players' tokens by default", async () => {
@@ -227,16 +235,16 @@ describe("ChangeMapDialog", () => {
     })
     await toConfirm()
     // One way on: the map left keeps a restore point first.
-    expect(button("Stay on this map")).toBeTruthy()
+    expect(button("Stay on this scene")).toBeTruthy()
     expect(
       buttons().some((b) => b.textContent?.includes("without saving"))
     ).toBe(false)
-    expect(button("Change map").disabled).toBe(false)
+    expect(button("Change scene").disabled).toBe(false)
     expect(document.body.textContent).toContain(
       "“The Crooked Lantern” keeps a restore point of how it is now."
     )
 
-    await click(button("Change map"))
+    await click(button("Change scene"))
     expect(onChange).toHaveBeenCalledTimes(1)
     const req = onChange.mock.calls[0][0]
     expect(req.save).toBe(true)
@@ -246,7 +254,7 @@ describe("ChangeMapDialog", () => {
     expect([...req.tokenIds].sort()).toEqual([ids.mira, ids.pony].sort())
     expect(req.arrival.levelId).toBe(sortedLevels(target)[0].id)
     expect(onOpenChange).not.toHaveBeenCalledWith(false)
-    expect(button("Change map").disabled).toBe(false)
+    expect(button("Change scene").disabled).toBe(false)
   })
 
   it("changes without a restore point only when the library can't be reached", async () => {
@@ -260,7 +268,7 @@ describe("ChangeMapDialog", () => {
       },
     })
     await toConfirm()
-    expect(buttons().some((b) => b.textContent === "Change map")).toBe(false)
+    expect(buttons().some((b) => b.textContent === "Change scene")).toBe(false)
     expect(document.body.textContent).toContain("You're offline.")
     await click(button("Change without saving"))
     expect(onChange).toHaveBeenCalledWith(
@@ -275,7 +283,7 @@ describe("ChangeMapDialog", () => {
     )
     const { onOpenChange } = await mount({ onChange })
     await toConfirm()
-    await click(button("Change map"))
+    await click(button("Change scene"))
     expect(document.body.textContent).toContain(
       "There's no room on that level for Pony."
     )
@@ -287,7 +295,7 @@ describe("ChangeMapDialog", () => {
     const { onOpenChange } = await mount({ onChange })
     await toConfirm()
     expect(document.body.textContent).not.toContain("restore point")
-    await click(button("Change map"))
+    await click(button("Change scene"))
     expect(onChange).toHaveBeenCalledWith(
       expect.objectContaining({ save: false })
     )
@@ -303,9 +311,9 @@ describe("ChangeMapDialog", () => {
     const { state, ids, target, rerender } = await mount({ onChange })
     await toConfirm()
     const said =
-      "The other 1 token of “The Crooked Lantern” stay behind: they are not on the new map."
+      "The other 1 token of “The Crooked Lantern” stay behind: they are not on the new scene."
     expect(document.body.textContent).toContain(said)
-    await click(button("Change map"))
+    await click(button("Change scene"))
     // The swap is dispatched: the live game is the crypt, with Mira, the pony and the crypt's own guard.
     const levelId = sortedLevels(target)[0].id
     const crypt = { ...state, scene: structuredClone(target) }
@@ -332,7 +340,7 @@ describe("ChangeMapDialog", () => {
       saveMap: { library: { status: "loading" }, dirty: true, saving: true },
     })
     await toConfirm()
-    expect(button("Change map").disabled).toBe(true)
+    expect(button("Change scene").disabled).toBe(true)
     expect(document.body.textContent).toContain("Saving a restore point")
   })
 })

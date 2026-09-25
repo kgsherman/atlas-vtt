@@ -1,8 +1,9 @@
 /**
- * Scene-library operations used by the home and shared pages and the map screen (new maps, duplicate,
- * samples, import/export, copying a shared scene, loading a map to play). Each returns user-facing
- * warnings for partial successes (e.g. a map image that could not be copied) and throws LibraryError /
- * NetError on failure.
+ * Scene operations used by the world, home and shared pages and the scene screen (new scenes, duplicate,
+ * samples, import/export, copying a shared scene, loading a scene to play, deleting a world). Every scene is
+ * in a world (ARCHITECTURE §6.9): new ones go into the world named (default: the first one). Each returns
+ * user-facing warnings for partial successes (e.g. a map image that could not be copied) and throws
+ * LibraryError / NetError on failure.
  */
 import { withPreset } from "@/components/editor/lib/environmentPresets"
 import { createScene, newId } from "@/core/scene/factory"
@@ -13,6 +14,7 @@ import { parseGameStateDetailed } from "@/core/session/persist"
 import type { SceneOrigin } from "@/core/session/types"
 import { exportSceneFile, exportSceneFileWithAssets, importSceneFileWithAssets, type SceneSummary, type SharedScene } from "@/net/scenesRepo"
 import { describeNetError, isNetError } from "@/net/supabase"
+import type { WorldSummary } from "@/net/worldsRepo"
 
 import type { AppServices } from "./services"
 
@@ -104,10 +106,12 @@ export function blankMap(): Scene {
   return scene
 }
 
-/** Add a new blank map to the library. */
-export function createBlankMap(services: Pick<AppServices, "scenes">): Promise<SceneSummary> {
-  return services.scenes.create(blankMap())
+/** Add a new blank scene to a world (default: the first one). */
+export function createBlankMap(services: Pick<AppServices, "scenes">, worldId?: string): Promise<SceneSummary> {
+  return services.scenes.create(blankMap(), inWorld(worldId))
 }
+
+const inWorld = (worldId: string | undefined) => (worldId === undefined ? {} : { worldId })
 
 /** A copy of a document with a fresh identity (never shares ids with its source). */
 function forkScene(scene: Scene, name: string): Scene {
@@ -124,7 +128,8 @@ export async function duplicateScene(services: AppServices, summary: SceneSummar
   const loaded = await services.scenes.load(summary.id)
   const source = requireScene(loaded.parsed, "copied")
   const copy = forkScene(source, nextCopyName(summary.name, existingNames))
-  const created = await services.scenes.create(copy)
+  // The copy stays in the scene's world.
+  const created = await services.scenes.create(copy, { worldId: summary.worldId })
   const warnings: string[] = []
   const assetIds = Object.keys(copy.assets ?? {})
   if (assetIds.length > 0) {
@@ -137,12 +142,12 @@ export async function duplicateScene(services: AppServices, summary: SceneSummar
   return { summary: created, warnings }
 }
 
-export async function createFromSample(services: AppServices, sampleId: string): Promise<LibraryResult> {
+export async function createFromSample(services: AppServices, sampleId: string, worldId?: string): Promise<LibraryResult> {
   const sample = sampleById(sampleId)
   if (!sample) throw new LibraryError("That sample scene does not exist.")
   const scene = sample.build()
   scene.name = sample.name
-  return { summary: await services.scenes.create(scene), warnings: [] }
+  return { summary: await services.scenes.create(scene, inWorld(worldId)), warnings: [] }
 }
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`
@@ -239,8 +244,8 @@ export function importedName(name: string, existing: Iterable<string>): string {
   return candidate
 }
 
-/** Import an `.atlas.json` file (with embedded map images) into the library. */
-export async function importSceneFile(services: AppServices, file: Blob): Promise<LibraryResult> {
+/** Import an `.atlas.json` file (with embedded map images) into a world (default: the first one). */
+export async function importSceneFile(services: AppServices, file: Blob, worldId?: string): Promise<LibraryResult> {
   const text = await file.text()
   const warnings: string[] = []
   // Restores embedded images under the imported scene's fresh document id. It never throws for the
@@ -257,17 +262,17 @@ export async function importSceneFile(services: AppServices, file: Blob): Promis
   }
   const scene = parsed.scene
   try {
-    // A second entry with an identical name is ambiguous in the library: suffix it.
+    // A second scene with an identical name is ambiguous in the world: suffix it.
     scene.name = importedName(
       scene.name,
-      (await services.scenes.list()).map((s) => s.name)
+      (await services.scenes.list(inWorld(worldId))).map((s) => s.name)
     )
   } catch {
     // Listing failed: keep the file's name.
   }
   let summary: SceneSummary
   try {
-    summary = await services.scenes.create(scene)
+    summary = await services.scenes.create(scene, inWorld(worldId))
   } catch (err) {
     // No scene references the images stored for it: remove them (best-effort).
     await deleteImages(services, scene.id, Object.keys(scene.assets ?? {}))
@@ -313,7 +318,7 @@ export function hasMapImages(scene: Pick<Scene, "assets" | "levels">): boolean {
  * Copy a link-shared scene into my library. The owner's map images live in their private storage
  * and are not part of the share, so backdrops are dropped (the geometry, lights and tokens stay).
  */
-export async function copySharedScene(services: AppServices, shared: SharedScene): Promise<LibraryResult> {
+export async function copySharedScene(services: AppServices, shared: SharedScene, worldId?: string): Promise<LibraryResult> {
   const source = requireScene(shared.parsed, "copied")
   const copy = forkScene(source, shared.name)
   const warnings: string[] = []
@@ -322,5 +327,17 @@ export async function copySharedScene(services: AppServices, shared: SharedScene
     for (const level of Object.values(copy.levels)) delete level.backdrop
     warnings.push("Map images are not included in shared links, so the copy has no backdrop images.")
   }
-  return { summary: await services.scenes.create(copy), warnings }
+  return { summary: await services.scenes.create(copy, inWorld(worldId)), warnings }
+}
+
+/**
+ * Delete a world: its scenes first (each like deleteScene: its table ends, its images are freed), then the
+ * world with its characters and players. A scene that cannot be deleted stops it (the world stays, with
+ * what is left in it).
+ */
+export async function deleteWorld(services: AppServices, world: Pick<WorldSummary, "id">): Promise<{ warnings: string[] }> {
+  const warnings: string[] = []
+  for (const scene of await services.scenes.list({ worldId: world.id })) warnings.push(...(await deleteScene(services, scene)).warnings)
+  await services.worlds.remove(world.id)
+  return { warnings: [...new Set(warnings)] }
 }

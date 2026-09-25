@@ -14,6 +14,80 @@ export type Database = {
   }
   public: {
     Tables: {
+      character_players: {
+        Row: {
+          character_id: string
+          created_at: string
+          user_id: string
+          world_id: string
+        }
+        Insert: {
+          character_id: string
+          created_at?: string
+          user_id: string
+          world_id: string
+        }
+        Update: {
+          character_id?: string
+          created_at?: string
+          user_id?: string
+          world_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "character_players_character_id_world_id_fkey"
+            columns: ["character_id", "world_id"]
+            isOneToOne: false
+            referencedRelation: "characters"
+            referencedColumns: ["id", "world_id"]
+          },
+          {
+            foreignKeyName: "character_players_world_id_user_id_fkey"
+            columns: ["world_id", "user_id"]
+            isOneToOne: false
+            referencedRelation: "world_members"
+            referencedColumns: ["world_id", "user_id"]
+          },
+        ]
+      }
+      characters: {
+        Row: {
+          color: string
+          created_at: string
+          id: string
+          image_url: string | null
+          name: string
+          updated_at: string
+          world_id: string
+        }
+        Insert: {
+          color?: string
+          created_at?: string
+          id?: string
+          image_url?: string | null
+          name: string
+          updated_at?: string
+          world_id: string
+        }
+        Update: {
+          color?: string
+          created_at?: string
+          id?: string
+          image_url?: string | null
+          name?: string
+          updated_at?: string
+          world_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "characters_world_id_fkey"
+            columns: ["world_id"]
+            isOneToOne: false
+            referencedRelation: "worlds"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       free_assets: {
         Row: {
           attribution: string | null
@@ -157,6 +231,7 @@ export type Database = {
           share_slug: string | null
           updated_at: string
           visibility: string
+          world_id: string
         }
         Insert: {
           created_at?: string
@@ -167,6 +242,7 @@ export type Database = {
           share_slug?: string | null
           updated_at?: string
           visibility?: string
+          world_id: string
         }
         Update: {
           created_at?: string
@@ -177,8 +253,17 @@ export type Database = {
           share_slug?: string | null
           updated_at?: string
           visibility?: string
+          world_id?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "scenes_world_id_fkey"
+            columns: ["world_id"]
+            isOneToOne: false
+            referencedRelation: "worlds"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       session_members: {
         Row: {
@@ -251,6 +336,7 @@ export type Database = {
           room_code: string
           scene_id: string | null
           status: string
+          world_id: string | null
         }
         Insert: {
           created_at?: string
@@ -261,6 +347,7 @@ export type Database = {
           room_code: string
           scene_id?: string | null
           status?: string
+          world_id?: string | null
         }
         Update: {
           created_at?: string
@@ -271,6 +358,7 @@ export type Database = {
           room_code?: string
           scene_id?: string | null
           status?: string
+          world_id?: string | null
         }
         Relationships: [
           {
@@ -280,7 +368,73 @@ export type Database = {
             referencedRelation: "scenes"
             referencedColumns: ["id"]
           },
+          {
+            foreignKeyName: "sessions_world_id_fkey"
+            columns: ["world_id"]
+            isOneToOne: false
+            referencedRelation: "worlds"
+            referencedColumns: ["id"]
+          },
         ]
+      }
+      world_members: {
+        Row: {
+          display_name: string
+          joined_at: string
+          status: string
+          user_id: string
+          world_id: string
+        }
+        Insert: {
+          display_name: string
+          joined_at?: string
+          status?: string
+          user_id: string
+          world_id: string
+        }
+        Update: {
+          display_name?: string
+          joined_at?: string
+          status?: string
+          user_id?: string
+          world_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "world_members_world_id_fkey"
+            columns: ["world_id"]
+            isOneToOne: false
+            referencedRelation: "worlds"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      worlds: {
+        Row: {
+          created_at: string
+          id: string
+          name: string
+          owner_id: string
+          room_code: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          name: string
+          owner_id: string
+          room_code: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          name?: string
+          owner_id?: string
+          room_code?: string
+          updated_at?: string
+        }
+        Relationships: []
       }
     }
     Views: {
@@ -294,7 +448,7 @@ export type Database = {
       claim_host: { Args: { p_session_id: string }; Returns: number }
       create_merge_ticket: { Args: never; Returns: string }
       create_scene: {
-        Args: { p_data: Json; p_name: string; p_schema_version: number }
+        Args: { p_data: Json; p_name: string; p_schema_version: number; p_world_id?: string }
         Returns: string
       }
       create_session: {
@@ -305,6 +459,8 @@ export type Database = {
         }[]
       }
       end_session: { Args: { p_session_id: string }; Returns: boolean }
+      create_world: { Args: { p_name: string }; Returns: string }
+      delete_world: { Args: { p_world_id: string }; Returns: boolean }
       finish_guest_merge: {
         Args: { p_target: string; p_token: string }
         Returns: Json
@@ -323,6 +479,28 @@ export type Database = {
         Args: { p_display_name: string; p_room_code: string }
         Returns: string
       }
+      join_world: {
+        Args: { p_display_name: string; p_room_code: string }
+        Returns: {
+          session_id: string
+          world_id: string
+        }[]
+      }
+      list_joined_worlds: {
+        Args: never
+        Returns: {
+          characters: string[]
+          display_name: string
+          dm_display_name: string
+          joined_at: string
+          member_status: string
+          name: string
+          open_session_id: string
+          role: string
+          room_code: string
+          world_id: string
+        }[]
+      }
       list_session_members: {
         Args: { p_session_id: string }
         Returns: {
@@ -331,6 +509,10 @@ export type Database = {
           status: string
           user_id: string
         }[]
+      }
+      move_scene: {
+        Args: { p_scene_id: string; p_world_id: string }
+        Returns: boolean
       }
       open_map: {
         Args: { p_free_assets?: string[]; p_scene_id: string }
@@ -366,6 +548,8 @@ export type Database = {
           room_code: string
           session_id: string
           status: string
+          world_id: string
+          world_name: string
         }[]
       }
       set_display_name: { Args: { p_display_name: string }; Returns: string }
@@ -385,6 +569,14 @@ export type Database = {
         Args: { p_open: boolean; p_session_id: string }
         Returns: string
       }
+      set_character_players: {
+        Args: { p_character_id: string; p_user_ids: string[] }
+        Returns: boolean
+      }
+      set_world_member_status: {
+        Args: { p_status: string; p_user_id: string; p_world_id: string }
+        Returns: boolean
+      }
       unreferenced_scene_assets: {
         Args: { p_min_age?: string }
         Returns: string[]
@@ -399,6 +591,20 @@ export type Database = {
           p_view: Json
         }
         Returns: boolean
+      }
+      world_info: {
+        Args: { p_world_id: string }
+        Returns: {
+          characters: string[]
+          display_name: string
+          dm_display_name: string
+          member_status: string
+          name: string
+          open_session_id: string
+          role: string
+          room_code: string
+          world_id: string
+        }[]
       }
     }
     Enums: {

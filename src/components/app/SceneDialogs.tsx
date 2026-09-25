@@ -68,7 +68,7 @@ function RenameForm({ scene, onClose, onRenamed }: { scene: SceneSummary; onClos
     <form onSubmit={submit} className="grid gap-4">
       <DialogHeader>
         <DialogTitle>Rename scene</DialogTitle>
-        <DialogDescription>The name appears in your library and on exported files.</DialogDescription>
+        <DialogDescription>The name appears in its world, to players at its table and on exported files.</DialogDescription>
       </DialogHeader>
       <Field>
         <FieldLabel htmlFor={id}>Name</FieldLabel>
@@ -200,7 +200,7 @@ function SharePanel({ scene, onChanged }: { scene: SceneSummary; onChanged(scene
     <div className="grid gap-4">
       <DialogHeader>
         <DialogTitle>Share “{scene.name}”</DialogTitle>
-        <DialogDescription>Anyone with the link can view this scene and copy it into their own library.</DialogDescription>
+        <DialogDescription>Anyone with the link can view this scene and copy it into one of their own worlds.</DialogDescription>
       </DialogHeader>
 
       <div className="flex items-center justify-between gap-4 rounded-lg bg-muted/50 p-3 ring-1 ring-foreground/5">

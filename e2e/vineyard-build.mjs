@@ -1,8 +1,8 @@
 // Builds "The Vineyard" from the three Forgotten Adventures battlemaps in test_maps/ (local mode):
 //
-//  1. Library → "From map images" (a new map, its screen in Edit) → the import dialog: basement (−12 ft)
-//     and second floor (+10 ft) get a
-//     floor traced from the image alpha and walls traced from its outline; the ground floor is opaque.
+//  1. A new world → "From map images" (a new scene, its screen in Edit) → the import dialog: basement
+//     (−12 ft) and second floor (+10 ft) get a floor traced from the image alpha and walls traced from
+//     its outline; the ground floor is opaque.
 //  2. The rest goes through the editor store (dev hook window.__atlasEditor) in ONE undoable edit, from
 //     e2e/vineyard-plan.mjs (read off the art): walls, doors and windows of the three houses, the manor
 //     stairs and two trapdoors, roofs over the winery and the cottage, the lamps and fires, the party
@@ -13,11 +13,12 @@
 //     third-party art).
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/vineyard-build.mjs
+//   ATLAS_TEST_MAPS=/path/to/test_maps   the art (default <repo>/test_maps; see lib.mjs)
+//   ATLAS_EXPORT=/path/to/vineyard.atlas.json   where the export goes (default test_maps/)
 import fs from "node:fs"
 import path from "node:path"
 
 import {
-  BASE,
   Checks,
   editorSummary,
   jsonDiff,
@@ -38,6 +39,7 @@ import {
   ROOFS,
   TOKENS,
 } from "./vineyard-plan.mjs"
+import { createWorld } from "./session.mjs"
 
 const OUT = outDir("vineyard-build")
 const EXPORT_TO =
@@ -87,7 +89,7 @@ try {
 
   // ---- 1. import -----------------------------------------------------------------------------------
   checks.step("New scene from map images (import dialog)")
-  await page.goto(`${BASE}/?local=1`, { waitUntil: "domcontentloaded" })
+  await createWorld(page, { name: "Vineyard world" })
   await page
     .getByRole("button", { name: /From map images/ })
     .first()
@@ -203,7 +205,7 @@ try {
   )
   const plan = { GROUND_WALLS, ROOFS, CONNECTORS, LIGHTS, TOKENS }
   // The modules first, then one synchronous evaluate for the edit: an async evaluate whose edit goes
-  // through the map screen's host fails in Playwright with "Resulting promise was garbage collected".
+  // through the scene screen's host fails in Playwright with "Resulting promise was garbage collected".
   await page.evaluate(async () => {
     window.__vineyardModules = {
       f: await import("/src/core/scene/factory.ts"),
@@ -549,7 +551,7 @@ try {
   await page.reload({ waitUntil: "domcontentloaded" })
   await waitFor(page, () => window.__atlasHost?.mode === "edit", null, {
     timeout: 60000,
-    label: "the map screen again, in Edit",
+    label: "the scene screen again, in Edit",
   })
   await waitEditor(page, 60000)
   const reloaded = await page.evaluate(() =>

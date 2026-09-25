@@ -66,6 +66,7 @@ import {
   type SceneDelta,
   type SceneOrigin,
   type StateRequest,
+  type TableCharacter,
   type TablePing,
 } from "@/core/session"
 import { artExtents } from "@/core/session/clip"
@@ -269,6 +270,9 @@ function reducesVisibility(cmd: DmCommand): boolean {
       return true
     case "assign-token":
       return !cmd.assigned
+    case "set-characters":
+      // A player may lose a character.
+      return true
     default:
       return false
   }
@@ -296,6 +300,14 @@ export function sameVisionLevels(a: Scene["levels"], b: Scene["levels"]): boolea
   return true
 }
 
+/**
+ * Runners of this page still stopping, by session id: their host lock is released only once they have saved
+ * and torn down (≤ ~3 s), and a new runner of the same table waits for that rather than calling it another
+ * tab. At most STOPPING_WAIT_MS.
+ */
+const stoppingHere = new Map<string, Promise<void>>()
+const STOPPING_WAIT_MS = 5000
+
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
@@ -320,6 +332,8 @@ export class HostRunnerImpl implements HostRunner {
    * channel (ARCHITECTURE §6.8): the DM plays and edits alone, nothing reaches a player.
    */
   private tableOpen = false
+  /** The table's world (session_info): its roster gives the owners of character tokens (§6.9). */
+  private tableWorld: { id: string; name: string } | null = null
   private state: GameState | null = null
   /** Scene row id from the seed (asset lookups may key by it). */
   private sceneRowId: string | null = null
@@ -431,6 +445,7 @@ export class HostRunnerImpl implements HostRunner {
         members,
         stats: { ...this.stats },
         library: origin ? { sceneId: origin.sceneId, version: origin.version, dirty: origin.dirty } : null,
+        world: this.tableWorld,
       }
     }
     return this.snap
@@ -508,7 +523,11 @@ export class HostRunnerImpl implements HostRunner {
     this.clock = this.o.createTimers ? this.o.createTimers() : createHostTimers()
     const clock = this.clock
     try {
-      // 1. One host per browser.
+      // 1. One host per browser. A runner of this table on this page that is still stopping (the DM went to
+      // the world page and straight back) holds the lock a moment longer: that is not another tab.
+      const leaving = stoppingHere.get(sid)
+      if (leaving && !steal) await Promise.race([leaving, new Promise<void>((r) => clock.setTimeout(() => r(), STOPPING_WAIT_MS))])
+      if (gen !== this.gen) return
       const lock = await this.acquireLock(steal, gen)
       if (gen !== this.gen) return
       if (lock === "taken") {
@@ -526,6 +545,7 @@ export class HostRunnerImpl implements HostRunner {
       }
       this.roomCode = info.roomCode
       this.tableOpen = info.status === "active"
+      this.tableWorld = info.worldId ? { id: info.worldId, name: info.worldName ?? "" } : null
       // 3. Fencing epoch + wire epoch.
       const hostEpoch = await this.o.repo.claimHost(sid)
       if (gen !== this.gen) return
@@ -597,14 +617,25 @@ export class HostRunnerImpl implements HostRunner {
   }
 
   async stop(): Promise<void> {
-    if (this.starting) await this.starting.catch(() => {})
-    if (this.status === "hosting") {
-      // Best effort: persist the latest state and views before leaving.
-      await this.persistAll(3000)
+    const sid = this.o.sessionId
+    const run = (async () => {
+      if (this.starting) await this.starting.catch(() => {})
+      if (this.status === "hosting") {
+        // Best effort: persist the latest state and views before leaving.
+        await this.persistAll(3000)
+      }
+      this.gen++
+      await this.teardown()
+      if (this.status !== "ended") this.setStatus("standby", null)
+    })()
+    // A new runner for this table on this page waits for this one to let go of the host lock.
+    const settled = run.catch(() => undefined)
+    stoppingHere.set(sid, settled)
+    try {
+      await run
+    } finally {
+      if (stoppingHere.get(sid) === settled) stoppingHere.delete(sid)
     }
-    this.gen++
-    await this.teardown()
-    if (this.status !== "ended") this.setStatus("standby", null)
   }
 
   /**
@@ -1087,6 +1118,17 @@ export class HostRunnerImpl implements HostRunner {
           } else await this.expel(m.userId, true)
           if (!this.hosting(gen)) return
         }
+        // Players no longer of the world (its scene moved to another world, an account deleted) leave the game.
+        const listed = new Set(list.map((m) => m.userId))
+        for (const uid of Object.keys(this.state?.players ?? {})) {
+          if (listed.has(uid)) continue
+          await this.expel(uid, false)
+          if (!this.hosting(gen)) return
+          this.dispatch({ t: "remove-player", userId: uid })
+        }
+        // Who plays which character (after the players: a player just added takes theirs up).
+        await this.refreshCharacters(gen)
+        if (!this.hosting(gen)) return
         this.notify()
       } while (this.memberRefreshAgain && this.hosting(gen))
     }
@@ -1094,6 +1136,46 @@ export class HostRunnerImpl implements HostRunner {
       this.memberRefresh = null
     })
     return this.memberRefresh
+  }
+
+  /** The world's characters and who plays them → GameState.characters (a no-op when unchanged). */
+  private async refreshCharacters(gen: number): Promise<void> {
+    const worlds = this.o.worlds
+    const worldId = this.tableWorld?.id
+    if (!worlds || !worldId) return
+    let list: Awaited<ReturnType<typeof worlds.listCharacters>>
+    try {
+      list = await worlds.listCharacters(worldId)
+    } catch (err) {
+      if (this.hosting(gen)) this.log("reading the world's characters failed", err)
+      return
+    }
+    if (!this.hosting(gen)) return
+    const characters: Record<Id, TableCharacter> = {}
+    for (const c of list) characters[c.id] = { name: c.name, players: c.playerIds }
+    this.dispatch({ t: "set-characters", characters })
+  }
+
+  async refreshRoster(): Promise<void> {
+    if (this.status !== "hosting") return
+    const gen = this.gen
+    // The table's world may have changed meanwhile (a closed table moves with its scene: move_scene).
+    try {
+      const info = await this.o.repo.sessionInfo(this.o.sessionId)
+      if (!this.hosting(gen)) return
+      if (info && info.worldId !== (this.tableWorld?.id ?? null)) {
+        this.tableWorld = info.worldId ? { id: info.worldId, name: info.worldName ?? "" } : null
+        this.roomCode = info.roomCode
+        this.notify()
+      } else if (info?.worldId && this.tableWorld && info.worldName !== null && info.worldName !== this.tableWorld.name) {
+        this.tableWorld = { id: info.worldId, name: info.worldName }
+        this.notify()
+      }
+    } catch (err) {
+      this.log("reading the table's world failed", err)
+    }
+    if (!this.hosting(gen)) return
+    await this.refreshMembers(gen)
   }
 
   private ensureMember(m: SessionMember, gen: number): void {

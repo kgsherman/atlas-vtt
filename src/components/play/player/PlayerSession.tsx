@@ -69,7 +69,6 @@ import type { Engine, FogStyle, Quality } from "@/render/contracts"
 import { usePlayCanvasInput, usePlayKeys, zoomCanvas } from "../input"
 import { StrandedMove } from "../StrandedMove"
 import {
-  EndedScreen,
   ErrorScreenOverlay,
   JoiningScreen,
   KickedScreen,
@@ -430,7 +429,7 @@ function PlayerTable({
     controller.cancel()
     if (controller.getTool() !== "move") controller.setTool("move")
     setTemplateId(null)
-    const name = snap.view?.scene.name.trim() || "a new map"
+    const name = snap.view?.scene.name.trim() || "a new scene"
     toast.info(
       controlled.length > 0
         ? `The party travels to ${name}`
@@ -560,7 +559,11 @@ function PlayerTable({
     ) : snap.status === "closed" ? (
       <ClosedTableScreen sessionId={snap.sessionId} onReopened={onReopened} />
     ) : snap.status === "ended" ? (
-      <EndedScreen />
+      <ClosedTableScreen
+        sessionId={snap.sessionId}
+        ended
+        onReopened={onReopened}
+      />
     ) : snap.status === "error" ? (
       <ErrorScreenOverlay
         title="Can't join this session"

@@ -5,7 +5,8 @@
  * whole (hit points, conditions, portrait, model, senses…) with the lights they carry, standing on free,
  * standable squares around the arrival point (core/movement arrivalAnchors). Token ids are kept, so their
  * owners, the players' selections and anything keyed by token id carry over; a token of the target with
- * the same id (a duplicated map holds the same ids) is replaced by the one arriving, lights it carried
+ * the same id (a duplicated map holds the same ids) or of the same world character (Token.characterId,
+ * §6.9: the DM placed the party there beforehand) is replaced by the one arriving, lights it carried
  * included. An id that clashes with a level or object of the target is renamed (`carried` maps old → new).
  * Neither scene is changed.
  *
@@ -63,13 +64,20 @@ export function carryParty(source: Pick<Scene, "tokens" | "objects">, target: Sc
   const partySet = new Set(party)
   const nextId = deps.newId ?? sceneId
 
-  // The target without the tokens being replaced and the lights they carried.
+  // The target without the tokens being replaced (the same id, or the same world character: a character is
+  // never twice on a scene) and the lights they carried.
+  const characters = new Set(party.map((id) => source.tokens[id].characterId).filter((c): c is Id => !!c))
+  const replaced = (t: Token) => partySet.has(t.id) || (!!t.characterId && characters.has(t.characterId))
   const tokens: Record<Id, Token> = {}
-  for (const id of Object.keys(target.tokens).sort()) if (!partySet.has(id)) tokens[id] = target.tokens[id]
+  const gone = new Set<Id>()
+  for (const id of Object.keys(target.tokens).sort()) {
+    if (replaced(target.tokens[id])) gone.add(id)
+    else tokens[id] = target.tokens[id]
+  }
   const objects: Record<Id, SceneObject> = {}
   for (const id of Object.keys(target.objects).sort()) {
     const o = target.objects[id]
-    if (o.type === "light" && o.attachedTokenId !== null && partySet.has(o.attachedTokenId)) continue
+    if (o.type === "light" && o.attachedTokenId !== null && gone.has(o.attachedTokenId)) continue
     objects[id] = o
   }
   const taken = new Set<string>([...Object.keys(target.levels), ...Object.keys(objects), ...Object.keys(tokens)])
@@ -117,7 +125,7 @@ export function carryParty(source: Pick<Scene, "tokens" | "objects">, target: Sc
 
 /** The notice posted when the game moves to `name`. */
 export function travelNotice(name: string, carried: number): string {
-  const where = cleanText(name, TABLE_LIMITS.maxName) || "a new map"
+  const where = cleanText(name, TABLE_LIMITS.maxName) || "a new scene"
   return carried > 0 ? `The party travels to ${where}` : `The game moves to ${where}`
 }
 

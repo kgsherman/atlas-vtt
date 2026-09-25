@@ -1,6 +1,7 @@
 /**
- * Right-click menus on the DM's live map: tokens (select, preview vision, hide/reveal, add to or remove
- * from combat, move to level, assign to players, conditions), doors (open/close/lock/unlock, reveal a secret door) and lights (on/off).
+ * Right-click menus on the DM's live scene: tokens (select, preview vision, hide/reveal, add to or remove
+ * from combat, move to level, its world character or the players controlling it, conditions), doors
+ * (open/close/lock/unlock, reveal a secret door) and lights (on/off).
  */
 import {
   Dices,
@@ -18,7 +19,14 @@ import {
   Sparkles,
   Tags,
   UserPlus,
+  UserRoundPlus,
+  UsersRound,
 } from "lucide-react"
+
+import {
+  useCharacterLinks,
+  type CharacterLinks,
+} from "@/components/editor/context"
 
 import {
   ContextMenuCheckboxItem,
@@ -55,6 +63,8 @@ export function HostContextMenuContent({
   onPreview(tokenId: Id): void
   onSelect(tokenId: Id): void
 }) {
+  // The world's characters (ARCHITECTURE §6.9); null: the table knows no roster.
+  const links = useCharacterLinks()
   const scene = state.scene
   const labels = playerLabels(Object.values(state.players))
   const players = Object.values(state.players)
@@ -121,31 +131,42 @@ export function HostContextMenuContent({
               ))}
           </ContextMenuSubContent>
         </ContextMenuSub>
-        <ContextMenuSub>
-          <ContextMenuSubTrigger>
-            <UserPlus /> Controlled by
-          </ContextMenuSubTrigger>
-          <ContextMenuSubContent className="w-48">
-            {/* Base UI labels throw outside a group (and crash the host console). */}
-            <ContextMenuGroup>
-              {players.length === 0 ? (
-                <ContextMenuLabel>No players have joined yet</ContextMenuLabel>
-              ) : null}
-              {players.map((p) => (
-                <ContextMenuCheckboxItem
-                  key={p.userId}
-                  checked={owners.includes(p.userId)}
-                  onCheckedChange={(checked) =>
-                    actions.assign(t.id, p.userId, checked)
-                  }
-                  closeOnClick={false}
-                >
-                  {p.displayName}
-                </ContextMenuCheckboxItem>
-              ))}
-            </ContextMenuGroup>
-          </ContextMenuSubContent>
-        </ContextMenuSub>
+        {links ? (
+          <CharacterSubmenu
+            tokenId={t.id}
+            characterId={t.characterId ?? null}
+            links={links}
+          />
+        ) : null}
+        {links && t.characterId ? null : (
+          <ContextMenuSub>
+            <ContextMenuSubTrigger>
+              <UserPlus /> Controlled by
+            </ContextMenuSubTrigger>
+            <ContextMenuSubContent className="w-48">
+              {/* Base UI labels throw outside a group (and crash the host console). */}
+              <ContextMenuGroup>
+                {players.length === 0 ? (
+                  <ContextMenuLabel>
+                    No players have joined yet
+                  </ContextMenuLabel>
+                ) : null}
+                {players.map((p) => (
+                  <ContextMenuCheckboxItem
+                    key={p.userId}
+                    checked={owners.includes(p.userId)}
+                    onCheckedChange={(checked) =>
+                      actions.assign(t.id, p.userId, checked)
+                    }
+                    closeOnClick={false}
+                  >
+                    {p.displayName}
+                  </ContextMenuCheckboxItem>
+                ))}
+              </ContextMenuGroup>
+            </ContextMenuSubContent>
+          </ContextMenuSub>
+        )}
         <ContextMenuSub>
           <ContextMenuSubTrigger>
             <Tags /> Conditions
@@ -269,5 +290,75 @@ export function HostContextMenuContent({
         </ContextMenuItem>
       </ContextMenuGroup>
     </ContextMenuContent>
+  )
+}
+
+/** The token's world character: who plays it, another one, none, or a new one made from the token. */
+function CharacterSubmenu({
+  tokenId,
+  characterId,
+  links,
+}: {
+  tokenId: Id
+  characterId: Id | null
+  links: CharacterLinks
+}) {
+  const linked = characterId
+    ? links.characters.find((c) => c.id === characterId)
+    : undefined
+  return (
+    <ContextMenuSub>
+      <ContextMenuSubTrigger>
+        <UsersRound />{" "}
+        {linked
+          ? `Character: ${linked.name}`
+          : characterId
+            ? "Character: deleted"
+            : "Character"}
+      </ContextMenuSubTrigger>
+      <ContextMenuSubContent className="max-h-80 w-56">
+        {linked ? (
+          <ContextMenuGroup>
+            <ContextMenuLabel className="font-normal text-muted-foreground">
+              {linked.players.length > 0
+                ? `Played by ${linked.players.map(links.playerName).join(", ")}`
+                : "Nobody plays this character yet"}
+            </ContextMenuLabel>
+          </ContextMenuGroup>
+        ) : null}
+        <ContextMenuGroup>
+          <ContextMenuItem onClick={links.openRoster}>
+            <UsersRound /> Who plays whom…
+          </ContextMenuItem>
+          {characterId ? null : (
+            <ContextMenuItem onClick={() => void links.makeCharacter(tokenId)}>
+              <UserRoundPlus /> Make it a character
+            </ContextMenuItem>
+          )}
+        </ContextMenuGroup>
+        {links.characters.length > 0 || characterId ? (
+          <ContextMenuSeparator />
+        ) : null}
+        <ContextMenuGroup>
+          {links.characters.length > 0 ? (
+            <ContextMenuLabel>This token is</ContextMenuLabel>
+          ) : null}
+          {links.characters.map((c) => (
+            <ContextMenuCheckboxItem
+              key={c.id}
+              checked={c.id === characterId}
+              onCheckedChange={(on) => links.link(tokenId, on ? c.id : null)}
+            >
+              {c.name}
+            </ContextMenuCheckboxItem>
+          ))}
+          {characterId ? (
+            <ContextMenuItem onClick={() => links.link(tokenId, null)}>
+              Not a character
+            </ContextMenuItem>
+          ) : null}
+        </ContextMenuGroup>
+      </ContextMenuSubContent>
+    </ContextMenuSub>
   )
 }

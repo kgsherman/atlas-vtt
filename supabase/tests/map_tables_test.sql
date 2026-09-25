@@ -1,6 +1,7 @@
 -- Atlas VTT: map tables (ARCHITECTURE §6.8; migration *_map_tables.sql): open_map, set_table_open,
 -- set_session_scene, closed tables for players (join, membership, stored views), one live table per map,
--- reserved room codes, create_session / end_session on tables, and a deleted map ending its table.
+-- room codes kept by the world (migration *_worlds.sql), create_session / end_session on tables, and a
+-- deleted map ending its table.
 --
 -- Run as `postgres` (SQL editor, psql, or the MCP execute_sql tool). Everything runs in ONE transaction
 -- that is ROLLED BACK. The last statement before ROLLBACK returns (passed, failed, failures); `failed`
@@ -162,10 +163,11 @@ begin
   perform pg_temp.eq('closed: claim_host still works', pg_temp.val(format('select public.claim_host(%L)', v_t)), (v_epoch + 1)::text);
   v_epoch := v_epoch + 1;
   perform pg_temp.logout();
+  -- Room codes are the worlds' (migration *_worlds.sql): the world keeps its code while its tables are closed.
   perform pg_temp.check('closed: the room code stays reserved',
-    pg_temp.try(format('insert into public.sessions (dm_id, room_code, status) values (%L, %L, %L)', d, v_code, 'active')) like '%sessions_live_room_code_key%');
+    pg_temp.try(format('insert into public.worlds (owner_id, name, room_code) values (%L, %L, %L)', o, 'W', v_code)) like '%worlds_room_code_key%');
   perform pg_temp.check('one live table per map',
-    pg_temp.try(format('insert into public.sessions (dm_id, scene_id, room_code, status) values (%L, %L, %L, %L)', d, v_a, 'ZZZZ9999', 'closed')) like '%sessions_live_scene_key%');
+    pg_temp.try(format('insert into public.sessions (dm_id, scene_id, world_id, room_code, status) values (%L, %L, %L, %L, %L)', d, v_a, (select world_id from public.scenes where id = v_a), v_code, 'closed')) like '%sessions_live_scene_key%');
 
   -- ---- set_session_scene ---------------------------------------------------------------------------
   perform pg_temp.login(d);
@@ -190,11 +192,16 @@ begin
   perform pg_temp.eq('map change: DM only', pg_temp.try(format('select public.set_session_scene(%L, %s, %L)', v_t, v_epoch, v_a)), 'not_found');
 
   -- ---- create_session / end_session ------------------------------------------------------------------
+  -- A and B are in the same world (migration *_worlds.sql): one open table per world.
   perform pg_temp.login(d);
+  perform pg_temp.eq('create_session: not while another table of the world is open', pg_temp.try(format('select * from public.create_session(%L)', v_b)), 'world_table_open');
+  perform public.set_table_open(v_t3, false);
   select c.session_id into v_r from public.create_session(v_b) c;
   perform pg_temp.eq('create_session: the map''s table, opened', (select id::text || ':' || status from public.sessions where id = v_t), v_t::text || ':active');
   perform pg_temp.eq('end_session: a closed table ends', pg_temp.val(format('select public.set_table_open(%L, false)', v_t)) || ':' || pg_temp.val(format('select public.end_session(%L)', v_t)), 'closed:true');
-  perform pg_temp.eq('end_session: the code is free again', (select count(*)::text from public.sessions where room_code = v_code and status <> 'ended'), '0');
+  perform pg_temp.login(p);
+  perform pg_temp.eq('end_session: the code still answers for the world', pg_temp.try(format('select public.join_session(%L, %L)', v_code, 'Pat')), 'table_closed');
+  perform pg_temp.login(d);
 
   -- ---- deleting a map ends its table -----------------------------------------------------------------
   v_epoch := pg_temp.val(format('select public.claim_host(%L)', v_t3))::bigint;

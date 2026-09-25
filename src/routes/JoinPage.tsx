@@ -1,7 +1,7 @@
 /**
- * Join a game: forgiving room-code entry ("/join" or "/join/:code"), display name, then
- * sessions.joinSession → /play/:sid. Failures (wrong code, ended, kicked, you're the DM…) are
- * explained in place.
+ * Join a world (ARCHITECTURE §6.9): forgiving room-code entry ("/join" or "/join/:code"), display name,
+ * then worlds.join → its open table (/play/:sid), or the wait for the DM to open one (/world/:id/play).
+ * Failures (wrong code, kicked, you're the DM…) are explained in place.
  */
 import * as React from "react"
 import { ArrowRightIcon, CastIcon, DoorOpenIcon, TriangleAlertIcon } from "lucide-react"
@@ -24,7 +24,8 @@ import { Item, ItemActions, ItemContent, ItemDescription, ItemGroup, ItemTitle }
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import { DISPLAY_NAME_MAX, normalizeDisplayName } from "@/net/auth"
-import { formatRoomCode, ROOM_CODE_RE, type DmSession } from "@/net/sessionsRepo"
+import { ROOM_CODE_RE } from "@/net/roomCodes"
+import type { WorldSummary } from "@/net/worldsRepo"
 
 export default function JoinPage() {
   const services = useServices()
@@ -37,7 +38,7 @@ export default function JoinPage() {
   const [codeHint, setCodeHint] = React.useState<string | null>(null)
   const [submitted, setSubmitted] = React.useState(false)
   const [joining, setJoining] = React.useState(false)
-  const [failure, setFailure] = React.useState<(JoinFailure & { hosted: DmSession | null }) | null>(null)
+  const [failure, setFailure] = React.useState<(JoinFailure & { hosted: WorldSummary | null }) | null>(null)
   const nameId = React.useId()
   const codeId = React.useId()
 
@@ -55,15 +56,15 @@ export default function JoinPage() {
     setJoining(true)
     setFailure(null)
     try {
-      const sid = await services.sessions.joinSession(code, normalizedName)
+      const joined = await services.worlds.join(code, normalizedName)
       if (normalizedName !== services.identity.displayName) void services.setDisplayName(normalizedName).catch(() => {})
-      navigate(paths.play(sid))
+      navigate(joined.sessionId ? paths.play(joined.sessionId) : paths.worldPlay(joined.worldId))
     } catch (err) {
       const f = describeJoinError(err, services.mode)
-      let hosted: DmSession | null = null
+      let hosted: WorldSummary | null = null
       if (f.isDm) {
-        const mine = await services.sessions.listMySessions().catch(() => [] as DmSession[])
-        hosted = mine.find((s) => s.roomCode === code && s.status !== "ended") ?? null
+        const mine = await services.worlds.list().catch(() => [] as WorldSummary[])
+        hosted = mine.find((w) => w.roomCode === code) ?? null
       }
       setFailure({ ...f, hosted })
       setJoining(false)
@@ -86,7 +87,7 @@ export default function JoinPage() {
                 <DoorOpenIcon className="size-5" />
               </div>
               <CardTitle className="text-lg">Join a game</CardTitle>
-              <CardDescription>Enter the room code your DM shared. You'll see only what your character can see.</CardDescription>
+              <CardDescription>Enter the room code of your DM's world. You join it once; you'll see only what your character can see.</CardDescription>
             </CardHeader>
             <CardContent>
               <form onSubmit={submit} noValidate>
@@ -142,9 +143,9 @@ export default function JoinPage() {
                       <AlertDescription>
                         <p>{failure.description}</p>
                         {failure.hosted && (
-                          <Button size="sm" className="mt-2" onClick={() => navigate(paths.host(failure.hosted!.id))} type="button">
+                          <Button size="sm" className="mt-2" onClick={() => navigate(paths.world(failure.hosted!.id))} type="button">
                             <CastIcon data-icon="inline-start" />
-                            Open this map
+                            Open this world
                           </Button>
                         )}
                       </AlertDescription>
@@ -164,7 +165,7 @@ export default function JoinPage() {
               <p className="text-center text-xs text-muted-foreground">
                 Running the game?{" "}
                 <Link href="/" className="font-medium text-foreground underline-offset-4 hover:underline">
-                  Start a session from your scenes
+                  Open a table from your worlds
                 </Link>
               </p>
             </CardFooter>
@@ -177,35 +178,30 @@ export default function JoinPage() {
   )
 }
 
-/** Games this user joined before whose table is open. */
+/** Worlds this user joined before that have a table open. */
 function RecentGames() {
-  const { sessions, identity, mode } = useServices()
+  const { worlds, identity, mode } = useServices()
   const [, navigate] = useLocation()
   const now = useNow()
-  const q = useAsync(`recent-games:${mode}:${identity.userId}`, async () => {
-    const memberships = (await sessions.listMyMemberships(identity.userId)).filter((m) => m.status === "active").slice(0, 5)
-    const infos = await Promise.all(memberships.map((m) => sessions.sessionInfo(m.sessionId).catch(() => null)))
-    return memberships.flatMap((m, i) => {
-      const info = infos[i]
-      return info && info.status === "active" && info.memberStatus !== "kicked" ? [{ m, info }] : []
-    })
-  })
+  const q = useAsync(`recent-games:${mode}:${identity.userId}`, async () =>
+    (await worlds.listJoined()).filter((w) => w.memberStatus === "active" && w.openSessionId !== null).slice(0, 3)
+  )
   const games = q.data ?? []
   if (games.length === 0) return null
   return (
     <section className="flex animate-in flex-col gap-2 duration-300 fade-in-0">
       <h2 className="px-1 text-xs font-medium text-muted-foreground">Jump back in</h2>
       <ItemGroup className="gap-2">
-        {games.slice(0, 3).map(({ m, info }) => (
-          <Item key={m.sessionId} variant="outline" size="sm" className="bg-card/60 backdrop-blur-sm">
+        {games.map((w) => (
+          <Item key={w.worldId} variant="outline" size="sm" className="bg-card/60 backdrop-blur-sm">
             <ItemContent className="min-w-0">
-              <ItemTitle className="font-mono tracking-wider">{formatRoomCode(info.roomCode)}</ItemTitle>
+              <ItemTitle className="truncate">{w.name}</ItemTitle>
               <ItemDescription className="truncate">
-                {info.dmDisplayName ? `${info.dmDisplayName}'s table` : "DM's table"} · as {m.displayName} · joined {formatRelativeTime(m.joinedAt, now)}
+                {w.dmDisplayName ? `${w.dmDisplayName}'s table` : "DM's table"} · as {w.displayName} · joined {formatRelativeTime(w.joinedAt, now)}
               </ItemDescription>
             </ItemContent>
             <ItemActions>
-              <Button size="sm" variant="secondary" onClick={() => navigate(paths.play(m.sessionId))}>
+              <Button size="sm" variant="secondary" onClick={() => navigate(paths.play(w.openSessionId!))}>
                 Rejoin
               </Button>
             </ItemActions>

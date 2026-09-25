@@ -1,4 +1,5 @@
--- Atlas VTT: guest merge tests (ARCHITECTURE §6.4 Identity; migration *_guest_merge.sql).
+-- Atlas VTT: guest merge tests (ARCHITECTURE §6.4 Identity; migration *_guest_merge.sql; the guest's worlds
+-- move too and count against the account's world quota: migration *_worlds.sql).
 --
 -- Run as `postgres` (SQL editor, psql, or the MCP execute_sql tool). Everything runs in ONE transaction
 -- that is ROLLED BACK. The last statement before ROLLBACK returns (passed, failed, failures); `failed`
@@ -203,13 +204,20 @@ begin
   update storage.objects set name = a::text || substr(name, 37) where bucket_id = 'scene-assets' and name like g::text || '/%';
   perform pg_temp.as_service();
   v_done := public.finish_guest_merge(v_ticket, a);
-  perform pg_temp.eq('finish: reports what moved', format('%s/%s', v_done ->> 'scenes', v_done ->> 'sessions'), '2/1');
+  perform pg_temp.eq('finish: reports what moved', format('%s/%s/%s', v_done ->> 'scenes', v_done ->> 'sessions', v_done ->> 'worlds'), '2/1/1');
   perform pg_temp.logout();
   perform pg_temp.eq('finish: the scenes belong to the account', (select count(*)::text from public.scenes where owner_id = a), '2');
   perform pg_temp.eq('finish: the guest owns nothing', (select count(*)::text from public.scenes where owner_id = g), '0');
   perform pg_temp.eq('finish: the account is DM of the guest''s game', (select dm_id::text from public.sessions where id = v_sid), a::text);
   perform pg_temp.check('finish: the account is no longer a player of its own game',
     not exists (select 1 from public.session_members where session_id = v_sid and user_id = a));
+  perform pg_temp.eq('finish: the guest''s world belongs to the account',
+    format('%s/%s', (select count(*) from public.worlds where owner_id = a), (select count(*) from public.worlds where owner_id = g)), '1/0');
+  perform pg_temp.eq('finish: the scenes stay in it, and the game too',
+    format('%s/%s', (select count(*) from public.scenes s join public.worlds w on w.id = s.world_id where s.owner_id = a and w.owner_id = a),
+      (select count(*) from public.sessions s join public.worlds w on w.id = s.world_id where s.id = v_sid and w.owner_id = a)), '2/1');
+  perform pg_temp.check('finish: the account is no longer a player of its own world',
+    not exists (select 1 from public.world_members m join public.worlds w on w.id = m.world_id where w.owner_id = a and m.user_id = a));
   perform pg_temp.eq('finish: an account without a name adopts the guest''s', (select display_name from public.profiles where id = a), 'Guesty');
   perform pg_temp.check('finish: the ticket is consumed', not exists (select 1 from private.guest_merge_tickets where guest_id = g));
   perform pg_temp.as_service();
@@ -222,9 +230,10 @@ begin
   perform pg_temp.check('after: and hosts the game', public.claim_host(v_sid) > 0);
   perform pg_temp.logout();
 
-  -- ======================= expiry, name kept =======================
+  -- ======================= expiry, name kept, the worlds cap =======================
   perform pg_temp.login(o);
   perform public.set_display_name('Other guest');
+  perform public.create_world('Other guest world');
   v_ticket := public.create_merge_ticket();
   perform pg_temp.logout();
   update private.guest_merge_tickets set expires_at = now() - interval '1 second' where guest_id = o;
@@ -232,8 +241,19 @@ begin
   perform pg_temp.eq('expiry: an expired ticket is unknown', pg_temp.try(format('select public.begin_guest_merge(%L, %L)', v_ticket, a)), 'not_found');
   perform pg_temp.logout();
   update private.guest_merge_tickets set expires_at = now() + interval '1 hour' where guest_id = o;
+  -- The account now has 20 worlds: the guest's one more does not fit.
+  perform pg_temp.login(a);
+  for n in 1..19 loop
+    perform public.create_world('Account world ' || n);
+  end loop;
   perform pg_temp.as_service();
-  perform public.finish_guest_merge(v_ticket, a);
+  perform pg_temp.eq('worlds: 20 + 1 worlds do not fit in one account', pg_temp.try(format('select public.begin_guest_merge(%L, %L)', v_ticket, a)), 'quota_exceeded');
+  perform pg_temp.eq('worlds: nor at finish', pg_temp.try(format('select public.finish_guest_merge(%L, %L)', v_ticket, a)), 'quota_exceeded');
+  perform pg_temp.login(a);
+  perform public.delete_world((select id from public.worlds where name = 'Account world 1'));
+  perform pg_temp.as_service();
+  v_done := public.finish_guest_merge(v_ticket, a);
+  perform pg_temp.eq('worlds: once it fits, the guest''s world moves', v_done ->> 'worlds', '1');
   perform pg_temp.logout();
   perform pg_temp.eq('name: an account keeps its own display name', (select display_name from public.profiles where id = a), 'Guesty');
 

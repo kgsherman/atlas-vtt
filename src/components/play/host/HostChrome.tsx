@@ -1,6 +1,6 @@
 /**
- * The map screen's top bar (ARCHITECTURE §6.8): the menus, the map's name, the
- * Edit / Play switch (Tab), undo / redo in Edit or vision preview in Play, the Token Maker, Change map,
+ * The scene screen's top bar (ARCHITECTURE §6.8): back to the world, the menus, the scene's name, the
+ * Edit / Play switch (Tab), undo / redo in Edit or vision preview in Play, the Token Maker, Change scene,
  * the side panel and the table's doors (open / close); and the bottom status bar (host pipeline stats,
  * save state, frame rate).
  */
@@ -99,11 +99,11 @@ export function HostTopBar({
   onPreview(): void
   sidebar: boolean
   onSidebar(open: boolean): void
-  /** Back to the library (the table stays as it is). */
+  /** Back to the world's page (the table stays as it is). */
   onLeave(): void
-  /** Open the Change map dialog. */
+  /** Open the Change scene dialog. */
   onChangeMap(): void
-  /** A restore point is being saved (Change map waits for it). */
+  /** A restore point is being saved (Change scene waits for it). */
   savingMap: boolean
   onOpenTable(): Promise<void>
   onCloseTable(): void
@@ -118,14 +118,16 @@ export function HostTopBar({
               <Button
                 variant="ghost"
                 size="icon"
-                aria-label="Back to library"
+                aria-label="Back to the world"
                 onClick={onLeave}
               />
             }
           >
             <AppLogoMark className="size-5" />
           </TooltipTrigger>
-          <TooltipContent side="bottom">Back to library</TooltipContent>
+          <TooltipContent side="bottom">
+            {snap.world ? `Back to ${snap.world.name}` : "Back to your worlds"}
+          </TooltipContent>
         </Tooltip>
         {menus ? <EditorMenus doc={doc} mode={mode} /> : null}
         <Separator orientation="vertical" className="mx-1 h-5 self-center" />
@@ -178,7 +180,7 @@ export function HostTopBar({
           </TooltipTrigger>
           <TooltipContent side="bottom" className="max-w-64">
             Token maker: make token art in a new tab and put it on any token of
-            this map
+            this scene
           </TooltipContent>
         </Tooltip>
         <ChangeMapButton
@@ -212,7 +214,7 @@ export function HostTopBar({
   )
 }
 
-/** Edit / Play: two views of the same map; Tab switches. */
+/** Edit / Play: two views of the same scene; Tab switches. */
 function ModeSwitch({
   mode,
   onMode,
@@ -233,7 +235,7 @@ function ModeSwitch({
       }}
       className="shrink-0 rounded-lg bg-muted p-0.5"
       spacing={1}
-      aria-label="Edit or play the map"
+      aria-label="Edit or play the scene"
     >
       <Tooltip>
         <TooltipTrigger
@@ -249,7 +251,7 @@ function ModeSwitch({
           <Hammer className="size-3.5" /> Edit
         </TooltipTrigger>
         <TooltipContent side="bottom" className="max-w-64">
-          Build the map: walls, doors, lights, levels, terrain, tokens{" "}
+          Build the scene: walls, doors, lights, levels, terrain, tokens{" "}
           <CommandKbd scope="play" command="mode.edit" />
         </TooltipContent>
       </Tooltip>
@@ -267,7 +269,7 @@ function ModeSwitch({
           <Play className="size-3.5" /> Play
         </TooltipTrigger>
         <TooltipContent side="bottom" className="max-w-64">
-          Run the map: move tokens, open doors, preview vision, combat{" "}
+          Run the scene: move tokens, open doors, preview vision, combat{" "}
           <CommandKbd scope="editor" command="mode.play" />
         </TooltipContent>
       </Tooltip>
@@ -361,7 +363,7 @@ function TableDoors({
   )
 }
 
-/** "Change map": disabled (with the reason as its tooltip) unless hosting with no restore point being saved. */
+/** "Change scene": disabled (with the reason as its tooltip) unless hosting with no restore point being saved. */
 function ChangeMapButton({
   hosting,
   saving,
@@ -386,12 +388,12 @@ function ChangeMapButton({
           disabled={reason !== null}
           onClick={onClick}
         >
-          <MapIcon data-icon="inline-start" /> Change map
+          <MapIcon data-icon="inline-start" /> Change scene
         </Button>
       </TooltipTrigger>
       <TooltipContent side="bottom" className="max-w-64">
         {reason ??
-          "Move the table to another map of your library and bring the party along"}
+          "Move the table to another scene of this world and bring the party along"}
       </TooltipContent>
     </Tooltip>
   )

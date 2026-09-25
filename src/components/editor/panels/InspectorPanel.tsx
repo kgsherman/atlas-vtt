@@ -1,5 +1,5 @@
 import * as React from "react"
-import { Copy, EyeOff, Lock, LockOpen, MousePointerClick, RotateCw, Scan, Trash2, TriangleAlert } from "lucide-react"
+import { Copy, EyeOff, Lock, LockOpen, MousePointerClick, RotateCw, Scan, Trash2, TriangleAlert, UserRoundPlus, UsersRound } from "lucide-react"
 
 import { CommandKbd } from "@/components/keybindings/CommandKbd"
 import { useCommandLabel } from "@/components/keybindings/keymapStore"
@@ -37,7 +37,7 @@ import { ConditionChips, ConditionMenu } from "@/components/play/table/health"
 import { freeTokenModelRef } from "@/core/scene/tokenModel"
 import { HP_LIMITS, withMaxHp, type TokenHp, type TokenStatusChange } from "@/core/scene/tokenStatus"
 
-import { FreeAssetScopeContext, useEditorActions, useEditorContext, useEditorShallow, useEditorState } from "../context"
+import { FreeAssetScopeContext, useCharacterLinks, useEditorActions, useEditorContext, useEditorShallow, useEditorState } from "../context"
 import { ColorInput, FieldPair, FieldRow, Hint, NotesInput, NumberInput, PanelSection, Segmented, SelectInput, SliderInput, SwitchField, TextInput, type Option } from "../fields"
 import { degrees, formatFeet, itemLabel, LIGHT_PRESET_LABELS, objectKindLabel, OBJECT_TYPE_LABELS, radians, selectionSummary, tokenLabel, trimNumber } from "../lib/format"
 import { wallTerrainWarning } from "../lib/terrainInspect"
@@ -547,6 +547,7 @@ function TokenFields({ t }: { t: Token }) {
   return (
     <>
       <PanelSection title="Token">
+        <TokenCharacterField t={t} readOnly={readOnly} />
         <FieldRow label="Name" hint="Seen by the DM and by players who control or share vision with this token.">
           <TextInput value={t.name} disabled={readOnly} onCommit={(name) => update({ name: name.trim() || t.name })} />
         </FieldRow>
@@ -604,6 +605,60 @@ function TokenFields({ t }: { t: Token }) {
           <NotesInput value={t.dmNotes ?? ""} placeholder="Only you can see these notes." onCommit={(dmNotes) => update({ dmNotes })} />
         </div>
       </PanelSection>
+    </>
+  )
+}
+
+const NO_CHARACTER = "none"
+
+/**
+ * The world character the token is (ARCHITECTURE §6.9): whoever plays the character controls it, in every
+ * scene of the world. Only at a table that knows its world's roster.
+ */
+function TokenCharacterField({ t, readOnly }: { t: Token; readOnly: boolean }) {
+  const links = useCharacterLinks()
+  const update = useUpdateToken(t.id)
+  const [making, setMaking] = React.useState(false)
+  if (!links) return null
+  const linked = t.characterId ? links.characters.find((c) => c.id === t.characterId) : undefined
+  const options: Option<string>[] = [
+    { value: NO_CHARACTER, label: "None (this scene's token)" },
+    ...links.characters.map((c) => ({ value: c.id, label: c.name })),
+    ...(t.characterId && !linked ? [{ value: t.characterId, label: "A deleted character", disabled: true }] : []),
+  ]
+  const players = linked?.players.map(links.playerName) ?? []
+  return (
+    <>
+      <FieldRow label="Character" hint="A character of the world: whoever plays it controls this token, in every scene.">
+        <SelectInput
+          value={t.characterId ?? NO_CHARACTER}
+          options={options}
+          disabled={readOnly}
+          onValueChange={(id) => (id === NO_CHARACTER ? update({ characterId: undefined }) : update({ characterId: id, kind: "pc" }))}
+        />
+      </FieldRow>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {linked ? (
+          <Hint className="flex-1">{players.length > 0 ? `Played by ${players.join(", ")}.` : "Nobody plays this character yet."}</Hint>
+        ) : t.characterId ? (
+          <Hint className="flex-1">Its character was deleted: nobody controls it.</Hint>
+        ) : (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={readOnly || making}
+            onClick={() => {
+              setMaking(true)
+              void links.makeCharacter(t.id).finally(() => setMaking(false))
+            }}
+          >
+            <UserRoundPlus data-icon="inline-start" /> Make it a character
+          </Button>
+        )}
+        <Button variant="ghost" size="sm" onClick={links.openRoster}>
+          <UsersRound data-icon="inline-start" /> Who plays whom…
+        </Button>
+      </div>
     </>
   )
 }

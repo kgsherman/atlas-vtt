@@ -1,5 +1,5 @@
 import * as React from "react"
-import { ArrowRightIcon, EyeIcon, FileUpIcon, ImagePlusIcon, LayersIcon, PlusIcon, SunIcon, UsersIcon } from "lucide-react"
+import { ArrowRightIcon, EyeIcon, GlobeIcon, LayersIcon, SparklesIcon, SunIcon, UsersIcon } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -11,9 +11,10 @@ import { IsoLevels } from "./IsoLevels"
 import { RoomCodeInput } from "./RoomCodeInput"
 
 export interface HomeHeroProps {
-  onNewScene(): void
-  onNewFromImages(): void
-  onImportFile(): void
+  onNewWorld(): void
+  /** A world holding a copy of the Crooked Lantern, opened in Edit. */
+  onSampleWorld(): void
+  sampleBusy: boolean
   onIntent(): void
   joinCode: string
   onJoinCodeChange(code: string, info: { rejected: string[] }): void
@@ -48,7 +49,7 @@ export function HomeHero(props: HomeHeroProps) {
               </Badge>
             </div>
             <h1 className="font-heading text-4xl font-semibold tracking-tight text-balance sm:text-5xl">
-              Multi-level 3D maps.
+              Multi-level 3D scenes.
               <br />
               <span className="bg-linear-to-r from-sidebar-primary via-foreground/90 to-foreground bg-clip-text text-transparent">True line of sight.</span>
             </h1>
@@ -59,23 +60,21 @@ export function HomeHero(props: HomeHeroProps) {
           </div>
 
           <div className="flex flex-col gap-2.5">
-            <div className="grid gap-2.5 sm:grid-cols-3">
+            <div className="grid gap-2.5 sm:grid-cols-2">
               <ActionTile
                 primary
-                icon={<PlusIcon />}
-                title="New scene"
-                description="Start from an empty grid"
-                onClick={props.onNewScene}
-                onIntent={props.onIntent}
+                icon={<GlobeIcon />}
+                title="New world"
+                description="A campaign: its scenes, characters and players"
+                onClick={props.onNewWorld}
               />
               <ActionTile
-                icon={<ImagePlusIcon />}
-                title="From map images"
-                description="One battlemap per level"
-                onClick={props.onNewFromImages}
+                icon={props.sampleBusy ? <Spinner /> : <SparklesIcon />}
+                title="Try the sample"
+                description="The Crooked Lantern, in a world of its own"
+                onClick={props.onSampleWorld}
                 onIntent={props.onIntent}
               />
-              <ActionTile icon={<FileUpIcon />} title="Import scene file" description="Open an .atlas.json" onClick={props.onImportFile} />
             </div>
             <QuickJoin {...props} />
           </div>
@@ -84,7 +83,7 @@ export function HomeHero(props: HomeHeroProps) {
         <div className="relative hidden lg:block">
           <div aria-hidden className="absolute inset-8 -z-10 rounded-full bg-primary/10 blur-3xl" />
           <IsoLevels className="mx-auto max-h-[32rem] w-full" />
-          <p className="mt-1 text-center text-[0.7rem] text-muted-foreground">The Crooked Lantern — four storeys, one of the sample scenes below.</p>
+          <p className="mt-1 text-center text-[0.7rem] text-muted-foreground">The Crooked Lantern — four storeys, one of the sample scenes.</p>
         </div>
       </div>
     </section>

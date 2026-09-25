@@ -21,7 +21,7 @@ import { PLAY_POINTER_HELP, playCommandsFor } from "@/play"
 
 import { KEYMAPS, keymapStore, setKeyOverrides, useKeyOverrides, type KeymapScope } from "./keymapStore"
 
-const SCOPE_LABELS: Record<KeymapScope, string> = { editor: "Map editor", play: "Play" }
+const SCOPE_LABELS: Record<KeymapScope, string> = { editor: "Edit", play: "Play" }
 
 /** Keys a command may hold at once. */
 const MAX_KEYS = 3

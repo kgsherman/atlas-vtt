@@ -73,8 +73,8 @@ function v1Doc(): Record<string, any> {
 
 describe("migrateToCurrent", () => {
   it("has one migration per version step", () => {
-    expect(SCENE_SCHEMA_VERSION).toBe(9)
-    expect(Object.keys(MIGRATIONS)).toEqual(["1", "2", "3", "4", "5", "6", "7", "8"])
+    expect(SCENE_SCHEMA_VERSION).toBe(10)
+    expect(Object.keys(MIGRATIONS)).toEqual(["1", "2", "3", "4", "5", "6", "7", "8", "9"])
   })
 
   it("v8 → v9: grids see from the whole square unless they say otherwise", () => {
@@ -288,5 +288,24 @@ describe("v7 → v8 (scene author and description removed)", () => {
     if (!res.ok) return
     expect(res.migratedFrom).toBe(7)
     expect(res.scene.meta).toEqual({ tags: ["keep"] })
+  })
+})
+
+describe("v9 → v10 (tokens linked to world characters)", () => {
+  it("leaves v9 documents unchanged; v10 tokens may name a character", () => {
+    const v9: Record<string, any> = { ...(MIGRATIONS[8](MIGRATIONS[7](MIGRATIONS[2](v1Doc()))) as Record<string, any>), schemaVersion: 9 }
+    expect(MIGRATIONS[9](structuredClone(v9))).toEqual(v9)
+    const res = parseScene(v9)
+    expect(res.ok).toBe(true)
+    if (!res.ok) return
+    expect(res.migratedFrom).toBe(9)
+    const token = createToken("ground", { x: 7.5, z: 7.5 })
+    res.scene.tokens[token.id] = { ...token, characterId: "3f2b8c1e-0d4a-4a9b-9c1e-5b6d7e8f9a0b" }
+    expect(parseScene(structuredClone(res.scene)).ok).toBe(true)
+    for (const bad of ["", "no spaces", "__proto__", "x".repeat(65), 7]) {
+      const doc = structuredClone(res.scene) as Record<string, any>
+      doc.tokens[token.id].characterId = bad
+      expect(parseScene(doc).ok, JSON.stringify(bad)).toBe(false)
+    }
   })
 })

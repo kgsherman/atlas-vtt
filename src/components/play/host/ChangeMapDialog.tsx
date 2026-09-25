@@ -1,14 +1,15 @@
 /**
- * "Change map" (ARCHITECTURE §6.7, §6.8): the DM moves the table to another map of the library and
- * brings the party along. Three steps: pick the map (a library scene as it is now — its own table's
- * live copy when it has one —, or a library copy of a sample made on the spot), choose who comes along
- * and where they arrive (a level, and a point clicked on its thumbnail), then confirm — with what stays
- * behind; the map left keeps a restore point first (without one only when the library can't be
- * reached). The map screen makes the change (onChange → HostRunner.changeMap); a refusal is shown here
+ * "Change scene" (ARCHITECTURE §6.7, §6.8, §6.9): the DM moves the table to another scene of its world and
+ * brings the party along. Three steps: pick the scene (one of the world's as it is now — its own table's
+ * live copy when it has one —, or a copy of a sample added to the world on the spot), choose who comes
+ * along and where they arrive (a level, and a point clicked on its thumbnail), then confirm — with what
+ * stays behind; the scene left keeps a restore point first (without one only when the scenes can't be
+ * reached). The scene screen makes the change (onChange → HostRunner.changeMap); a refusal is shown here
  * and the dialog stays open.
  *
- * The library is listed only while the dialog is open (its steps unmount when it closes). The restore
- * point follows `saveMap` as it is when the DM confirms: the map may be saved while the dialog is open.
+ * The world's scenes are listed only while the dialog is open (its steps unmount when it closes). The
+ * restore point follows `saveMap` as it is when the DM confirms: the scene may be saved while the dialog
+ * is open.
  */
 import * as React from "react"
 import {
@@ -123,7 +124,7 @@ import {
 } from "./changeMapModel"
 import type { SaveMap } from "./useSaveMap"
 
-/** The samples Home offers (a library copy is made first, so the map keeps restore points). */
+/** The samples a world offers (a copy is added to the world first, so the scene keeps restore points). */
 const SAMPLES = SAMPLE_SCENES.filter(
   (s) => s.id === "crooked-lantern" || s.id === "stress-test"
 )
@@ -142,10 +143,12 @@ export interface ChangeMapDialogProps {
   onOpenChange(open: boolean): void
   /** The live game: its map's tokens make the party list. */
   state: Pick<GameState, "scene" | "owners" | "players">
-  /** The live map's library row (GameState.origin): listed as the current map, not selectable. */
+  /** The live scene's row (GameState.origin): listed as the current scene, not selectable. */
   currentSceneId: string | null
+  /** The table's world: only its scenes are listed (samples are copied into it). null: every scene. */
+  worldId: string | null
   saveMap: Pick<SaveMap, "library" | "dirty" | "saving">
-  /** Change the map (see ChangeMapOutcome); the dialog closes on true. */
+  /** Change the scene (see ChangeMapOutcome); the dialog closes on true. */
   onChange(req: ChangeMapRequest): Promise<ChangeMapOutcome>
 }
 
@@ -171,6 +174,7 @@ function ChangeMapSteps({
   onOpenChange,
   state,
   currentSceneId,
+  worldId,
   saveMap,
   onChange,
   busy,
@@ -240,7 +244,9 @@ function ChangeMapSteps({
     // Read the guard now: the map may have been saved (or be saving) since this step opened.
     const choice = saveChoice(saveMap)
     if (saveMap.saving) {
-      setError("The map is being saved to your library. Try again in a moment.")
+      setError(
+        "A restore point of the scene is being saved. Try again in a moment."
+      )
       return
     }
     if (save && choice.kind !== "offer") return
@@ -273,6 +279,7 @@ function ChangeMapSteps({
     return (
       <MapStep
         currentSceneId={currentSceneId}
+        worldId={worldId}
         busy={busy}
         setBusy={setBusy}
         onChosen={choose}
@@ -282,7 +289,7 @@ function ChangeMapSteps({
 
   const header = (
     <DialogHeader>
-      <DialogTitle>Change map</DialogTitle>
+      <DialogTitle>Change scene</DialogTitle>
       <DialogDescription>
         {step === "party"
           ? `Step 2 of 3 · Who comes along to “${picked.name}”, and where they arrive.`
@@ -321,7 +328,7 @@ function ChangeMapSteps({
             className="sm:mr-auto"
             onClick={() => setStep("map")}
           >
-            <ArrowLeft data-icon="inline-start" /> Another map
+            <ArrowLeft data-icon="inline-start" /> Another scene
           </Button>
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
@@ -369,7 +376,7 @@ function ChangeMapSteps({
       {error ? (
         <Alert variant="destructive">
           <TriangleAlert />
-          <AlertTitle>The map didn't change</AlertTitle>
+          <AlertTitle>The scene didn't change</AlertTitle>
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       ) : null}
@@ -396,7 +403,7 @@ function ChangeMapSteps({
             ) : (
               <MapIcon data-icon="inline-start" />
             )}
-            Change map
+            Change scene
           </Button>
         )}
         <Button
@@ -411,33 +418,35 @@ function ChangeMapSteps({
           disabled={busy !== null}
           onClick={() => onOpenChange(false)}
         >
-          Stay on this map
+          Stay on this scene
         </Button>
       </div>
     </>
   )
 }
 
-// ---- step 1: the map ------------------------------------------------------------------------------
+// ---- step 1: the scene ------------------------------------------------------------------------------
 
 function MapStep({
   currentSceneId,
+  worldId,
   busy,
   setBusy,
   onChosen,
   onCancel,
 }: {
   currentSceneId: string | null
+  worldId: string | null
   busy: Busy | null
   setBusy(b: Busy | null): void
-  /** A loaded map was chosen; returns why it can't be used (or null). */
+  /** A loaded scene was chosen; returns why it can't be used (or null). */
   onChosen(next: PlayableScene): string | null
   onCancel(): void
 }) {
   const services = useServices()
   const q = useAsync(
-    `scenes:${services.mode}:${services.identity.userId}`,
-    () => services.scenes.list()
+    `scenes:${services.mode}:${services.identity.userId}:${worldId ?? "*"}`,
+    () => services.scenes.list(worldId ? { worldId } : {})
   )
   const [query, setQuery] = React.useState("")
   /** The row (or `sample:<id>`) being loaded. */
@@ -469,8 +478,12 @@ function MapStep({
     void load(s.id, () => loadLiveMap(services, s.id))
   const pickSample = (id: string) =>
     void load(`sample:${id}`, async () => {
-      // A library copy first, so the new map can be saved back like any other.
-      const { summary } = await createFromSample(services, id)
+      // A copy in the world first, so the new scene can be saved back like any other.
+      const { summary } = await createFromSample(
+        services,
+        id,
+        worldId ?? undefined
+      )
       q.reload()
       return loadLiveMap(services, summary.id)
     })
@@ -478,10 +491,10 @@ function MapStep({
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Change map</DialogTitle>
+        <DialogTitle>Change scene</DialogTitle>
         <DialogDescription>
-          Step 1 of 3 · Pick the map to move the game to. You choose who comes
-          along next.
+          Step 1 of 3 · Pick the scene of this world to move the game to. You
+          choose who comes along next.
         </DialogDescription>
       </DialogHeader>
       <InputGroup className="h-7">
@@ -491,8 +504,8 @@ function MapStep({
         <InputGroupInput
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search your maps"
-          aria-label="Search your maps"
+          placeholder="Search the world's scenes"
+          aria-label="Search the world's scenes"
         />
         {query ? (
           <InputGroupAddon align="inline-end">
@@ -511,7 +524,7 @@ function MapStep({
           {q.error !== undefined && !q.data ? (
             <Alert variant="destructive">
               <TriangleAlert />
-              <AlertTitle>Couldn't load your maps</AlertTitle>
+              <AlertTitle>Couldn't load the world's scenes</AlertTitle>
               <AlertDescription>{userMessage(q.error)}</AlertDescription>
               <AlertAction>
                 <Button size="xs" variant="outline" onClick={q.reload}>
@@ -531,10 +544,10 @@ function MapStep({
                 <EmptyMedia variant="icon">
                   <LibraryBig />
                 </EmptyMedia>
-                <EmptyTitle>Your library is empty</EmptyTitle>
+                <EmptyTitle>No other scenes in this world</EmptyTitle>
                 <EmptyDescription>
-                  Use a copy of a sample map below, or build a map in the editor
-                  from the home page.
+                  Use a copy of a sample scene below, or add scenes to the world
+                  from its page.
                 </EmptyDescription>
               </EmptyHeader>
             </Empty>
@@ -544,7 +557,7 @@ function MapStep({
                 <EmptyMedia variant="icon">
                   <Search />
                 </EmptyMedia>
-                <EmptyTitle>No maps match “{query.trim()}”</EmptyTitle>
+                <EmptyTitle>No scenes match “{query.trim()}”</EmptyTitle>
               </EmptyHeader>
               <Button variant="outline" onClick={() => setQuery("")}>
                 Clear search
@@ -553,7 +566,7 @@ function MapStep({
           ) : (
             <div
               role="list"
-              aria-label="Your maps"
+              aria-label="The world's scenes"
               className="grid gap-3 sm:grid-cols-3"
             >
               {filtered.map((s) => (
@@ -583,11 +596,11 @@ function MapStep({
                 data-icon="inline-start"
                 className="transition-transform group-data-[panel-open]/samples:rotate-90"
               />
-              Sample maps
+              Sample scenes
             </CollapsibleTrigger>
             <CollapsibleContent className="flex flex-col gap-2 pt-2">
               <p className="text-muted-foreground">
-                Using a sample adds a copy of it to your library first.
+                Using a sample adds a copy of it to this world first.
               </p>
               {SAMPLES.map((sample) => (
                 <SampleSceneCard
@@ -606,7 +619,7 @@ function MapStep({
       {pickError ? (
         <Alert variant="destructive">
           <TriangleAlert />
-          <AlertTitle>Couldn't use that map</AlertTitle>
+          <AlertTitle>Couldn't use that scene</AlertTitle>
           <AlertDescription>{pickError}</AlertDescription>
         </Alert>
       ) : null}
@@ -619,7 +632,7 @@ function MapStep({
   )
 }
 
-/** One library map to pick: its thumbnail (the Home cards' digest cache), name and size. */
+/** One scene of the world to pick: its thumbnail (the scene cards' digest cache), name and size. */
 function MapPickCard({
   summary,
   current,
@@ -628,7 +641,7 @@ function MapPickCard({
   onPick,
 }: {
   summary: SceneSummary
-  /** The map being played: marked, never selectable. */
+  /** The scene being played: marked, never selectable. */
   current: boolean
   loading: boolean
   disabled: boolean
@@ -651,7 +664,7 @@ function MapPickCard({
           onClick={onPick}
           aria-label={
             current
-              ? `${summary.name} (the current map)`
+              ? `${summary.name} (the current scene)`
               : `Move the game to ${summary.name}`
           }
         />
@@ -661,7 +674,7 @@ function MapPickCard({
         <SceneCardPreview entry={entry} status={status} />
         {current ? (
           <Badge variant="secondary" className="absolute top-2 left-2">
-            <MapPin data-icon="inline-start" /> Current map
+            <MapPin data-icon="inline-start" /> Current scene
           </Badge>
         ) : null}
         {loading ? (
@@ -734,7 +747,7 @@ function PartyPicker({
       <ScrollArea className="h-[min(20rem,45vh)] rounded-lg border">
         {rows.length === 0 ? (
           <p className="p-3 text-muted-foreground">
-            There are no tokens on this map. The game moves on its own.
+            There are no tokens on this scene. The game moves on its own.
           </p>
         ) : (
           <div className="flex flex-col gap-0.5 p-1">
@@ -865,8 +878,8 @@ function ArrivalPicker({
       />
       <div className="flex min-h-6 items-center justify-between gap-2 text-[0.7rem] text-muted-foreground">
         <span>
-          Click the map to choose the spot (arrow keys move it). Everyone stands
-          on the nearest free squares.
+          Click the thumbnail to choose the spot (arrow keys move it). Everyone
+          stands on the nearest free squares.
         </span>
         {onReset ? (
           <Button variant="ghost" size="xs" onClick={onReset}>
@@ -924,7 +937,7 @@ function ArrivalMap({
         role={onClick ? "button" : "img"}
         aria-label={
           onClick
-            ? "Arrival point: click the map to move it"
+            ? "Arrival point: click the thumbnail to move it"
             : "The arrival point"
         }
         onClick={onClick}
@@ -1030,12 +1043,12 @@ function ConfirmSummary({
           <li className="flex gap-2">
             <Users />
             {left > 0
-              ? `The other ${plural(left, "token")} of “${oldName}” stay behind: they are not on the new map.`
+              ? `The other ${plural(left, "token")} of “${oldName}” stay behind: they are not on the new scene.`
               : `Every token of “${oldName}” comes along.`}
           </li>
           <li className="flex gap-2">
             <EyeOff />
-            Players' fog of war starts fresh on the new map.
+            Players' fog of war starts fresh on the new scene.
           </li>
           <li className="flex gap-2">
             <Swords />
@@ -1043,11 +1056,12 @@ function ConfirmSummary({
           </li>
           <li className="flex gap-2">
             <MessagesSquare />
-            The room code, the players and the chat stay.
+            The world's players (and who plays whom), the room code and the chat
+            stay.
           </li>
           <li className="flex gap-2">
             <MapIcon />
-            Players see the new map's name: “{name}”.
+            Players see the new scene's name: “{name}”.
           </li>
         </ul>
       </div>

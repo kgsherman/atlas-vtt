@@ -13,11 +13,14 @@ import type { ScenesRepo } from "@/net/scenesRepo"
 import type { SessionsRepo } from "@/net/sessionsRepo"
 import type { TokenImageStore } from "@/net/tokenImages"
 import type { Transport } from "@/net/transport"
+import type { WorldsRepo } from "@/net/worldsRepo"
 
 export interface AppServices {
   /** "supabase" when VITE_SUPABASE_* are configured, else "local" (IndexedDB + BroadcastChannel, dev only). */
   mode: "supabase" | "local"
   identity: AtlasIdentity
+  /** Worlds (campaigns): their scenes, characters and players (ARCHITECTURE §6.9). */
+  worlds: WorldsRepo
   scenes: ScenesRepo
   sessions: SessionsRepo
   transport: Transport

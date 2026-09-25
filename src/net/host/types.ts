@@ -13,6 +13,7 @@ import type { AtlasIdentity } from "../auth"
 import type { ScenesRepo } from "../scenesRepo"
 import type { SessionsRepo } from "../sessionsRepo"
 import type { Transport } from "../transport"
+import type { WorldsRepo } from "../worldsRepo"
 import type { AssetStore } from "../assets/types"
 
 export type HostStatus =
@@ -66,6 +67,8 @@ export interface HostSnapshot {
    * whether the map changed since (edits and play actions). null: none (the library scene was deleted).
    */
   library: { sceneId: string; version: number | null; dirty: boolean } | null
+  /** The table's world (ARCHITECTURE §6.9): where its players, characters and other scenes are. null: unknown. */
+  world: { id: string; name: string } | null
 }
 
 /** A ping seen by the host: a player's (`from`: their user id) or the DM's own (`from`: null). */
@@ -84,6 +87,11 @@ export interface HostRunnerOptions {
   assets: AssetStore
   /** The DM's scene library (saveMapToLibrary). Without it the live map cannot be saved back. */
   scenes?: ScenesRepo
+  /**
+   * The table's world roster (ARCHITECTURE §6.9): its characters and who plays them become
+   * GameState.characters (read at start, with every member refresh, and on refreshRoster). Absent: none.
+   */
+  worlds?: Pick<WorldsRepo, "listCharacters">
   /**
    * Public URL prefix of the token image store (TokenImageStore.publicBase): players may put images from
    * their own folder there on their tokens (`token-image` requests). Absent / null: they cannot.
@@ -141,8 +149,13 @@ export interface HostRunner {
   applyScenePatches(patches: Patch[]): void
   /** DM "preview token vision": visibility for these tokens against the live scene (no knowledge update). */
   previewVisibility(tokenIds: Id[]): Promise<VisibilityResult>
-  /** Kick (status kicked + remove-player + {t:"kicked"}). */
+  /** Kick (from the table's world: status kicked + remove-player + {t:"kicked"}). */
   kick(userId: string): Promise<void>
+  /**
+   * Read the world's players and characters again now (after the DM changed who plays whom): the owners of
+   * character tokens follow at once.
+   */
+  refreshRoster(): Promise<void>
   /** Persist immediately (fenced). */
   save(): Promise<void>
   /**

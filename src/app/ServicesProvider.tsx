@@ -108,7 +108,7 @@ export function ServicesProvider({ children }: { children: React.ReactNode }) {
   }, [ready, displayName])
 
   if (state.status === "error") return <BootError error={state.error} onRetry={retry} />
-  if (!value) return <Splash label={currentMode().mode === "supabase" ? "Connecting to Atlas Cloud…" : "Opening your local library…"} />
+  if (!value) return <Splash label={currentMode().mode === "supabase" ? "Connecting to Atlas Cloud…" : "Opening your local worlds…"} />
   return (
     <ServicesContext.Provider value={value}>
       {children}

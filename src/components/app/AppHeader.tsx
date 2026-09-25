@@ -16,7 +16,7 @@ import { ThemeToggle } from "./ThemeToggle"
 function AppNav() {
   const [location] = useLocation()
   const tabs = [
-    { href: paths.home(), label: "Library", icon: <LibraryBig data-icon="inline-start" />, active: location === "/" },
+    { href: paths.home(), label: "Worlds", icon: <LibraryBig data-icon="inline-start" />, active: location === "/" || location.startsWith("/world/") },
     { href: paths.tokens(), label: "Token maker", icon: <CircleUserRound data-icon="inline-start" />, active: location.startsWith("/tokens") },
   ]
   return (

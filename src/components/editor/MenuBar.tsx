@@ -162,8 +162,8 @@ export function EditorMenus({ doc, mode }: { doc: MenuDocument; mode: "edit" | "
         <MenubarTrigger className={trigger}>File</MenubarTrigger>
         <MenubarContent className="min-w-60">
           <MenubarGroup>
-            <MenubarItem onClick={actions.newScene}>New map</MenubarItem>
-            <MenubarItem onClick={actions.newFromImages}>New map from map images…</MenubarItem>
+            <MenubarItem onClick={actions.newScene}>New scene</MenubarItem>
+            <MenubarItem onClick={actions.newFromImages}>New scene from map images…</MenubarItem>
           </MenubarGroup>
           <MenubarSeparator />
           <MenubarGroup>
@@ -192,7 +192,7 @@ export function EditorMenus({ doc, mode }: { doc: MenuDocument; mode: "edit" | "
             </MenubarItem>
           </MenubarGroup>
           <MenubarSeparator />
-          <MenubarItem onClick={actions.goHome}>Back to library</MenubarItem>
+          <MenubarItem onClick={actions.goHome}>Back to the world</MenubarItem>
         </MenubarContent>
       </MenubarMenu>
 

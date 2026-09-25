@@ -311,7 +311,7 @@ describe("importPlan", () => {
   it("names scenes after the map", () => {
     expect(sceneNameFromFiles(["181-FA-Vineyard-Interiors-27x47-NoGrid-FirstFloor-Night.jpg"])).toBe("Vineyard Interiors")
     expect(sceneNameFromFiles(["181-FA-Vineyard-Interior-27x47-NoGrid-Basement-Night.png"])).toBe("Vineyard Interior")
-    expect(sceneNameFromFiles(["12.png"])).toBe("Imported Map")
+    expect(sceneNameFromFiles(["12.png"])).toBe("Imported scene")
     // One tokenizer for scene and level names: noise words go even inside camelCase runs.
     expect(sceneNameFromFiles(["Keep-GroundFloorDusk.png"])).toBe("Keep")
     expect(levelNameFromFile("Keep-TowerDawn-NoGrid.png")).toBe("Keep Tower")

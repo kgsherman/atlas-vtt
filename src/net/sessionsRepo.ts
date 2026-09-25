@@ -15,10 +15,12 @@ import { normalizeFreeAssetCategories, type FreeAssetCategory } from "@/core/ses
 import { PLAYER_VIEW_VERSION, type GameState, type PlayerView } from "@/core/session/types"
 
 import { localIdentity, normalizeDisplayName } from "./auth"
+import { normalizeRoomCode, ROOM_CODE_RE } from "./roomCodes"
 import type { Json } from "./database.types"
 import { getLocalStore, type LocalStore } from "./localStore"
 import { createLocalScenesRepo, type ScenesRepo } from "./scenesRepo"
 import { getSupabaseOrNull, NetError, unwrap, type AtlasClient } from "./supabase"
+import { createLocalWorldsRepo, localWorlds, type LocalWorld, type LocalWorldMember } from "./worldsRepo"
 
 export type MemberStatus = "active" | "kicked"
 /**
@@ -53,6 +55,9 @@ export interface SessionInfo {
   displayName: string | null
   dmDisplayName: string | null
   createdAt: string
+  /** The table's world (ARCHITECTURE §6.9; null only for ended tables of deleted scenes). */
+  worldId: string | null
+  worldName: string | null
 }
 
 export interface SessionMember {
@@ -66,18 +71,13 @@ export interface SessionMember {
 export interface DmSession {
   id: string
   sceneId: string | null
+  /** The table's world (null only for ended tables of deleted scenes). */
+  worldId: string | null
   roomCode: string
   status: SessionStatus
   hostEpoch: number
   createdAt: string
   endedAt: string | null
-}
-
-export interface Membership {
-  sessionId: string
-  displayName: string
-  status: MemberStatus
-  joinedAt: string
 }
 
 /** What create_session writes into session_state before any host has saved a GameState. */
@@ -146,13 +146,16 @@ export interface SessionsRepo {
    * that map ends when nobody plays there; with players it refuses (NetError "map_in_use").
    */
   setSessionScene(sessionId: string, hostEpoch: number, sceneId: string): Promise<void>
-  /** Player: join (or rejoin) by room code. Throws kicked / session_not_found / is_dm / … */
+  /**
+   * Player (older flow; the app joins with WorldsRepo.join): join the world with this room code, then its
+   * open table. Throws table_closed (joining nothing) while none is open, kicked / session_not_found / is_dm / …
+   */
   joinSession(roomCode: string, displayName: string): Promise<string>
   /** DM or member (kicked members too, so the UI can explain); null for anyone else. */
   sessionInfo(sessionId: string): Promise<SessionInfo | null>
-  /** DM only. */
+  /** DM only: the players of the table's world. */
   listSessionMembers(sessionId: string): Promise<SessionMember[]>
-  /** DM only. Returns whether a member row changed. */
+  /** DM only: remove a player from the table's world (every table of it) or let them back. Whether it changed. */
   setMemberStatus(sessionId: string, userId: string, status: MemberStatus): Promise<boolean>
   /** DM only. Bumps and returns the fencing epoch. */
   claimHost(sessionId: string): Promise<number>
@@ -168,52 +171,21 @@ export interface SessionsRepo {
   loadPlayerView(sessionId: string, userId: string): Promise<PlayerViewRow | null>
   /** Sessions I run, newest first. */
   listMySessions(): Promise<DmSession[]>
-  /** Sessions I joined, newest first. */
-  listMyMemberships(userId: string): Promise<Membership[]>
 }
 
-// ---------------------------------------------------------------------------
-// Room codes (8 characters of Crockford base32)
+// Room codes and display names (net/roomCodes.ts; re-exported for existing callers)
 // ---------------------------------------------------------------------------
 
-export const ROOM_CODE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
-export const ROOM_CODE_RE = /^[0-9A-HJKMNP-TV-Z]{8}$/
-
-/** Mirrors private.normalize_room_code(): case-insensitive, separators ignored, I/L → 1, O → 0. */
-export function normalizeRoomCode(input: string): string {
-  return input
-    .replace(/[\s_-]/gu, "")
-    .toUpperCase()
-    .replace(/[IL]/g, "1")
-    .replace(/O/g, "0")
-}
-
-export function isValidRoomCode(input: string): boolean {
-  return ROOM_CODE_RE.test(normalizeRoomCode(input))
-}
-
-/** "ABCD1234" → "ABCD-1234" for display. */
-export function formatRoomCode(code: string): string {
-  const c = normalizeRoomCode(code)
-  return c.length === 8 ? `${c.slice(0, 4)}-${c.slice(4)}` : c
-}
-
-/** 40 random bits (byte & 31 is uniform: 256 is a multiple of 32). Server codes come from SQL. */
-/** Names that pose as the DM (join_session refuses them; mirrors private.display_name_taken). */
-export const RESERVED_DISPLAY_NAMES = ["dm", "gm", "the dm", "the gm", "dungeon master", "game master", "the dungeon master", "the game master"]
-
-/** Whether `name` is unavailable to `uid` among a session's members (case-insensitive). */
-export function displayNameTaken(name: string, uid: string, members: Readonly<Record<string, { displayName: string }>>, dmName: string | null = null): boolean {
-  const lower = name.toLowerCase()
-  if (RESERVED_DISPLAY_NAMES.includes(lower)) return true
-  if (dmName !== null && dmName.toLowerCase() === lower) return true
-  return Object.entries(members).some(([id, m]) => id !== uid && m.displayName.toLowerCase() === lower)
-}
-
-export function generateRoomCode(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(8))
-  return [...bytes].map((b) => ROOM_CODE_ALPHABET[b & 31]).join("")
-}
+export {
+  displayNameTaken,
+  formatRoomCode,
+  generateRoomCode,
+  isValidRoomCode,
+  normalizeRoomCode,
+  RESERVED_DISPLAY_NAMES,
+  ROOM_CODE_ALPHABET,
+  ROOM_CODE_RE,
+} from "./roomCodes"
 
 // ---------------------------------------------------------------------------
 // Row parsing
@@ -303,6 +275,8 @@ export function createRemoteSessionsRepo(client: AtlasClient): SessionsRepo {
         displayName: n.display_name ?? null,
         dmDisplayName: n.dm_display_name ?? null,
         createdAt: r.created_at,
+        worldId: (r.world_id as string | null) ?? null,
+        worldName: (r.world_name as string | null) ?? null,
       }
     },
     async listSessionMembers(sessionId) {
@@ -363,31 +337,20 @@ export function createRemoteSessionsRepo(client: AtlasClient): SessionsRepo {
     },
     async listMySessions() {
       const rows = unwrap(
-        await client.from("sessions").select("id, scene_id, room_code, status, host_epoch, created_at, ended_at").order("created_at", { ascending: false })
+        await client
+          .from("sessions")
+          .select("id, scene_id, world_id, room_code, status, host_epoch, created_at, ended_at")
+          .order("created_at", { ascending: false })
       )
       return (rows ?? []).map((s) => ({
         id: s.id,
         sceneId: s.scene_id,
+        worldId: s.world_id,
         roomCode: s.room_code,
         status: asSessionStatus(s.status),
         hostEpoch: s.host_epoch,
         createdAt: s.created_at,
         endedAt: s.ended_at,
-      }))
-    },
-    async listMyMemberships(userId) {
-      const rows = unwrap(
-        await client
-          .from("session_members")
-          .select("session_id, display_name, status, joined_at")
-          .eq("user_id", userId)
-          .order("joined_at", { ascending: false })
-      )
-      return (rows ?? []).map((m) => ({
-        sessionId: m.session_id,
-        displayName: m.display_name,
-        status: asMemberStatus(m.status) ?? "kicked",
-        joinedAt: m.joined_at,
       }))
     },
   }
@@ -397,22 +360,17 @@ export function createRemoteSessionsRepo(client: AtlasClient): SessionsRepo {
 // Local (IndexedDB, dev/offline — mirrors the SQL rules, NOT a security boundary)
 // ---------------------------------------------------------------------------
 
-interface LocalMember {
-  displayName: string
-  status: MemberStatus
-  joinedAt: string
-}
-
 interface LocalSession {
   id: string
   dmId: string
   sceneId: string | null
+  /** The scene's world (absent in tables from before worlds: read from the scene, sessionWorld). */
+  worldId?: string | null
   roomCode: string
   status: SessionStatus
   hostEpoch: number
   createdAt: string
   endedAt: string | null
-  members: Record<string, LocalMember>
 }
 
 interface LocalStateRecord {
@@ -437,20 +395,38 @@ export interface LocalSessionsRepoOptions {
   userId?: () => string
 }
 
-const MAX_MEMBERS = 64
-
 export function createLocalSessionsRepo(opts: LocalSessionsRepoOptions = {}): SessionsRepo {
   const storeP = opts.store ?? getLocalStore()
   const store = () => Promise.resolve(storeP)
   const scenes = opts.scenes ?? createLocalScenesRepo(storeP)
+  const worlds = createLocalWorldsRepo({ store: storeP, userId: opts.userId })
   const me = opts.userId ?? (() => localIdentity().userId)
   const sKey = (id: string) => `s:${id}`
-  const codeKey = (code: string) => `code:${code}`
   const stateKey = (id: string) => `state:${id}`
   const viewKey = (id: string, uid: string) => `view:${id}:${uid}`
 
   const getSession = async (id: string) => (await store()).get<LocalSession>("sessions", sKey(id))
   const putSession = async (s: LocalSession) => (await store()).put("sessions", sKey(s.id), s)
+  /** The table's world (tables from before worlds: their scene's), with its code. */
+  const sessionWorld = async (s: LocalSession): Promise<LocalWorld | null> => {
+    const st = await store()
+    let worldId = s.worldId ?? null
+    if (!worldId && s.sceneId) worldId = (await scenes.get(s.sceneId))?.worldId ?? null
+    const w = worldId ? await localWorlds.get(st, worldId) : undefined
+    if (w && (s.worldId !== w.id || s.roomCode !== w.roomCode) && s.status !== "ended") await putSession({ ...s, worldId: w.id, roomCode: w.roomCode })
+    return w ?? null
+  }
+  /** Like session_members: the table's world players (a DM is never one of them). */
+  const members = async (s: LocalSession): Promise<Record<string, LocalWorldMember>> => {
+    const w = await sessionWorld(s)
+    const out: Record<string, LocalWorldMember> = {}
+    for (const [uid, m] of Object.entries(w?.members ?? {})) if (uid !== s.dmId) out[uid] = m
+    return out
+  }
+  const member = async (s: LocalSession, uid: string) => {
+    const all = await members(s)
+    return Object.hasOwn(all, uid) ? all[uid] : undefined
+  }
   /** The caller's session as DM, like private.is_session_dm(); not_found otherwise. */
   const dmSession = async (id: string) => {
     const s = await getSession(id)
@@ -466,7 +442,7 @@ export function createLocalSessionsRepo(opts: LocalSessionsRepoOptions = {}): Se
   }
 
   const allSessions = async () => (await (await store()).entries<LocalSession>("sessions", "s:")).map(([, s]) => s)
-  /** The live table holding a map (the partial unique index sessions_live_scene_key keeps it single). */
+  /** The live table holding a scene (the partial unique index sessions_live_scene_key keeps it single). */
   const mapTable = async (sceneId: string) => (await allSessions()).find((s) => s.sceneId === sceneId && s.status !== "ended") ?? null
   const endTable = async (s: LocalSession) => {
     const st = await store()
@@ -474,7 +450,6 @@ export function createLocalSessionsRepo(opts: LocalSessionsRepoOptions = {}): Se
     s.endedAt = new Date().toISOString()
     s.hostEpoch += 1
     await putSession(s)
-    await st.delete("sessions", codeKey(s.roomCode))
     await st.deletePrefix("sessions", `view:${s.id}:`)
   }
 
@@ -488,23 +463,26 @@ export function createLocalSessionsRepo(opts: LocalSessionsRepoOptions = {}): Se
     async openMap(sceneId, opts = {}) {
       const loaded = await scenes.load(sceneId)
       const existing = await mapTable(sceneId)
-      // One live table per map (the map is this browser's, so its table is too).
-      if (existing) return { sessionId: existing.id, roomCode: existing.roomCode, status: existing.status, created: false }
+      // One live table per scene (the scene is this browser's, so its table is too).
+      if (existing) {
+        const w = await sessionWorld(existing)
+        return { sessionId: existing.id, roomCode: w?.roomCode ?? existing.roomCode, status: existing.status, created: false }
+      }
       if (!loaded.parsed.ok) throw new NetError("invalid_data", "the scene cannot be loaded")
       const st = await store()
-      let code = generateRoomCode()
-      for (let i = 0; i < 16 && (await st.get("sessions", codeKey(code))); i++) code = generateRoomCode()
+      const world = await localWorlds.get(st, loaded.summary.worldId)
+      if (!world) throw new NetError("not_found", "world not found")
       const now = new Date().toISOString()
       const session: LocalSession = {
         id: crypto.randomUUID(),
         dmId: me(),
         sceneId,
-        roomCode: code,
+        worldId: world.id,
+        roomCode: world.roomCode,
         status: "closed",
         hostEpoch: 0,
         createdAt: now,
         endedAt: null,
-        members: {},
       }
       const seed: SessionSeed = {
         kind: "seed",
@@ -515,77 +493,73 @@ export function createLocalSessionsRepo(opts: LocalSessionsRepoOptions = {}): Se
         freeAssets: normalizeFreeAssetCategories(opts.freeAssets ?? []),
       }
       await putSession(session)
-      await st.put("sessions", codeKey(code), session.id)
       await st.put<LocalStateRecord>("sessions", stateKey(session.id), { epoch: 0, state: seed, updatedAt: now })
-      return { sessionId: session.id, roomCode: code, status: "closed", created: true }
+      return { sessionId: session.id, roomCode: world.roomCode, status: "closed", created: true }
     },
     async setTableOpen(sessionId, open) {
       const s = await dmSession(sessionId)
       if (s.status === "ended") throw new NetError("session_ended", "the session has ended")
+      if (open) {
+        // Like set_table_open: the world's players are at one table.
+        const w = await sessionWorld(s)
+        const others = (await allSessions()).filter((o) => o.id !== s.id && o.status === "active")
+        for (const o of others)
+          if ((await sessionWorld(o))?.id === w?.id) throw new NetError("world_table_open", "another scene of this world has its table open")
+      }
       s.status = open ? "active" : "closed"
-      await putSession(s)
+      await putSession({ ...(await getSession(sessionId))!, status: s.status })
       return s.status
     },
     async setSessionScene(sessionId, hostEpoch, sceneId) {
       const s = await fenced(sessionId, hostEpoch)
-      if (!(await scenes.get(sceneId))) throw new NetError("not_found", "scene not found")
+      const scene = await scenes.get(sceneId)
+      if (!scene) throw new NetError("not_found", "scene not found")
+      if (scene.worldId !== (await sessionWorld(s))?.id) throw new NetError("other_world", "the scene is in another world")
       const other = await mapTable(sceneId)
       if (other && other.id !== sessionId) {
-        if (Object.values(other.members).some((m) => m.status === "active")) throw new NetError("map_in_use", "players are at another table on this map")
+        if (other.status === "active") throw new NetError("map_in_use", "players are at another table on this scene")
         await endTable(other)
       }
-      s.sceneId = sceneId
-      await putSession(s)
+      await putSession({ ...(await getSession(sessionId))!, sceneId })
     },
     async joinSession(roomCode, displayName) {
-      const code = requireCode(roomCode)
-      const name = requireName(displayName)
-      const sid = await (await store()).get<string>("sessions", codeKey(code))
-      const s = sid ? await getSession(sid) : undefined
-      if (!s || s.status === "ended") throw new NetError("session_not_found", "no active session with that room code")
-      const uid = me()
-      if (s.dmId === uid) throw new NetError("is_dm", "you are the DM of this session")
-      if (s.status !== "active") throw new NetError("table_closed", "the DM has not opened this table")
-      const existing = s.members[uid]
-      if (existing?.status === "kicked") throw new NetError("kicked", "you were removed from this session")
-      if (!existing && Object.keys(s.members).length >= MAX_MEMBERS) throw new NetError("session_full", "this session has too many members")
-      // Like join_session: no posing as the DM, no second player with the same name.
-      if (displayNameTaken(name, uid, s.members)) throw new NetError("name_taken", "that name is taken in this session")
-      s.members[uid] = { displayName: name, status: "active", joinedAt: existing?.joinedAt ?? new Date().toISOString() }
-      await putSession(s)
-      return s.id
+      const joined = await worlds.join(roomCode, displayName)
+      if (!joined.sessionId) throw new NetError("table_closed", "the DM has not opened a table in this world")
+      return joined.sessionId
     },
     async sessionInfo(sessionId) {
       const s = await getSession(sessionId)
       const uid = me()
-      const member = s?.members[uid]
-      if (!s || (s.dmId !== uid && !member)) return null
+      if (!s) return null
+      const m = await member(s, uid)
+      if (s.dmId !== uid && !m) return null
+      const w = await sessionWorld(s)
       return {
         sessionId: s.id,
         status: s.status,
-        roomCode: s.roomCode,
+        roomCode: w?.roomCode ?? s.roomCode,
         role: s.dmId === uid ? "dm" : "player",
-        memberStatus: member?.status ?? null,
-        displayName: member?.displayName ?? null,
+        memberStatus: s.dmId === uid ? null : (m?.status ?? null),
+        displayName: s.dmId === uid ? null : (m?.displayName ?? null),
         dmDisplayName: null,
         createdAt: s.createdAt,
+        worldId: w?.id ?? null,
+        worldName: w?.name ?? null,
       }
     },
     async listSessionMembers(sessionId) {
       const s = await getSession(sessionId)
       if (!s || s.dmId !== me()) throw new NetError("forbidden", "only the DM can list members")
-      return Object.entries(s.members)
+      return Object.entries(await members(s))
         .map(([userId, m]) => ({ userId, displayName: m.displayName, status: m.status, joinedAt: m.joinedAt }))
         .sort((a, b) => a.joinedAt.localeCompare(b.joinedAt) || a.userId.localeCompare(b.userId))
     },
     async setMemberStatus(sessionId, userId, status) {
       const s = await getSession(sessionId)
       if (!s || s.dmId !== me()) throw new NetError("forbidden", "only the DM can change member status")
-      const m = s.members[userId]
-      if (!m || m.status === status) return false
-      m.status = status
-      await putSession(s)
-      return true
+      // Like set_member_status: the kick is from the table's world.
+      const w = await sessionWorld(s)
+      return w ? worlds.setMemberStatus(w.id, userId, status) : false
     },
     async claimHost(sessionId) {
       const s = await dmSession(sessionId)
@@ -606,7 +580,7 @@ export function createLocalSessionsRepo(opts: LocalSessionsRepoOptions = {}): Se
     },
     async upsertPlayerView(a) {
       const s = await fenced(a.sessionId, a.hostEpoch)
-      if (s.members[a.userId]?.status !== "active") throw new NetError("not_member", "the user is not an active member of this session")
+      if ((await member(s, a.userId))?.status !== "active") throw new NetError("not_member", "the user is not an active member of this session")
       const st = await store()
       const prev = await st.get<LocalViewRecord>("sessions", viewKey(a.sessionId, a.userId))
       // Same rule as SQL: within one wire epoch an older seq never overwrites a newer one.
@@ -635,34 +609,29 @@ export function createLocalSessionsRepo(opts: LocalSessionsRepoOptions = {}): Se
     async loadPlayerView(sessionId, userId) {
       const s = await getSession(sessionId)
       const uid = me()
-      const allowed = s && (s.dmId === uid || (userId === uid && s.status === "active" && s.members[uid]?.status === "active"))
+      const allowed = s && (s.dmId === uid || (userId === uid && s.status === "active" && (await member(s, uid))?.status === "active"))
       if (!allowed) return null
       const r = await (await store()).get<LocalViewRecord>("sessions", viewKey(sessionId, userId))
       return r ? { sessionId, userId, hostEpoch: r.hostEpoch, epoch: r.epoch, seq: r.seq, view: asPlayerView(r.view), updatedAt: r.updatedAt } : null
     },
     async listMySessions() {
       const uid = me()
-      return (await allSessions())
-        .filter((s) => s.dmId === uid)
-        .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-        .map((s) => ({
+      const out: DmSession[] = []
+      for (const s of await allSessions()) {
+        if (s.dmId !== uid) continue
+        const w = s.status === "ended" ? null : await sessionWorld(s)
+        out.push({
           id: s.id,
           sceneId: s.sceneId,
-          roomCode: s.roomCode,
+          worldId: w?.id ?? s.worldId ?? null,
+          roomCode: w?.roomCode ?? s.roomCode,
           status: s.status,
           hostEpoch: s.hostEpoch,
           createdAt: s.createdAt,
           endedAt: s.endedAt,
-        }))
-    },
-    async listMyMemberships(userId) {
-      const all = await (await store()).entries<LocalSession>("sessions", "s:")
-      return all
-        .flatMap(([, s]) => {
-          const m = s.members[userId]
-          return m ? [{ sessionId: s.id, displayName: m.displayName, status: m.status, joinedAt: m.joinedAt }] : []
         })
-        .sort((a, b) => b.joinedAt.localeCompare(a.joinedAt))
+      }
+      return out.sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     },
   }
   return repo

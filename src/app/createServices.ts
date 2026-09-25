@@ -26,6 +26,7 @@ import { createMergeTicket, mergeGuest } from "@/net/guestMerge"
 import { createLocalTransport } from "@/net/localTransport"
 import { createLocalScenesRepo, createRemoteScenesRepo } from "@/net/scenesRepo"
 import { createLocalSessionsRepo, createRemoteSessionsRepo } from "@/net/sessionsRepo"
+import { createLocalWorldsRepo, createRemoteWorldsRepo } from "@/net/worldsRepo"
 import { getSupabase, NetError, type AtlasClient } from "@/net/supabase"
 import { createSupabaseTransport } from "@/net/supabaseTransport"
 import { createLocalTokenImageStore, createRemoteTokenImageStore } from "@/net/tokenImages"
@@ -73,6 +74,7 @@ export async function createServices(opts: CreateServicesOptions = {}): Promise<
 
   const scenes = client ? createRemoteScenesRepo(client) : createLocalScenesRepo(store)
   const sessions = client ? createRemoteSessionsRepo(client) : createLocalSessionsRepo({ store, scenes, userId: () => identity.userId })
+  const worlds = client ? createRemoteWorldsRepo(client) : createLocalWorldsRepo({ store, userId: () => identity.userId })
   const transport = client ? createSupabaseTransport(client) : createLocalTransport()
   const assets = safeAssetStore(mode, () => createAssetStore({ client, store, userId: identity.userId }))
   const freeAssets = client ? createRemoteFreeAssetsRepo(client) : createLocalFreeAssetsRepo()
@@ -82,6 +84,7 @@ export async function createServices(opts: CreateServicesOptions = {}): Promise<
   return {
     mode,
     identity,
+    worlds,
     scenes,
     sessions,
     transport,

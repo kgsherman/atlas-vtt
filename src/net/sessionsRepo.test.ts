@@ -6,6 +6,7 @@ import type { GameState, PlayerView } from "@/core/session/types"
 
 import { createMemoryStore, type LocalStore } from "./localStore"
 import { createLocalScenesRepo } from "./scenesRepo"
+import { createLocalWorldsRepo } from "./worldsRepo"
 import {
   createLocalSessionsRepo,
   createRemoteSessionsRepo,
@@ -176,7 +177,7 @@ describe("local sessions repo (dev mode, mirrors the SQL rules)", () => {
     expect(await repo.loadPlayerView(sessionId, P1)).toBeNull()
   })
 
-  it("ending a session bumps the epoch, frees the room code and drops views", async () => {
+  it("ending a session bumps the epoch and drops views; the code stays the world's", async () => {
     const { sessionId, roomCode } = await repo.createSession(sceneId)
     as = P1
     await repo.joinSession(roomCode, "Alice")
@@ -189,8 +190,8 @@ describe("local sessions repo (dev mode, mirrors the SQL rules)", () => {
     await expectNetError(repo.saveSessionState(sessionId, epoch + 1, state), "session_ended")
     expect(await repo.loadPlayerView(sessionId, P1)).toBeNull()
     as = P1
-    await expectNetError(repo.joinSession(roomCode, "Alice"), "session_not_found")
-    expect(await repo.listMyMemberships(P1)).toEqual([expect.objectContaining({ sessionId, status: "active" })])
+    await expectNetError(repo.joinSession(roomCode, "Alice"), "table_closed")
+    expect(await createLocalWorldsRepo({ store, userId: () => P1 }).listJoined()).toEqual([expect.objectContaining({ roomCode, memberStatus: "active" })])
   })
 })
 
@@ -273,13 +274,91 @@ describe("local map tables (mirror open_map / set_table_open / set_session_scene
     expect((await repo.sessionInfo(table.sessionId))?.status).toBe("active")
   })
 
-  it("deleting a map ends its table", async () => {
+  it("deleting a scene ends its table (the world stays: its code finds no open table)", async () => {
     const { sessionId, roomCode } = await repo.openMap(sceneId)
     await repo.setTableOpen(sessionId, true)
     await scenes.remove(sceneId)
     expect((await repo.sessionInfo(sessionId))?.status).toBe("ended")
     as = P1
-    await expectNetError(repo.joinSession(roomCode, "Alice"), "session_not_found")
+    await expectNetError(repo.joinSession(roomCode, "Alice"), "table_closed")
+  })
+})
+
+describe("local tables in worlds (mirror the worlds migration)", () => {
+  let store: LocalStore
+  let as: string
+  let repo: SessionsRepo
+  let scenes: ReturnType<typeof createLocalScenesRepo>
+  let worlds: ReturnType<typeof createLocalWorldsRepo>
+
+  beforeEach(() => {
+    store = createMemoryStore()
+    as = DM
+    scenes = createLocalScenesRepo(store)
+    worlds = createLocalWorldsRepo({ store, userId: () => as })
+    repo = createLocalSessionsRepo({ store, scenes, userId: () => as })
+  })
+
+  it("every table of a world answers to its code and seats its players, who join the world once", async () => {
+    const w = await worlds.create("Tyranny of Dragons")
+    const a = (await scenes.create(createScene({ name: "Keep" }), { worldId: w.id })).id
+    const b = (await scenes.create(createScene({ name: "Crypt" }), { worldId: w.id })).id
+    const ta = await repo.openMap(a)
+    expect(ta.roomCode).toBe(w.roomCode)
+    as = P1
+    expect(await worlds.join(w.roomCode, "Alice")).toEqual({ worldId: w.id, sessionId: null })
+    as = DM
+    const tb = await repo.openMap(b)
+    expect(tb.roomCode).toBe(w.roomCode)
+    for (const t of [ta, tb])
+      expect(await repo.listSessionMembers(t.sessionId)).toEqual([expect.objectContaining({ userId: P1, displayName: "Alice", status: "active" })])
+    expect(await repo.sessionInfo(ta.sessionId)).toMatchObject({ worldId: w.id, worldName: "Tyranny of Dragons" })
+    // One open table per world.
+    await repo.setTableOpen(ta.sessionId, true)
+    await expectNetError(repo.setTableOpen(tb.sessionId, true), "world_table_open")
+    as = P1
+    expect(await worlds.join(w.roomCode, "Alice")).toEqual({ worldId: w.id, sessionId: ta.sessionId })
+    expect(await worlds.info(w.id)).toMatchObject({ role: "player", openSessionId: ta.sessionId })
+    as = DM
+    await repo.setTableOpen(ta.sessionId, false)
+    expect(await repo.setTableOpen(tb.sessionId, true)).toBe("active")
+    // A kick at one table is from the world: every table.
+    expect(await repo.setMemberStatus(tb.sessionId, P1, "kicked")).toBe(true)
+    expect((await repo.listSessionMembers(ta.sessionId))[0].status).toBe("kicked")
+    as = P1
+    await expectNetError(worlds.join(w.roomCode, "Alice"), "kicked")
+  })
+
+  it("a table changes scene only within its world", async () => {
+    const w1 = await worlds.create("One")
+    const w2 = await worlds.create("Two")
+    const a = (await scenes.create(createScene({ name: "A" }), { worldId: w1.id })).id
+    const x = (await scenes.create(createScene({ name: "X" }), { worldId: w2.id })).id
+    const t = await repo.openMap(a)
+    const epoch = await repo.claimHost(t.sessionId)
+    await expectNetError(repo.setSessionScene(t.sessionId, epoch, x), "other_world")
+  })
+
+  it("a scene moves to another world with its closed table, never an open one", async () => {
+    const w1 = await worlds.create("One")
+    const w2 = await worlds.create("Two")
+    const a = (await scenes.create(createScene({ name: "A" }), { worldId: w1.id })).id
+    const t = await repo.openMap(a)
+    await repo.setTableOpen(t.sessionId, true)
+    await expectNetError(scenes.moveToWorld(a, w2.id), "table_open")
+    await repo.setTableOpen(t.sessionId, false)
+    expect(await scenes.moveToWorld(a, w2.id)).toBe(true)
+    expect(await scenes.moveToWorld(a, w2.id)).toBe(false)
+    expect((await scenes.get(a))?.worldId).toBe(w2.id)
+    expect(await repo.sessionInfo(t.sessionId)).toMatchObject({ worldId: w2.id, roomCode: w2.roomCode })
+    expect((await scenes.list({ worldId: w1.id })).length).toBe(0)
+  })
+
+  it("scenes stored before worlds join the first world", async () => {
+    await store.put("scenes", "old", { id: "old", name: "Old", latestVersion: 1, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" })
+    const [summary] = await createLocalScenesRepo(store).list()
+    expect(summary).toMatchObject({ id: "old" })
+    expect((await worlds.get(summary.worldId))?.name).toBe("My world")
   })
 })
 
@@ -377,6 +456,8 @@ describe("remote sessions repo", () => {
       display_name: null,
       dm_display_name: "Kev",
       created_at: "t",
+      world_id: "w",
+      world_name: "Tyranny of Dragons",
     }
     const repo = createRemoteSessionsRepo(fakeClient(() => ({ data: [row], error: null })).client)
     expect(await repo.sessionInfo("s")).toEqual({
@@ -388,6 +469,8 @@ describe("remote sessions repo", () => {
       displayName: null,
       dmDisplayName: "Kev",
       createdAt: "t",
+      worldId: "w",
+      worldName: "Tyranny of Dragons",
     })
     const none = createRemoteSessionsRepo(fakeClient(() => ({ data: [], error: null })).client)
     expect(await none.sessionInfo("s")).toBeNull()

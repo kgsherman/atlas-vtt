@@ -1,5 +1,5 @@
-// Keyboard shortcuts and key remapping (local mode): the theme's "D" hotkey works on the home page but
-// not on the map views (D pans right there; W A S D pan the editor camera and select no tool) → the editor's "?" opens the Keyboard shortcuts
+// Keyboard shortcuts and key remapping (local mode): the theme's "D" hotkey works on the world page but
+// not on the scene views (D pans right there; W A S D pan the editor camera and select no tool) → the editor's "?" opens the Keyboard shortcuts
 // dialog → recording a key (Escape cancels without closing the dialog, a key taken from another command
 // moves, browser-reserved keys are refused, Enter records without re-triggering the button) → the remapped
 // keys drive the editor and survive a reload → reset → the play tab refuses camera keys → at an open table,
@@ -48,9 +48,11 @@ try {
     .first()
     .waitFor()
   await page.keyboard.press("d")
-  checks.ok((await theme(page)) !== t0, "D toggles the theme on the home page")
+  checks.ok((await theme(page)) !== t0, "D toggles the theme on the world page")
   await page.keyboard.press("d")
   checks.eq(await theme(page), t0, "D toggles it back")
+  // Straight back: the host that was left may still be stopping (and holding its lock); the new one
+  // waits for it rather than calling it another tab.
   await page.goForward({ waitUntil: "domcontentloaded" })
   await waitFor(page, () => window.__atlasEditor?.engine != null, null, {
     timeout: 60000,
@@ -165,9 +167,7 @@ try {
   await page.keyboard.press("v")
   await page.keyboard.press("Shift+?")
   await dialog.waitFor()
-  await dialog
-    .getByRole("button", { name: /Reset all map editor keys/ })
-    .click()
+  await dialog.getByRole("button", { name: /Reset all edit keys/ }).click()
   await sleep(150)
   checks.ok(
     await dialog
@@ -231,7 +231,7 @@ try {
   await sleep(200)
   checks.eq(await preview.getAttribute("aria-pressed"), "true", "B does")
   await page.keyboard.press("b")
-  // Tab switches the map screen between Play and Edit, on a focused button too.
+  // Tab switches the scene screen between Play and Edit, on a focused button too.
   await page.keyboard.press("Tab")
   await waitFor(page, () => window.__atlasHost?.mode === "edit", null, {
     timeout: 5000,

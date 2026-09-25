@@ -1,5 +1,6 @@
 /**
- * A link-shared scene (/shared/:slug): preview (top-down schematic + stats) and "Copy to my scenes".
+ * A link-shared scene (/shared/:slug): preview (top-down schematic + stats) and "Copy to my world" (one of
+ * the visitor's worlds, ARCHITECTURE §6.9; "My world" is created for someone who has none).
  * Shared links are read through the get_shared_scene RPC only (Cloud mode).
  */
 import * as React from "react"
@@ -20,6 +21,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
@@ -133,6 +135,10 @@ function SharedView({ shared }: { shared: SharedScene }) {
   const services = useServices()
   const [, navigate] = useLocation()
   const [copying, setCopying] = React.useState(false)
+  const worldsQ = useAsync(`worlds:${services.mode}:${services.identity.userId}`, () => services.worlds.list())
+  const worlds = worldsQ.data ?? []
+  const [picked, setPicked] = React.useState<string | null>(null)
+  const target = worlds.find((w) => w.id === picked) ?? worlds[0] ?? null
   const parsed = shared.parsed
   const scene: Scene | null = parsed.ok ? parsed.scene : null
   const digest: SceneDigest | null = React.useMemo(() => (scene ? sceneDigest(scene) : null), [scene])
@@ -141,10 +147,10 @@ function SharedView({ shared }: { shared: SharedScene }) {
   const copy = async () => {
     setCopying(true)
     try {
-      const { summary, warnings } = await copySharedScene(services, shared)
-      toast.success(`Copied “${summary.name}” to your scenes`)
+      const { summary, warnings } = await copySharedScene(services, shared, target?.id)
+      toast.success(`Copied “${summary.name}” to ${target?.name ?? "your world"}`)
       for (const w of warnings) toast.warning(w)
-      navigate(paths.map(summary.id))
+      navigate(paths.scene(summary.id))
     } catch (err) {
       toast.error("Couldn't copy the scene", { description: userMessage(err) })
       setCopying(false)
@@ -217,6 +223,20 @@ function SharedView({ shared }: { shared: SharedScene }) {
         )}
 
         <div className="flex flex-wrap gap-2">
+          {worlds.length > 1 && (
+            <Select value={target?.id ?? null} onValueChange={(v) => v && setPicked(String(v))}>
+              <SelectTrigger aria-label="World" className="h-9 w-56">
+                <SelectValue>{() => target?.name ?? "Choose a world"}</SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                {worlds.map((w) => (
+                  <SelectItem key={w.id} value={w.id}>
+                    {w.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
           <Button
             size="lg"
             className="h-9 px-4 text-sm"
@@ -225,7 +245,7 @@ function SharedView({ shared }: { shared: SharedScene }) {
             disabled={!parsed.ok || copying}
           >
             {copying ? <Spinner className="size-4" data-icon="inline-start" /> : <CopyPlusIcon data-icon="inline-start" />}
-            Copy to my scenes
+            {worlds.length === 1 ? `Copy to ${worlds[0].name}` : worlds.length > 1 ? "Copy to this world" : "Copy to my scenes"}
           </Button>
         </div>
         <p className="text-[0.7rem] text-muted-foreground">The copy is yours to edit and play; the original is not affected.</p>

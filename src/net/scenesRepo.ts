@@ -17,11 +17,14 @@ import type { AssetStore } from "./assets/types"
 import type { Json } from "./database.types"
 import { getLocalStore, type LocalStore } from "./localStore"
 import { getSupabaseOrNull, NetError, toNetError, unwrap, type AtlasClient } from "./supabase"
+import { localWorlds } from "./worldsRepo"
 
 export type SceneVisibility = "private" | "link"
 
 export interface SceneSummary {
   id: string
+  /** The world the scene is in (ARCHITECTURE §6.9). */
+  worldId: string
   name: string
   visibility: SceneVisibility
   /** Present only while visibility is "link". */
@@ -61,11 +64,16 @@ export interface SaveOptions {
 
 export interface ScenesRepo {
   readonly storage: "remote" | "local"
-  /** My scenes, most recently updated first. */
-  list(): Promise<SceneSummary[]>
+  /** My scenes (of one world with `worldId`), most recently updated first. */
+  list(opts?: { worldId?: string }): Promise<SceneSummary[]>
   get(id: string): Promise<SceneSummary | null>
-  /** New library entry with the scene as version 1. */
-  create(scene: Scene): Promise<SceneSummary>
+  /** New scene with the document as version 1, in `worldId` (default: my first world, "My world" when I have none). */
+  create(scene: Scene, opts?: { worldId?: string }): Promise<SceneSummary>
+  /**
+   * Move a scene to another of my worlds (its closed table goes with it). NetError "table_open" while its
+   * table's doors are open. Whether it moved.
+   */
+  moveToWorld(id: string, worldId: string): Promise<boolean>
   /** Append an immutable version; returns the new version number. */
   saveVersion(id: string, scene: Scene, opts?: SaveOptions): Promise<number>
   /** Latest version by default. */
@@ -115,10 +123,11 @@ function parseStored(data: unknown, name: string): ParseSceneResult {
 // Supabase
 // ---------------------------------------------------------------------------
 
-const SUMMARY_COLUMNS = "id, name, visibility, share_slug, latest_version, created_at, updated_at"
+const SUMMARY_COLUMNS = "id, world_id, name, visibility, share_slug, latest_version, created_at, updated_at"
 
 interface SceneRow {
   id: string
+  world_id: string
   name: string
   visibility: string
   share_slug: string | null
@@ -130,6 +139,7 @@ interface SceneRow {
 function fromRow(row: SceneRow): SceneSummary {
   return {
     id: row.id,
+    worldId: row.world_id,
     name: row.name,
     visibility: asVisibility(row.visibility),
     shareSlug: row.share_slug,
@@ -152,17 +162,27 @@ export function createRemoteScenesRepo(client: AtlasClient): ScenesRepo {
 
   return {
     storage: "remote",
-    async list() {
-      const rows = unwrap(await client.from("scenes").select(SUMMARY_COLUMNS).order("updated_at", { ascending: false }))
+    async list(opts = {}) {
+      let q = client.from("scenes").select(SUMMARY_COLUMNS)
+      if (opts.worldId !== undefined) q = q.eq("world_id", opts.worldId)
+      const rows = unwrap(await q.order("updated_at", { ascending: false }))
       return (rows ?? []).map(fromRow)
     },
     get,
-    async create(scene) {
+    async create(scene, opts = {}) {
       const id = unwrap(
-        await client.rpc("create_scene", { p_name: normalizeSceneName(scene.name), p_schema_version: scene.schemaVersion, p_data: scene as unknown as Json })
+        await client.rpc("create_scene", {
+          p_name: normalizeSceneName(scene.name),
+          p_schema_version: scene.schemaVersion,
+          p_data: scene as unknown as Json,
+          ...(opts.worldId !== undefined ? { p_world_id: opts.worldId } : {}),
+        })
       )
       if (typeof id !== "string") throw new NetError("unknown", "create_scene returned no id")
       return mustGet(id)
+    },
+    async moveToWorld(id, worldId) {
+      return unwrap(await client.rpc("move_scene", { p_scene_id: id, p_world_id: worldId })) === true
     },
     async saveVersion(id, scene, opts = {}) {
       const version = unwrap(
@@ -232,6 +252,8 @@ export function createRemoteScenesRepo(client: AtlasClient): ScenesRepo {
 
 interface LocalSceneRecord {
   id: string
+  /** Absent in records from before worlds: they are adopted by the first world (localWorlds.adoptScenes). */
+  worldId?: string
   name: string
   latestVersion: number
   createdAt: string
@@ -247,8 +269,17 @@ interface LocalVersionRecord {
 
 const versionKey = (id: string, version: number) => `${id}:${String(version).padStart(9, "0")}`
 
-function localSummary(r: LocalSceneRecord): SceneSummary {
-  return { id: r.id, name: r.name, visibility: "private", shareSlug: null, latestVersion: r.latestVersion, createdAt: r.createdAt, updatedAt: r.updatedAt }
+function localSummary(r: LocalSceneRecord & { worldId: string }): SceneSummary {
+  return {
+    id: r.id,
+    worldId: r.worldId,
+    name: r.name,
+    visibility: "private",
+    shareSlug: null,
+    latestVersion: r.latestVersion,
+    createdAt: r.createdAt,
+    updatedAt: r.updatedAt,
+  }
 }
 
 /** Store a plain JSON copy (drops undefined, like the database would). */
@@ -264,28 +295,39 @@ function stamp(): string {
 }
 
 export function createLocalScenesRepo(storeOrPromise: LocalStore | Promise<LocalStore>): ScenesRepo {
-  const store = () => Promise.resolve(storeOrPromise)
+  // Scenes stored before worlds join the first world before anything reads them.
+  const store = async () => {
+    const s = await storeOrPromise
+    await localWorlds.adoptScenes(s)
+    return s
+  }
   const record = async (id: string) => {
     const r = await (await store()).get<LocalSceneRecord>("scenes", id)
     if (!r) throw new NetError("not_found", "scene not found")
-    return r
+    return r as LocalSceneRecord & { worldId: string }
   }
   const offline = () => new NetError("unsupported_offline", "sharing needs an online (Supabase) library")
 
   return {
     storage: "local",
-    async list() {
-      const all = await (await store()).entries<LocalSceneRecord>("scenes")
-      return all.map(([, r]) => localSummary(r)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    async list(opts = {}) {
+      const all = await (await store()).entries<LocalSceneRecord & { worldId: string }>("scenes")
+      return all
+        .map(([, r]) => localSummary(r))
+        .filter((r) => opts.worldId === undefined || r.worldId === opts.worldId)
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
     },
     async get(id) {
-      const r = await (await store()).get<LocalSceneRecord>("scenes", id)
+      const r = await (await store()).get<LocalSceneRecord & { worldId: string }>("scenes", id)
       return r ? localSummary(r) : null
     },
-    async create(scene) {
+    async create(scene, opts = {}) {
       const s = await store()
       const now = stamp()
-      const r: LocalSceneRecord = { id: crypto.randomUUID(), name: normalizeSceneName(scene.name), latestVersion: 1, createdAt: now, updatedAt: now }
+      let worldId = opts.worldId
+      if (worldId === undefined) worldId = (await localWorlds.default(s)).id
+      else if (!(await localWorlds.get(s, worldId))) throw new NetError("not_found", "world not found")
+      const r = { id: crypto.randomUUID(), worldId, name: normalizeSceneName(scene.name), latestVersion: 1, createdAt: now, updatedAt: now }
       await s.put<LocalVersionRecord>("sceneVersions", versionKey(r.id, 1), {
         version: 1,
         schemaVersion: scene.schemaVersion,
@@ -293,7 +335,25 @@ export function createLocalScenesRepo(storeOrPromise: LocalStore | Promise<Local
         data: toStoredJson(scene),
       })
       await s.put("scenes", r.id, r)
+      await localWorlds.touch(s, worldId)
       return localSummary(r)
+    },
+    async moveToWorld(id, worldId) {
+      const s = await store()
+      const r = await record(id)
+      const w = await localWorlds.get(s, worldId)
+      if (!w) throw new NetError("not_found", "world not found")
+      if (r.worldId === worldId) return false
+      // Like move_scene: an open table refuses; a closed one moves with its scene (net/sessionsRepo keeps
+      // tables in the same store: s:{id}).
+      for (const [key, table] of await s.entries<{ sceneId?: string | null; status?: string; worldId?: string; roomCode?: string }>("sessions", "s:")) {
+        if (table?.sceneId !== id || table.status === "ended") continue
+        if (table.status === "active") throw new NetError("table_open", "close the scene's table first")
+        await s.put("sessions", key, { ...table, worldId, roomCode: w.roomCode })
+      }
+      await s.put<LocalSceneRecord>("scenes", id, { ...r, worldId })
+      await localWorlds.touch(s, worldId)
+      return true
     },
     async saveVersion(id, scene, opts = {}) {
       const s = await store()

@@ -18,6 +18,7 @@ import { createMemoryStore, type LocalStore } from "../localStore"
 import { LocalTransport } from "../localTransport"
 import { createLocalScenesRepo } from "../scenesRepo"
 import { createLocalSessionsRepo, type SessionsRepo } from "../sessionsRepo"
+import { createLocalWorldsRepo, type WorldsRepo } from "../worldsRepo"
 import type { PlayerChannels, Transport } from "../transport"
 import { createHostRunner } from "./index"
 import type { CreateHostRunnerOptions, LockManagerLike } from "./hostRunner"
@@ -287,6 +288,9 @@ export interface SessionFixture {
   roomCode: string
   dmRepo: SessionsRepo
   repoOf(uid: string): SessionsRepo
+  /** The world the scene is in (the DM's first world) and its repository as the DM. */
+  worldId: string
+  worlds: WorldsRepo
   namespace: string
   newTransport(): LocalTransport
   identity: AtlasIdentity
@@ -314,6 +318,8 @@ export async function createSessionFixture(scene: Scene, players: string[]): Pro
     sessionId,
     roomCode,
     dmRepo,
+    worldId: summary.worldId,
+    worlds: createLocalWorldsRepo({ store, userId: () => DM }),
     repoOf: (uid) => {
       let r = repos.get(uid)
       if (!r) repos.set(uid, (r = createLocalSessionsRepo({ store, userId: () => uid })))
@@ -350,6 +356,7 @@ export function startHost(fx: SessionFixture, extra: Partial<CreateHostRunnerOpt
     sessionId: fx.sessionId,
     transport: fx.newTransport(),
     repo: fx.dmRepo,
+    worlds: fx.worlds,
     identity: fx.identity,
     assets: recordingAssets().store,
     createVisionClient: createInThreadVisionClient,

@@ -1,155 +1,100 @@
 /**
- * Home / library: brand hero with the primary actions, "My scenes" (Edit / Play — the same map screen —,
- * rename, duplicate, export, share, delete), sample scenes, and "My sessions" (open tables, rejoin).
+ * Home: brand hero (a new world, the sample, quick join), "Your worlds" (ARCHITECTURE §6.9: each world
+ * holds its scenes, characters and players; its page is where they are managed), and "Tables & games"
+ * (my open tables, the worlds I joined as a player).
  */
 import * as React from "react"
-import { FileUpIcon, HardDriveIcon, LibraryBigIcon, PlusIcon, SearchIcon, UploadIcon, UserRoundIcon, XIcon } from "lucide-react"
+import { GlobeIcon, HardDriveIcon, PlusIcon, UserRoundIcon } from "lucide-react"
 import { toast } from "sonner"
 import { useLocation } from "wouter"
 
-import { downloadText } from "@/app/clipboard"
-import { forgetDigest } from "@/app/digestCache"
 import { describeJoinError } from "@/app/joinErrors"
-import { createFromSample, duplicateScene, exportScene, importSceneFile, LibraryError, sweepUnusedImages, userMessage } from "@/app/library"
+import { createFromSample, sweepUnusedImages, userMessage } from "@/app/library"
 import { currentMode, modeSwitchUrl } from "@/app/mode"
 import { paths, preloadRoute } from "@/app/routes"
 import { useServices } from "@/app/services"
 import { useAsync, useOnFocus } from "@/app/useAsync"
 import { AppHeader } from "@/components/app/AppHeader"
 import { HomeHero } from "@/components/app/HomeHero"
-import { SampleSceneCard } from "@/components/app/SampleSceneCard"
-import { SceneCard, SceneCardSkeleton, type SceneAction } from "@/components/app/SceneCard"
-import { DeleteSceneDialog, RenameSceneDialog, ShareSceneDialog } from "@/components/app/SceneDialogs"
 import { SessionsPanel } from "@/components/app/SessionsPanel"
 import { SignInButtons } from "@/components/app/SignInButtons"
+import { WorldCard, WorldCardSkeleton } from "@/components/app/WorldCard"
+import { WorldNameDialog } from "@/components/world/WorldDialogs"
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
-import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from "@/components/ui/input-group"
 import { Spinner } from "@/components/ui/spinner"
-import { SAMPLE_SCENES } from "@/core/scene/samples"
+import { formatRoomCode } from "@/net/roomCodes"
 import type { SceneSummary } from "@/net/scenesRepo"
-import { formatRoomCode } from "@/net/sessionsRepo"
+import type { WorldSummary } from "@/net/worldsRepo"
 
-const SHOWN_SAMPLES = SAMPLE_SCENES.filter((s) => s.id === "crooked-lantern" || s.id === "stress-test")
-
-type DialogState = { kind: "rename" | "share" | "delete"; scene: SceneSummary } | null
+const SAMPLE_ID = "crooked-lantern"
 
 export default function HomePage() {
   const services = useServices()
   const [, navigate] = useLocation()
-  const scenesQ = useAsync(`scenes:${services.mode}:${services.identity.userId}`, () => services.scenes.list())
-  const reloadScenes = scenesQ.reload
-  useOnFocus(reloadScenes)
+  const who = `${services.mode}:${services.identity.userId}`
+  const worldsQ = useAsync(`worlds:${who}`, () => services.worlds.list())
+  const scenesQ = useAsync(`scenes:${who}`, () => services.scenes.list())
+  const tablesQ = useAsync(`tables:${who}`, () => services.sessions.listMySessions())
+  const { reload: reloadWorlds } = worldsQ
+  const { reload: reloadScenes } = scenesQ
+  const { reload: reloadTables } = tablesQ
+  const reloadAll = React.useCallback(() => {
+    reloadWorlds()
+    reloadScenes()
+    reloadTables()
+  }, [reloadWorlds, reloadScenes, reloadTables])
+  useOnFocus(reloadAll)
 
   // Map images no scene uses any more (at most daily, in the background; Supabase only).
   React.useEffect(() => {
     void sweepUnusedImages(services)
   }, [services])
 
-  const [busy, setBusy] = React.useState<{ id: string; action: SceneAction } | null>(null)
-  const [sampleBusy, setSampleBusy] = React.useState<string | null>(null)
-  const [dialog, setDialog] = React.useState<DialogState>(null)
-  const [query, setQuery] = React.useState("")
+  const [newWorld, setNewWorld] = React.useState(false)
+  const [sampleBusy, setSampleBusy] = React.useState(false)
   const [joinCode, setJoinCode] = React.useState("")
   const [joinHint, setJoinHint] = React.useState<string | null>(null)
   const [joining, setJoining] = React.useState(false)
-  const [dragging, setDragging] = React.useState(false)
-  const fileRef = React.useRef<HTMLInputElement>(null)
 
+  const worlds = React.useMemo(() => worldsQ.data ?? [], [worldsQ.data])
   const scenes = React.useMemo(() => scenesQ.data ?? [], [scenesQ.data])
+  const scenesByWorld = React.useMemo(() => {
+    const out = new Map<string, SceneSummary[]>()
+    for (const s of scenes) out.set(s.worldId, [...(out.get(s.worldId) ?? []), s])
+    return out
+  }, [scenes])
+  const worldNames = React.useMemo(() => new Map(worlds.map((w) => [w.id, w.name])), [worlds])
   const sceneNames = React.useMemo(() => new Map(scenes.map((s) => [s.id, s.name])), [scenes])
-  const needle = query.trim().toLowerCase()
-  const filtered = needle ? scenes.filter((s) => s.name.toLowerCase().includes(needle)) : scenes
+  const openWorlds = new Set((tablesQ.data ?? []).filter((t) => t.status === "active" && t.worldId).map((t) => t.worldId!))
+  // Worlds whose scenes were edited last come first.
+  const lastEdit = (id: string, fallback: string) => {
+    const latest = scenesByWorld.get(id)?.[0]?.updatedAt
+    return latest && latest > fallback ? latest : fallback
+  }
+  const sorted = [...worlds].sort((a, b) => lastEdit(b.id, b.updatedAt).localeCompare(lastEdit(a.id, a.updatedAt)))
 
-  const replaceScene = (next: SceneSummary) => scenesQ.mutate((list) => list?.map((s) => (s.id === next.id ? next : s)))
+  // ---- the sample, in a world of its own ------------------------------------------------------------------
 
-  // ---- scene actions ---------------------------------------------------------------------------
-
-  const openEditor = React.useCallback((id: string) => navigate(paths.map(id)), [navigate])
-
-  const onAction = async (action: SceneAction, scene: SceneSummary) => {
-    switch (action) {
-      case "open":
-        navigate(paths.map(scene.id, { mode: "edit" }))
-        return
-      case "play":
-        navigate(paths.map(scene.id, { mode: "play" }))
-        return
-      case "rename":
-      case "share":
-      case "delete":
-        setDialog({ kind: action, scene })
-        return
-      default:
-        break
-    }
-    setBusy({ id: scene.id, action })
+  const openSample = async () => {
+    if (sampleBusy) return
+    setSampleBusy(true)
+    let world: WorldSummary | null = null
     try {
-      if (action === "duplicate") {
-        const { summary, warnings } = await duplicateScene(
-          services,
-          scene,
-          scenes.map((s) => s.name)
-        )
-        toast.success(`Created “${summary.name}”`, { action: { label: "Open", onClick: () => openEditor(summary.id) } })
-        for (const w of warnings) toast.warning(w)
-        scenesQ.reload()
-      } else if (action === "export") {
-        const file = await exportScene(services, scene)
-        downloadText(file.fileName, file.mimeType, file.text)
-        toast.success(`Exported ${file.fileName}`)
-        for (const w of file.warnings) toast.warning(w)
-      }
+      world = await services.worlds.create("The Crooked Lantern")
+      const { summary } = await createFromSample(services, SAMPLE_ID, world.id)
+      const created = world
+      toast.success(`Created the world “${created.name}”`, { action: { label: "Open world", onClick: () => navigate(paths.world(created.id)) } })
+      navigate(paths.scene(summary.id, { mode: "edit" }))
     } catch (err) {
-      const verb = action === "duplicate" ? "duplicate the scene" : "export the scene"
-      toast.error(`Couldn't ${verb}`, { description: describeError(err) })
-    } finally {
-      setBusy(null)
+      // No empty world left behind (best effort).
+      if (world) await services.worlds.remove(world.id).catch(() => undefined)
+      toast.error("Couldn't set up the sample", { description: userMessage(err) })
+      setSampleBusy(false)
+      reloadWorlds()
     }
   }
-
-  const openSampleCopy = async (sampleId: string) => {
-    setSampleBusy(sampleId)
-    try {
-      const { summary } = await createFromSample(services, sampleId)
-      toast.success(`Added “${summary.name}” to your library`)
-      openEditor(summary.id)
-    } catch (err) {
-      toast.error("Couldn't copy the sample", { description: describeError(err) })
-      setSampleBusy(null)
-    }
-  }
-
-  // ---- import ----------------------------------------------------------------------------------
-
-  const importFiles = React.useCallback(
-    async (files: Iterable<File>) => {
-      let imported = 0
-      for (const file of files) {
-        if (file.type.startsWith("image/")) {
-          toast.info("Map images are imported into a new scene", {
-            description: file.name,
-            action: { label: "New from map images", onClick: () => navigate(paths.newFromImages()) },
-          })
-          continue
-        }
-        const id = toast.loading(`Importing ${file.name}…`)
-        try {
-          const { summary, warnings } = await importSceneFile(services, file)
-          imported++
-          toast.success(`Imported “${summary.name}”`, { id, action: { label: "Open", onClick: () => navigate(paths.map(summary.id)) } })
-          for (const w of warnings) toast.warning(w)
-        } catch (err) {
-          toast.error(`Couldn't import ${file.name}`, { id, description: describeError(err) })
-        }
-      }
-      if (imported > 0) reloadScenes()
-    },
-    [navigate, reloadScenes, services]
-  )
-
-  const pickFile = () => fileRef.current?.click()
 
   // ---- quick join ------------------------------------------------------------------------------
 
@@ -162,14 +107,13 @@ export default function HomePage() {
     }
     setJoining(true)
     try {
-      const sid = await services.sessions.joinSession(joinCode, name)
-      navigate(paths.play(sid))
+      const joined = await services.worlds.join(joinCode, name)
+      navigate(joined.sessionId ? paths.play(joined.sessionId) : paths.worldPlay(joined.worldId))
     } catch (err) {
       const f = describeJoinError(err, services.mode)
       if (f.isDm) {
-        const mine = await services.sessions.listMySessions().catch(() => [])
-        const hosted = mine.find((s) => s.roomCode === joinCode && s.status !== "ended")
-        toast.info(f.title, { description: f.description, action: hosted ? { label: "Open it", onClick: () => navigate(paths.host(hosted.id)) } : undefined })
+        const mine = worlds.find((w) => w.roomCode === joinCode)
+        toast.info(f.title, { description: f.description, action: mine ? { label: "Open it", onClick: () => navigate(paths.world(mine.id)) } : undefined })
       } else {
         toast.error(f.title, { description: f.description })
       }
@@ -183,55 +127,16 @@ export default function HomePage() {
     setJoinHint(bad.length > 0 ? `“${bad[0]}” never appears in room codes — they use digits and letters except I, L, O and U.` : null)
   }
 
-  // ---- drag-and-drop -------------------------------------------------------------------------
-
-  React.useEffect(() => {
-    let depth = 0
-    const hasFiles = (e: DragEvent) => !!e.dataTransfer && [...e.dataTransfer.types].includes("Files")
-    const enter = (e: DragEvent) => {
-      if (!hasFiles(e)) return
-      depth++
-      setDragging(true)
-    }
-    const leave = (e: DragEvent) => {
-      if (!hasFiles(e)) return
-      depth = Math.max(0, depth - 1)
-      if (depth === 0) setDragging(false)
-    }
-    const over = (e: DragEvent) => {
-      if (hasFiles(e)) e.preventDefault()
-    }
-    const drop = (e: DragEvent) => {
-      if (!hasFiles(e)) return
-      e.preventDefault()
-      depth = 0
-      setDragging(false)
-      if (e.dataTransfer?.files.length) void importFiles(e.dataTransfer.files)
-    }
-    window.addEventListener("dragenter", enter)
-    window.addEventListener("dragleave", leave)
-    window.addEventListener("dragover", over)
-    window.addEventListener("drop", drop)
-    return () => {
-      window.removeEventListener("dragenter", enter)
-      window.removeEventListener("dragleave", leave)
-      window.removeEventListener("dragover", over)
-      window.removeEventListener("drop", drop)
-    }
-  }, [importFiles])
-
   const warmEditor = () => preloadRoute("host")
-  const onIntent = warmEditor
-  const libraryBusy = busy !== null || sampleBusy !== null
 
   return (
     <div className="flex min-h-svh flex-col bg-background">
       <AppHeader />
       <main className="flex-1">
         <HomeHero
-          onNewScene={() => navigate(paths.newScene())}
-          onNewFromImages={() => navigate(paths.newFromImages())}
-          onImportFile={pickFile}
+          onNewWorld={() => setNewWorld(true)}
+          onSampleWorld={() => void openSample()}
+          sampleBusy={sampleBusy}
           onIntent={warmEditor}
           joinCode={joinCode}
           onJoinCodeChange={onJoinCodeChange}
@@ -242,19 +147,20 @@ export default function HomePage() {
 
         <div className="mx-auto flex w-full max-w-7xl flex-col gap-8 px-4 py-8 sm:px-6 lg:py-10">
           {services.mode === "local" && <LocalModeNotice />}
-          {services.mode === "supabase" && services.identity.isAnonymous && scenes.length > 0 && <GuestAccountNotice />}
+          {services.mode === "supabase" && services.identity.isAnonymous && worlds.length > 0 && <GuestAccountNotice />}
 
-          {/* Narrow: scenes, sessions, samples. Wide: scenes and samples beside a sticky sessions column. */}
-          <div className="grid grid-cols-1 gap-10 [grid-template-areas:'scenes'_'sessions'_'samples'] xl:grid-cols-[minmax(0,1fr)_22rem] xl:grid-rows-[auto_1fr] xl:gap-x-8 xl:[grid-template-areas:'scenes_sessions'_'samples_sessions']">
-            <section aria-labelledby="my-scenes" className="flex min-w-0 flex-col gap-4 [grid-area:scenes]">
+          {/* Narrow: worlds, then tables. Wide: worlds beside a sticky tables column. */}
+          <div className="grid grid-cols-1 gap-10 xl:grid-cols-[minmax(0,1fr)_22rem] xl:gap-x-8">
+            <section aria-labelledby="my-worlds" className="flex min-w-0 flex-col gap-4">
               <div className="flex flex-wrap items-end justify-between gap-3">
                 <div className="flex flex-col gap-0.5">
-                  <h2 id="my-scenes" className="flex items-center gap-2 font-heading text-lg font-semibold tracking-tight">
-                    My scenes
-                    {scenes.length > 0 && <span className="text-sm font-normal text-muted-foreground tabular-nums">{scenes.length}</span>}
-                    {scenesQ.refreshing && <Spinner className="size-3.5 text-muted-foreground" />}
+                  <h2 id="my-worlds" className="flex items-center gap-2 font-heading text-lg font-semibold tracking-tight">
+                    Your worlds
+                    {worlds.length > 0 && <span className="text-sm font-normal text-muted-foreground tabular-nums">{worlds.length}</span>}
+                    {worldsQ.refreshing && <Spinner className="size-3.5 text-muted-foreground" />}
                   </h2>
                   <p className="text-xs text-muted-foreground">
+                    One per campaign: its scenes, characters and players.{" "}
                     {services.mode === "local"
                       ? "Stored in this browser."
                       : services.identity.isAnonymous
@@ -262,134 +168,69 @@ export default function HomePage() {
                         : "Saved to your Atlas account."}
                   </p>
                 </div>
-                <div className="flex w-full items-center gap-2 sm:w-auto">
-                  {scenes.length > 3 && (
-                    <InputGroup className="h-7 sm:w-56">
-                      <InputGroupAddon>
-                        <SearchIcon />
-                      </InputGroupAddon>
-                      <InputGroupInput
-                        value={query}
-                        onChange={(e) => setQuery(e.target.value)}
-                        placeholder="Search scenes"
-                        aria-label="Search scenes"
-                        onKeyDown={(e) => e.key === "Escape" && (setQuery(""), e.currentTarget.blur())}
-                      />
-                      {query && (
-                        <InputGroupAddon align="inline-end">
-                          <InputGroupButton size="icon-xs" aria-label="Clear search" onClick={() => setQuery("")}>
-                            <XIcon />
-                          </InputGroupButton>
-                        </InputGroupAddon>
-                      )}
-                    </InputGroup>
-                  )}
-                  {scenes.length > 0 && (
-                    <>
-                      <Button variant="outline" onClick={pickFile} className="max-sm:flex-1">
-                        <FileUpIcon data-icon="inline-start" />
-                        Import
-                      </Button>
-                      <Button onClick={() => navigate(paths.newScene())} onPointerEnter={warmEditor} className="max-sm:flex-1">
-                        <PlusIcon data-icon="inline-start" />
-                        New scene
-                      </Button>
-                    </>
-                  )}
-                </div>
+                {worlds.length > 0 && (
+                  <Button onClick={() => setNewWorld(true)} className="max-sm:w-full">
+                    <PlusIcon data-icon="inline-start" />
+                    New world
+                  </Button>
+                )}
               </div>
 
-              {scenesQ.error !== undefined && !scenesQ.data ? (
+              {(worldsQ.error !== undefined && !worldsQ.data) || (scenesQ.error !== undefined && !scenesQ.data) ? (
                 <Alert variant="destructive">
-                  <AlertTitle>Couldn't load your scenes</AlertTitle>
-                  <AlertDescription>{userMessage(scenesQ.error)}</AlertDescription>
+                  <AlertTitle>Couldn't load your worlds</AlertTitle>
+                  <AlertDescription>{userMessage(worldsQ.error ?? scenesQ.error)}</AlertDescription>
                   <AlertAction>
-                    <Button size="xs" variant="outline" onClick={scenesQ.reload}>
+                    <Button size="xs" variant="outline" onClick={reloadAll}>
                       Retry
                     </Button>
                   </AlertAction>
                 </Alert>
-              ) : scenesQ.loading && !scenesQ.data ? (
+              ) : !worldsQ.data || !scenesQ.data ? (
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                   {[0, 1, 2].map((i) => (
-                    <SceneCardSkeleton key={i} />
+                    <WorldCardSkeleton key={i} />
                   ))}
                 </div>
-              ) : scenes.length === 0 ? (
+              ) : worlds.length === 0 ? (
                 <Empty className="border bg-card/30 py-12">
                   <EmptyHeader>
                     <EmptyMedia variant="icon">
-                      <LibraryBigIcon />
+                      <GlobeIcon />
                     </EmptyMedia>
-                    <EmptyTitle>Your library is empty</EmptyTitle>
-                    <EmptyDescription>Create a scene from scratch, start from your battlemap images, or open a copy of a sample below.</EmptyDescription>
+                    <EmptyTitle>No worlds yet</EmptyTitle>
+                    <EmptyDescription>
+                      A world is one campaign — say, Tyranny of Dragons for one group and Storm King's Thunder for another. Create one, or explore the sample.
+                    </EmptyDescription>
                   </EmptyHeader>
                   <EmptyContent className="flex-row justify-center">
-                    <Button onClick={() => navigate(paths.newScene())} onPointerEnter={warmEditor}>
+                    <Button onClick={() => setNewWorld(true)}>
                       <PlusIcon data-icon="inline-start" />
-                      New scene
+                      New world
                     </Button>
-                    <Button variant="outline" onClick={pickFile}>
-                      <FileUpIcon data-icon="inline-start" />
-                      Import file
-                    </Button>
-                  </EmptyContent>
-                </Empty>
-              ) : filtered.length === 0 ? (
-                <Empty className="border py-10">
-                  <EmptyHeader>
-                    <EmptyMedia variant="icon">
-                      <SearchIcon />
-                    </EmptyMedia>
-                    <EmptyTitle>No scenes match “{query.trim()}”</EmptyTitle>
-                  </EmptyHeader>
-                  <EmptyContent>
-                    <Button variant="outline" onClick={() => setQuery("")}>
-                      Clear search
+                    <Button variant="outline" onClick={() => void openSample()} onPointerEnter={warmEditor} disabled={sampleBusy}>
+                      {sampleBusy && <Spinner className="size-3.5" data-icon="inline-start" />}
+                      Try the sample
                     </Button>
                   </EmptyContent>
                 </Empty>
               ) : (
                 <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {filtered.map((scene) => (
-                    <SceneCard
-                      key={scene.id}
-                      scene={scene}
-                      busy={busy?.id === scene.id ? busy.action : null}
-                      disabled={libraryBusy}
-                      onAction={(a, s) => void onAction(a, s)}
-                      onIntent={onIntent}
-                    />
+                  {sorted.map((world) => (
+                    <WorldCard key={world.id} world={world} scenes={scenesByWorld.get(world.id) ?? []} tableOpen={openWorlds.has(world.id)} />
                   ))}
                 </div>
               )}
             </section>
 
-            <section aria-labelledby="samples" className="flex min-w-0 flex-col gap-4 [grid-area:samples]">
-              <div className="flex flex-col gap-0.5">
-                <h2 id="samples" className="font-heading text-lg font-semibold tracking-tight">
-                  Sample scenes
-                </h2>
-                <p className="text-xs text-muted-foreground">
-                  Ready-made maps to explore the lighting, levels and vision. Opening one adds a copy to your library.
-                </p>
-              </div>
-              <div className="grid gap-4 lg:grid-cols-2">
-                {SHOWN_SAMPLES.map((sample) => (
-                  <SampleSceneCard
-                    key={sample.id}
-                    sample={sample}
-                    busy={sampleBusy === sample.id}
-                    disabled={libraryBusy}
-                    onOpenCopy={() => void openSampleCopy(sample.id)}
-                    onIntent={warmEditor}
-                  />
-                ))}
-              </div>
-            </section>
-
-            <aside className="flex min-w-0 flex-col gap-4 [grid-area:sessions] xl:sticky xl:top-20 xl:self-start">
-              <SessionsPanel sceneNames={sceneNames} />
+            <aside className="flex min-w-0 flex-col gap-4 xl:sticky xl:top-20 xl:self-start">
+              <SessionsPanel
+                tables={tablesQ.data}
+                tablesError={tablesQ.error !== undefined && !tablesQ.data ? tablesQ.error : undefined}
+                onRetryTables={reloadTables}
+                worldNames={worldNames}
+                sceneNames={sceneNames}
+              />
             </aside>
           </div>
         </div>
@@ -401,39 +242,9 @@ export default function HomePage() {
         </div>
       </footer>
 
-      <input
-        ref={fileRef}
-        type="file"
-        accept=".json,.atlas.json,application/json"
-        multiple
-        hidden
-        onChange={(e) => {
-          const files = e.currentTarget.files ? [...e.currentTarget.files] : []
-          e.currentTarget.value = ""
-          if (files.length) void importFiles(files)
-        }}
-      />
-
-      <RenameSceneDialog scene={dialog?.kind === "rename" ? dialog.scene : null} onClose={() => setDialog(null)} onRenamed={replaceScene} />
-      <ShareSceneDialog scene={dialog?.kind === "share" ? dialog.scene : null} onClose={() => setDialog(null)} onChanged={replaceScene} />
-      <DeleteSceneDialog
-        scene={dialog?.kind === "delete" ? dialog.scene : null}
-        onClose={() => setDialog(null)}
-        onDeleted={(scene) => {
-          forgetDigest(scene)
-          scenesQ.mutate((list) => list?.filter((s) => s.id !== scene.id))
-          toast.success(`Deleted “${scene.name}”`)
-        }}
-      />
-
-      {dragging && <DropOverlay />}
+      <WorldNameDialog open={newWorld} world={null} onClose={() => setNewWorld(false)} onDone={(w) => navigate(paths.world(w.id))} />
     </div>
   )
-}
-
-function describeError(err: unknown): string {
-  if (err instanceof LibraryError && err.details.length > 0) return `${err.message} ${err.details.slice(0, 3).join(" · ")}`
-  return userMessage(err)
 }
 
 function LocalModeNotice() {
@@ -443,7 +254,7 @@ function LocalModeNotice() {
       <HardDriveIcon />
       <AlertTitle>Local mode</AlertTitle>
       <AlertDescription>
-        Scenes are stored in this browser and games only work between its tabs — each tab is a separate user. Use it for testing; it is not secure.
+        Worlds and scenes are stored in this browser and games only work between its tabs — each tab is a separate user. Use it for testing; it is not secure.
       </AlertDescription>
       {cloudAvailable && (
         <AlertAction>
@@ -458,7 +269,7 @@ function LocalModeNotice() {
 
 const GUEST_NOTICE_KEY = "atlas-vtt:guest-notice-dismissed"
 
-/** Cloud guests with scenes: nudge towards a permanent account (dismissible per browser). */
+/** Cloud guests with worlds: nudge towards a permanent account (dismissible per browser). */
 function GuestAccountNotice() {
   const [dismissed, setDismissed] = React.useState(() => {
     try {
@@ -481,8 +292,10 @@ function GuestAccountNotice() {
   return (
     <Alert className="border-primary/30 bg-primary/8 *:[svg]:text-primary">
       <UserRoundIcon />
-      <AlertTitle>Keep your scenes</AlertTitle>
-      <AlertDescription>You're a guest: your scenes live in this browser only. Create an account to keep them and open them anywhere.</AlertDescription>
+      <AlertTitle>Keep your worlds</AlertTitle>
+      <AlertDescription>
+        You're a guest: your worlds and scenes live in this browser only. Create an account to keep them and open them anywhere.
+      </AlertDescription>
       {/* In the flow rather than an AlertAction: the provider buttons don't fit beside the title on phones. */}
       <div className="col-start-2 mt-1.5 flex flex-wrap items-center gap-1">
         <SignInButtons orientation="horizontal" size="xs" className="flex-wrap" />
@@ -491,19 +304,5 @@ function GuestAccountNotice() {
         </Button>
       </div>
     </Alert>
-  )
-}
-
-function DropOverlay() {
-  return (
-    <div className="pointer-events-none fixed inset-0 z-50 flex animate-in items-center justify-center bg-background/80 p-6 backdrop-blur-sm duration-150 fade-in-0">
-      <div className="flex w-full max-w-md flex-col items-center gap-3 rounded-2xl border-2 border-dashed border-primary/60 bg-card/80 px-8 py-12 text-center">
-        <div className="flex size-12 items-center justify-center rounded-xl bg-primary/15 text-primary">
-          <UploadIcon className="size-6" />
-        </div>
-        <div className="font-heading text-base font-semibold">Drop to import</div>
-        <p className="text-xs text-muted-foreground">.atlas.json scene files are added to your library.</p>
-      </div>
-    </div>
   )
 }

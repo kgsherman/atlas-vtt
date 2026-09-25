@@ -114,7 +114,7 @@ describe("the unsaved-edits guard", () => {
     expect(saveChoiceText(c)).toContain("“The Crooked Lantern”")
   })
 
-  it("explains every other library state", () => {
+  it("explains every other state of the scene", () => {
     expect(saveChoice({ dirty: true, library: { status: "loading" } })).toEqual(
       { kind: "looking-up" }
     )
@@ -128,7 +128,7 @@ describe("the unsaved-edits guard", () => {
       saveChoiceText(
         saveChoice({ dirty: true, library: { status: "deleted" } })
       )
-    ).toMatch(/no longer in your library/)
+    ).toMatch(/has been deleted/)
   })
 })
 
@@ -156,7 +156,7 @@ describe("refusals", () => {
   it("explains the other refusals", () => {
     expect(changeMapErrorText("unknown-level")).toMatch(/arrival level/)
     expect(changeMapErrorText("too-many")).toMatch(/1,000 tokens/)
-    expect(changeMapErrorText("same-map")).toMatch(/map you're playing/)
+    expect(changeMapErrorText("same-map")).toMatch(/scene you're playing/)
     expect(changeMapErrorText("not-hosting")).toMatch(/isn't hosting/)
   })
 })

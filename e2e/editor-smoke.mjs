@@ -1,14 +1,13 @@
-// Editor smoke test (local mode): new map (the map screen in Edit, its table closed) → the start-up
+// Editor smoke test (local mode): a new world → a new scene (the scene screen in Edit, its table closed) → the start-up
 // quality probe ran (Auto) → every menubar menu opens without crashing → every tool's options fit a
 // 1280 px window (each terrain sub-tool too) → floor, walls, door, light, token through the real tools →
 // undo / redo → shortcuts still work after a Select popup was used → a terrain block drawn Blender-style
 // (drag the base, move up, click), invisible and unselectable outside the terrain tool, selectable with
 // its Select sub-tool → a wall's Follow terrain switch in the Inspector → rename, a restore point
-// (Ctrl+S) → reload → the map is unchanged → it is listed in the library under its new name.
+// (Ctrl+S) → reload → the scene is unchanged → it is listed in its world under its new name.
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/editor-smoke.mjs
 import {
-  BASE,
   Checks,
   clickWorld,
   dragWorld,
@@ -25,6 +24,7 @@ import {
   waitFor,
   watchPage,
 } from "./lib.mjs"
+import { createWorld } from "./session.mjs"
 
 const OUT = outDir("editor-smoke")
 const checks = new Checks("editor-smoke")
@@ -129,8 +129,8 @@ try {
   const page = await context.newPage()
   watchPage(page, "editor", logs)
 
-  checks.step("Library → New scene")
-  await page.goto(`${BASE}/?local=1`, { waitUntil: "domcontentloaded" })
+  checks.step("New world → New scene")
+  const worldId = await createWorld(page, { name: "Smoke world" })
   await page
     .getByRole("button", { name: /New scene/ })
     .first()
@@ -141,7 +141,7 @@ try {
       location.pathname.startsWith("/host/") &&
       window.__atlasHost?.mode === "edit",
     null,
-    { label: "the new map's screen in Edit" }
+    { label: "the new scene's screen in Edit" }
   )
   await waitEditor(page)
   const initial = await editorSummary(page)
@@ -609,13 +609,13 @@ try {
   )
   await shot(page, OUT, "04-reloaded")
 
-  checks.step("Library lists the scene")
-  await page.getByRole("button", { name: "Back to library" }).click()
-  await waitFor(page, () => location.pathname === "/", null, {
-    label: "library route",
+  checks.step("The world lists the scene")
+  await page.getByRole("button", { name: "Back to the world" }).click()
+  await waitFor(page, (id) => location.pathname === `/world/${id}`, worldId, {
+    label: "the world page",
   })
   await page.getByText(name).first().waitFor({ timeout: 10000 })
-  checks.ok(true, "the saved scene appears in My scenes")
+  checks.ok(true, "the saved scene appears in the world's scenes")
   await shot(page, OUT, "05-library")
 } catch (err) {
   checks.fail("editor-smoke crashed", err)

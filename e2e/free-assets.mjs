@@ -2,7 +2,7 @@
 // models" category on in the Assets tab, which lists the free token models; a click puts one on the
 // selected token, a player who sees the token downloads the model from the public free-assets bucket
 // and draws it, and unloading the category keeps the token's model. Cleans up: ends the table and
-// deletes the scene copy.
+// deletes the scene copy and its world.
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/free-assets.mjs
 //
@@ -83,7 +83,10 @@ try {
   dm = await dmCtx.newPage()
   watchPage(dm, "dm", logs)
   const sceneId = await openSceneInEditor(dm, { mode: "supabase" })
-  cleanup = { sceneId, sessionId: null }
+  const worldId = await dm.evaluate(
+    () => window.__atlasHost.runner.getSnapshot().world?.id ?? null
+  )
+  cleanup = { sceneId, sessionId: null, worldId }
   const h0 = await startSession(dm, { freeAssets: ["Token models"] })
   cleanup.sessionId = h0.sessionId
   checks.eq(
@@ -128,11 +131,11 @@ try {
   )
   checks.ok(
     dmDownloads.some((p) => p.endsWith("/token-models/elf-archer.glb")),
-    "the map screen downloaded the model from the free-assets bucket"
+    "the scene screen downloaded the model from the free-assets bucket"
   )
   checks.ok(
     (await hostState(dm)).state.origin?.dirty === true,
-    "a model change changes the map (since its last restore point)"
+    "a model change changes the scene (since its last restore point)"
   )
   await sleep(1500)
   await shot(dm, OUT, "02-host-assets-tab")
@@ -214,17 +217,18 @@ try {
 } finally {
   if (cleanup && dm) {
     try {
-      // As the DM (same anonymous user): end the session, delete the scene copy.
+      // As the DM (same anonymous user): end the session, delete the scene copy and its world.
       await dm.goto(`${BASE}/?local=0`, { waitUntil: "domcontentloaded" })
-      const who = await dm.evaluate(async ({ sceneId, sessionId }) => {
+      const who = await dm.evaluate(async ({ sceneId, sessionId, worldId }) => {
         const m = await import("/src/app/createServices.ts")
         const s = await m.createServices({ mode: "supabase" })
         if (sessionId) await s.sessions.endSession(sessionId).catch(() => false)
         await s.scenes.remove(sceneId)
+        if (worldId) await s.worlds.remove(worldId).catch(() => {})
         return s.identity.userId
       }, cleanup)
       console.log(
-        `  cleanup: session ended, scene ${cleanup.sceneId} deleted (anonymous users remain, DM ${who})`
+        `  cleanup: session ended, scene ${cleanup.sceneId} and its world deleted (anonymous users remain, DM ${who})`
       )
     } catch (err) {
       console.log(`  cleanup failed: ${err.message}`)

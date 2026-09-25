@@ -1,8 +1,8 @@
 /**
- * /map/:sceneId — open one of the DM's maps (ARCHITECTURE §6.8): the map's table (SessionsRepo.openMap,
- * created closed when the map has none) opens in the map screen (/host/:sessionId), in Edit or Play.
- * "new" first adds a blank map to the library (?import=1: then the map image import builds it from
- * battlemaps). The old /editor/… links land here too.
+ * /scene/:sceneId — open one of the DM's scenes (ARCHITECTURE §6.8): the scene's table (SessionsRepo.openMap,
+ * created closed when the scene has none) opens in the scene screen (/host/:sessionId), in Edit or Play.
+ * "new" first adds a blank scene to a world (`?world=`, default the first one; §6.9); `?import=1` then opens
+ * the map image import, which builds it from battlemaps. The old /map/… and /editor/… links land here too.
  */
 import * as React from "react"
 import { AlertTriangle, ArrowLeft } from "lucide-react"
@@ -16,7 +16,7 @@ import { PageLoader } from "@/components/app/Splash"
 import { Button } from "@/components/ui/button"
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 
-export default function MapPage() {
+export default function ScenePage() {
   const params = useParams<{ sceneId?: string }>()
   const search = useSearch()
   const [, navigate] = useLocation()
@@ -29,7 +29,7 @@ export default function MapPage() {
     preloadRoute("host")
     const q = new URLSearchParams(search)
     const open = async () => {
-      const id = sceneId === "new" ? (await createBlankMap(services)).id : sceneId
+      const id = sceneId === "new" ? (await createBlankMap(services, q.get("world") ?? undefined)).id : sceneId
       const table = await services.sessions.openMap(id, { freeAssets: readStartFreeAssets() })
       if (!alive) return
       const next = new URLSearchParams()
@@ -39,7 +39,7 @@ export default function MapPage() {
       const qs = next.toString()
       navigate(`${paths.host(table.sessionId)}${qs ? `?${qs}` : ""}`, { replace: true })
     }
-    // Deferred by a task: StrictMode's mount → unmount → mount must not create two new maps.
+    // Deferred by a task: StrictMode's mount → unmount → mount must not create two new scenes.
     const timer = setTimeout(() => {
       open().catch((err: unknown) => {
         if (alive) setError(userMessage(err))
@@ -51,7 +51,7 @@ export default function MapPage() {
     }
   }, [sceneId, search, services, navigate])
 
-  if (!error) return <PageLoader label={sceneId === "new" ? "Creating the map…" : "Opening the map…"} />
+  if (!error) return <PageLoader label={sceneId === "new" ? "Creating the scene…" : "Opening the scene…"} />
   return (
     <div className="grid h-svh place-items-center bg-background p-6">
       <Empty className="max-w-md border">
@@ -59,12 +59,12 @@ export default function MapPage() {
           <EmptyMedia variant="icon">
             <AlertTriangle />
           </EmptyMedia>
-          <EmptyTitle>This map can't be opened</EmptyTitle>
+          <EmptyTitle>This scene can't be opened</EmptyTitle>
           <EmptyDescription>{error}</EmptyDescription>
         </EmptyHeader>
         <EmptyContent className="flex-row justify-center">
           <Button variant="outline" onClick={() => navigate(paths.home())}>
-            <ArrowLeft data-icon="inline-start" /> Library
+            <ArrowLeft data-icon="inline-start" /> Worlds
           </Button>
         </EmptyContent>
       </Empty>

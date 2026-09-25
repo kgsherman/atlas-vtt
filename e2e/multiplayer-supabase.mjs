@@ -1,13 +1,14 @@
 // Multiplayer end to end against the real Supabase backend (the app's default mode, from .env.local):
-// two browser contexts = two anonymous users. The DM copies the Crooked Lantern sample into their
-// library and starts a session; one player joins by room code; realtime runs over RLS-protected
+// two browser contexts = two anonymous users. The DM creates a world, copies the Crooked Lantern sample
+// into it and opens its table; one player joins by the world's room code; realtime runs over RLS-protected
 // private channels. Checks: the player's view equals the authoritative oracle, a drag move, the
 // movement lock, reload → same state, Realtime RLS refuses another user's topics and the host topic
 // for writes, table RLS hides the DM's rows, no secret in any websocket frame the player received,
 // Realtime refuses public channels and a kicked member's host subscription stops receiving once its
-// client sends a new JWT, closing the table reaches the player (and hides their stored view), and deleting the map ends
-// the table and removes its players' tiles. Cleans up whatever is left: ends the table and deletes the scene copy
-// (anonymous users cannot be deleted with the publishable key; they are listed at the end).
+// client sends a new JWT, closing the table reaches the player (and hides their stored view), and deleting the scene
+// (from the world's page) ends the table and removes its players' tiles. Cleans up whatever is left: ends the table,
+// deletes the scene copy and the world (anonymous users cannot be deleted with the publishable key; they are listed
+// at the end).
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-supabase.mjs
 import {
@@ -111,7 +112,10 @@ try {
     mode: "supabase",
     file: process.env.ATLAS_SCENE ?? null,
   })
-  cleanup = { sceneId, sessionId: null }
+  const worldId = await dm.evaluate(
+    () => window.__atlasHost.runner.getSnapshot().world?.id ?? null
+  )
+  cleanup = { sceneId, sessionId: null, worldId }
   const h0 = await startSession(dm)
   const sessionId = h0.sessionId
   cleanup.sessionId = sessionId
@@ -881,7 +885,7 @@ try {
   checks.eq(
     await dm.evaluate(() => window.__atlasHost.runner.getSnapshot().status),
     "hosting",
-    "the DM stays on the map"
+    "the DM stays on the scene"
   )
   checks.eq(
     await pl.evaluate(async (sid) => {
@@ -897,11 +901,11 @@ try {
   )
   await shot(pl, OUT, "03-player-closed")
 
-  checks.step("DM deletes the map: its table ends")
-  await dm.getByRole("button", { name: "Back to library" }).click()
-  await waitFor(dm, () => location.pathname === "/", null, {
+  checks.step("DM deletes the scene on the world's page: its table ends")
+  await dm.getByRole("button", { name: "Back to the world" }).click()
+  await waitFor(dm, (id) => location.pathname === `/world/${id}`, worldId, {
     timeout: 30000,
-    label: "library",
+    label: "the world page",
   })
   const card = dm.locator("[data-slot=card]", { hasText: scene0.name }).first()
   await card.getByRole("button", { name: /More actions for/ }).click()
@@ -926,7 +930,7 @@ try {
   cleanup.sessionId = null
   cleanup.sceneId = null
   if (Object.values(scene0.levels).some((l) => l.backdrop)) {
-    // Deleting the map removes its players' tile chunks (best effort).
+    // Deleting the scene removes its players' tile chunks (best effort).
     const leftover = async () =>
       dm.evaluate(async (sid) => {
         const { getSupabase } = await import("/src/net/supabase.ts")
@@ -951,19 +955,20 @@ try {
       await sleep(1000)
       left = await leftover()
     }
-    checks.eq(left, 0, "deleting the map deletes its players' map tiles")
+    checks.eq(left, 0, "deleting the scene deletes its players' map tiles")
   }
 } catch (err) {
   checks.fail("multiplayer-supabase crashed", err)
 } finally {
-  // Cleanup through the DM's own identity: end the session if still active, delete the scene copy.
+  // Cleanup through the DM's own identity: end the session if still active, delete the scene copy and
+  // the world.
   if (cleanup) {
     try {
       const ctx = browser.contexts()[0]
       const page = ctx?.pages()[0]
       if (page) {
         const done = await page.evaluate(
-          async ({ sceneId, sessionId, cleanupSid }) => {
+          async ({ sceneId, sessionId, cleanupSid, worldId }) => {
             const m = await import("/src/app/createServices.ts")
             const { removeSessionTiles } =
               await import("/src/net/assets/index.ts")
@@ -972,7 +977,7 @@ try {
             if (sessionId)
               await s.sessions.endSession(sessionId).catch(() => false)
             // Uploaded map images (stored under the scene DOCUMENT id), any tiles the host left behind,
-            // then the library row.
+            // then the scene's row and the (then empty) world.
             const scene = sceneId
               ? await s.scenes.load(sceneId).catch(() => null)
               : null
@@ -999,12 +1004,24 @@ try {
                 )
               : 0
             if (sceneId) await s.scenes.remove(sceneId)
-            return { userId: s.identity.userId, assets: deleted, left, tiles }
+            const world = worldId
+              ? await s.worlds.remove(worldId).then(
+                  () => "deleted",
+                  (e) => `not deleted (${e?.code ?? e?.message ?? e})`
+                )
+              : "unknown"
+            return {
+              userId: s.identity.userId,
+              assets: deleted,
+              left,
+              tiles,
+              world,
+            }
           },
           { ...cleanup, cleanupSid: cleanup.sid }
         )
         console.log(
-          `  cleanup: session ended, scene ${cleanup.sceneId} deleted with ${done.assets} map images (${done.left} left) and ${done.tiles} leftover tiles (anonymous DM user ${done.userId} remains)`
+          `  cleanup: session ended, scene ${cleanup.sceneId} deleted with ${done.assets} map images (${done.left} left) and ${done.tiles} leftover tiles, world ${done.world} (anonymous DM user ${done.userId} remains)`
         )
       }
     } catch (err) {

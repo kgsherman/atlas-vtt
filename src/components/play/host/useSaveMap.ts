@@ -42,7 +42,7 @@ export interface SaveMap {
 export type SaveMapRunner = Pick<HostRunner, "saveMapToLibrary">
 
 /** Why there is nothing to save restore points to (the live map's library scene is gone). */
-export const LIBRARY_SCENE_DELETED = "This map was deleted from your library."
+export const LIBRARY_SCENE_DELETED = "This scene was deleted from its world."
 
 /** The version-conflict toast (one at a time; dismissed when the game moves to another map). */
 const CONFLICT_TOAST = "save-map-conflict"
@@ -123,22 +123,22 @@ export function useSaveMap(
   const saveOnce = React.useCallback<SaveMap["save"]>(
     async (opts = {}) => {
       if (library.status !== "linked") {
-        toast.error("There is no library entry to save to", {
+        toast.error("There is no scene to save to", {
           description:
             library.status === "deleted"
               ? LIBRARY_SCENE_DELETED
               : library.status === "unavailable"
                 ? library.error
-                : "Still looking up the library scene. Try again in a moment.",
+                : "Still looking up the scene. Try again in a moment.",
         })
         return false
       }
       const target = library.sceneId
       const conflict = () => {
-        toast.error("Another restore point of this map was saved elsewhere", {
+        toast.error("Another restore point of this scene was saved elsewhere", {
           id: CONFLICT_TOAST,
           description:
-            "Save the map as it is here anyway, or keep that one. Either way, earlier versions stay in version history.",
+            "Save the scene as it is here anyway, or keep that one. Either way, earlier versions stay in version history.",
           duration: 12_000,
           action: {
             label: "Save anyway",
@@ -179,7 +179,7 @@ export function useSaveMap(
         if (isNetError(err, "version_conflict")) conflict()
         else if (isNetError(err, "not_found")) {
           setLookup({ sceneId: library.sceneId, link: { status: "deleted" } })
-          toast.error("This map was deleted from your library", {
+          toast.error("This scene was deleted from its world", {
             description: "There is nothing to save restore points to.",
           })
         } else

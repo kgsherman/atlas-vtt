@@ -18,16 +18,27 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
 
 ## Features
 
-**One screen per map (DM)**
-- The DM opens a map and switches between **Edit** and **Play** with the switch at the top or **Tab**. Both
-  are views of the same live map: undo, the level and the camera carry across.
-- Each map has a **table** with a room code. **Open the table** lets players in; you can keep editing and
-  playing as before, and they see changes as they explore. **Close the table** disconnects them and keeps
-  you on the map; they come back with the same room code, on their own if their page is still open. Leaving
-  with the table open asks whether to close it first.
-- The map remembers everything that happens on it (edits, token moves, doors, lights) and saves itself.
+**Worlds (DM)**
+- A **world** is one campaign — say, Tyranny of Dragons for one group and Storm King's Thunder for another.
+  It holds its **scenes**, its **characters** and its **players**, and has one room code.
+- Players join the world once, with its code. On the world page the DM gives each player their
+  **characters** ("Played by"), once for every scene of the world. A token linked to a character (the token
+  inspector's **Character** field, or "Make it a character") is controlled by whoever plays it, in any scene.
+  Other tokens (a summoned wolf, a charmed ogre) can still be handed out at the table.
+- The world page lists its scenes (new, from map images, import, samples, move to another world), its
+  characters and its players (remove one from the world, or let them back in).
+
+**One screen per scene (DM)**
+- The DM opens a scene and switches between **Edit** and **Play** with the switch at the top or **Tab**. Both
+  are views of the same live scene: undo, the level and the camera carry across.
+- Each scene has a **table**. **Open the table** lets the world's players in (one table of a world is open
+  at a time); you can keep editing and playing as before, and they see changes as they explore. **Close the
+  table** disconnects them and keeps you on the scene; they come back on their own if their page is still
+  open, or to whichever table of the world you open next. Leaving with the table open asks whether to close
+  it first.
+- The scene remembers everything that happens on it (edits, token moves, doors, lights) and saves itself.
   **Restore points** go to its version history: Ctrl+S, and on the way when you close the table, leave,
-  change maps or share it. Version history puts the map back as it was at any restore point (undoable).
+  change scenes or share it. Version history puts the scene back as it was at any restore point (undoable).
 
 **Building maps (Edit)**
 - Multi-level scenes: each level has its own elevation, storey height and floor thickness. Levels can be
@@ -71,15 +82,15 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
   a model on the selected token; the token inspector and each token's menu offer them too. A model stands
   on the token's base for everyone who sees the token, at a level of detail that fits its size on screen.
 - DM controls: lock movement (for everyone or per player), shared vision, speed enforcement, door and light
-  toggles, hide or reveal tokens, reveal secret doors, assign tokens to players, reset fog, and kick
-  players.
-- **Change map**: the DM moves the table to another map of the library (or a copy of a sample) without
+  toggles, hide or reveal tokens, reveal secret doors, the world's characters and who plays them, other
+  tokens handed to players, reset fog, and removing players from the world.
+- **Change scene**: the DM moves the table to another scene of the world (or a copy of a sample) without
   closing it. They choose who comes along and where the party arrives. The chosen tokens keep their hit
-  points, conditions, portraits and carried lights, and their players keep controlling them. Players stay
-  connected, keep the chat and follow their characters to the new map, starting with fresh fog. The map
-  left keeps a restore point.
+  points, conditions, portraits and carried lights, and their players keep controlling them (a character
+  already placed on the new scene gives way to the one arriving). Players stay connected, keep the chat and
+  follow their characters to the new scene, starting with fresh fog. The scene left keeps a restore point.
 
-![Change map, step 2: the DM ticks who comes along from the tavern (the players' characters by default) and picks where they arrive on the Stress Test](docs/screenshots/crooked-lantern-dm-change-map.png)
+![Change scene, step 2: the DM ticks who comes along from the tavern (the players' characters by default) and picks where they arrive on the Stress Test](docs/screenshots/crooked-lantern-dm-change-map.png)
 
 **At the table**
 - Chat and dice for the DM and every player (Enter opens the dock). Type `/r 1d20+5 to hit`, a bare
@@ -133,9 +144,10 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
   the browser.
 
 **Multiplayer**
-- The DM opens a map's table and players join with its 8-character room code. No accounts are needed: the app
-  signs everyone in as an anonymous guest. A guest can create a permanent account with Discord (from the
-  name chip in the header) to keep their scenes and games across browsers; the display name stays
+- Players join a world with its 8-character room code, then come to whichever of its tables the DM opens
+  (they wait on a page of their own until one is). No accounts are needed: the app signs everyone in as an
+  anonymous guest. A guest can create a permanent account with Discord (from the name chip in the header) to
+  keep their worlds and games across browsers; the display name stays
   Atlas's own and can be changed at any time.
 - The DM is authoritative. Players send move and door requests; the DM's tab validates them, computes
   visibility in a Web Worker, and sends each player a per-player diff of their filtered view.
@@ -168,7 +180,7 @@ npm run dev          # http://localhost:5173
 
 ### Local mode (no backend)
 
-Without Supabase settings the app runs in **local mode**. Scenes are stored in IndexedDB, and games run
+Without Supabase settings the app runs in **local mode**. Worlds and scenes are stored in IndexedDB, and games run
 between tabs of one browser over `BroadcastChannel`, with each tab acting as its own user. Open the DM in
 one tab and the players in others (`/join/<room code>`). Local mode is for development and testing only:
 it is not secure. When Supabase is configured you can still force local mode with `?local=1`, and go back
@@ -328,7 +340,7 @@ delete. `src/net/guestMerge.live.supabase.test.ts` (needs the deployed `merge-gu
 guest into a new email sign-up and prints that permanent user's id for deletion.
 
 **SQL tests** (`supabase/tests/*.sql`: RLS, RPCs, Realtime authorisation, Storage policies, tile chunks,
-per-account quotas, free assets, map tables).
+per-account quotas, free assets, scene tables, worlds).
 Run each file as `postgres`, in the SQL editor or with psql. Each file runs in one transaction that is
 rolled back, and its final row reports `passed` / `failed`.
 
@@ -336,21 +348,22 @@ rolled back, and its final row reports `passed` / `failed`.
 
 ```bash
 npx vite --port 5173 &
-ATLAS_URL=http://127.0.0.1:5173 node e2e/editor-smoke.mjs         # a new map in Edit: quality probe (tier per GPU), menus, labels, options bar at 1280 px, the tools, undo/redo, shortcuts, a restore point, reload
+ATLAS_URL=http://127.0.0.1:5173 node e2e/worlds-local.mjs         # a world, its characters, a player joining and waiting, a character handed out and linked to a token, the open table bringing them in, one open table per world
+ATLAS_URL=http://127.0.0.1:5173 node e2e/editor-smoke.mjs         # a new world and scene in Edit: quality probe (tier per GPU), menus, labels, options bar at 1280 px, the tools, undo/redo, shortcuts, a restore point, reload
 ATLAS_URL=http://127.0.0.1:5173 node e2e/vineyard-build.mjs       # builds test_maps/vineyard.atlas.json from the battlemaps (see below)
 ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-local.mjs    # DM + 2 players in local mode: host menus, oracle-equal views, moves, doors, stairs, lock, reloads, leak scan
 ATLAS_SCENE=$PWD/test_maps/vineyard.atlas.json ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-local.mjs   # the same on the Vineyard
-ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-supabase.mjs # the same against the real backend (+ Realtime / table / Storage RLS checks, no public channels, a kicked member's subscriptions, sub-cell chunk clipping, closing the table, deleting the map)
+ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-supabase.mjs # the same against the real backend (+ Realtime / table / Storage RLS checks, no public channels, a kicked member's subscriptions, sub-cell chunk clipping, closing the table, deleting the scene)
 ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-latency.mjs  # move results on a 120×120 daylit field arrive well under the 5 s timeout
-ATLAS_URL=http://127.0.0.1:5173 node e2e/map-table-local.mjs      # the map screen: Tab and undo across Edit / Play, restore points, closing and reopening the table with a player, leaving, version restore
-ATLAS_URL=http://127.0.0.1:5173 node e2e/change-map-local.mjs     # "Change map" mid-session: the party carried to a sample copy and back, two players following
+ATLAS_URL=http://127.0.0.1:5173 node e2e/map-table-local.mjs      # the scene screen: Tab and undo across Edit / Play, restore points, closing and reopening the table with a player, leaving, version restore
+ATLAS_URL=http://127.0.0.1:5173 node e2e/change-map-local.mjs     # "Change scene" mid-session: the party carried to a sample copy and back, two players following
 ATLAS_URL=http://127.0.0.1:5173 node e2e/table-local.mjs         # DM + 2 players in local mode: chat, whispers, host-rolled dice, combat (hidden and unseen combatants never sent), initiative and turns, hit points and conditions (bands only for others), pings, reload, leak scan
 ATLAS_URL=http://127.0.0.1:5173 node e2e/templates-local.mjs     # DM + 2 players in local mode: the Area tool and presets, a Fireball's catch in 3D, a player's cone from their token, oracle-equal views, damage from the card (halved on a save), hiding, an aura that follows its token, removing, reload, leak scan, clearing all
 ATLAS_URL=http://127.0.0.1:5173 node e2e/free-assets.mjs          # a table with the token models loaded, put one on a token, a player downloads and draws it (ATLAS_FREE_ASSETS_DIR serves a local build)
-ATLAS_URL=http://127.0.0.1:5173 node e2e/engine-leak.mjs          # map screen ↔ library round trips release every WebGL context
+ATLAS_URL=http://127.0.0.1:5173 node e2e/engine-leak.mjs          # scene screen ↔ world page round trips release every WebGL context
 ATLAS_URL=http://127.0.0.1:5173 node e2e/perf.mjs                 # frame times per GPU / tier / scene
 ATLAS_URL=http://127.0.0.1:5173 node e2e/showcase.mjs             # regenerate docs/screenshots
-ATLAS_URL=http://127.0.0.1:5173 node e2e/firefox-smoke.mjs        # headless Firefox (npx playwright install firefox): library, editor at every tier, a local player view
+ATLAS_URL=http://127.0.0.1:5173 node e2e/firefox-smoke.mjs        # headless Firefox (npx playwright install firefox): home and a world, editor at every tier, a local player view
 ```
 
 `e2e/vineyard-build.mjs` builds a large scene from three Forgotten Adventures battlemaps, and `perf.mjs` and

@@ -1,8 +1,8 @@
 // Firefox smoke test (local mode, headless Firefox from `npx playwright install firefox`; WebGL2 runs on
-// its software rasteriser there): the home page and library → the editor on a copy of the Crooked
-// Lantern renders at the tier the start-up probe picks → the DM starts a session, a player joins in
-// another tab, gets a character, and their view equals the authoritative oracle and renders → no
-// console errors. Screenshots of each page go to ATLAS_OUT.
+// its software rasteriser there): the home page → a new world's page lists the samples → the editor on
+// a copy of the Crooked Lantern renders at the tier the start-up probe picks → the DM starts a session,
+// a player joins in another tab, gets a character, and their view equals the authoritative oracle and
+// renders → no console errors. Screenshots of each page go to ATLAS_OUT.
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/firefox-smoke.mjs
 import { createRequire } from "node:module"
@@ -19,9 +19,9 @@ import {
 } from "./lib.mjs"
 import {
   assignToken,
+  createWorld,
   hostState,
   joinGame,
-  openSceneInEditor,
   startSession,
   viewConverges,
 } from "./session.mjs"
@@ -64,15 +64,13 @@ try {
   })
   console.log(`Firefox ${browser.version()}`)
 
-  checks.step("Home page and library")
+  checks.step("Home page and a world")
   const dm = await context.newPage()
   watchPage(dm, "dm", logs)
   await dm.goto(`${BASE}/?local=1`, { waitUntil: "domcontentloaded" })
-  const card = dm.locator("[data-slot=card]", {
-    hasText: "The Crooked Lantern",
-  })
-  await card.first().waitFor({ timeout: 30000 })
-  checks.ok(await card.first().isVisible(), "the library lists the samples")
+  const newWorld = dm.getByRole("button", { name: /New world/ }).first()
+  await newWorld.waitFor({ timeout: 30000 })
+  checks.ok(await newWorld.isVisible(), "the home page offers a new world")
   const renderer = await dm.evaluate(() => {
     const gl = document.createElement("canvas").getContext("webgl2")
     return gl ? gl.getParameter(gl.RENDERER) : null
@@ -81,9 +79,28 @@ try {
   checks.ok(renderer !== null, "WebGL2 is available")
   await sleep(2500) // the hero's storeys fade in one after another
   await shot(dm, OUT, "01-home")
+  await createWorld(dm, { name: "Firefox world" })
+  const card = dm.locator("[data-slot=card]", {
+    hasText: "The Crooked Lantern",
+  })
+  await card.first().waitFor({ timeout: 30000 })
+  checks.ok(
+    await card.first().isVisible(),
+    "the world's page lists the samples"
+  )
+  await shot(dm, OUT, "01-world")
 
   checks.step("Editor on a copy of the Crooked Lantern")
-  await openSceneInEditor(dm, { mode: "local" })
+  await card.getByRole("button", { name: "Open a copy" }).click()
+  await waitFor(
+    dm,
+    () =>
+      location.pathname.startsWith("/host/") &&
+      window.__atlasHost?.mode === "edit" &&
+      window.__atlasEditor?.engine != null,
+    null,
+    { timeout: 90000, label: "the scene screen in Edit" }
+  )
   await sleep(1500)
   const ed = await frameStats(dm, "__atlasEditor")
   console.log(`  editor: ${JSON.stringify(ed)}`)

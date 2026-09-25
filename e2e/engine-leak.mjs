@@ -1,12 +1,13 @@
-// WebGL context leak check (local mode): editor ↔ library round trips must release each engine's WebGL
-// context. Module-level textures and geometries shared by every engine used to keep a `dispose` listener
-// that captured the renderer that last used them, so every editor / host / play visit kept its context
-// (drawing buffers, textures, buffers) alive, and after 16 visits Chrome started force-losing contexts
-// ("Too many active WebGL contexts").
+// WebGL context leak check (local mode): scene screen ↔ world page round trips must release each
+// engine's WebGL context. Module-level textures and geometries shared by every engine used to keep a
+// `dispose` listener that captured the renderer that last used them, so every editor / host / play
+// visit kept its context (drawing buffers, textures, buffers) alive, and after 16 visits Chrome started
+// force-losing contexts ("Too many active WebGL contexts").
 //
 // An init script wraps HTMLCanvasElement.prototype.getContext and keeps only WeakRefs to the WebGL2
-// contexts the page creates. After each trip back to the library the page runs gc() (Chromium started
-// with --js-flags=--expose-gc) and counts the engine contexts that are neither collected nor lost.
+// contexts the page creates. After each trip back to the world page the page runs gc() (Chromium
+// started with --js-flags=--expose-gc) and counts the engine contexts that are neither collected nor
+// lost.
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/engine-leak.mjs
 //   ATLAS_TRIPS=5+18   round trips before the first check + after it (default 5+18)
@@ -66,8 +67,11 @@ async function contexts(page) {
   })
 }
 
-/** Library → "Open a copy" of the sample → the map screen with a live engine → back to the library. */
-async function roundTrip(page, trip) {
+/**
+ * The world page → "Open a copy" of the sample → the scene screen with a live engine → back to the
+ * world page.
+ */
+async function roundTrip(page, worldId, trip) {
   await page.evaluate((t) => (window.__atlasTrip = t), trip)
   await page
     .locator("[data-slot=card]", { hasText: "The Crooked Lantern" })
@@ -83,8 +87,8 @@ async function roundTrip(page, trip) {
   )
   await sleep(600)
   await page.goBack()
-  await waitFor(page, () => location.pathname === "/", null, {
-    label: `library (trip ${trip})`,
+  await waitFor(page, (id) => location.pathname === `/world/${id}`, worldId, {
+    label: `the world page (trip ${trip})`,
   })
   await sleep(300)
 }
@@ -101,15 +105,18 @@ try {
     "Open the sample once (the first visit also runs the quality probe)"
   )
   await openSceneInEditor(page, { mode: "local" })
+  const worldId = await page.evaluate(
+    () => window.__atlasHost.runner.getSnapshot().world?.id
+  )
   await page.goBack()
-  await waitFor(page, () => location.pathname === "/", null, {
-    label: "library",
+  await waitFor(page, (id) => location.pathname === `/world/${id}`, worldId, {
+    label: "the world page",
   })
   let c = await contexts(page)
   console.log(`   after the first visit: ${JSON.stringify(c)}`)
 
-  checks.step(`${FIRST} editor ↔ library round trips`)
-  for (let t = 1; t <= FIRST; t++) await roundTrip(page, t)
+  checks.step(`${FIRST} scene screen ↔ world page round trips`)
+  for (let t = 1; t <= FIRST; t++) await roundTrip(page, worldId, t)
   c = await contexts(page)
   const created = c.engine.alive + c.engine.lost + c.engine.collected
   console.log(`   ${JSON.stringify(c)}`)
@@ -120,12 +127,12 @@ try {
   checks.eq(
     c.engine.alive,
     0,
-    "back in the library, no engine context is still alive (each was lost or collected)"
+    "back on the world page, no engine context is still alive (each was lost or collected)"
   )
 
   checks.step(`${MORE} more round trips`)
   for (let t = FIRST + 1; t <= FIRST + MORE; t++) {
-    await roundTrip(page, t)
+    await roundTrip(page, worldId, t)
     if (t % 6 === 0)
       console.log(`   trip ${t}: ${JSON.stringify(await contexts(page))}`)
   }

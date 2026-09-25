@@ -202,7 +202,7 @@ describe("useSaveMap", () => {
     expect(ok).toBe(false)
     expect(ref.current.dirty).toBe(true)
     expect(toast.error).toHaveBeenCalledWith(
-      "Another restore point of this map was saved elsewhere",
+      "Another restore point of this scene was saved elsewhere",
       expect.objectContaining({
         action: expect.objectContaining({ label: "Save anyway" }),
       })
@@ -265,7 +265,7 @@ describe("useSaveMap", () => {
       .mocked(toast.error)
       .mock.calls.find(
         ([title]) =>
-          title === "Another restore point of this map was saved elsewhere"
+          title === "Another restore point of this scene was saved elsewhere"
       )
     const opts = call?.[1] as {
       id?: string
@@ -336,7 +336,7 @@ describe("useSaveMap", () => {
     expect(ok).toBe(false)
     expect(saveMapToLibrary).not.toHaveBeenCalled()
     expect(toast.error).toHaveBeenCalledWith(
-      "Another restore point of this map was saved elsewhere",
+      "Another restore point of this scene was saved elsewhere",
       expect.anything()
     )
     await act(async () => {
@@ -356,10 +356,9 @@ describe("useSaveMap", () => {
     })
     expect(ok).toBe(false)
     expect(none.saveMapToLibrary).not.toHaveBeenCalled()
-    expect(toast.error).toHaveBeenCalledWith(
-      "There is no library entry to save to",
-      { description: LIBRARY_SCENE_DELETED }
-    )
+    expect(toast.error).toHaveBeenCalledWith("There is no scene to save to", {
+      description: LIBRARY_SCENE_DELETED,
+    })
     act(() => root?.unmount())
 
     // Deleted from the library after the session started.
@@ -384,7 +383,7 @@ describe("useSaveMap", () => {
       await ref.current.save()
     })
     expect(toast.error).toHaveBeenCalledWith(
-      "This map was deleted from your library",
+      "This scene was deleted from its world",
       expect.anything()
     )
     expect(ref.current.library).toEqual({ status: "deleted" })

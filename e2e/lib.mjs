@@ -3,6 +3,8 @@
 //   ATLAS_URL  dev server origin (default http://127.0.0.1:5173; start one with `npx vite`)
 //   ATLAS_GPU  "nvidia" | "amd" | "swiftshader" (default nvidia; see scripts/pw.mjs)
 //   ATLAS_OUT  directory for screenshots and logs (default $TMPDIR/atlas-e2e/<script>)
+//   ATLAS_TEST_MAPS  the battlemap art directory (default <repo>/test_maps; e.g. the main checkout's
+//              from a git worktree)
 //
 // Every script exits non-zero when a check fails, and prints one line per check.
 import fs from "node:fs"
@@ -20,7 +22,8 @@ export const REPO = path.resolve(
   path.dirname(new URL(import.meta.url).pathname),
   ".."
 )
-export const TEST_MAPS = path.join(REPO, "test_maps")
+export const TEST_MAPS =
+  process.env.ATLAS_TEST_MAPS ?? path.join(REPO, "test_maps")
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 

@@ -2,6 +2,7 @@ import {
   CopyIcon,
   DownloadIcon,
   EllipsisIcon,
+  FolderInputIcon,
   ImageIcon,
   Link2Icon,
   HammerIcon,
@@ -35,20 +36,22 @@ import { cn } from "@/lib/utils"
 
 import { SceneThumbnail } from "./SceneThumbnail"
 
-/** "open" opens the map in Edit, "play" in Play (the same map screen: ARCHITECTURE §6.8). */
-export type SceneAction = "open" | "play" | "rename" | "duplicate" | "export" | "share" | "delete"
+/** "open" opens the scene in Edit, "play" in Play (the same scene screen: ARCHITECTURE §6.8). */
+export type SceneAction = "open" | "play" | "rename" | "duplicate" | "move" | "export" | "share" | "delete"
 
 export interface SceneCardProps {
   scene: SceneSummary
   /** Action in progress on this card (shows a spinner, disables the others). */
   busy: SceneAction | null
-  /** Another library action is running: disable this card's actions. */
+  /** Another action is running: disable this card's actions. */
   disabled?: boolean
+  /** The DM has other worlds to move the scene to. */
+  canMove?: boolean
   onAction(action: SceneAction, scene: SceneSummary): void
   onIntent?(): void
 }
 
-export function SceneCard({ scene, busy, disabled: otherBusy = false, onAction, onIntent }: SceneCardProps) {
+export function SceneCard({ scene, busy, disabled: otherBusy = false, canMove = false, onAction, onIntent }: SceneCardProps) {
   const services = useServices()
   const now = useNow()
   const [ref, seen] = useSeenOnce<HTMLDivElement>()
@@ -95,7 +98,7 @@ export function SceneCard({ scene, busy, disabled: otherBusy = false, onAction, 
           <h3 className="min-w-0 flex-1 truncate font-heading text-sm font-medium" title={scene.name}>
             {scene.name}
           </h3>
-          <SceneMenu scene={scene} disabled={disabled} onAction={onAction} />
+          <SceneMenu scene={scene} disabled={disabled} canMove={canMove} onAction={onAction} />
         </div>
         <div className="flex items-center gap-1.5 text-[0.7rem] text-muted-foreground">
           <Tooltip>
@@ -133,7 +136,7 @@ export function SceneCard({ scene, busy, disabled: otherBusy = false, onAction, 
 }
 
 /**
- * A library scene's thumbnail from the digest cache (useSceneDigest): its primary level, a placeholder
+ * A scene's thumbnail from the digest cache (useSceneDigest): its primary level, a placeholder
  * while it loads, or a notice when it can't be read. Fills its box, cropping whatever overflows it.
  */
 export function SceneCardPreview({ entry, status, thumbnailClassName }: { entry: DigestEntry | null; status: DigestStatus; thumbnailClassName?: string }) {
@@ -159,7 +162,7 @@ export function SceneCardPreview({ entry, status, thumbnailClassName }: { entry:
   return <Skeleton className="size-full rounded-none" />
 }
 
-function SceneMenu({ scene, disabled, onAction }: { scene: SceneSummary; disabled: boolean; onAction: SceneCardProps["onAction"] }) {
+function SceneMenu({ scene, disabled, canMove, onAction }: { scene: SceneSummary; disabled: boolean; canMove: boolean; onAction: SceneCardProps["onAction"] }) {
   const { mode } = useServices()
   const item = (action: SceneAction) => () => onAction(action, scene)
   return (
@@ -191,6 +194,12 @@ function SceneMenu({ scene, disabled, onAction }: { scene: SceneSummary; disable
             <CopyIcon />
             Duplicate
           </DropdownMenuItem>
+          {canMove && (
+            <DropdownMenuItem onClick={item("move")}>
+              <FolderInputIcon />
+              Move to another world…
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem onClick={item("export")}>
             <DownloadIcon />
             Export .atlas.json
@@ -210,7 +219,7 @@ function SceneMenu({ scene, disabled, onAction }: { scene: SceneSummary; disable
   )
 }
 
-/** Placeholder card while the library loads. */
+/** Placeholder card while the scenes load. */
 export function SceneCardSkeleton({ className }: { className?: string }) {
   return (
     <Card className={cn("gap-0 py-0", className)}>

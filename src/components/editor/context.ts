@@ -109,6 +109,29 @@ export interface EditorActions {
 
 export const EditorActionsContext = React.createContext<EditorActions | null>(null)
 
+/**
+ * The world's characters at a table (ARCHITECTURE §6.9), for linking tokens to them (the token inspector,
+ * the DM's token menu). Absent outside a table that knows its world's roster.
+ */
+export interface CharacterLinks {
+  /** The world's characters, by name. */
+  characters: Array<{ id: string; name: string; players: string[] }>
+  /** A player's name at the table. */
+  playerName(userId: string): string
+  /** Link a token to a character, or unlink it (null): an edit of the scene. */
+  link(tokenId: string, characterId: string | null): void
+  /** A new world character made from the token (its name, colour, portrait and players), linked to it. */
+  makeCharacter(tokenId: string): Promise<void>
+  /** Open the world's roster (who plays whom). */
+  openRoster(): void
+}
+
+export const CharacterLinksContext = React.createContext<CharacterLinks | null>(null)
+
+export function useCharacterLinks(): CharacterLinks | null {
+  return React.useContext(CharacterLinksContext)
+}
+
 export function useEditorActions(): EditorActions {
   const ctx = React.useContext(EditorActionsContext)
   if (!ctx) throw new Error("useEditorActions() outside the editor page")

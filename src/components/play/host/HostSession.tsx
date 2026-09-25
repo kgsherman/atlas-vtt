@@ -8,7 +8,7 @@
  *    manipulation (select, drag to move, door clicks, right-click menus), the session panel (room code,
  *    players, tokens, combat, table rules, assets), the table (chat & dice dock, initiative order, turn
  *    ring, pings: a long press, Shift for "everyone look here"), areas of effect (TemplateLayer) and
- *    "Change map" (ChangeMapDialog: another library map, the party carried along).
+ *    "Change scene" (ChangeMapDialog: another scene of the world, the party carried along).
  * "Open the table" lets players in with the room code; "Close the table" disconnects them and keeps the
  * DM here. The map saves itself with the game; restore points (library versions) are kept on Ctrl+S,
  * when the table closes, on a map change and when the DM leaves.
@@ -26,11 +26,14 @@ import { withModeParam } from "@/app/mode"
 import { inviteLink } from "@/app/roomCodeInput"
 import { paths } from "@/app/routes"
 import { useServices } from "@/app/services"
+import { useOnFocus } from "@/app/useAsync"
 import { useFogStyle } from "@/components/canvas/fogStyle"
 import { useQualityChoice } from "@/components/canvas/qualityChoice"
 import {
+  CharacterLinksContext,
   EditorContext,
   FreeAssetScopeContext,
+  type CharacterLinks,
 } from "@/components/editor/context"
 import {
   MapImportDialog,
@@ -114,7 +117,11 @@ import {
   usePreference,
   useSessionResource,
 } from "../useSessionResource"
+import { WorldRosterDialog } from "@/components/world/WorldRosterDialog"
+import { normalizeCharacterName } from "@/net/worldsRepo"
+
 import { ChangeMapDialog } from "./ChangeMapDialog"
+import { playerLabels } from "./playerLabels"
 import {
   changeMapErrorText,
   type ChangeMapOutcome,
@@ -181,6 +188,8 @@ export function HostSession({ sessionId }: { sessionId: string }) {
         assets: services.assets,
         // Restore points (HostRunner.saveMapToLibrary) go to the scene library.
         scenes: services.scenes,
+        // Who plays which character comes from the table's world (ARCHITECTURE §6.9).
+        worlds: services.worlds,
         tokenImageBase: services.tokenImages.publicBase,
       })
       void r
@@ -220,7 +229,7 @@ function TableEnded() {
     <BlockingScreen
       icon={<DoorClosed />}
       title="This table has ended"
-      description="Its map was deleted, or it moved to another table. Open the map again from your library."
+      description="Its scene was deleted, or it moved to another table. Open the scene again from its world."
       actions={<HomeButton />}
     />
   )
@@ -247,7 +256,7 @@ function HostTable({ runner }: { runner: HostRunnerImpl }) {
           title={notDm ? "This isn't your table" : "Can't open this table"}
           message={
             notDm
-              ? "Only the DM whose map this is can run its table. If you were invited as a player, join with the room code instead."
+              ? "Only the DM whose scene this is can run its table. If you were invited as a player, join with the room code instead."
               : snap.error
           }
           onRetry={notDm ? undefined : retry}
@@ -258,7 +267,7 @@ function HostTable({ runner }: { runner: HostRunnerImpl }) {
       return (
         <BlockingScreen
           icon={<Crown />}
-          title="This map is open in another tab"
+          title="This scene is open in another tab"
           description={
             snap.error ??
             "Another tab or device is running this table. Take over to run it from here."
@@ -387,6 +396,13 @@ function HostConsole({
   )
   const saveMap = useSaveMap(runner, snap)
   const [changing, setChanging] = React.useState(false)
+  const [rosterOpen, setRosterOpen] = React.useState(false)
+  // Who plays whom may have changed on the world page (another tab): the owners follow.
+  const refreshRoster = React.useCallback(
+    () => void runner.refreshRoster(),
+    [runner]
+  )
+  useOnFocus(refreshRoster)
   const [closingTable, setClosingTable] = React.useState(false)
   const [leaveTo, setLeaveTo] = React.useState<string | null>(null)
   const [versionsOpen, setVersionsOpen] = React.useState(false)
@@ -893,9 +909,9 @@ function HostConsole({
   ): Promise<ChangeMapOutcome> => {
     // A save in flight would stamp the old map's library row on the new map (checked at confirm time).
     if (saveMap.saving)
-      return "A restore point of this map is being saved. Try again in a moment."
+      return "A restore point of this scene is being saved. Try again in a moment."
     if (req.save && !(await saveMap.save({ quiet: true })))
-      return "This map couldn't be saved to your library, so the table stayed here. See the notice for why."
+      return "A restore point of this scene couldn't be saved, so the table stayed here. See the notice for why."
     controller.cancel()
     editor?.ctx.controller.cancelGesture()
     // The editor's undo history belongs to this map: it goes before the swap (a new one follows).
@@ -934,9 +950,9 @@ function HostConsole({
     void r.saved.then((saved) => {
       // After a stand-down the screen says why hosting stopped instead.
       if (saved || runner.getSnapshot().status !== "hosting") return
-      toast.warning("The map change isn't saved yet", {
+      toast.warning("The scene change isn't saved yet", {
         description:
-          "Atlas keeps trying in the background. If this tab closes before then, the previous map may come back.",
+          "Atlas keeps trying in the background. If this tab closes before then, the previous scene may come back.",
       })
     })
     return true
@@ -978,6 +994,109 @@ function HostConsole({
     }
   }, [runner, engine, controller, editor, mode, switchMode])
 
+  // ---- world characters (ARCHITECTURE §6.9): tokens linked to them, in the inspector and the token menu ----
+  const tableWorld = snap.world
+  const roster = state.characters
+  const players = state.players
+  // The world's players (read even while the table is closed, when none of them is at it).
+  const members = snap.members
+  const characterLinks = React.useMemo<CharacterLinks | null>(() => {
+    if (!tableWorld || !roster) return null
+    const labels = playerLabels([...Object.values(players), ...members])
+    const link = (tokenId: Id, characterId: Id | null) =>
+      editor?.ctx.store
+        .getState()
+        .updateToken(
+          tokenId,
+          characterId ? { characterId, kind: "pc" } : { characterId: undefined }
+        )
+    return {
+      characters: Object.entries(roster)
+        .map(([id, c]) => ({ id, name: c.name, players: c.players }))
+        .sort(
+          (a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id)
+        ),
+      playerName: (uid) =>
+        labels.get(uid) ??
+        (Object.hasOwn(players, uid)
+          ? players[uid].displayName
+          : "a player who left"),
+      link: (tokenId, characterId) => void link(tokenId, characterId),
+      makeCharacter: async (tokenId) => {
+        const live = runner.getSnapshot().state
+        const t =
+          live && Object.hasOwn(live.scene.tokens, tokenId)
+            ? live.scene.tokens[tokenId]
+            : null
+        if (!live || !t) return
+        let c: Awaited<ReturnType<typeof services.worlds.createCharacter>>
+        try {
+          c = await services.worlds.createCharacter(tableWorld.id, {
+            name: normalizeCharacterName(t.name) ?? "Character",
+            color: t.color,
+            imageUrl:
+              t.imageUrl && t.imageUrl.length <= 2000 ? t.imageUrl : null,
+          })
+        } catch (err) {
+          toast.error("Couldn't make the character", {
+            description: userMessage(err),
+          })
+          return
+        }
+        // Whoever controlled the token plays the character.
+        const owners = live.owners[tokenId] ?? []
+        let players: string[] = []
+        let playersFailed: unknown = null
+        if (owners.length > 0) {
+          try {
+            await services.worlds.setCharacterPlayers(c, owners)
+            players = [...owners]
+          } catch (err) {
+            playersFailed = err
+          }
+        }
+        // The table knows the character before the token is linked to it, so its owners follow at once
+        // (the roster is read again after, from the world).
+        const now = runner.getSnapshot().state
+        runner.dispatch({
+          t: "set-characters",
+          characters: {
+            ...(now?.characters ?? {}),
+            [c.id]: { name: c.name, players },
+          },
+        })
+        const linked = link(tokenId, c.id) === true
+        void runner.refreshRoster()
+        if (!linked) {
+          toast.warning(`${c.name} was added to ${tableWorld.name}`, {
+            description:
+              "The token couldn't be linked to it (it may have been deleted). Link a token in its Character field.",
+          })
+          return
+        }
+        if (playersFailed) {
+          toast.warning(`${c.name} is a character of ${tableWorld.name}`, {
+            description: `Nobody plays the character yet: ${userMessage(playersFailed)}`,
+            action: {
+              label: "Who plays whom…",
+              onClick: () => setRosterOpen(true),
+            },
+          })
+          return
+        }
+        toast.success(`${c.name} is a character of ${tableWorld.name}`, {
+          description:
+            "Whoever plays the character controls this token, in every scene of the world.",
+          action: {
+            label: "Who plays whom…",
+            onClick: () => setRosterOpen(true),
+          },
+        })
+      },
+      openRoster: () => setRosterOpen(true),
+    }
+  }, [tableWorld, roster, players, members, editor, runner, services])
+
   // ---- page commands (menus, panels) -------------------------------------------------------------------
   const commands = React.useMemo<MapScreenCommands>(
     () => ({
@@ -991,10 +1110,10 @@ function HostConsole({
       exportFile: () => void doc.exportFile(),
       importFile: () => fileRef.current?.click(),
       openShare: () => setShareOpen(true),
-      leave: () => go(paths.home()),
+      leave: () => go(tableWorld ? paths.world(tableWorld.id) : paths.home()),
       openShortcuts: () => setKeysOpen(true),
     }),
-    [saveRestorePoint, doc, editing, switchMode, go]
+    [saveRestorePoint, doc, editing, switchMode, go, tableWorld]
   )
 
   // ---- drag and drop: battlemaps onto the map (Edit), .atlas.json files anywhere ------------------------
@@ -1068,7 +1187,7 @@ function HostConsole({
                   <ImagePlus className="size-6 text-primary" />
                   Drop battlemaps to import them onto “{activeLevelName}”
                   <span className="text-xs text-muted-foreground">
-                    …or an .atlas.json map file to add it to your library
+                    …or an .atlas.json scene file to add it to this world
                   </span>
                 </div>
               </div>
@@ -1318,6 +1437,7 @@ function HostConsole({
               onFocusToken={focusToken}
               onPreviewToken={previewToken}
               onKick={(uid) => runner.kick(uid)}
+              onCharacters={() => setRosterOpen(true)}
               onTakeOver={() => void runner.takeOver()}
               onOpenTable={openTable}
               activeLevelId={activeLevelId}
@@ -1347,11 +1467,22 @@ function HostConsole({
           leaveTo ? leaveNow(leaveTo, choice) : Promise.resolve(true)
         }
       />
+      <WorldRosterDialog
+        open={rosterOpen}
+        onOpenChange={setRosterOpen}
+        world={
+          snap.world
+            ? { ...snap.world, roomCode: snap.roomCode || state.roomCode }
+            : null
+        }
+        onChanged={refreshRoster}
+      />
       <ChangeMapDialog
         open={changing && hosting}
         onOpenChange={setChanging}
         state={state}
         currentSceneId={snap.library?.sceneId ?? null}
+        worldId={snap.world?.id ?? null}
         saveMap={saveMap}
         onChange={changeMap}
       />
@@ -1397,15 +1528,17 @@ function HostConsole({
   // The inspector's asset pickers offer what this game loads (GameState.freeAssets).
   return (
     <FreeAssetScopeContext.Provider value={freeAssetScope}>
-      <EditorContext.Provider value={editor ? editor.ctx : null}>
-        <HostEditorProviders
-          editor={editor}
-          engine={engine}
-          commands={commands}
-        >
-          {main}
-        </HostEditorProviders>
-      </EditorContext.Provider>
+      <CharacterLinksContext.Provider value={characterLinks}>
+        <EditorContext.Provider value={editor ? editor.ctx : null}>
+          <HostEditorProviders
+            editor={editor}
+            engine={engine}
+            commands={commands}
+          >
+            {main}
+          </HostEditorProviders>
+        </EditorContext.Provider>
+      </CharacterLinksContext.Provider>
     </FreeAssetScopeContext.Provider>
   )
 }

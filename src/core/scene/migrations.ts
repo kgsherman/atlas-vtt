@@ -63,6 +63,8 @@ export const MIGRATIONS: Readonly<Record<number, Migration>> = Object.freeze({
   6: (doc: unknown) => doc,
   7: dropMetaAuthorDescription,
   8: gridVisionOrigin,
+  // v10 added the optional Token.characterId (world characters); v9 documents are valid v10 documents.
+  9: (doc: unknown) => doc,
 })
 
 export type MigrateResult =

@@ -460,6 +460,7 @@ const tokenSchema = z.strictObject({
   dmNotes: text.optional(),
   hp: tokenHpSchema.optional(),
   conditions: tokenConditionsSchema.optional(),
+  characterId: idSchema.optional(),
 })
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-// Showcase screenshots (1920×1080) of the map screen in Edit and in Play and players' fog-of-war views, per
+// Showcase screenshots (1920×1080) of the scene screen in Edit and in Play and players' fog-of-war views, per
 // quality tier, in local mode:
 //   - The Crooked Lantern sample (our own art)  → docs/screenshots/
 //   - The Vineyard (test_maps/vineyard.atlas.json, built by e2e/vineyard-build.mjs; third-party art)
@@ -167,7 +167,7 @@ async function runScene(key, quality) {
       })
     )
 
-    // The map screen in Play, top-down over the ground floor (Edit and Play share the camera and the
+    // The scene screen in Play, top-down over the ground floor (Edit and Play share the camera and the
     // level, left in orbit over the upper floor above), without the "table is open" toast.
     const session = await startSession(dm)
     await dm.getByRole("button", { name: "Top-down (2.5D) camera" }).click()

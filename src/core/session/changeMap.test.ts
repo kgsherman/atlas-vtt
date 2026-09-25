@@ -169,7 +169,7 @@ describe("changing the map in a game", () => {
       origin: { sceneId: "row-2", version: 3, dirty: false },
     })
     expect(cmd.scene.tokens[t.pc.id].levelId).toBe(d.ground)
-    expect(travelNotice("", 0)).toBe("The game moves to a new map")
+    expect(travelNotice("", 0)).toBe("The game moves to a new scene")
   })
 
   it("the public notice does not count hidden arrivals (players must not learn one came along)", () => {

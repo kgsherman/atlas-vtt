@@ -30,17 +30,44 @@ export async function drainWire(page) {
 // ---- setting up a game ---------------------------------------------------------------------------------
 
 /**
- * From the library, open a map (its map screen, in Edit): a copy of a sample (`sample`: its display
- * name) or an imported .atlas.json (`file`: a path). `mode` is "local" (?local=1) or "supabase"
- * (?local=0). Resolves with the map's library id once the editor is on it (the table is closed).
+ * Home → "New world" (ARCHITECTURE §6.9) → the world's page. Resolves with the world's id.
  */
-export async function openSceneInEditor(
+export async function createWorld(
   page,
-  { mode = "local", sample = "The Crooked Lantern", file = null } = {}
+  { mode = "local", name = "E2E world" } = {}
 ) {
   await page.goto(`${BASE}/?local=${mode === "local" ? 1 : 0}`, {
     waitUntil: "domcontentloaded",
   })
+  await page
+    .getByRole("button", { name: /New world/ })
+    .first()
+    .click()
+  const dialog = page.getByRole("dialog", { name: "New world" })
+  await dialog.getByLabel("Name").fill(name)
+  await dialog.getByRole("button", { name: "Create world" }).click()
+  await waitFor(page, () => location.pathname.startsWith("/world/"), null, {
+    timeout: 30000,
+    label: "the world page",
+  })
+  return page.evaluate(() => location.pathname.split("/")[2])
+}
+
+/**
+ * Open a scene (its scene screen, in Edit) in a new world: a copy of a sample (`sample`: its display
+ * name) or an imported .atlas.json (`file`). `mode`: "local" (?local=1) or "supabase" (?local=0).
+ * Resolves with the scene's library id once the editor is on it (the table is closed).
+ */
+export async function openSceneInEditor(
+  page,
+  {
+    mode = "local",
+    sample = "The Crooked Lantern",
+    file = null,
+    world = "E2E world",
+  } = {}
+) {
+  await createWorld(page, { mode, name: world })
   if (file) {
     await page.locator('input[type="file"]').first().setInputFiles(file)
     // The success toast offers to open the imported scene.
@@ -61,7 +88,7 @@ export async function openSceneInEditor(
       window.__atlasHost?.mode === "edit" &&
       window.__atlasEditor?.engine != null,
     null,
-    { timeout: 90000, label: "the map screen in Edit" }
+    { timeout: 90000, label: "the scene screen in Edit" }
   )
   return page.evaluate(
     () => window.__atlasHost.runner.getSnapshot().library?.sceneId ?? null
@@ -69,7 +96,7 @@ export async function openSceneInEditor(
 }
 
 /**
- * On the map screen: "Open the table" (players may join) and switch to Play. `freeAssets`: the labels
+ * On the scene screen: "Open the table" (players may join) and switch to Play. `freeAssets`: the labels
  * of the free asset categories the game loads (e.g. ["Token models"]), ticked in the Assets tab.
  * Returns the session id, room code and state.
  */

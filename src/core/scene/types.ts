@@ -16,7 +16,7 @@
 
 import type { TokenCondition, TokenHp } from "./tokenStatus"
 
-export const SCENE_SCHEMA_VERSION = 9 as const
+export const SCENE_SCHEMA_VERSION = 10 as const
 
 export type Id = string
 
@@ -494,6 +494,11 @@ export interface Token {
   hp?: TokenHp
   /** Conditions shown on the token (catalog order, each once). Absent: none. */
   conditions?: TokenCondition[]
+  /**
+   * The world character this token is (ARCHITECTURE §6.9): the world's roster says who plays it, in every
+   * scene of the world. Absent: a token of this scene only (handed to players at the table, if at all).
+   */
+  characterId?: Id
 }
 
 // ---------------------------------------------------------------------------

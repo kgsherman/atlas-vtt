@@ -1,15 +1,16 @@
-// Changing the map mid-session end to end in local mode (?local=1), through the DM's "Change map"
+// Changing the scene mid-session end to end in local mode (?local=1), through the DM's "Change scene"
 // dialog.
 //
-// DM starts The Crooked Lantern → players A and B join and get a character each; the DM tracks A's hit
-// points and conditions, A says something in the chat → the DM moves the game to a copy of the Stress
-// Test sample (Sample maps → "Use a copy"), bringing the party: the room code, the players, their
-// characters (hit points and conditions included) and the chat stay; the chat gains the travel notice;
-// every player's view equals the oracle on the new map, A's page says where the party went and A's
-// character walks there → the DM moves the game back to The Crooked Lantern with only A's character: the
-// map holds the same token ids (the character replaces its own twin), B's character stays behind, so B
-// controls nothing and is told the DM moved the game → A and then the DM reload and both come back on
-// that map → no player ever received a secret of any of the maps, or another player's id.
+// DM starts a copy of The Crooked Lantern in a new world → players A and B join and get a character
+// each; the DM tracks A's hit points and conditions, A says something in the chat → the DM moves the
+// game to a copy of the Stress Test sample (Sample scenes → "Use a copy", added to the world), bringing
+// the party: the room code, the players, their characters (hit points and conditions included) and the
+// chat stay; the chat gains the travel notice; every player's view equals the oracle on the new scene,
+// A's page says where the party went and A's character walks there → the DM moves the game back to The
+// Crooked Lantern (listed among the world's scenes) with only A's character: the scene holds the same
+// token ids (the character replaces its own twin), B's character stays behind, so B controls nothing
+// and is told the DM moved the game → A and then the DM reload and both come back on that scene → no
+// player ever received a secret of any of the scenes, or another player's id.
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/change-map-local.mjs
 import {
@@ -43,7 +44,7 @@ const checks = new Checks("change-map-local")
 const logs = []
 const browser = await openBrowser()
 
-/** Wait until the host plays the map named `name` (after `serial` map changes). */
+/** Wait until the host plays the scene named `name` (after `serial` scene changes). */
 async function waitMap(dm, name, serial, timeout = 60000) {
   await waitFor(
     dm,
@@ -56,7 +57,7 @@ async function waitMap(dm, name, serial, timeout = 60000) {
   )
 }
 
-/** Wait until a player's page shows the view of the `serial`-th map. */
+/** Wait until a player's page shows the view of the `serial`-th scene. */
 async function waitPlayerMap(page, serial, timeout = 30000) {
   await waitFor(
     page,
@@ -64,7 +65,7 @@ async function waitPlayerMap(page, serial, timeout = 30000) {
       (window.__atlasPlayer?.client.getSnapshot().view?.scene.mapSerial ??
         0) === serial,
     serial,
-    { timeout, label: `player on map ${serial}` }
+    { timeout, label: `player on scene ${serial}` }
   )
 }
 
@@ -92,21 +93,23 @@ async function stepAside(page, tokenId) {
   return { ...(await waitResult(page, req.reqId)), cell: req.cell }
 }
 
-/** Open the DM's Change map dialog. */
-async function openChangeMap(dm) {
+/** Open the DM's Change scene dialog. */
+async function openChangeScene(dm) {
   await dm.bringToFront()
-  await dm.getByRole("button", { name: "Change map" }).click()
-  const dialog = dm.getByRole("dialog", { name: "Change map" })
+  await dm.getByRole("button", { name: "Change scene" }).click()
+  const dialog = dm.getByRole("dialog", { name: "Change scene" })
   await dialog.waitFor({ timeout: 10000 })
   return dialog
 }
 
-/** Step 3 → "Change map"; waits until the dialog has closed. */
+/** Step 3 → "Change scene"; waits until the dialog has closed. */
 async function confirmChange(dm, dialog, name) {
   await dialog.getByRole("button", { name: "Review" }).click()
   await dialog.getByText(`Step 3 of 3 · Move the game to “${name}”?`).waitFor()
   await shot(dm, OUT, `confirm-${name.replace(/\W+/g, "-")}`)
-  await dialog.getByRole("button", { name: "Change map", exact: true }).click()
+  await dialog
+    .getByRole("button", { name: "Change scene", exact: true })
+    .click()
   await dialog.waitFor({ state: "hidden", timeout: 60000 })
 }
 
@@ -141,7 +144,7 @@ try {
   const h0 = await startSession(dm)
   const lantern = h0.state.scene
   const lanternRow = h0.state.origin?.sceneId
-  checks.ok(typeof lanternRow === "string", "the game knows its library scene")
+  checks.ok(typeof lanternRow === "string", "the game knows its saved scene")
   const pcs = Object.values(lantern.tokens)
     .filter((t) => t.kind === "pc" && !t.hidden)
     .sort((a, b) => a.name.localeCompare(b.name))
@@ -179,13 +182,13 @@ try {
     { id: hero.id, hp }
   )
   await A.page.evaluate(() =>
-    window.__atlasPlayer.client.say("Onward, to the next map!", "all")
+    window.__atlasPlayer.client.say("Onward, to the next scene!", "all")
   )
   await waitFor(
     dm,
     () =>
       (window.__atlasHost.runner.getSnapshot().state.table?.log ?? []).some(
-        (m) => m.text === "Onward, to the next map!"
+        (m) => m.text === "Onward, to the next scene!"
       ),
     null,
     { timeout: 10000, label: "A's message reaches the host" }
@@ -197,15 +200,15 @@ try {
   checks.step(
     "The DM moves the game to a copy of the Stress Test, bringing the party"
   )
-  let dialog = await openChangeMap(dm)
-  await shot(dm, OUT, "01-dialog-maps")
+  let dialog = await openChangeScene(dm)
+  await shot(dm, OUT, "01-dialog-scenes")
   checks.ok(
     await dialog
-      .getByRole("button", { name: "The Crooked Lantern (the current map)" })
+      .getByRole("button", { name: "The Crooked Lantern (the current scene)" })
       .isDisabled(),
-    "the map being played is marked and can't be picked"
+    "the scene being played is marked and can't be picked"
   )
-  await dialog.getByRole("button", { name: "Sample maps" }).click()
+  await dialog.getByRole("button", { name: "Sample scenes" }).click()
   await dialog
     .locator("[data-slot=card]", { hasText: "Stress Test" })
     .getByRole("button", { name: "Use a copy" })
@@ -231,7 +234,7 @@ try {
   checks.eq(h1.roomCode, h0.roomCode, "the room code is the same")
   checks.ok(
     carried.every((id) => Object.hasOwn(stress.tokens, id)),
-    "the party stands on the new map under the same ids"
+    "the party stands on the new scene under the same ids"
   )
   const heroNow = stress.tokens[hero.id]
   checks.eq(
@@ -253,18 +256,18 @@ try {
     Object.values(lantern.tokens)
       .filter((t) => !carried.includes(t.id))
       .every((t) => !Object.hasOwn(stress.tokens, t.id)),
-    "the tokens left behind are not on the new map"
+    "the tokens left behind are not on the new scene"
   )
   const log1 = tableTexts(h1.state)
   checks.ok(
-    log1.includes("chat:Onward, to the next map!") &&
+    log1.includes("chat:Onward, to the next scene!") &&
       log1.at(-1) === "system:The party travels to Stress Test",
     "the chat is kept and ends with the travel notice",
     log1.slice(-3)
   )
   checks.ok(
     h1.state.origin?.sceneId !== lanternRow && h1.state.origin?.dirty === false,
-    "the game's library scene is the new copy",
+    "the game's saved scene is the new copy",
     h1.state.origin
   )
 
@@ -274,7 +277,7 @@ try {
     checks.eq(
       await viewConverges(dm, P.page, P.uid, 20000),
       [],
-      `${P.name}'s view equals the oracle on the new map`
+      `${P.name}'s view equals the oracle on the new scene`
     )
   }
   checks.ok(await aToast, "A's page says where the party went")
@@ -284,13 +287,13 @@ try {
       return { changes: s.mapChanges, controls: s.view.controlledTokenIds }
     }),
     { changes: 1, controls: [hero.id] },
-    "A's client counted one map change and controls its character"
+    "A's client counted one scene change and controls its character"
   )
   await sleep(1500)
   await shot(A.page, OUT, "03-player-arrived")
   await shot(dm, OUT, "04-dm-arrived")
   const step1 = await stepAside(A.page, hero.id)
-  checks.ok(step1.ok, "A's character walks on the new map", step1)
+  checks.ok(step1.ok, "A's character walks on the new scene", step1)
   const moved = (await hostState(dm)).state.scene.tokens[hero.id].position
   checks.ok(
     Math.floor(moved.x / stress.grid.cellSize) === step1.cell?.i &&
@@ -304,7 +307,7 @@ try {
     "Back to The Crooked Lantern with only A's character (same token ids)"
   )
   await drain()
-  dialog = await openChangeMap(dm)
+  dialog = await openChangeScene(dm)
   await dialog
     .getByRole("button", { name: "Move the game to The Crooked Lantern" })
     .click()
@@ -330,12 +333,12 @@ try {
   checks.eq(
     back.tokens[hero.id]?.hp,
     hp,
-    "A's character replaced its twin of the library map (hit points kept)"
+    "A's character replaced its twin of the saved scene (hit points kept)"
   )
   checks.eq(
     back.tokens[mate.id]?.position,
     lantern.tokens[mate.id].position,
-    "B's character's twin stands where the library map has it"
+    "B's character's twin stands where the saved scene has it"
   )
   checks.eq(
     h2.state.owners,
@@ -345,7 +348,7 @@ try {
   checks.eq(
     h2.state.origin?.sceneId,
     lanternRow,
-    "the game is on its first library scene again"
+    "the game is on its first saved scene again"
   )
   checks.eq(
     tableTexts(h2.state).at(-1),
@@ -359,7 +362,7 @@ try {
       () => window.__atlasPlayer.client.getSnapshot().view.controlledTokenIds
     ),
     [],
-    "B controls nothing on this map"
+    "B controls nothing on this scene"
   )
   checks.ok(await bToast, "B's page says the DM moved the game")
   for (const P of [A, B])
@@ -371,7 +374,7 @@ try {
   await shot(B.page, OUT, "05-player-left-behind")
 
   // ---- reloads ------------------------------------------------------------------------------------------
-  checks.step("A and then the DM reload: both come back on this map")
+  checks.step("A and then the DM reload: both come back on this scene")
   await drain()
   await A.page.reload({ waitUntil: "domcontentloaded" })
   await waitPlayerLive(A.page, 45000)
@@ -397,7 +400,7 @@ try {
       owners: { [hero.id]: [A.uid] },
       hp,
     },
-    "the DM's reload resumes the game on this map"
+    "the DM's reload resumes the game on this scene"
   )
   for (const P of [A, B]) {
     await waitPlayerLive(P.page, 45000)
@@ -414,14 +417,16 @@ try {
   )
 
   // ---- leaks -------------------------------------------------------------------------------------------------
-  checks.step("No player received a secret of any map, or another player's id")
+  checks.step(
+    "No player received a secret of any scene, or another player's id"
+  )
   await drain()
   const secrets = [lantern, stress, back].map(sceneSecrets)
   const all = {
     ids: [...new Set(secrets.flatMap((s) => s.ids))],
     strings: [...new Set(secrets.flatMap((s) => s.strings))],
   }
-  // A carried character is public on the map it came from and the one it went to.
+  // A carried character is public on the scene it came from and the one it went to.
   const texts = (who) =>
     wire[who].map((f, k) => ({ where: `${who} ${f.name} #${k}`, text: f.json }))
   const views = (who) => texts(who).filter((f) => f.where.includes(":view:"))

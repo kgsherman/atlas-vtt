@@ -225,11 +225,11 @@ begin
   perform pg_temp.eq('catalog: authenticated can execute exactly the RPCs',
     (select string_agg(p.proname, ',' order by p.proname) from pg_proc p
       where p.pronamespace = 'public'::regnamespace and has_function_privilege('authenticated', p.oid, 'execute')),
-    'claim_host,create_merge_ticket,create_scene,create_session,end_session,get_shared_scene,image_folders_to_free,join_session,list_session_members,open_map,save_scene_version,save_session_state,session_info,set_display_name,set_member_status,set_scene_visibility,set_session_scene,set_table_open,unreferenced_scene_assets,upsert_player_view');
+    'claim_host,create_merge_ticket,create_scene,create_session,create_world,delete_world,end_session,get_shared_scene,image_folders_to_free,join_session,join_world,list_joined_worlds,list_session_members,move_scene,open_map,save_scene_version,save_session_state,session_info,set_character_players,set_display_name,set_member_status,set_scene_visibility,set_session_scene,set_table_open,set_world_member_status,unreferenced_scene_assets,upsert_player_view,world_info');
   perform pg_temp.eq('catalog: authenticated can execute only the policy helpers in private',
     (select string_agg(p.proname, ',' order by p.proname) from pg_proc p
       where p.pronamespace = 'private'::regnamespace and has_function_privilege('authenticated', p.oid, 'execute')),
-    'can_delete_session_tile,can_insert_scene_asset,can_insert_token_image,can_read_session_tile,can_write_session_tile,is_active_member,is_session_dm,normalize_display_name,topic_kind,topic_sid,topic_uid');
+    'can_delete_session_tile,can_insert_scene_asset,can_insert_token_image,can_read_session_tile,can_write_session_tile,is_active_member,is_session_dm,is_world_owner,normalize_display_name,topic_kind,topic_sid,topic_uid');
   perform pg_temp.eq('catalog: every public/private function pins an empty search_path',
     (select coalesce(string_agg(p.proname, ','), '') from pg_proc p
       where p.pronamespace in ('public'::regnamespace, 'private'::regnamespace)
@@ -237,8 +237,8 @@ begin
   perform pg_temp.eq('catalog: policy helpers are security definer',
     (select string_agg(p.proname || '=' || p.prosecdef, ',' order by p.proname) from pg_proc p
       where p.pronamespace = 'private'::regnamespace
-        and p.proname in ('topic_sid', 'topic_kind', 'topic_uid', 'is_session_dm', 'is_active_member')),
-    'is_active_member=true,is_session_dm=true,topic_kind=true,topic_sid=true,topic_uid=true');
+        and p.proname in ('topic_sid', 'topic_kind', 'topic_uid', 'is_session_dm', 'is_active_member', 'is_world_owner')),
+    'is_active_member=true,is_session_dm=true,is_world_owner=true,topic_kind=true,topic_sid=true,topic_uid=true');
 
   -- ======================= profiles =======================
   perform pg_temp.login(d);
@@ -593,7 +593,8 @@ begin
     pg_temp.try(format($q$select public.save_session_state(%L, 3, '{}')$q$, v_sid)), 'session_ended');
   perform pg_temp.eq('end: player_views are dropped', pg_temp.val(format('select count(*) from public.player_views where session_id = %L', v_sid)), '0');
   perform pg_temp.login(p1);
-  perform pg_temp.eq('end: the room code no longer resolves', pg_temp.try(format('select public.join_session(%L, %L)', v_code, 'Alice')), 'session_not_found');
+  -- The code is the world's (migration *_worlds.sql): it still resolves, but no table of the world is open.
+  perform pg_temp.eq('end: the room code finds no open table', pg_temp.try(format('select public.join_session(%L, %L)', v_code, 'Alice')), 'table_closed');
   perform pg_temp.eq('end: session_info reports ended', pg_temp.val(format('select status from public.session_info(%L)', v_sid)), 'ended');
   perform pg_temp.rt('player (after end)', p1, format('session:%s:host', v_sid), 'select', 'broadcast', false);
   perform pg_temp.rt('player (after end)', p1, format('session:%s:view:%s', v_sid, p1), 'select', 'broadcast', false);

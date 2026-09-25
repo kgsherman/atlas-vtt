@@ -88,6 +88,8 @@ function stubRepo(overrides: Partial<SessionsRepo> = {}): SessionsRepo {
       displayName: "Alice",
       dmDisplayName: null,
       createdAt: new Date().toISOString(),
+      worldId: null,
+      worldName: null,
     }),
     ...overrides,
   } as unknown as SessionsRepo
@@ -733,6 +735,8 @@ describe("PlayerClient: membership", () => {
         displayName: "Alice",
         dmDisplayName: null,
         createdAt: "",
+        worldId: null,
+        worldName: null,
       }),
     })
     const client = makeClient(newTab({ joinDelayMs: 60_000 }), { repo })
@@ -754,6 +758,8 @@ describe("PlayerClient: membership", () => {
         displayName: "Alice",
         dmDisplayName: null,
         createdAt: "",
+        worldId: null,
+        worldName: null,
       }),
     })
     const closed = makeClient(newTab({ joinDelayMs: 60_000 }), { repo })
@@ -783,6 +789,8 @@ describe("PlayerClient: membership", () => {
         displayName: "Alice",
         dmDisplayName: null,
         createdAt: "",
+        worldId: null,
+        worldName: null,
       }),
     })
     const host = rawHost(newTab())
@@ -806,6 +814,8 @@ describe("PlayerClient: membership", () => {
           displayName: null,
           dmDisplayName: null,
           createdAt: "",
+          worldId: null,
+          worldName: null,
         }),
       }),
     })
