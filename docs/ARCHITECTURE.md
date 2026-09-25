@@ -2055,7 +2055,7 @@ map screen: Edit / Play (Tab) on the table's live map, and doors that open and c
 version restore), `keybindings` 35/35, `multiplayer-local` 54/54, `change-map-local` 39/39, `table-local` 35/35,
 `templates-local` 30/30, `multiplayer-latency` 7/7, `engine-leak` 5/5, `vineyard-build` 23/23, `showcase` (the
 Crooked Lantern shots in `docs/screenshots/` re-shot with the new top bar). Against Supabase with the migration
-applied: `multiplayer-supabase` 32/33 (the "Allow public access" dashboard check, as before; closing the table
+applied: `multiplayer-supabase` 33/33 (after "Allow public access" was turned off in the dashboard; closing the table
 reaches the player and hides their stored view, deleting the map ends the table), `free-assets` 12/12; SQL tests
 `map_tables_test` 36/36 (new), `rls_test` 334/336 before its two stale catalog lists were brought up to date
 (`create_merge_ticket`, `can_insert_token_image`, both from later migrations; now closed tables' Realtime topics
@@ -2076,7 +2076,7 @@ run against a Vite dev server (Chromium, NVIDIA through WSL d3d12 unless noted; 
 | `editor-smoke` | 34/34 on NVIDIA (probe picks ultra) and 34/34 on SwiftShader (probe picks low): quality probe, menus, labels, options bar at 1280 px, tools, undo / redo, shortcuts, save, reload |
 | `vineyard-build` | 23/23 (import dialog, traced floors and walls, the layout in one undoable edit, every storey reachable, save / reload, export) |
 | `multiplayer-local` | 54/54 on the Crooked Lantern and 54/54 on the Vineyard (probed tiers on host and players, host menus, oracle-equal views, moves, doors, stairs incl. a blind landing on the Vineyard, lock, reloads, leak scan) |
-| `multiplayer-supabase` | 29/30 on the Crooked Lantern, 38/39 on the Vineyard with map chunks: the one failure is the "Allow public access" dashboard check (see Known gaps, Security); public channels received no session data, the kicked member's subscription stopped after a token refresh, and ending the session deleted the players' chunks |
+| `multiplayer-supabase` | 29/30 on the Crooked Lantern, 38/39 on the Vineyard with map chunks: the one failure was the "Allow public access" dashboard check, since turned off (33/33 with the map tables); public channels received no session data, the kicked member's subscription stopped after a token refresh, and ending the session deleted the players' chunks |
 | `multiplayer-latency` | 7/7 (120×120 daylit field: a 20-step move answered in 325–610 ms, a concurrent 1-step move in 609–617 ms over two runs) |
 | `host-save-map` | 12/12 |
 | `free-assets` | 12/12 (2026-09-23, against Supabase with the bucket files served from a local build via `ATLAS_FREE_ASSETS_DIR`: start dialog, Assets tab, the host and a player download and draw the model, unloading keeps it) |
@@ -2518,10 +2518,6 @@ Known gaps and deliberate limits:
   ended ones included, §6.4), but ended games stay stored until then. A migration that drops the state on
   `end_session`, the unused policy and grant (plus a one-time purge of existing ended sessions' state) was
   drafted in wave 4 and not applied: it needs the project owner's approval.
-- On the linked project Realtime's "Allow public access" is still on (a dashboard switch that migrations
-  cannot set; README step 2 says to turn it off), so `e2e/multiplayer-supabase.mjs` fails that one check.
-  The same run shows that public subscribers to a session's host and view topics receive none of its
-  private broadcasts, so no session data is exposed.
 
 **Tooling**
 
