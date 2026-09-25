@@ -90,7 +90,7 @@ export type TokenUpdate = Partial<Omit<Token, "id">>
 /** Level fields editable through updateLevel. Terrain (heightmap, terrainEdits) goes through the terrain actions. */
 export type LevelUpdate = Partial<Omit<Level, "id" | "heightmap" | "terrainEdits">>
 export type EnvironmentUpdate = Partial<Omit<Environment, "directional">> & { directional?: Partial<DirectionalLightSettings> }
-export type GridUpdate = Partial<Pick<GridSettings, "width" | "depth" | "diagonalRule">>
+export type GridUpdate = Partial<Pick<GridSettings, "width" | "depth" | "diagonalRule" | "visionOrigin">>
 
 export interface ApplyOptions {
   /** Merge with the previous undo step when it has the same key (slider drags, repeated nudges). */
@@ -1127,6 +1127,7 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
           if (partial.width !== undefined) d.grid.width = clampCells(partial.width)
           if (partial.depth !== undefined) d.grid.depth = clampCells(partial.depth)
           if (partial.diagonalRule !== undefined) d.grid.diagonalRule = partial.diagonalRule
+          if (partial.visionOrigin !== undefined) d.grid.visionOrigin = partial.visionOrigin
           if (d.grid.width === prevGrid.width && d.grid.depth === prevGrid.depth) return
           // Terrain follows the new lattice: the painted base is cropped (samples beyond it dropped, so old
           // heights can't come back if the grid grows again) and the shapes rebaked (a grown grid shows the

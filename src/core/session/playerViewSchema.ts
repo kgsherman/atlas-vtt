@@ -225,6 +225,8 @@ const grid = z.strictObject({
   width: z.int().min(1),
   depth: z.int().min(1),
   diagonalRule: z.enum(["5-5-5", "5-10-5", "euclidean"]),
+  // Views stored before it (a session still open across the update) see from the whole square.
+  visionOrigin: z.enum(["square", "eye"]).default("square"),
 })
 
 const ambient = z.enum(["bright", "dim", "dark"])

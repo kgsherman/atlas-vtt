@@ -102,6 +102,7 @@ const gridSchema = z.strictObject({
   width: z.int().min(1).max(SCENE_LIMITS.maxGridCells),
   depth: z.int().min(1).max(SCENE_LIMITS.maxGridCells),
   diagonalRule: z.enum(["5-5-5", "5-10-5", "euclidean"]),
+  visionOrigin: z.enum(["square", "eye"]),
 })
 
 const ambientLevelSchema = z.enum(["bright", "dim", "dark"])

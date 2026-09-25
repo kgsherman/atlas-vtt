@@ -1,3 +1,4 @@
+import { yawCos, yawSin } from "./vec"
 /**
  * Axis-aligned boxes (2D on the ground plane and 3D) and oriented rectangles on XZ.
  *
@@ -61,22 +62,22 @@ export function yawFromDirection(dx: number, dz: number): number {
 
 /** Local (lx, lz) → world offset, for a frame rotated by yaw. */
 export function rotateLocalXZ(lx: number, lz: number, yaw: number): Vec2 {
-  const c = Math.cos(yaw)
-  const s = Math.sin(yaw)
+  const c = yawCos(yaw)
+  const s = yawSin(yaw)
   return { x: c * lx + s * lz, z: -s * lx + c * lz }
 }
 
 /** World offset → local (lx, lz), inverse of rotateLocalXZ. */
 export function unrotateXZ(wx: number, wz: number, yaw: number): Vec2 {
-  const c = Math.cos(yaw)
-  const s = Math.sin(yaw)
+  const c = yawCos(yaw)
+  const s = yawSin(yaw)
   return { x: c * wx - s * wz, z: s * wx + c * wz }
 }
 
 /** Corners (counter-clockwise in local space) of an oriented rectangle. */
 export function orientedRectCorners(center: Vec2, halfX: number, halfZ: number, yaw: number): Vec2[] {
-  const c = Math.cos(yaw)
-  const s = Math.sin(yaw)
+  const c = yawCos(yaw)
+  const s = yawSin(yaw)
   const out: Vec2[] = []
   for (const [lx, lz] of [
     [-halfX, -halfZ],
@@ -91,8 +92,8 @@ export function orientedRectCorners(center: Vec2, halfX: number, halfZ: number, 
 
 /** World-space AABB of an oriented rectangle. */
 export function orientedRectBounds(center: Vec2, halfX: number, halfZ: number, yaw: number): AABB2 {
-  const c = Math.abs(Math.cos(yaw))
-  const s = Math.abs(Math.sin(yaw))
+  const c = Math.abs(yawCos(yaw))
+  const s = Math.abs(yawSin(yaw))
   const ex = c * halfX + s * halfZ
   const ez = s * halfX + c * halfZ
   return { minX: center.x - ex, minZ: center.z - ez, maxX: center.x + ex, maxZ: center.z + ez }
@@ -110,8 +111,8 @@ export function orientedRectOverlapsAABB2(
   box: AABB2,
   eps = 0
 ): boolean {
-  const c = Math.cos(yaw)
-  const s = Math.sin(yaw)
+  const c = yawCos(yaw)
+  const s = yawSin(yaw)
   const ac = Math.abs(c)
   const as = Math.abs(s)
   const bx = (box.maxX - box.minX) / 2

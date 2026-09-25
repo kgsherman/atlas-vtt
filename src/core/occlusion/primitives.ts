@@ -29,7 +29,7 @@ import {
   lineVerticalCylinder,
 } from "../geometry/ray"
 import { clipSegmentToBox2Into, distancePointSegment2 } from "../geometry/segment"
-import { EPS } from "../geometry/vec"
+import { EPS, yawCos, yawSin } from "../geometry/vec"
 import type { Rect, Vec2, Vec3 } from "../scene/types"
 import type { Heightfield, OccluderPrimitive, OrientedBox, VerticalCylinder, WallStrip } from "./types"
 
@@ -227,8 +227,8 @@ function stripMaxY(st: WallStrip): number {
 
 /** Local (along, across) coordinates of a world XZ point in a strip's frame. */
 function stripLocal(st: WallStrip, x: number, z: number): { lx: number; lz: number } {
-  const c = Math.cos(st.yaw)
-  const s = Math.sin(st.yaw)
+  const c = yawCos(st.yaw)
+  const s = yawSin(st.yaw)
   const dx = x - st.center.x
   const dz = z - st.center.z
   return { lx: c * dx - s * dz, lz: s * dx + c * dz }
@@ -242,8 +242,8 @@ function stripLocal(st: WallStrip, x: number, z: number): { lx: number; lz: numb
 export function primitiveContains(p: OccluderPrimitive, q: Vec3, eps = EPS): boolean {
   switch (p.shape) {
     case "box": {
-      const c = Math.cos(p.yaw)
-      const s = Math.sin(p.yaw)
+      const c = yawCos(p.yaw)
+      const s = yawSin(p.yaw)
       const dx = q.x - p.center.x
       const dz = q.z - p.center.z
       return (
@@ -537,7 +537,7 @@ export function segmentEntry(p: OccluderPrimitive, from: Vec3, to: Vec3): number
   let r: number
   switch (p.shape) {
     case "box":
-      r = boxEntry(p, Math.cos(p.yaw), Math.sin(p.yaw), from.x, from.y, from.z, dx, dy, dz, len)
+      r = boxEntry(p, yawCos(p.yaw), yawSin(p.yaw), from.x, from.y, from.z, dx, dy, dz, len)
       break
     case "cylinder":
       r = cylinderEntry(p, from.x, from.y, from.z, dx, dy, dz, len)
@@ -546,7 +546,7 @@ export function segmentEntry(p: OccluderPrimitive, from: Vec3, to: Vec3): number
       r = heightfieldEntry(p, from.x, from.y, from.z, dx, dy, dz, len)
       break
     case "strip":
-      r = stripEntry(p, Math.cos(p.yaw), Math.sin(p.yaw), stripMaxY(p), from.x, from.y, from.z, dx, dy, dz, len)
+      r = stripEntry(p, yawCos(p.yaw), yawSin(p.yaw), stripMaxY(p), from.x, from.y, from.z, dx, dy, dz, len)
       break
   }
   return r > 0 && r < 1 ? r : null
@@ -710,8 +710,8 @@ export function footprintPolygon(p: OccluderPrimitive): Vec2[] | null {
 export function primitiveTopAt(p: OccluderPrimitive, x: number, z: number): number | null {
   switch (p.shape) {
     case "box": {
-      const c = Math.cos(p.yaw)
-      const s = Math.sin(p.yaw)
+      const c = yawCos(p.yaw)
+      const s = yawSin(p.yaw)
       const dx = x - p.center.x
       const dz = z - p.center.z
       if (Math.abs(c * dx - s * dz) > p.halfExtents.x + EPS || Math.abs(s * dx + c * dz) > p.halfExtents.z + EPS) return null
@@ -741,8 +741,8 @@ export function pushOutOfPrimitive(p: OccluderPrimitive, q: Vec3, margin: number
   if (!primitiveContains(p, q)) return { x: q.x, y: q.y, z: q.z }
   switch (p.shape) {
     case "box": {
-      const c = Math.cos(p.yaw)
-      const s = Math.sin(p.yaw)
+      const c = yawCos(p.yaw)
+      const s = yawSin(p.yaw)
       const dx = q.x - p.center.x
       const dz = q.z - p.center.z
       let lx = c * dx - s * dz
@@ -782,8 +782,8 @@ export function pushOutOfPrimitive(p: OccluderPrimitive, q: Vec3, margin: number
       return top - q.y <= q.y - bottom ? { x: q.x, y: top + margin, z: q.z } : { x: q.x, y: bottom - margin, z: q.z }
     }
     case "strip": {
-      const c = Math.cos(p.yaw)
-      const s = Math.sin(p.yaw)
+      const c = yawCos(p.yaw)
+      const s = yawSin(p.yaw)
       const dx = q.x - p.center.x
       const dz = q.z - p.center.z
       let lx = c * dx - s * dz

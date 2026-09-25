@@ -6,7 +6,7 @@ import type { GridSettings } from "@/core/scene/types"
 import { GroundSampler } from "../builders/ground"
 import { gridGeometry, GridOverlay } from "./grid"
 
-const grid = (width: number, depth: number): GridSettings => ({ cellSize: 5, width, depth, diagonalRule: "5-5-5" })
+const grid = (width: number, depth: number): GridSettings => ({ cellSize: 5, width, depth, diagonalRule: "5-5-5", visionOrigin: "square" })
 
 /** Dense lattice sampler (resolution `res`) of h(x, z) on a level at `elevation`. */
 function sampler(g: GridSettings, res: number, elevation: number, h: (x: number, z: number) => number): GroundSampler {

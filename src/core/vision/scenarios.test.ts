@@ -9,6 +9,7 @@ import { paintHeightmap } from "../occlusion/test-utils"
 import { createConnector, createDoor, createFloor, createLight, createPillar, createProp, createWall, createWindow } from "../scene/factory"
 import { createVisionEngine, resolveViewerEye, VisionEngineImpl } from "."
 import { add, addLevel, addToken, flat, grade, partial, perceivedCount, subPerceived, sunlitCell, withObject, withToken } from "./test-scenes"
+import type { VisibilityResult } from "./types"
 
 describe("eye height and low walls", () => {
   // Outdoors in daylight; a 3 ft wall along x = 25 (cells i ≥ 5 are behind it).
@@ -609,5 +610,66 @@ describe("engine edge cases", () => {
     // c stands next to the cell on the same side as a: still partial.
     const res2 = engine.compute([engine.viewerFor(a), engine.viewerFor(c)])
     expect(partial(res2, ground, 4, 4)).toBeDefined()
+  })
+})
+
+describe("sight from the whole square", () => {
+  // A 3 ft pillar-like wall (x = 20, z 11..14) straight between the viewer (12.5, 12.5) and the east. The
+  // eye's shadow of it runs to the grid edge; the corner eyes (x 10.5..14.5, z 10.5..14.5) are 4 ft apart,
+  // wider than the wall, so they see behind it from x ≈ 37 on.
+  function pillar(origin: "eye" | "square") {
+    const t = flat(12, 5, "bright", origin)
+    add(t.scene, createWall(t.ground, { x: 20, z: 11 }, { x: 20, z: 14 }))
+    const viewer = addToken(t.scene, t.ground, 12.5, 12.5)
+    const target = addToken(t.scene, t.ground, 30, 12.5)
+    const engine = createVisionEngine(t.scene)
+    return { ...t, viewer, target, res: engine.compute([engine.viewerFor(viewer)]) }
+  }
+
+  it("sees behind an obstacle narrower than its space", () => {
+    const eye = pillar("eye")
+    const sq = pillar("square")
+    expect(grade(eye.res, eye.ground, 8, 2)).toBe(0)
+    expect(grade(sq.res, sq.ground, 8, 2)).toBe(3)
+    expect(perceivedCount(sq.res, sq.ground)).toBeGreaterThan(perceivedCount(eye.res, eye.ground))
+    // Everything the eye perceives, the square perceives too.
+    const g = (t: { res: VisibilityResult; ground: string }, c: number) => t.res.perception[t.ground].grades[c]
+    for (let c = 0; c < 60; c++) if (g(eye, c) > 0) expect(g(sq, c)).toBeGreaterThan(0)
+  })
+
+  it("sees tokens behind the obstacle that the eye alone cannot", () => {
+    expect(pillar("eye").res.visibleTokenIds.has(pillar("eye").target.id)).toBe(false)
+    const sq = pillar("square")
+    expect(sq.res.visibleTokenIds.has(sq.target.id)).toBe(true)
+  })
+
+  it("never sees through a wall the token stands against", () => {
+    // A thick wall along x = 10 (x 9.25..10.75) with the token's cell right against it: its east corners
+    // (x = 9.5) are in the wall and dropped.
+    const { scene, ground } = flat(8, 4, "bright", "square")
+    add(scene, createWall(ground, { x: 10, z: -5 }, { x: 10, z: 25 }, { thickness: 1.5 }))
+    const viewer = addToken(scene, ground, 7.5, 12.5)
+    const beyond = addToken(scene, ground, 17.5, 12.5)
+    const engine = createVisionEngine(scene)
+    const v = engine.viewerFor(viewer)
+    expect(v.eyes!.length).toBe(3)
+    const res = engine.compute([v])
+    for (let j = 0; j < 4; j++) for (let i = 3; i < 8; i++) expect(grade(res, ground, i, j), `(${i}, ${j})`).toBe(0)
+    expect(res.visibleTokenIds.has(beyond.id)).toBe(false)
+  })
+
+  it("measures darkvision from the nearest eye", () => {
+    const sub = (origin: "eye" | "square") => {
+      const { scene, ground } = flat(40, 3, "dark", origin)
+      const elf = addToken(scene, ground, 2.5, 7.5, { vision: { darkvision: 60, blindsight: 0, blind: false } })
+      const engine = createVisionEngine(scene)
+      const res = engine.compute([engine.viewerFor(elf)])
+      expect(grade(res, ground, 12, 1)).toBe(2)
+      let n = 0
+      for (let sz = 0; sz < 4; sz++) for (let sx = 0; sx < 4; sx++) if (subPerceived(res, ground, 12, 1, sx, sz)) n++
+      return n
+    }
+    // The 60 ft sphere crosses cell 12 (x 60..65); the east corner eyes are 2 ft closer than the eye.
+    expect(sub("square")).toBeGreaterThan(sub("eye"))
   })
 })

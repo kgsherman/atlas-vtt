@@ -86,7 +86,7 @@ export function createScene(partial: Partial<Pick<Scene, "name">> & { width?: nu
     name: partial.name ?? "Untitled Scene",
     createdAt: now,
     updatedAt: now,
-    grid: { cellSize: DEFAULT_CELL_SIZE, width, depth, diagonalRule: "5-5-5" },
+    grid: { cellSize: DEFAULT_CELL_SIZE, width, depth, diagonalRule: "5-5-5", visionOrigin: "square" },
     environment: defaultEnvironment(),
     levels: { [ground.id]: ground },
     objects: {},

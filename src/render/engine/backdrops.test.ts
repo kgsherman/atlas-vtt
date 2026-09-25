@@ -74,7 +74,7 @@ describe("BackdropManager", () => {
     const calls: { opacity: number; tintWalls: boolean }[] = []
     const m = new BackdropManager(renderer, "high", (_l, _t, _r, opacity, tintWalls) => calls.push({ opacity, tintWalls }))
     const level = { id: "L", name: "L", elevation: 0, height: 10, floorThickness: 1, heightmap: null, backdrop: { assetId: "a", rect, opacity: 0.5, tintWalls: true } }
-    m.syncScene({ grid: { cellSize: 5, width: 20, depth: 10, diagonalRule: "5-5-5" }, environment: {} as never, levels: { L: level }, objects: {}, tokens: {} })
+    m.syncScene({ grid: { cellSize: 5, width: 20, depth: 10, diagonalRule: "5-5-5", visionOrigin: "square" }, environment: {} as never, levels: { L: level }, objects: {}, tokens: {} })
     m.set("L", image, rect)
     expect(calls.at(-1)).toEqual({ opacity: 0.5, tintWalls: true })
     m.set("L", image, rect, { opacity: 0.25 })

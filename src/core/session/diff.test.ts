@@ -111,7 +111,7 @@ function randomView(r: Rand): PlayerView {
     userId: "u",
     scene: {
       name: pick(r, ["A", "B"]),
-      grid: { cellSize: 5, width: 10, depth: 10, diagonalRule: pick(r, ["5-5-5", "5-10-5"] as const) },
+      grid: { cellSize: 5, width: 10, depth: 10, diagonalRule: pick(r, ["5-5-5", "5-10-5"] as const), visionOrigin: "square" },
       environment: {
         skyLevel: pick(r, ["bright", "dark"] as const),
         ambientLevel: "dark",

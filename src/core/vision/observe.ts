@@ -306,12 +306,7 @@ export function observedObjectIds(
         continue
       }
       if (!o.on || o.hidden) continue
-      for (const v of seeing) {
-        if (!world.segmentBlocked(v.eye, pos, { channel: "sight" })) {
-          out.add(id)
-          break
-        }
-      }
+      if (seeing.some((v) => (v.eyes ?? [v.eye]).some((eye) => !world.segmentBlocked(eye, pos, { channel: "sight" })))) out.add(id)
       continue
     }
     const fp = footprint(o)

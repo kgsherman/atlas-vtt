@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest"
 
 import { buildOcclusionWorld } from "../occlusion"
-import { createConnector, createProp, createWall } from "../scene/factory"
+import { createConnector, createFloor, createProp, createWall } from "../scene/factory"
 import { createHeightmap, sampleCounts, writeHeights } from "../scene/heightmap"
 import { levelGround } from "../scene/queries"
-import { resolveLightOrigin, resolveViewerEye, tokenPointColumns, tokenTestPoints } from "."
+import { resolveLightOrigin, resolveViewerEye, tokenPointColumns, tokenTestPoints, viewerEyesAtGround } from "."
 import { insideInfoAt, TOP_PROBE_HEIGHT } from "./layout"
 import { add, addLevel, addToken, flat } from "./test-scenes"
 
@@ -116,5 +116,51 @@ describe("follow-terrain walls (strips)", () => {
       const info = insideInfoAt(world, x, top(x) - 2, 25)
       expect(info?.top?.y).toBeCloseTo(top(x) + TOP_PROBE_HEIGHT, 9)
     }
+  })
+})
+
+describe("viewerEyesAtGround", () => {
+  it("is the eye alone with sight from the eye point", () => {
+    const { scene, ground } = flat(10, 10)
+    const t = addToken(scene, ground, 12.5, 12.5)
+    expect(viewerEyesAtGround(buildOcclusionWorld(scene), 5, 0, t, "eye")).toEqual([{ x: 12.5, y: 5.5, z: 12.5 }])
+  })
+
+  it("adds the footprint's corners inset 0.5 ft at eye height with sight from the square", () => {
+    const { scene, ground } = flat(10, 10)
+    const world = buildOcclusionWorld(scene)
+    const medium = addToken(scene, ground, 12.5, 12.5)
+    expect(viewerEyesAtGround(world, 5, 0, medium, "square")).toEqual([
+      { x: 12.5, y: 5.5, z: 12.5 },
+      { x: 10.5, y: 5.5, z: 10.5 },
+      { x: 14.5, y: 5.5, z: 10.5 },
+      { x: 10.5, y: 5.5, z: 14.5 },
+      { x: 14.5, y: 5.5, z: 14.5 },
+    ])
+    const large = addToken(scene, ground, 20, 20, { size: "large" })
+    expect(viewerEyesAtGround(world, 5, 0, large, "square").map((e) => [e.x, e.z])).toEqual([
+      [20, 20],
+      [15.5, 15.5],
+      [24.5, 15.5],
+      [15.5, 24.5],
+      [24.5, 24.5],
+    ])
+  })
+
+  it("clamps each corner below its own ceiling and drops corners behind a wall", () => {
+    const { scene, ground } = flat(10, 10)
+    // A slab 4 ft up over x < 10.6 only: the west corners duck under it (the segment from the eye passes
+    // under its edge), the eye and east corners do not.
+    const upper = addLevel(scene, { name: "Loft", elevation: 4, floorThickness: 0.5 })
+    add(scene, createFloor(upper.id, { x: 0, z: 0, w: 10.6, d: 50 }))
+    // A wall through the south corners' row.
+    add(scene, createWall(ground, { x: 0, z: 14 }, { x: 50, z: 14 }))
+    const t = addToken(scene, ground, 12.5, 12.5)
+    const eyes = viewerEyesAtGround(buildOcclusionWorld(scene), 5, 0, t, "square")
+    expect(eyes.map((e) => [e.x, e.y, e.z])).toEqual([
+      [12.5, 5.5, 12.5],
+      [10.5, 3.25, 10.5],
+      [14.5, 5.5, 10.5],
+    ])
   })
 })

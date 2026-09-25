@@ -19,7 +19,7 @@ import {
   supercoverCells,
 } from "./grid"
 
-const grid: GridSettings = { cellSize: 5, width: 10, depth: 8, diagonalRule: "5-5-5" }
+const grid: GridSettings = { cellSize: 5, width: 10, depth: 8, diagonalRule: "5-5-5", visionOrigin: "square" }
 
 const key = (c: Cell) => `${c.i},${c.j}`
 const keys = (cells: Cell[]) => cells.map(key).sort()

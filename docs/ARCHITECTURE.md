@@ -202,6 +202,10 @@ and the table dialogs).
   respect:
   - Eyes are pushed out of sight blockers by `resolveViewerEye` (§5.2), except blockers that also contain the
     token's feet (a creature standing in a bush).
+  - Boxes are oriented by yaw with cos / sin snapped to exactly 0 / ±1 at quarter turns (`yawCos` / `yawSin`),
+    so axis-aligned boxes sharing a face (a wall piece and the closed leaf in its opening) share it exactly:
+    a segment lying on that face enters both (closed solids) instead of slipping between them on 1e-16
+    round-off. Corner eyes (§5.2) sit on such planes whenever a 4 ft door is centred on a cell.
   - Light origins are resolved at compute time by `core/vision` `resolveLightOrigin`, which both the vision
     engine and the renderer's light capture (`render/lighting/lights.ts`) use. The origin is pushed 0.3 ft
     past the nearest face of every light blocker that contains it (EPS-closed containment, so a light
@@ -763,6 +767,17 @@ extensions, so a door toggle builds no joint index.
 
 **Viewer eye** (`resolveViewerEye`): nominal eye `ground + eyeHeight`, clamped to `ceiling − 0.25` (ceiling from
 an upward sight raycast), then pushed out of any containing sight blocker it did not start in.
+
+**Viewer eyes** (`viewerEyesAtGround` / `resolveViewerEyes`, `Viewer.eyes`): with `grid.visionOrigin` "eye" the
+eye alone; with "square" (the default) also the 4 corners of the token's footprint inset `CORNER_EYE_INSET`
+(0.5 ft), at the eye's nominal height over the token's own ground (the head moves sideways, not with the
+terrain), each clamped and pushed out like the eye. A corner is dropped when the segment from the eye to it is
+sight-blocked (a corner in or behind a wall never sees past it). Everything is the union over eyes: a sample,
+sub-cell or token test point is perceived if some eye perceives it, with distances (darkvision, blindsight)
+from that eye. The line-of-sight cache holds one entry per sample and eye, tested lazily in order of the grade
+an eye could give, stopping at the first that sees, so a seen point usually costs one ray. Measured
+(`perf.test.ts`, Node): dark dungeon full compute unchanged (~20 ms), torch-bearer step 1.45×, terrain map
+1.4×, the daylit worst case 2× the eye-only cost.
 
 **Samples**: per cell, centre + 4 points inset `VISION_SAMPLE_INSET` (0.75 ft) from the cell edges, at
 `groundHeightAt + 0.25`. A (level, cell) is **sampleable** only if an effective floor / heightfield / connector

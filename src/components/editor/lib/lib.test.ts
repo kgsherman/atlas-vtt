@@ -144,7 +144,7 @@ describe("levelOps", () => {
 
 describe("pointer", () => {
   it("builds snapped tool events and honours Alt", () => {
-    const grid = { cellSize: 5, width: 10, depth: 10, diagonalRule: "5-5-5" as const }
+    const grid = { cellSize: 5, width: 10, depth: 10, diagonalRule: "5-5-5" as const, visionOrigin: "square" as const }
     const pick = { ground: { x: 6.2, y: 0, z: 13.9 }, objectId: null, tokenId: null, hitPoint: null }
     const base = { clientX: 10, clientY: 20, button: 0, shiftKey: false, altKey: false, ctrlKey: false, metaKey: true, detail: 2 }
     const e = toToolPointerEvent(base, pick, { grid, snapMode: "center", altHeld: false })
@@ -163,7 +163,7 @@ describe("pointer", () => {
   })
 
   it("fills canvas-relative coordinates and the pressed buttons", () => {
-    const grid = { cellSize: 5, width: 10, depth: 10, diagonalRule: "5-5-5" as const }
+    const grid = { cellSize: 5, width: 10, depth: 10, diagonalRule: "5-5-5" as const, visionOrigin: "square" as const }
     const pick = { ground: null, objectId: null, tokenId: null, hitPoint: null }
     const base = { clientX: 110, clientY: 220, button: 0, buttons: 2, shiftKey: false, altKey: false, ctrlKey: false, metaKey: false }
     const e = toToolPointerEvent(base, pick, { grid, snapMode: "center", altHeld: false }, { origin: { left: 100, top: 200 } })

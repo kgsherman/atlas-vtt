@@ -16,7 +16,7 @@
 
 import type { TokenCondition, TokenHp } from "./tokenStatus"
 
-export const SCENE_SCHEMA_VERSION = 8 as const
+export const SCENE_SCHEMA_VERSION = 9 as const
 
 export type Id = string
 
@@ -49,6 +49,13 @@ export interface Cell {
 
 export type DiagonalRule = "5-5-5" | "5-10-5" | "euclidean"
 
+/**
+ * Where a token's line of sight starts: "square" = its eye point and the 4 corners of its footprint (inset
+ * 0.5 ft) at eye height, as if it could lean anywhere in its space (5e's cover rule traces from any corner
+ * of the attacker's square); "eye" = the eye point only.
+ */
+export type VisionOrigin = "square" | "eye"
+
 export interface GridSettings {
   /** Feet per square. Default 5. */
   cellSize: number
@@ -58,6 +65,8 @@ export interface GridSettings {
   depth: number
   /** How diagonal moves are measured by the ruler and movement validation. */
   diagonalRule: DiagonalRule
+  /** Where tokens see from (ARCHITECTURE §5.2 "Viewer eyes"). */
+  visionOrigin: VisionOrigin
 }
 
 // ---------------------------------------------------------------------------

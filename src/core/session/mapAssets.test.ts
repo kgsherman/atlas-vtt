@@ -164,7 +164,7 @@ describe("masked floors", () => {
   })
 
   it("merges an aligned mask back into few rects when fully explored", () => {
-    const grid = { cellSize: 5, width: 20, depth: 20, diagonalRule: "5-5-5" as const }
+    const grid = { cellSize: 5, width: 20, depth: 20, diagonalRule: "5-5-5" as const, visionOrigin: "square" as const }
     const rect = { x: 10, z: 10, w: 40, d: 40 }
     const floor = { rect, mask: maskFrom(rect, 1.25, () => true) }
     const explored = decodeMask({ width: 20, depth: 20, b64: bytesToBase64(new Uint8Array(Math.ceil(400 / 8)).fill(255)) })

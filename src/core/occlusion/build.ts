@@ -39,6 +39,7 @@ import type {
 } from "../scene/types"
 import { MIN_EXTENT, openingFrame, pieceKnots, WALL_BOTTOM_MARGIN, wallProfile, type WallProfile } from "../scene/wallProfile"
 import { TerrainSampler } from "./terrain"
+import { yawCos, yawSin } from "../geometry/vec"
 import type { BlockFlags, Heightfield, OccluderPrimitive, OrientedBox, VerticalCylinder, WallStrip } from "./types"
 
 /** Wall bottoms extend this far below the minimum ground along their footprint (see core/scene/wallProfile). */
@@ -605,8 +606,8 @@ function buildProp(ctx: BuildContext, prop: PropObject): OccluderPrimitive[] {
   const sy = Math.abs(prop.scale.y)
   const sz = Math.abs(prop.scale.z)
   const yaw = prop.rotationY
-  const cos = Math.cos(yaw)
-  const sin = Math.sin(yaw)
+  const cos = yawCos(yaw)
+  const sin = yawSin(yaw)
   // Terrain rule: the prop's base sits at ground(centre) + y.
   const baseY = terrain.heightAt(prop.position.x, prop.position.z) + prop.position.y
   const resting = prop.position.y === 0

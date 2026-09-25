@@ -27,6 +27,7 @@ I want to build a browser-based virtual tabletop (VTT) called Atlas VTT in TypeS
 ## Lighting and vision (the key feature)
 - Real-time dynamic shadows from all light sources, cast by the 3D geometry (walls, pillars, props, floors of other levels)
 - Line of sight computed per token from eye height in 3D, so a low wall blocks a halfling's view but not a giant's, and a character on a balcony can see down into a courtyard
+- By default a token sees from anywhere in its square (its eye point and the corners of its space, as if leaning around a corner, like 5e's cover rule); the DM can switch a map to "eye point only"
 - Vision types per token: normal, darkvision (with range, rendered greyscale), blindsight, and blind
 - Fog of war with three states: currently visible, previously explored (dimmed, shows static geometry only, no tokens), and unexplored (black)
 - Each player sees only what their own tokens can see; shared vision for party members is a toggle

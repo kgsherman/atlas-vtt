@@ -2,7 +2,7 @@
  * Scene builders and result accessors shared by the vision tests.
  */
 import { createFloor, createLevel, createScene, createToken } from "../scene/factory"
-import type { Id, Level, Rect, Scene, SceneObject, Token } from "../scene/types"
+import type { Id, Level, Rect, Scene, SceneObject, Token, VisionOrigin } from "../scene/types"
 import { SUBCELLS, type GradeMask, type VisibilityResult } from "./types"
 
 export interface TestScene {
@@ -10,9 +10,13 @@ export interface TestScene {
   ground: Id
 }
 
-/** One flat level fully covered by a floor. Light: "bright" everywhere, or "dark" everywhere. */
-export function flat(width: number, depth: number, light: "bright" | "dark" = "bright"): TestScene {
+/**
+ * One flat level fully covered by a floor. Light: "bright" everywhere, or "dark" everywhere. Tokens see from
+ * their eye point unless `origin` says otherwise (most scenarios are geometry around one eye).
+ */
+export function flat(width: number, depth: number, light: "bright" | "dark" = "bright", origin: VisionOrigin = "eye"): TestScene {
   const scene = createScene({ width, depth })
+  scene.grid.visionOrigin = origin
   scene.environment.skyLevel = light
   scene.environment.ambientLevel = light
   return { scene, ground: Object.keys(scene.levels)[0] }

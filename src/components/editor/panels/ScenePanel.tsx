@@ -4,7 +4,7 @@ import { CloudMoon, Moon, Sun, Sunrise, Warehouse } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { finestTerrainResolution, maxCellsForResolution } from "@/core/scene/heightmap"
 import { SCENE_LIMITS } from "@/core/scene/schema"
-import type { AmbientLevel, DiagonalRule, DirectionalLightSettings, Environment } from "@/core/scene/types"
+import type { AmbientLevel, DiagonalRule, DirectionalLightSettings, Environment, VisionOrigin } from "@/core/scene/types"
 import type { EnvironmentUpdate } from "@/editor/store"
 import { cn } from "@/lib/utils"
 
@@ -23,6 +23,11 @@ const DIAGONAL_OPTIONS: Option<DiagonalRule>[] = [
   { value: "5-5-5", label: "5-5-5 (every step 5 ft)" },
   { value: "5-10-5", label: "5-10-5 (alternating)" },
   { value: "euclidean", label: "Euclidean" },
+]
+
+const VISION_ORIGIN_OPTIONS: Option<VisionOrigin>[] = [
+  { value: "square", label: "Whole square" },
+  { value: "eye", label: "Eye point" },
 ]
 
 const PRESET_ICONS: Record<EnvPresetId, React.ReactNode> = {
@@ -252,6 +257,9 @@ export function ScenePanel() {
         </Hint>
         <FieldRow label="Diagonals" hint="How the ruler and movement count diagonal steps.">
           <SelectInput value={grid.diagonalRule} options={DIAGONAL_OPTIONS} disabled={readOnly} onValueChange={(diagonalRule) => store.getState().updateGrid({ diagonalRule })} />
+        </FieldRow>
+        <FieldRow label="Sight from" hint="Whole square: tokens see from any corner of their space, as if leaning around corners (5e cover rules). Eye point: only from the token's eye.">
+          <SelectInput value={grid.visionOrigin} options={VISION_ORIGIN_OPTIONS} disabled={readOnly} onValueChange={(visionOrigin) => store.getState().updateGrid({ visionOrigin })} />
         </FieldRow>
       </PanelSection>
 

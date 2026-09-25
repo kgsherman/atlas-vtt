@@ -13,7 +13,7 @@ import { closestOnSegment, constrainAngle, edgeSnapMode, effectiveSnapMode, plac
 import { fixtureScene } from "./test-utils"
 import { alignDelta, applyMove, applyRotation, boundsPivot, normalizeAngle, planMove, rotateQuarter, rotationPivot, snapDragDelta } from "./transform"
 
-const grid: GridSettings = { cellSize: 5, width: 20, depth: 20, diagonalRule: "5-5-5" }
+const grid: GridSettings = { cellSize: 5, width: 20, depth: 20, diagonalRule: "5-5-5", visionOrigin: "square" }
 
 describe("sceneChangeFromPatches", () => {
   it("classifies object, token, terrain and structural paths", () => {

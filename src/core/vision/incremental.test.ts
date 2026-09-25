@@ -51,9 +51,9 @@ function expectSame(engine: VisionEngine, scene: Scene, tokens: Token[], label: 
 const setObject = (scene: Scene, o: SceneObject): Scene => ({ ...scene, objects: { ...scene.objects, [o.id]: o } })
 const setToken = (scene: Scene, t: Token): Scene => ({ ...scene, tokens: { ...scene.tokens, [t.id]: t } })
 
-describe("incremental updates", () => {
+describe.each(["eye", "square"] as const)("incremental updates (sight from %s)", (origin) => {
   it("match a fresh engine after every kind of change", () => {
-    const { scene: s0, ground } = flat(24, 16, "dark")
+    const { scene: s0, ground } = flat(24, 16, "dark", origin)
     const upper = addLevel(s0, { name: "Upper", elevation: 10 }, { x: 0, z: 0, w: 60, d: 80 })
     paintHeightmap(s0, ground, (x, z) => (x > 80 ? 0.5 * Math.sin(x / 7) + 0.3 * Math.cos(z / 5) : 0), 2)
     const w1 = add(s0, createWall(ground, { x: 30, z: 0 }, { x: 30, z: 60 }))
@@ -120,7 +120,7 @@ describe("incremental updates", () => {
 
   it("match a fresh engine under random light and door churn", () => {
     const rand = rng(7)
-    const { scene: s0, ground } = flat(30, 30, "dark")
+    const { scene: s0, ground } = flat(30, 30, "dark", origin)
     const doors: Id[] = []
     for (let k = 0; k < 6; k++) {
       const x = 25 * (k + 1)

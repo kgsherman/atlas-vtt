@@ -11,7 +11,7 @@
 import { aabb3ContainsPoint, aabb3Union, circleOverlapsAABB2, inflateRect, orientedRectOverlapsAABB2, type AABB3 } from "../geometry/box"
 import { createInterval, lineAABB3 } from "../geometry/ray"
 import { clipSegmentToBox2Into } from "../geometry/segment"
-import { EPS } from "../geometry/vec"
+import { EPS, yawCos, yawSin } from "../geometry/vec"
 import { rectsOverlap, structureSignature } from "../scene/queries"
 import type { Id, Rect, SceneLike, Vec2, Vec3 } from "../scene/types"
 import {
@@ -734,7 +734,7 @@ export class GridOcclusionWorld implements OcclusionWorld {
 
   private createEntry(prim: OccluderPrimitive): Entry {
     const yaw = prim.shape === "box" || prim.shape === "strip" ? prim.yaw : 0
-    return { prim, bounds: primitiveBounds(prim), mask: maskOf(prim.blocks), cos: Math.cos(yaw), sin: Math.sin(yaw), stamp: 0, cells: [] }
+    return { prim, bounds: primitiveBounds(prim), mask: maskOf(prim.blocks), cos: yawCos(yaw), sin: yawSin(yaw), stamp: 0, cells: [] }
   }
 
   private removeEntry(key: string): void {

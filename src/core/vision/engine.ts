@@ -11,7 +11,7 @@ import type { DirtyRegion, OcclusionWorld } from "../occlusion/types"
 import { chunkSamples, parseChunkKey, sampleSpacing } from "../scene/heightmap"
 import { structureSignature, tokenRect } from "../scene/queries"
 import type { Id, Level, LightObject, Rect, SceneLike, SceneObject, SceneObjectType, Token, Vec3 } from "../scene/types"
-import { eyeAtGround, resolveLightOrigin, tokenPointsAtGround } from "./eye"
+import { resolveLightOrigin, tokenPointsAtGround, viewerEyesAtGround } from "./eye"
 import { SampleLayout, type InsideInfo } from "./layout"
 import { environmentSignature, expandBounds, LightField, sceneBounds, type LightSource } from "./lightField"
 import { createCellMask, createGradeMask, FULL_SUBMASK, setCell } from "./mask"
@@ -291,10 +291,12 @@ export class VisionEngineImpl implements VisionEngine {
 
   viewerFor(token: Token): Viewer {
     const ground = this.index.groundAtLevel(token.levelId, token.position.x, token.position.z)
+    const eyes = viewerEyesAtGround(this.worldImpl, this.scene.grid.cellSize, ground, token, this.scene.grid.visionOrigin)
     return {
       tokenId: token.id,
       levelId: token.levelId,
-      eye: eyeAtGround(this.worldImpl, ground, token),
+      eye: eyes[0],
+      eyes,
       vision: { darkvision: token.vision.darkvision, blindsight: token.vision.blindsight, blind: token.vision.blind },
     }
   }
@@ -319,7 +321,7 @@ export class VisionEngineImpl implements VisionEngine {
 
   private stateFor(v: Viewer, used: Set<Id>): ViewerState {
     const footprint = this.footprintCells(v)
-    const eyeKey = `${v.levelId}|${v.eye.x}|${v.eye.y}|${v.eye.z}`
+    const eyeKey = `${v.levelId}|${(v.eyes ?? [v.eye]).map((e) => `${e.x},${e.y},${e.z}`).join("|")}`
     const vis = v.vision
     const gradeKey = `${eyeKey}|${vis.darkvision}|${vis.blindsight}|${vis.blind}|${[...footprint].join(",")}`
     const L = this.layout

@@ -65,6 +65,11 @@ export interface Viewer {
   tokenId: Id
   levelId: Id
   eye: Vec3
+  /**
+   * Every point the viewer sees from, `eye` first (viewerEyesAtGround: with "square" vision also its
+   * footprint's corners). A point is perceived if some eye perceives it. Absent = [eye].
+   */
+  eyes?: Vec3[]
   vision: VisionSettings
 }
 

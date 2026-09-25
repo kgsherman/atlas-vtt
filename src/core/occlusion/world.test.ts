@@ -59,6 +59,15 @@ describe("openings", () => {
     return { scene, levelId, wall }
   }
 
+  it("a ray exactly along the seam between a wall piece and a closed leaf is blocked (quarter-turn walls)", () => {
+    const { scene, levelId } = flatScene()
+    // A wall along z (yaw −π/2) with a 4 ft door centred at z = 17.5: its leaf meets the wall at z = 15.5.
+    const wall = add(scene, createWall(levelId, { x: 35, z: 0 }, { x: 35, z: 40 }))
+    add(scene, createDoor(wall, 17.5, { width: 4 }))
+    const world = buildOcclusionWorld(scene)
+    for (const z of [15.5, 19.5]) expect(blocked(world, v(29.5, 5.5, z), v(50.5, 3, z), "sight"), `z = ${z}`).toBe(true)
+  })
+
   it("windows block movement but not sight or light; sill and lintel block everything", () => {
     const { scene } = wallWith((s, w) => add(s, createWindow(w, 20, { width: 3, sillHeight: 3, height: 3 })))
     const world = buildOcclusionWorld(scene)

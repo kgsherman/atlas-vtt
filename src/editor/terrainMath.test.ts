@@ -31,7 +31,7 @@ import {
 } from "./terrainMath"
 import { orthoCamera, perspectiveCamera } from "./test-utils"
 
-const grid: GridSettings = { cellSize: 5, width: 20, depth: 20, diagonalRule: "5-5-5" }
+const grid: GridSettings = { cellSize: 5, width: 20, depth: 20, diagonalRule: "5-5-5", visionOrigin: "square" }
 const down = (x: number, z: number) => ({ origin: { x, y: 100, z }, direction: { x: 0, y: -1, z: 0 } })
 
 describe("terrain math: rays, directions, heights", () => {

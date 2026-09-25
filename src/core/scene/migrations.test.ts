@@ -73,8 +73,14 @@ function v1Doc(): Record<string, any> {
 
 describe("migrateToCurrent", () => {
   it("has one migration per version step", () => {
-    expect(SCENE_SCHEMA_VERSION).toBe(8)
-    expect(Object.keys(MIGRATIONS)).toEqual(["1", "2", "3", "4", "5", "6", "7"])
+    expect(SCENE_SCHEMA_VERSION).toBe(9)
+    expect(Object.keys(MIGRATIONS)).toEqual(["1", "2", "3", "4", "5", "6", "7", "8"])
+  })
+
+  it("v8 → v9: grids see from the whole square unless they say otherwise", () => {
+    expect(MIGRATIONS[8]({ grid: { cellSize: 5 } })).toEqual({ grid: { cellSize: 5, visionOrigin: "square" } })
+    expect(MIGRATIONS[8]({ grid: { visionOrigin: "eye" } })).toEqual({ grid: { visionOrigin: "eye" } })
+    expect(MIGRATIONS[8]({ name: "no grid" })).toEqual({ name: "no grid" })
   })
 
   it("migrates v1 documents (no token models) to v2 unchanged", () => {

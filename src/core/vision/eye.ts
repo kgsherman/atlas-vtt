@@ -5,7 +5,7 @@
 import { heightfieldSurfaceAt, primitiveContains, primitiveTopAt, pushOutOfPrimitive } from "../occlusion/primitives"
 import type { OccluderPrimitive, OcclusionWorld, SegmentQueryOptions } from "../occlusion/types"
 import { SIZE_FOOTPRINT } from "../scene/defaults"
-import type { Token, Vec3 } from "../scene/types"
+import type { Token, Vec3, VisionOrigin } from "../scene/types"
 
 /** Eyes and test points stay this far below the ceiling found by the upward sight ray (feet). */
 export const CEILING_MARGIN = 0.25
@@ -15,6 +15,8 @@ export const EYE_PUSH_MARGIN = 0.3
 export const FEET_OFFSET = 0.1
 /** Token test-point corners are inset this far from the footprint edges (feet). */
 export const TOKEN_POINT_INSET = 0.5
+/** Corner eyes of "square" vision are inset this far from the footprint edges (feet). */
+export const CORNER_EYE_INSET = 0.5
 
 const SIGHT: SegmentQueryOptions = { channel: "sight" }
 
@@ -52,6 +54,41 @@ export function eyeAtGround(world: OcclusionWorld, ground: number, token: Pick<T
   }
   return eye
 }
+
+/**
+ * Every eye a token sees from (ARCHITECTURE §5.2 "Viewer eyes"). The first is its clamped eye
+ * (eyeAtGround). With `origin` "square", the 4 corners of its footprint inset CORNER_EYE_INSET follow, at
+ * the eye's nominal height over the token's own ground (the head moves sideways, not with the terrain),
+ * each clamped below its own column's ceiling and pushed out of blockers like the eye. A corner is dropped
+ * when the segment from the eye to it is sight-blocked (a corner in or behind a wall must not see past it),
+ * or when it coincides with the eye (a footprint too small for the inset).
+ */
+export function viewerEyesAtGround(
+  world: OcclusionWorld,
+  cellSize: number,
+  ground: number,
+  token: Pick<Token, "position" | "eyeHeight" | "size">,
+  origin: VisionOrigin
+): Vec3[] {
+  const eye = eyeAtGround(world, ground, token)
+  if (origin !== "square") return [eye]
+  const h = ((SIZE_FOOTPRINT[token.size] ?? 1) * cellSize) / 2 - CORNER_EYE_INSET
+  if (!(h > 0.01)) return [eye]
+  const out = [eye]
+  for (const [dx, dz] of CORNERS) {
+    const corner = eyeAtGround(world, ground, { position: { x: token.position.x + dx * h, z: token.position.z + dz * h }, eyeHeight: token.eyeHeight })
+    if (world.segmentBlocked(eye, corner, SIGHT)) continue
+    out.push(corner)
+  }
+  return out
+}
+
+const CORNERS: readonly (readonly [number, number])[] = [
+  [-1, -1],
+  [1, -1],
+  [-1, 1],
+  [1, 1],
+]
 
 /** Push-out passes for a light origin (a pass may land in a neighbouring blocker, e.g. at a T-junction). */
 const LIGHT_PUSH_PASSES = 4

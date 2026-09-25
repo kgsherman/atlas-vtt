@@ -1,14 +1,15 @@
 /**
  * Per-viewer caches and perception grading (docs/ARCHITECTURE.md §5.2 "Perception" and "Caches").
  *
- * ViewerState holds, for one viewer (token):
- *  - `los`: line of sight per sample (0 untested, 1 blocked, 2 seen), valid for the viewer's eye and
- *    the occlusion state it was tested against. Only samples that could be perceived (lit, or within
+ * ViewerState holds, for one viewer (token) with one or more eyes (Viewer.eyes, "square" vision):
+ *  - `los`: line of sight per sample and eye (0 untested, 1 blocked, 2 seen; entry s·nEyes + e), valid for
+ *    the viewer's eyes and the occlusion state it was tested against. A point is perceived if some eye
+ *    perceives it, so eyes are tested lazily until one does: most seen points cost one test. Only samples that could be perceived (lit, or within
  *    darkvision / blindsight range) are ever tested, so darkness is cheap. Occluder changes reset the
  *    entries whose segment crosses a dirty box.
  *  - `grades`: perception grade per sample; `cellGrades` / `cellMask`: per cell grade and, for cells
  *    whose samples disagree (some perceived, some not), the 4×4 sub-cell mask of perceived sub-cells.
- *  - `subLos`: line of sight of refined sub-cell centres.
+ *  - `subLos`: line of sight of refined sub-cell centres (entry q·nEyes + e).
  * Cells are re-evaluated only when their light changed (LightField.cellVersion) or their LOS was
  * invalidated.
  */
@@ -31,6 +32,8 @@ export const PROBE_PULLBACK = 0.1
 const DIRTY_MARGIN = 0.01
 /** Beyond this many pending dirty boxes a viewer's line of sight is simply recomputed. */
 const MAX_PENDING_BOXES = 48
+/** Upper bound of eyes per viewer (the eye + 4 corners). */
+export const MAX_VIEWER_EYES = 5
 
 interface SubLos {
   los: Uint8Array
@@ -49,7 +52,8 @@ export interface PendingChanges {
 export class ViewerState {
   readonly tokenId: Id
   levelId: Id = ""
-  eye: Vec3 = { x: 0, y: 0, z: 0 }
+  /** Eyes (first = the eye); their count sizes the per-eye caches. */
+  eyes: Vec3[] = [{ x: 0, y: 0, z: 0 }]
   darkvision = 0
   blindsight = 0
   blind = false
@@ -58,7 +62,8 @@ export class ViewerState {
   eyeKey = ""
   /** eyeKey + senses + footprint: validity key of the grades. */
   gradeKey = ""
-  readonly los: Uint8Array
+  los: Uint8Array
+  /** Effective distance of buried samples per eye (probe distance), keyed like `los`. */
   readonly probeDist = new Map<number, number>()
   readonly grades: Uint8Array
   readonly cellGrades: Uint8Array
@@ -70,16 +75,24 @@ export class ViewerState {
   readonly dirty = new Set<number>()
   lastUsed = 0
 
+  private readonly nSamples: number
+
   constructor(tokenId: Id, nSamples: number, nCells: number) {
     this.tokenId = tokenId
+    this.nSamples = nSamples
     this.los = new Uint8Array(nSamples)
     this.grades = new Uint8Array(nSamples)
     this.cellGrades = new Uint8Array(nCells)
   }
 
-  /** Forget line of sight (the eye moved). */
+  get eye(): Vec3 {
+    return this.eyes[0]
+  }
+
+  /** Forget line of sight (an eye moved). */
   resetLos(): void {
-    this.los.fill(0)
+    if (this.los.length !== this.nSamples * this.eyes.length) this.los = new Uint8Array(this.nSamples * this.eyes.length)
+    else this.los.fill(0)
     this.probeDist.clear()
     this.subLos.clear()
     this.pending = { boxes: [], samples: [], cells: [] }
@@ -88,12 +101,13 @@ export class ViewerState {
   }
 
   configure(v: Viewer, footprint: ReadonlySet<number>, eyeKey: string, gradeKey: string): void {
+    const eyes = v.eyes && v.eyes.length > 0 ? v.eyes.slice(0, MAX_VIEWER_EYES) : [v.eye]
+    this.eyes = eyes.map((e) => ({ x: e.x, y: e.y, z: e.z }))
     if (eyeKey !== this.eyeKey) this.resetLos()
     else if (gradeKey !== this.gradeKey) this.evaluated = false
     this.eyeKey = eyeKey
     this.gradeKey = gradeKey
     this.levelId = v.levelId
-    this.eye = { x: v.eye.x, y: v.eye.y, z: v.eye.z }
     this.darkvision = Math.max(0, v.vision.darkvision || 0)
     this.blindsight = Math.max(0, v.vision.blindsight || 0)
     this.blind = !!v.vision.blind
@@ -138,8 +152,9 @@ export class Evaluator {
   private readonly sight: BlockerCache
   private readonly subOfSample: number[]
   private readonly p: Vec3 = { x: 0, y: 0, z: 0 }
-  private outLos = 0
-  private outDist = 0
+  /** Per-eye line of sight / effective distance of the point being graded (in and out of gradeAt). */
+  private readonly eLos = new Uint8Array(MAX_VIEWER_EYES)
+  private readonly eDist = new Float64Array(MAX_VIEWER_EYES)
 
   constructor(world: OcclusionWorld, layout: SampleLayout, light: LightField) {
     this.world = world
@@ -181,10 +196,13 @@ export class Evaluator {
       return
     }
     const L = this.layout
-    const eye = st.eye
+    const eyes = st.eyes
+    const n = eyes.length
     for (const s of samples) {
-      st.los[s] = LOS_UNTESTED
-      st.probeDist.delete(s)
+      for (let e = 0; e < n; e++) {
+        st.los[s * n + e] = LOS_UNTESTED
+        st.probeDist.delete(s * n + e)
+      }
       st.dirty.add(Math.floor(s / SAMPLES_PER_CELL))
     }
     for (const g of cells) {
@@ -193,16 +211,18 @@ export class Evaluator {
     }
     if (boxes.length === 0) return
     const los = st.los
-    for (let s = 0; s < los.length; s++) {
-      if (los[s] === LOS_UNTESTED) continue
+    for (let k = 0; k < los.length; k++) {
+      if (los[k] === LOS_UNTESTED) continue
+      const s = Math.floor(k / n)
+      const eye = eyes[k - s * n]
       const x = L.sampleX(s)
       const y = L.y[s]
       const z = L.sampleZ(s)
       const top = L.insideOf(s)?.top
       for (const box of boxes) {
         if (segmentMeetsBox(eye, x, y, z, box) || (top && segmentMeetsBox(eye, top.x, top.y, top.z, box))) {
-          los[s] = LOS_UNTESTED
-          st.probeDist.delete(s)
+          los[k] = LOS_UNTESTED
+          st.probeDist.delete(k)
           st.dirty.add(Math.floor(s / SAMPLES_PER_CELL))
           break
         }
@@ -210,14 +230,16 @@ export class Evaluator {
     }
     for (const [g, entry] of st.subLos) {
       const sub = L.subLayout(g)
-      for (let q = 0; q < SUBS_PER_CELL; q++) {
-        if (entry.los[q] === LOS_UNTESTED) continue
+      for (let k = 0; k < entry.los.length; k++) {
+        if (entry.los[k] === LOS_UNTESTED) continue
+        const q = Math.floor(k / n)
+        const eye = eyes[k - q * n]
         const x = L.subX(g, q)
         const z = L.subZ(g, q)
         const top = sub.inside[q]?.top
         for (const box of boxes) {
           if (segmentMeetsBox(eye, x, sub.y[q], z, box) || (top && segmentMeetsBox(eye, top.x, top.y, top.z, box))) {
-            entry.los[q] = LOS_UNTESTED
+            entry.los[k] = LOS_UNTESTED
             st.dirty.add(g)
             break
           }
@@ -235,11 +257,10 @@ export class Evaluator {
   }
 
   /**
-   * Distance from the eye at which a buried point is seen (side probe: the ray's first hit is one
-   * of the blockers containing it; else the top probe), or −1 when it is not seen.
+   * Distance from `eye` at which a buried point is seen (side probe: the ray's first hit is one of the
+   * blockers containing it; else the top probe), or −1 when it is not seen.
    */
-  private buriedDistance(st: ViewerState, x: number, y: number, z: number, ins: InsideInfo): number {
-    const eye = st.eye
+  private buriedDistance(eye: Vec3, x: number, y: number, z: number, ins: InsideInfo): number {
     const p = this.p
     p.x = x
     p.y = y
@@ -253,46 +274,76 @@ export class Evaluator {
     return -1
   }
 
+  /** Line of sight from eye e to (x, y, z), cached in eLos[e]. */
+  private seenFrom(st: ViewerState, e: number, x: number, y: number, z: number): boolean {
+    if (this.eLos[e] === LOS_UNTESTED) {
+      const p = this.p
+      p.x = x
+      p.y = y
+      p.z = z
+      this.eLos[e] = this.sight.blocked(st.eyes[e], p) ? LOS_BLOCKED : LOS_SEEN
+    }
+    return this.eLos[e] === LOS_SEEN
+  }
+
   /**
-   * Grade of a point for a viewer given its light level, cached line-of-sight state `los` and cached
-   * effective distance `dist` (buried points). The updated cache values are left in outLos / outDist.
+   * Grade of a point for a viewer given its light level: the best grade over the eyes that see it. The
+   * cached per-eye line of sight and effective distance (buried points) are read from and written back to
+   * eLos / eDist. Eyes are tested in the order of the grade they could give, stopping at the first one that
+   * sees the point, so only what can change the answer is ever tested.
    */
-  private gradeAt(st: ViewerState, x: number, y: number, z: number, L: number, ins: InsideInfo | null, los: number, dist: number): Perception {
-    this.outLos = los
-    this.outDist = dist
-    const eye = st.eye
+  private gradeAt(st: ViewerState, x: number, y: number, z: number, L: number, ins: InsideInfo | null): Perception {
+    const eyes = st.eyes
+    const n = eyes.length
+    const lit = !st.blind && L >= 1
     if (ins === null || ins.sight.size === 0) {
-      const c = this.candidate(st, L, Math.hypot(x - eye.x, y - eye.y, z - eye.z))
-      if (c === 0) return 0
-      if (los === LOS_UNTESTED) {
-        const p = this.p
-        p.x = x
-        p.y = y
-        p.z = z
-        los = this.sight.blocked(eye, p) ? LOS_BLOCKED : LOS_SEEN
-        this.outLos = los
+      if (lit) {
+        for (let e = 0; e < n; e++) if (this.seenFrom(st, e, x, y, z)) return 3
+        return 0
       }
-      return los === LOS_SEEN ? c : 0
+      if (st.darkvision <= 0 && st.blindsight <= 0) return 0
+      for (let c = 2; c >= 1; c--) {
+        for (let e = 0; e < n; e++) {
+          const eye = eyes[e]
+          if (this.candidate(st, L, Math.hypot(x - eye.x, y - eye.y, z - eye.z)) === c && this.seenFrom(st, e, x, y, z)) return c as Perception
+        }
+      }
+      return 0
     }
     // Buried: the effective distance is only known after the probes, so test first when anything
     // could be perceived at all.
-    if (!(L >= 1 && !st.blind) && st.darkvision <= 0 && st.blindsight <= 0) return 0
-    if (los === LOS_UNTESTED) {
-      dist = this.buriedDistance(st, x, y, z, ins)
-      los = dist < 0 ? LOS_BLOCKED : LOS_SEEN
-      this.outLos = los
-      this.outDist = dist
+    const most = lit ? 3 : !st.blind && st.darkvision > 0 ? 2 : st.blindsight > 0 ? 1 : 0
+    if (most === 0) return 0
+    let best: Perception = 0
+    for (let e = 0; e < n && best < most; e++) {
+      if (this.eLos[e] === LOS_UNTESTED) {
+        const dist = this.buriedDistance(eyes[e], x, y, z, ins)
+        this.eLos[e] = dist < 0 ? LOS_BLOCKED : LOS_SEEN
+        this.eDist[e] = dist
+      }
+      if (this.eLos[e] === LOS_SEEN) {
+        const c = this.candidate(st, L, this.eDist[e])
+        if (c > best) best = c
+      }
     }
-    return los === LOS_SEEN ? this.candidate(st, L, dist) : 0
+    return best
   }
 
   private gradeSample(st: ViewerState, s: number): Perception {
     const L = this.layout
     if (!L.valid[s]) return 0
     const ins = L.insideOf(s)
-    const g = this.gradeAt(st, L.sampleX(s), L.y[s], L.sampleZ(s), this.light.level(s), ins, st.los[s], ins ? (st.probeDist.get(s) ?? 0) : 0)
-    st.los[s] = this.outLos
-    if (ins !== null && this.outLos === LOS_SEEN) st.probeDist.set(s, this.outDist)
+    const n = st.eyes.length
+    const o = s * n
+    for (let e = 0; e < n; e++) {
+      this.eLos[e] = st.los[o + e]
+      this.eDist[e] = ins ? (st.probeDist.get(o + e) ?? 0) : 0
+    }
+    const g = this.gradeAt(st, L.sampleX(s), L.y[s], L.sampleZ(s), this.light.level(s), ins)
+    for (let e = 0; e < n; e++) {
+      st.los[o + e] = this.eLos[e]
+      if (ins !== null && this.eLos[e] === LOS_SEEN) st.probeDist.set(o + e, this.eDist[e])
+    }
     return g
   }
 
@@ -301,18 +352,26 @@ export class Evaluator {
     const L = this.layout
     const sub = L.subLayout(g)
     const levels = this.light.subLevels(g)
+    const n = st.eyes.length
     let entry = st.subLos.get(g)
     if (!entry) {
-      entry = { los: new Uint8Array(SUBS_PER_CELL), dist: new Float64Array(SUBS_PER_CELL) }
+      entry = { los: new Uint8Array(SUBS_PER_CELL * n), dist: new Float64Array(SUBS_PER_CELL * n) }
       st.subLos.set(g, entry)
     }
     let mask = 0
     let grade: Perception = 0
     for (let q = 0; q < SUBS_PER_CELL; q++) {
       if (!sub.valid[q]) continue
-      const gr = this.gradeAt(st, L.subX(g, q), sub.y[q], L.subZ(g, q), levels[q], sub.inside[q], entry.los[q], entry.dist[q])
-      entry.los[q] = this.outLos
-      entry.dist[q] = this.outDist
+      const o = q * n
+      for (let e = 0; e < n; e++) {
+        this.eLos[e] = entry.los[o + e]
+        this.eDist[e] = entry.dist[o + e]
+      }
+      const gr = this.gradeAt(st, L.subX(g, q), sub.y[q], L.subZ(g, q), levels[q], sub.inside[q])
+      for (let e = 0; e < n; e++) {
+        entry.los[o + e] = this.eLos[e]
+        entry.dist[o + e] = this.eDist[e]
+      }
       if (gr > 0) {
         mask |= 1 << q
         if (gr > grade) grade = gr
@@ -363,10 +422,12 @@ export class Evaluator {
    * `lightAt` evaluated only when light matters.
    */
   perceivesPoint(st: ViewerState, p: Vec3, lightAt: () => number): boolean {
-    const eye = st.eye
-    const d = Math.hypot(p.x - eye.x, p.y - eye.y, p.z - eye.z)
-    const inRange = (!st.blind && d <= st.darkvision) || d <= st.blindsight
-    if (!inRange && (st.blind || lightAt() < 1)) return false
-    return !this.sight.blocked(eye, p)
+    for (const eye of st.eyes) {
+      const d = Math.hypot(p.x - eye.x, p.y - eye.y, p.z - eye.z)
+      const inRange = (!st.blind && d <= st.darkvision) || d <= st.blindsight
+      if (!inRange && (st.blind || lightAt() < 1)) continue
+      if (!this.sight.blocked(eye, p)) return true
+    }
+    return false
   }
 }

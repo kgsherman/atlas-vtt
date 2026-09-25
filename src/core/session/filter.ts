@@ -561,7 +561,7 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
     scene: {
       ...(state.mapSerial ? { mapSerial: state.mapSerial } : {}),
       name: scene.name,
-      grid: { cellSize: grid.cellSize, width: grid.width, depth: grid.depth, diagonalRule: grid.diagonalRule },
+      grid: { cellSize: grid.cellSize, width: grid.width, depth: grid.depth, diagonalRule: grid.diagonalRule, visionOrigin: grid.visionOrigin },
       environment: playerEnvironment(scene.environment),
       levels,
     },

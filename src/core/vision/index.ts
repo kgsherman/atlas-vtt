@@ -6,7 +6,7 @@ import type { OcclusionWorld } from "../occlusion/types"
 import { groundHeightAt, lightGroundY, lightWorldPosition, type GroundIndex } from "../scene/queries"
 import type { LightObject, SceneLike, Token, Vec3 } from "../scene/types"
 import { VisionEngineImpl } from "./engine"
-import { eyeAtGround, resolveLightOrigin, tokenPointsAtGround } from "./eye"
+import { eyeAtGround, resolveLightOrigin, tokenPointsAtGround, viewerEyesAtGround } from "./eye"
 import type { VisionEngine } from "./types"
 
 export type * from "./types"
@@ -14,6 +14,7 @@ export * from "./mask"
 export { VisionEngineImpl, type SampleInspection } from "./engine"
 export {
   CEILING_MARGIN,
+  CORNER_EYE_INSET,
   EYE_PUSH_MARGIN,
   FEET_OFFSET,
   TOKEN_POINT_INSET,
@@ -22,6 +23,7 @@ export {
   resolveLightOrigin,
   tokenPointColumns,
   tokenPointsAtGround,
+  viewerEyesAtGround,
 } from "./eye"
 export { LIGHT_LEVEL } from "./lightField"
 export {
@@ -42,6 +44,15 @@ export function resolveViewerEye(
   token: Pick<Token, "levelId" | "position" | "eyeHeight" | "height">
 ): Vec3 {
   return eyeAtGround(world, groundHeightAt(scene, token.levelId, token.position), token)
+}
+
+/** Every eye a token sees from (viewerEyesAtGround on its ground, by the scene's grid.visionOrigin). */
+export function resolveViewerEyes(
+  world: OcclusionWorld,
+  scene: SceneLike,
+  token: Pick<Token, "levelId" | "position" | "eyeHeight" | "height" | "size">
+): Vec3[] {
+  return viewerEyesAtGround(world, scene.grid.cellSize, groundHeightAt(scene, token.levelId, token.position), token, scene.grid.visionOrigin)
 }
 
 /**
