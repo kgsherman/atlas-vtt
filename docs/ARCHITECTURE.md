@@ -993,15 +993,17 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
   the host drop a move's in-flight step results (`applyKnowledge` compares levels with `sameVisionLevels`,
   which ignores `terrainEdits`). The vision worker never receives `terrainEdits`
   (`net/host/visionProtocol.ts` `visionLevels`).
-  `GameState.origin = {sceneId, version, dirty}` records the library scene row the session was started from
-  and the version the live map is based on; `apply-scene-patches` sets `dirty` (play actions never do), and
+  `GameState.origin = {sceneId, version, dirty}` records the library scene row the live map comes from (the
+  one the session started from, or the one a map change loaded, §6.7) and the version it is based on; `apply-scene-patches` sets `dirty` (play actions never do), and
   `set-origin` records a save. `HostRunner.saveMapToLibrary({force?})` saves the live map (edits, token
   positions, hidden tokens, door and light state as they are now) as a new version of that library scene
   with a `baseVersion` conflict check: another version saved meanwhile (e.g. from the editor) rejects with
   `version_conflict`, and `force` overwrites (the version history still keeps every earlier version); a
   deleted library scene rejects with `not_found`. It needs `HostRunnerOptions.scenes` (the scene library),
   and `HostSnapshot.library = {sceneId, version, dirty} | null` exposes the origin. The saved version keeps
-  the library entry's current name, and edits made while a save is in flight leave `dirty` set.
+  the library entry's current name, and edits made while a save is in flight leave `dirty` set. A save that
+  resolves after a map change leaves the new map's origin alone, and a conflict toast's "Overwrite" does
+  nothing once the map changed.
   The host console passes `services.scenes`, and its "Save map to library" button, Ctrl+S in Edit map and
   "Save map & end" (end-session dialog, offered while `origin.dirty`) all call `saveMapToLibrary` through
   `components/play/host/useSaveMap`; a conflict toast offers "Overwrite" (force). The "unsaved edits" dot is
@@ -1198,7 +1200,7 @@ authoritative, and a player receives only what filter.ts lets through.
   to everyone or whisper to the DM; the DM also whispers to chosen players or keeps a secret note / roll.
   `combat = {round, activeId, entries}`, entries `{id, tokenId | null (a custom entry: a lair action…), name,
   initiative, modifier, hidden}` in turn order (`sortCombat`: initiative high → low, unrolled last, then
-  bonus, then as added). `load-scene` ends combat; `rebind-player` (guest merge) moves a player's messages
+  bonus, then as added). `load-scene` ends combat (a map change also posts a public system notice, §6.7); `rebind-player` (guest merge) moves a player's messages
   and whispers to the new id; `parseGameState` drops entries whose token is gone.
 - **Requests** (`ClientToHost`, strict zod, the sender is the topic's `{uid}`): `say {text ≤ 1000 UTF-16
   units, to: all | dm}`, `roll {formula ≤ 200, to}`, `initiative {tokenId, bonus}` (an integer within ±20;
@@ -1369,6 +1371,69 @@ balcony's wall or the cellar under the paving.
   points are tracked, halved (rounded down) for those marked as having saved. The template's label is the
   roll's label after a `#` (`damageInput`), so a player's label never extends the formula.
   The host's Table tab counts the areas on the map and clears them all (`template-delete` with `null`).
+
+### 6.7 Changing the map mid-game (`core/session/changeMap.ts`, `core/movement/arrival.ts`, `HostRunner.changeMap`)
+
+The party walks out of the tavern and into the sewers: the DM moves the game to another library scene and
+the chosen tokens come along, with their hit points, conditions, portraits, models, senses and the lights
+they carry. The room code, the players, the carried tokens' owners, the chat log and the free assets stay;
+players keep playing without rejoining.
+
+- **Carry** (`carryParty(source, target, {tokenIds, arrival})`, pure): the target scene plus copies of the
+  chosen tokens of the current one, standing around `arrival = {levelId, x, z}` on the target. Token ids are
+  kept, so owners, selections and anything keyed by token id follow them; a token of the target with the
+  same id (a duplicated map holds the same ids, `forkScene`) is replaced by the one arriving, with the lights
+  it carried. An id clashing with a level or object of the target is renamed (`carried`: old id → new id).
+  Attached lights travel with their carrier (same offset, its new level). Refusals: `unknown-level`,
+  `no-room` (with the tokens that did not fit), `too-many` (`SCENE_LIMITS`). Neither scene is changed.
+- **Arrival** (`arrivalAnchors(scene, world, tokens, arrival, {standing})`, pure, deterministic): each token
+  gets an anchor it could jump to (checkJump's rule, `jumpReason`: grounded, clear of movement blockers)
+  whose footprint no earlier arrival and no visible token of the target holds (hidden ones are ignored: a
+  gap would give them away). Visible tokens are placed first, larger first, then by id. The search starts
+  at the standable anchor nearest the point and spreads breadth-first over legal steps (`checkStep`, at
+  most `ARRIVAL_NODE_LIMIT` = 6000 anchors), so the party stays together on the arrival's side of walls;
+  only when that region is full does a token take the nearest free anchor anywhere on the level.
+- **Command** (`changeMapCommand(state, target, {tokenIds, arrival, origin}, ctx)`): `load-scene {scene,
+  origin, carried, stamp, notice}`. With `carried` the reducer keeps only the carried tokens' owners (under
+  their new ids): a token left behind whose twin is on a duplicated map loses its owners, so a player never
+  sees through a token the DM did not bring. Like any `load-scene` it clears explored masks, memory and
+  revealed cells, ends combat and drops every area of effect. It posts the notice ("The party travels to
+  …", or "The game moves to …" when nobody came along) as a public system message, and bumps
+  `GameState.mapSerial` (saved with the game; sent as `view.scene.mapSerial` once > 0), which tells a
+  player's page that the map changed even when its level ids did not.
+- **Host** (`HostRunnerImpl.changeMap(target, {tokenIds, arrival, origin})`): builds the command from the
+  runner's own state (a player's hit point change a moment earlier travels too, where the page's state
+  could be a render behind) and dispatches it in the same step, reusing the occlusion world built for the
+  placement in the full rebuild (tokens and lights are not occluders). It refuses `same-map` (the live
+  `Scene.id`: engines rebuild only for another id) and `not-hosting`, then awaits the game's save, so a
+  reload right after the change resumes on the new map (`saved: false` when that save failed; it is
+  retried). On `load-scene` the runner also looks for images under the new map's folders only (its id and
+  library row, never the previous map's, which a duplicate would share asset ids with; a restarted host
+  skips the session row's scene after a map change), forgets moves in flight, and marks every connection
+  `staleMap` until it is sent a view of the new map: meanwhile moves, jumps, doors and templates are
+  refused with `cannot` (they would be checked against the old map's view, and a duplicated map has the
+  same door and level ids), and pings need a level of the current map. The tiler resets every level (§9).
+- **Player** (`playerClient` `isOtherMap`, `PlayerClientSnapshot.mapChanges`): a view with another
+  `mapSerial` (by patch or snapshot) counts as a map change: the page does a full `engine.setScene`, the
+  pending move, jump, door and template requests are dropped (their verdicts are never shown; chat, rolls
+  and token requests still settle), host pings on levels the view does not know are dropped, pings on
+  screen are cleared, and the backdrop compositor rebuilds its layers (its layout key includes the map).
+  The page cancels any gesture, returns to Move, clears the template selection, moves the camera to the
+  player's token and says "The party travels to …" (or "The DM moved the game to …" when the player has no
+  token there). A stranded move whose level is gone is dismissed.
+- **DM** (`components/play/host/ChangeMapDialog`, `changeMapModel`): "Change map" in the top bar (disabled
+  outside Play, while not hosting and while the map is being saved) opens three steps: (1) a library
+  scene (searchable, with the Home cards' thumbnails; the current one is marked and can't be picked; a
+  sample is first copied into the library, so the new map can be saved back), loaded latest and migrated
+  (`app/library` `loadLibraryScene`: too-new and invalid documents are refused, as is one with the live
+  `Scene.id`); (2) who comes along (PCs and every player's token ticked by default) and where they arrive
+  (a level and a point on its thumbnail, by default the middle of what the thumbnail frames); (3) a
+  summary of what stays and what resets, with the unsaved-edits guard read when the DM confirms: "Save map
+  & change" saves the live map to its library scene first and stays open if that fails, "Change without
+  saving" discards the edits. The console leaves Edit map before the swap (the editor's undo history
+  belongs to the old map), clears the selection, shows the arrival level and focuses the arrival point;
+  `HostViewport` reframes and reloads level images keyed by the document (`play/host` `levelImageKey`,
+  `backdropFolders`) and drops the old map's cached images.
 
 ---
 
@@ -1711,7 +1776,11 @@ per storey, transparent outside the drawn area on upper floors/basements).
     cell with any explored sub-cell (0 = removed); `rev` identifies the chunk's content (a non-zero hash of
     its cells' explored sub-cell masks; 3-element entries without it are still accepted), so a chunk whose
     cells stay the same but whose sub-cells grew gets a new `rev`, is re-fetched, and the player redraws
-    the refreshed cells. The full list, with `reset`, precedes every snapshot. A view waits at most
+    the refreshed cells. The hash is salted with the level's key (the document's `Scene.id`, the image and
+    its placement), so the same cells of another map, or of a moved image, never announce a `rev` a player
+    has cached; a map change (§6.7) resets every level, even on a duplicated map that shares level and
+    image ids, and uploads to one storage path run one at a time across the reset, so an old map's upload
+    still in flight never lands over the new map's chunk. The full list, with `reset`, precedes every snapshot. A view waits at most
     `tileWaitMs` (250 ms) for its chunks, so moves usually arrive with their art, but the game never blocks
     on Storage. Why chunks: an open outdoor map's first view is ~70 objects instead of ~1000 per-cell ones,
     which Storage rate-limits. The earlier per-cell layout `{sessionId}/{levelId}/{i}_{j}.webp` is gone
@@ -2175,6 +2244,20 @@ Known gaps and deliberate limits:
   mark (no rolled saves, resistances or immunities). Templates are game state: "Save map to library" does
   not keep them, and they are not part of the editor's undo history.
 - Chips stack when they would overlap each other, not other HUD elements.
+
+**Changing the map**
+
+- Fog is per game, not per map: a map change clears what players explored and remember, and going back to
+  an earlier map starts its fog fresh. The same goes for combat and areas of effect.
+- The session row (`sessions.scene_id`) keeps naming the map the session started on: "My sessions" shows
+  that scene's name (or "Deleted scene" once it is deleted) for a game that has moved on. No RPC updates it.
+- The saved view of a player who is offline during the change (`player_views`) keeps the old map until they
+  reconnect; if the DM is also offline, that player's page shows the old map from it until the DM is back.
+  It holds only what that player saw there.
+- A new map's images stored under its library row's folder (not its `Scene.id`) are protected from the
+  image sweep by that row's versions, so only while the library scene exists (§6.4, §9).
+- Tokens arrive on squares a jump could reach; a creature whose size fits nowhere on the arrival level
+  makes the change refuse (`no-room`, naming it) rather than place it elsewhere.
 
 **Terrain editing and walls on terrain**
 

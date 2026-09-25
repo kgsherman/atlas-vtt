@@ -190,6 +190,13 @@ describe("ChangeMapDialog", () => {
     expect(current.disabled).toBe(true)
     expect(current.textContent).toContain("Current map")
     expect(button("Move the game to The Sunken Crypt").disabled).toBe(false)
+    // Each card is a button (no role of its own) inside an item of the "Your maps" list.
+    expect(current.hasAttribute("role")).toBe(false)
+    expect(
+      current
+        .closest("[role=listitem]")
+        ?.parentElement?.getAttribute("aria-label")
+    ).toBe("Your maps")
   })
 
   it("brings PCs and the players' tokens by default", async () => {

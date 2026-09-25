@@ -552,14 +552,15 @@ function MapStep({
               className="grid gap-3 sm:grid-cols-3"
             >
               {filtered.map((s) => (
-                <MapPickCard
-                  key={s.id}
-                  summary={s}
-                  current={s.id === currentSceneId}
-                  loading={pending === s.id}
-                  disabled={busy !== null}
-                  onPick={() => pickRow(s)}
-                />
+                <div key={s.id} role="listitem" className="flex min-w-0">
+                  <MapPickCard
+                    summary={s}
+                    current={s.id === currentSceneId}
+                    loading={pending === s.id}
+                    disabled={busy !== null}
+                    onPick={() => pickRow(s)}
+                  />
+                </div>
               ))}
             </div>
           )}
@@ -634,10 +635,9 @@ function MapPickCard({
   const digest = entry?.digest
   return (
     <Item
-      role="listitem"
       variant="outline"
       size="xs"
-      className="items-stretch gap-0 overflow-hidden p-0 text-left not-disabled:hover:bg-muted/50 disabled:opacity-60"
+      className="w-full items-stretch gap-0 overflow-hidden p-0 text-left not-disabled:hover:bg-muted/50 disabled:opacity-60"
       render={
         <button
           ref={ref}

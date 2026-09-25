@@ -64,6 +64,11 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
   players. The DM can switch to "Edit map" mid-session, and players see the edits live. Those edits stay
   in the session until the DM chooses **Save map to library**, which saves them (with the current token,
   door and light state) as a new version of the library scene, after a conflict check.
+- **Change map**: the DM moves the game to another map of the library (or a copy of a sample) without
+  ending the session. They choose who comes along and where the party arrives. The chosen tokens keep
+  their hit points, conditions, portraits and carried lights, and their players keep controlling them.
+  Players stay connected, keep the chat and follow their characters to the new map, starting with fresh
+  fog. If the live map has unsaved edits, the DM can save them first.
 
 **At the table**
 - Chat and dice for the DM and every player (Enter opens the dock). Type `/r 1d20+5 to hit`, a bare
@@ -327,6 +332,7 @@ ATLAS_SCENE=$PWD/test_maps/vineyard.atlas.json ATLAS_URL=http://127.0.0.1:5173 n
 ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-supabase.mjs # the same against the real backend (+ Realtime / table / Storage RLS checks, no public channels, a kicked member's subscriptions, sub-cell chunk clipping)
 ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-latency.mjs  # move results on a 120×120 daylit field arrive well under the 5 s timeout
 ATLAS_URL=http://127.0.0.1:5173 node e2e/host-save-map.mjs        # "Save map to library" from a live session, including the conflict path
+ATLAS_URL=http://127.0.0.1:5173 node e2e/change-map-local.mjs     # "Change map" mid-session: the party carried to a sample copy and back, two players following
 ATLAS_URL=http://127.0.0.1:5173 node e2e/table-local.mjs         # DM + 2 players in local mode: chat, whispers, host-rolled dice, combat (hidden and unseen combatants never sent), initiative and turns, hit points and conditions (bands only for others), pings, reload, leak scan
 ATLAS_URL=http://127.0.0.1:5173 node e2e/templates-local.mjs     # DM + 2 players in local mode: the Area tool and presets, a Fireball's catch in 3D, a player's cone from their token, oracle-equal views, damage from the card (halved on a save), hiding, an aura that follows its token, removing, reload, leak scan, clearing all
 ATLAS_URL=http://127.0.0.1:5173 node e2e/free-assets.mjs          # start a game with token models, put one on a token, a player downloads and draws it (ATLAS_FREE_ASSETS_DIR serves a local build)
