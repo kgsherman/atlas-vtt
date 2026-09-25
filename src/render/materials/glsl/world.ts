@@ -122,7 +122,8 @@ void main() {
   float dvLift = 0.0;
   bool gridFog = uFogGrid > 0.5;
   if (uVisionMode != 0) {
-    vec4 m = atSurfaceMask(p, n, vSurf, uLevelLayer, grade);
+    vec2 maskAt;
+    vec4 m = atSurfaceMask(p, n, vSurf, uLevelLayer, grade, maskAt);
     dvIn = atSenseWeight(p, 0, AT_SENSE_EDGE);
     dvLift = dvIn > 0.0 ? atSenseWeight(p, 0, AT_DV_FEATHER) : 0.0;
     sunlit = smoothstep(0.5, 1.0, m.b);
@@ -134,10 +135,14 @@ void main() {
       // Smooth fog: the band (r = 0.5, one sub-cell around the host's perceived sub-cells) counts as
       // perceived only while every eye's GPU line of sight can confirm it per pixel, and precisely enough
       // (atBandTrust); then the edge is the real shadow line (and light / sense range) instead of the
-      // host's sub-cell staircase. Elsewhere it follows the host's samples, smoothed (atFogEdge).
+      // host's sub-cell staircase. Elsewhere it follows a smooth fit of the host's sub-cells (atHostFields),
+      // as the explored edge always does.
       bool los = uViewersAll > 0.5 && atLosReady();
-      perceived = grade > 0.5 ? atFogEdge(m.r, los ? atBandTrust(p) : 0.0) : 0.0;
-      explored = smoothstep(0.5, 1.0, m.g);
+      // Only near an edge of either mask do the 16 taps of the smooth host fields matter.
+      bool edge = (m.r > 0.01 && m.r < 0.99) || (m.g > 0.01 && m.g < 0.99);
+      vec2 host = edge ? atHostFields(maskAt, uLevelLayer) : vec2(step(0.5, m.r), step(0.5, m.g));
+      perceived = grade > 0.5 ? atFogEdge(m.r, host.x, los ? atBandTrust(p) : 0.0) : 0.0;
+      explored = smoothstep(0.38, 0.62, host.y);
       if (perceived > 0.0) perceived *= atViewerLos(p, n, vSurf);
       // Darkvision (grade 2) and blindsight (grade 1) end at their range per pixel (only removes
       // perception): the host's cells and sub-cells drew the range as a staircase. A viewer's own

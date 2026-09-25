@@ -634,22 +634,26 @@ bool atLosReady() {
 // (it then tests the cap itself and removes perception it cannot confirm: smooth fog only), perception
 // may also come from 2.5 and 5 ft toward the viewer (the near edge of props up to ~10 ft across). Explored / sunlit
 // always come from the 0.6 ft cell: farther lookups could cross a wall.
-vec4 atSurfaceMask(vec3 p, vec3 n, float surf, int layer, out float grade) {
+vec4 atSurfaceMask(vec3 p, vec3 n, float surf, int layer, out float grade, out vec2 at) {
+  at = p.xz;
   if (surf < 0.5) return atMaskSample(p.xz, layer, grade);
   if (surf > 1.5) {
     int v = atNearestViewer(p);
     if (v >= 0) {
       vec3 h = atHoriz(uViewers[v * 3].xyz - p);
       if (dot(h, h) > 0.5) {
-        vec4 best = atMaskSample(p.xz + h.xz * 0.6, layer, grade);
+        at = p.xz + h.xz * 0.6;
+        vec4 best = atMaskSample(at, layer, grade);
         if (best.r < 1.0 && atLosReady() && uFogGrid < 0.5) {
           for (int k = 0; k < 2; k++) {
             float g;
-            vec4 m = atMaskSample(p.xz + h.xz * (k == 0 ? 2.5 : 5.0), layer, g);
+            vec2 xz = p.xz + h.xz * (k == 0 ? 2.5 : 5.0);
+            vec4 m = atMaskSample(xz, layer, g);
             if (m.r > best.r) {
               best.r = m.r;
               best.a = m.a;
               grade = g;
+              at = xz;
             }
           }
         }
@@ -657,7 +661,38 @@ vec4 atSurfaceMask(vec3 p, vec3 n, float surf, int layer, out float grade) {
       }
     }
   }
-  return atMaskSample(p.xz + n.xz * 0.3, layer, grade);
+  at = p.xz + n.xz * 0.3;
+  return atMaskSample(at, layer, grade);
+}
+
+// Cubic B-spline weights of 4 taps for a point at fraction f between the middle two.
+vec4 atBSpline(float f) {
+  float g = 1.0 - f;
+  float f2 = f * f;
+  float f3 = f2 * f;
+  return vec4(g * g * g, 3.0 * f3 - 6.0 * f2 + 4.0, -3.0 * f3 + 3.0 * f2 + 3.0 * f + 1.0, f3) / 6.0;
+}
+
+// The host's perceived (x) and explored (y) sub-cells around xz as smooth fields: a cubic B-spline over
+// the 4 × 4 nearest texels of the binary masks (band texels are not perceived). Cut at 0.5, a straight edge
+// stays half-way between sub-cell centres, and a staircase of sub-cells becomes a smooth curve (a straight
+// line along a diagonal) instead of steps with rounded corners, as the plain linear filter draws it.
+vec2 atHostFields(vec2 xz, int layer) {
+  vec2 t = xz * uMaskGrid.xy * uMaskGrid.zw - 0.5;
+  vec2 i0 = floor(t);
+  vec2 f = t - i0;
+  vec4 wx = atBSpline(f.x);
+  vec4 wy = atBSpline(f.y);
+  ivec2 hi = ivec2(uMaskGrid.zw) - 1;
+  vec2 sum = vec2(0.0);
+  for (int j = 0; j < 4; j++) {
+    for (int i = 0; i < 4; i++) {
+      ivec2 c = clamp(ivec2(i0) + ivec2(i - 1, j - 1), ivec2(0), hi);
+      vec4 m = texelFetch(uMasks, ivec3(c, layer), 0);
+      sum += vec2(step(0.75, m.r), step(0.5, m.g)) * (wx[i] * wy[j]);
+    }
+  }
+  return sum;
 }
 
 // Per-pixel line of sight against the viewer atlas (only ever REMOVES host perception). Returns the
@@ -709,12 +744,11 @@ float atBandTrust(vec3 p) {
   return 1.0 - smoothstep(AT_BAND_TRUST_FT, 2.0 * AT_BAND_TRUST_FT, best);
 }
 
-// Smooth fog's perceived weight from the filtered mask r (1 perceived, 0.5 band, 0 not): with the band
-// trusted (GPU line of sight then decides it per pixel), everything up to its outer edge; otherwise a
-// contour through the boundary between the host's perceived and unperceived sub-cells, which the linear
-// filter rounds into a smooth curve instead of the sub-cell staircase.
-float atFogEdge(float r, float trust) {
-  return mix(smoothstep(0.625, 0.875, r), smoothstep(0.25, 0.5, r), trust);
+// Smooth fog's perceived weight from the filtered mask r (1 perceived, 0.5 band, 0 not) and the host's
+// perceived field (atHostFields): with the band trusted (GPU line of sight then decides it per pixel),
+// everything up to its outer edge; otherwise the smooth contour through the host's sub-cells.
+float atFogEdge(float r, float host, float trust) {
+  return mix(smoothstep(0.38, 0.62, host), smoothstep(0.25, 0.5, r), trust);
 }
 
 // Albedo luma compressed toward the middle, for the monochrome senses: dark materials (barrels,

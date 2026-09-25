@@ -421,9 +421,11 @@ Per fragment, in one forward pass:
      to k·d / sin(elevation) of ground too far: several feet 100 ft away at a low angle, which would confirm
      the whole band and draw the host's staircase one sub-cell too far out. So the band is trusted fully
      while that error is ≤ `AT_BAND_TRUST_FT` (2 ft, roughly 30 ft from an eye at head height) and not at
-     all beyond twice that; there, and when line of sight is not ready, the edge is a contour through the
-     boundary between the host's perceived and unperceived sub-cells (`atFogEdge`: `smoothstep(0.625,
-     0.875, r)`), which the linear filter draws as smooth curves. Found on a player's view 95 ft from their
+     all beyond twice that; there, and when line of sight is not ready, the edge is the 0.5 contour of a
+     cubic B-spline over the host's binary perceived sub-cells (`atHostFields`, 4 × 4 texel taps, only on
+     edge pixels), so a staircase of sub-cells is drawn as a smooth curve and a diagonal as a straight line
+     (the linear filter alone left steps with rounded corners). The explored (memory) edge uses the same
+     contour in smooth fog. Found on a player's view 95 ft from their
      token over a terrain lip: fine-grid ray casts put the true edge where the host's samples do.
    - "grid": whole cells. A cell with any perceived sub-cell is perceived whole at its grade, one with any
      explored sub-cell explored whole; no GPU line of sight, light or sense refinement, and caps never look
@@ -552,8 +554,9 @@ direction D"), stored as octahedral linear-distance maps:
 Per level, the engine expands `HostLevelMasks` into one RGBA8 layer of a `DataArrayTexture` at 4 texels per cell
 (coarse bits + 4×4 partial sub-cells, `render/fog/maskExpand.ts`): r = perceived (1, or 0.5 for the smooth
 style's band), g = explored, b = sunlit, a = grade (nearest fetch). LINEAR filtering; perceived edges use
-`atFogEdge` (§4.1: a contour through the perceived / band texel boundary, or with the band trusted
-`smoothstep(0.25, 0.5, r)`, band included, feathering into its outer half); explored uses `smoothstep(0.5, 1, g)`.
+`atFogEdge` (§4.1: the smooth B-spline contour of the host's sub-cells, or with the band trusted
+`smoothstep(0.25, 0.5, r)`, band included, feathering into its outer half); explored uses the B-spline contour
+too (grid fog: `atCellEdge`).
 Band texels take the best neighbouring grade and sunlit value. The "grid" style expands cells whole and has no
 band. In both styles the **grade ring** — texels next to any with r > 0 — carries the neighbours' grade with
 r = 0: the grade is read from the nearest texel, and without it a texel whose filtered r is still high (a
