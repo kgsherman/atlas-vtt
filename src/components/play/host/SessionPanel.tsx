@@ -628,7 +628,7 @@ function TokensTab({
         if (list.length === 0) return null
         return (
           <section key={level.id} className="flex flex-col gap-0.5">
-            <h3 className="atlas-rubric flex items-center gap-1.5 px-1.5 pb-1 text-[0.6875rem] uppercase">
+            <h3 className="flex items-center gap-1.5 px-1.5 pb-1 atlas-rubric text-[0.6875rem] uppercase">
               <Layers className="size-3" /> {level.name}
               <span className="ml-auto normal-case tabular-nums">
                 {list.length}

@@ -10,7 +10,6 @@ import {
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
-  AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
@@ -63,39 +62,31 @@ export function EndSessionDialog({
                 : "You haven't changed the map during this session."}
           </AlertDialogDescription>
         </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel disabled={busy !== null}>
+        {/* Event-style options: the decision first, then backing out. */}
+        <div className="mt-1 flex flex-col gap-1.5">
+          {offerSave ? (
+            <AlertDialogAction
+              variant="decision"
+              disabled={busy !== null}
+              onClick={() => void run(true)}
+            >
+              {busy === "save" ? <Spinner data-icon="inline-start" /> : null}
+              Save map & end
+            </AlertDialogAction>
+          ) : null}
+          <AlertDialogAction
+            variant="decision"
+            className="text-destructive hover:text-destructive"
+            disabled={busy !== null}
+            onClick={() => void run(false)}
+          >
+            {busy === "end" ? <Spinner data-icon="inline-start" /> : null}
+            {offerSave ? "End without saving" : "End session"}
+          </AlertDialogAction>
+          <AlertDialogCancel variant="decision" disabled={busy !== null}>
             Keep playing
           </AlertDialogCancel>
-          {offerSave ? (
-            <>
-              <AlertDialogAction
-                variant="destructive"
-                disabled={busy !== null}
-                onClick={() => void run(false)}
-              >
-                {busy === "end" ? <Spinner data-icon="inline-start" /> : null}
-                End without saving
-              </AlertDialogAction>
-              <AlertDialogAction
-                disabled={busy !== null}
-                onClick={() => void run(true)}
-              >
-                {busy === "save" ? <Spinner data-icon="inline-start" /> : null}
-                Save map & end
-              </AlertDialogAction>
-            </>
-          ) : (
-            <AlertDialogAction
-              variant="destructive"
-              disabled={busy !== null}
-              onClick={() => void run(false)}
-            >
-              {busy === "end" ? <Spinner data-icon="inline-start" /> : null}
-              End session
-            </AlertDialogAction>
-          )}
-        </AlertDialogFooter>
+        </div>
       </AlertDialogContent>
     </AlertDialog>
   )

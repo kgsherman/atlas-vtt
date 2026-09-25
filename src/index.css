@@ -52,16 +52,24 @@
     --filigree-tr: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none' stroke='black' stroke-width='1.1' stroke-linecap='round'%3E%3Cg transform='matrix(-1 0 0 1 32 0)'%3E%3Cpath d='M1.5 24V7Q1.5 1.5 7 1.5H24'/%3E%3Cpath d='M5 16C5 9 9 5 16 5'/%3E%3Cpath d='M24 1.5c3 0 4 2.6 2.4 3.6c-1 .6-2.2-.2-1.6-1.2'/%3E%3Cpath d='M1.5 24c0 3 2.6 4 3.6 2.4c.6-1-.2-2.2-1.2-1.6'/%3E%3Cpath d='M16 5c2 0 3 1.4 2.2 2.4'/%3E%3Cpath d='M5 16c0 2 1.4 3 2.4 2.2'/%3E%3Cpath d='M4.6 2.9L6.3 4.6L4.6 6.3L2.9 4.6Z' fill='black' stroke='none'/%3E%3C/g%3E%3C/svg%3E");
     --filigree-bl: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none' stroke='black' stroke-width='1.1' stroke-linecap='round'%3E%3Cg transform='matrix(1 0 0 -1 0 32)'%3E%3Cpath d='M1.5 24V7Q1.5 1.5 7 1.5H24'/%3E%3Cpath d='M5 16C5 9 9 5 16 5'/%3E%3Cpath d='M24 1.5c3 0 4 2.6 2.4 3.6c-1 .6-2.2-.2-1.6-1.2'/%3E%3Cpath d='M1.5 24c0 3 2.6 4 3.6 2.4c.6-1-.2-2.2-1.2-1.6'/%3E%3Cpath d='M16 5c2 0 3 1.4 2.2 2.4'/%3E%3Cpath d='M5 16c0 2 1.4 3 2.4 2.2'/%3E%3Cpath d='M4.6 2.9L6.3 4.6L4.6 6.3L2.9 4.6Z' fill='black' stroke='none'/%3E%3C/g%3E%3C/svg%3E");
     --filigree-br: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none' stroke='black' stroke-width='1.1' stroke-linecap='round'%3E%3Cg transform='matrix(-1 0 0 -1 32 32)'%3E%3Cpath d='M1.5 24V7Q1.5 1.5 7 1.5H24'/%3E%3Cpath d='M5 16C5 9 9 5 16 5'/%3E%3Cpath d='M24 1.5c3 0 4 2.6 2.4 3.6c-1 .6-2.2-.2-1.6-1.2'/%3E%3Cpath d='M1.5 24c0 3 2.6 4 3.6 2.4c.6-1-.2-2.2-1.2-1.6'/%3E%3Cpath d='M16 5c2 0 3 1.4 2.2 2.4'/%3E%3Cpath d='M5 16c0 2 1.4 3 2.4 2.2'/%3E%3Cpath d='M4.6 2.9L6.3 4.6L4.6 6.3L2.9 4.6Z' fill='black' stroke='none'/%3E%3C/g%3E%3C/svg%3E");
-    /* Gold leaf: highlight, body, shadow, the dark bevel edge, and the ink engraved on a gold plate. */
+    /* Gold leaf: highlight, body, shadow and the dark bevel edge. */
     --gilt-hi: oklch(0.88 0.1 90);
     --gilt: oklch(0.66 0.12 75);
     --gilt-lo: oklch(0.52 0.11 62);
     --gilt-edge: oklch(0.4 0.08 55);
-    --gilt-ink: oklch(0.22 0.04 55);
     /* Lacquer: the raised plate of secondary buttons and active tabs. */
     --lacquer: oklch(0.97 0.008 220);
     --lacquer-lo: oklch(0.91 0.014 222);
+    /* Bronze plate of the primary button. */
+    --bronze-plate: oklch(0.9 0.05 85);
+    --bronze-plate-lo: oklch(0.84 0.065 78);
     --bevel-shadow: oklch(0.25 0.04 240 / 18%);
+    /* The dark band behind an event-style decision. */
+    --decision-band: oklch(0.3 0.04 240 / 8%);
+    /* Faint woven crosshatch on framed buttons. */
+    --weave:
+      repeating-linear-gradient(45deg, color-mix(in oklch, var(--foreground) 3%, transparent) 0 1px, transparent 1px 4px),
+      repeating-linear-gradient(-45deg, color-mix(in oklch, var(--foreground) 3%, transparent) 0 1px, transparent 1px 4px);
 }
 
 .dark {
@@ -103,7 +111,11 @@
     --gilt-edge: oklch(0.4 0.07 55);
     --lacquer: oklch(0.29 0.035 224);
     --lacquer-lo: oklch(0.215 0.03 230);
+    /* Mixed in oklab: an oklch mix would swing the hue from slate through green on its way to bronze. */
+    --bronze-plate: color-mix(in oklab, var(--lacquer), var(--gilt-edge) 62%);
+    --bronze-plate-lo: color-mix(in oklab, var(--lacquer-lo), var(--gilt-edge) 45%);
     --bevel-shadow: oklch(0.05 0.02 240 / 55%);
+    --decision-band: oklch(0.05 0.02 240 / 38%);
 }
 
 @theme inline {
@@ -111,7 +123,6 @@
     --font-heading: 'Cinzel Variable', serif;
     --color-gilt: var(--gilt);
     --color-gilt-hi: var(--gilt-hi);
-    --color-gilt-ink: var(--gilt-ink);
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -226,23 +237,73 @@
   background-image: linear-gradient(to bottom, color-mix(in oklch, var(--gilt-hi) 5%, transparent), transparent 140px);
 }
 
-/* Burnished gold plate: primary actions ("decision" buttons). */
-@utility atlas-gilded {
-  color: var(--gilt-ink);
-  border-color: var(--gilt-edge);
-  background-image: linear-gradient(to bottom, var(--gilt-hi), var(--gilt) 48%, var(--gilt-lo));
-  text-shadow: 0 1px 0 color-mix(in oklch, var(--gilt-hi) 55%, transparent);
+/* Framed button (CK3 "Guest List"): square dark lacquer with a faint weave, a bronze frame and a dark keyline
+   inside it. The frame turns gold and the plate glows on hover. Tints come from the --framed-* properties so
+   a modifier such as atlas-framed-warm can change them without competing for the same declarations. */
+@utility atlas-framed {
+  border-color: var(--framed-edge, color-mix(in oklch, var(--gilt) 42%, transparent));
+  color: var(--framed-text, color-mix(in oklch, var(--foreground) 85%, var(--gilt)));
+  background-image:
+    var(--weave),
+    linear-gradient(to bottom, var(--framed-top, var(--lacquer)), var(--framed-bottom, var(--lacquer-lo)));
   box-shadow:
-    inset 0 1px 0 color-mix(in oklch, white 45%, transparent),
-    inset 0 -1px 0 color-mix(in oklch, var(--gilt-edge) 55%, transparent),
-    0 1px 3px var(--bevel-shadow);
-  &:hover {
-    filter: brightness(1.08) saturate(1.05);
+    inset 0 0 0 1px var(--bevel-shadow),
+    inset 0 2px 0 -1px color-mix(in oklch, var(--gilt-hi) 10%, transparent),
+    0 1px 2px var(--bevel-shadow);
+  &:hover,
+  &[aria-expanded="true"] {
+    color: var(--framed-text-hover, var(--foreground));
+    border-color: var(--framed-edge-hover, color-mix(in oklch, var(--gilt) 85%, transparent));
     box-shadow:
-      inset 0 1px 0 color-mix(in oklch, white 55%, transparent),
-      inset 0 -1px 0 color-mix(in oklch, var(--gilt-edge) 55%, transparent),
-      0 0 12px -2px color-mix(in oklch, var(--gilt) 45%, transparent),
-      0 1px 3px var(--bevel-shadow);
+      inset 0 0 0 1px var(--bevel-shadow),
+      inset 0 0 14px color-mix(in oklch, var(--gilt) 16%, transparent),
+      0 0 10px -3px color-mix(in oklch, var(--gilt) 40%, transparent);
+  }
+}
+
+/* With atlas-framed, the primary button (CK3 "Send Proposal"): a brighter gold frame on a bronze-warmed plate. */
+@utility atlas-framed-warm {
+  --framed-edge: color-mix(in oklch, var(--gilt) 75%, transparent);
+  --framed-edge-hover: var(--gilt-hi);
+  --framed-text: var(--foreground);
+  --framed-text-hover: var(--gilt-hi);
+  --framed-top: var(--bronze-plate);
+  --framed-bottom: var(--bronze-plate-lo);
+}
+
+/* Event decision (CK3 event options): a full-width dark band between two gold hairlines that fade out at both ends.
+   Hovering lights the band from the centre. */
+@utility atlas-decision {
+  position: relative;
+  color: var(--foreground);
+  background-image: linear-gradient(to right, transparent, var(--decision-band) 10%, var(--decision-band) 90%, transparent);
+  &::before,
+  &::after {
+    content: "";
+    position: absolute;
+    left: 3%;
+    right: 3%;
+    height: 1px;
+    background-image: linear-gradient(to right, transparent, color-mix(in oklch, var(--gilt) 50%, transparent) 14%, color-mix(in oklch, var(--gilt) 50%, transparent) 86%, transparent);
+    box-shadow: 0 1px 0 var(--bevel-shadow);
+    transition: opacity 150ms;
+  }
+  &::before {
+    top: 0;
+  }
+  &::after {
+    bottom: 0;
+  }
+  &:hover,
+  &:focus-visible {
+    color: var(--gilt-hi);
+    background-image:
+      radial-gradient(ellipse 60% 120% at 50% 50%, color-mix(in oklch, var(--gilt) 16%, transparent), transparent),
+      linear-gradient(to right, transparent, var(--decision-band) 10%, var(--decision-band) 90%, transparent);
+    &::before,
+    &::after {
+      background-image: linear-gradient(to right, transparent, var(--gilt) 14%, var(--gilt) 86%, transparent);
+    }
   }
 }
 
