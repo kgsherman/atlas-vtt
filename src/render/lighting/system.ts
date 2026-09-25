@@ -34,7 +34,7 @@ import { groundHeightAt, groundIndex, levelCeilingY, nominalTokenEye, sortedLeve
 import type { Id, Rect, SceneLike, Token, Vec3, VisionSettings } from "@/core/scene/types"
 import { viewerEyesAtGround } from "@/core/vision"
 import type { GroundSampler } from "../builders/ground"
-import type { Quality, SceneChange, ViewState } from "../contracts"
+import type { FogStyle, Quality, SceneChange, ViewState } from "../contracts"
 import { HostMaskTextures } from "../fog/hostMaskTextures"
 import { LAYER, type CreateLightingSystem, type LightingFrameStats, type LightingSystem, type WorldMaterialOptions } from "../internal"
 import { createBackdropUniforms, setBackdropUniforms, type BackdropUniforms } from "../materials/backdrop"
@@ -153,6 +153,7 @@ export const DEFAULT_VIEW_STATE: ViewState = {
   viewerTokenIds: [],
   hostMasks: {},
   gpuVisionRefine: false,
+  fogStyle: "smooth",
   dimmedTokenIds: [],
   primaryViewerId: null,
   showHelpers: false,
@@ -521,6 +522,8 @@ export class AtlasLightingSystem implements LightingSystem {
       if (!sameLights || !sameHi || !sameViewers) this.captureBurst = true
     }
     this.config = next
+    // Grid fog on a tier without GPU line of sight: re-expand the masks if that changed the style.
+    this.syncMasks()
     // One-time recompile of every material for the new tier's shader features.
     this.tiers.set(TIER_DEFINE[q])
     // Prepared atlases already hold captures; new ones are bound by beforeRender once they do.
@@ -931,9 +934,16 @@ export class AtlasLightingSystem implements LightingSystem {
     }
   }
 
+  /** The fog style drawn: the view's, except "grid" on a tier without GPU line of sight (low). */
+  get fogStyle(): FogStyle {
+    return this.config.viewerAtlas === null ? "grid" : this.view.fogStyle
+  }
+
   private syncMasks(): void {
+    const grid = this.fogStyle === "grid"
+    this.shared.uFogGrid.value = grid ? 1 : 0
     if (!this.scene || this.view.vision === "off") return
-    this.masks.sync(this.scene, this.view.hostMasks)
+    this.masks.sync(this.scene, this.view.hostMasks, grid ? "grid" : "smooth")
   }
 
   private updateEnvironment(): void {

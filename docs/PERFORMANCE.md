@@ -124,6 +124,8 @@ could succeed). Ray queries use a 5 ft uniform grid with DDA traversal and mailb
 Players' GPUs only refine line-of-sight edges inside host-perceived cells using the viewer atlas (≤ 8 viewers,
 one tile per eye: 5 per viewer with "square" sight, ≤ 40 in all), updated only when a viewer moves; a move
 recaptures its viewer's 5 tiles (the primary viewer's are forced over the per-frame budget).
+Host masks are expanded into the mask texture only when they change (per level); smooth fog's band pass adds
+~2 ms on a 200×200 grid with a 60-cell perceived area (6–8 ms vs 4–5 ms for grid fog, Node), on the main thread.
 A move's result waits only for the vision compute of its final position; the intermediate steps (which OR
 into explored, so walked-past corridors are explored) run afterwards as low-priority probes whose exploration
 follows in the next patch (ARCHITECTURE §5.2). Before, every step queued a full compute ahead of the result:

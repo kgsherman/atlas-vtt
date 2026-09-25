@@ -3,7 +3,8 @@
  *
  * Every field of the PlayerView is built explicitly from allowlisted sources:
  *  - objects come from the player's MEMORY only (never straight from the scene), clipped to explored
- *    cells without dilation (clip.ts). The live scene is consulted only to drop things that must not
+ *    cells without dilation (clip.ts); floors (and terrain, map art) over the art extent instead: explored
+ *    cells whole plus one sub-cell beyond (core/vision artExtent), where fog may show a little more ground. The live scene is consulted only to drop things that must not
  *    exist for players any more (hidden objects, secret doors not revealed to this player);
  *  - wall pieces keep `followTerrain`; a follow-terrain piece on a heightmap level also carries the host's
  *    base line along its centreline (`terrainProfile`, at core/scene/wallProfile `wallBaseKnots`), so the
@@ -15,7 +16,7 @@
  *    senses, speed and exact hit points only for tokens the player controls or sees through (others: a
  *    coarse health band unless the DM hides wounds); conditions for every token sent;
  *  - levels: explored ("known") levels + stubs for levels referenced by sent connectors, tokens, lights;
- *  - terrain chunks overlapping explored cells with unexplored samples zeroed; masks;
+ *  - terrain chunks overlapping the art extent with samples outside it zeroed; masks;
  *  - backdrops: placement only (rect, opacity, tintWalls, tile size) for known levels with a map image —
  *    never the asset id, its name or any pixels (tiles of explored cells travel separately, net/assets);
  *  - table (`playerTable`): the messages this player may read (public ones, their own, whispers to them)
@@ -38,7 +39,18 @@ import { wallBaseKnots, wallProfile, type WallProfile } from "../scene/wallProfi
 import { encodeGrades, encodeMask, createCellMask, getCell, setCell } from "../vision/mask"
 import { objectFootprint } from "../vision/observe"
 import type { EncodedGrades, EncodedMask, VisibilityResult } from "../vision/types"
-import { clipTerrainChunk, exploredLevel, footprintTouchesExplored, maskedFloorExploredRects, mergeRuns, wallExploredRuns, type ExploredLevel, type Run } from "./clip"
+import {
+  clipTerrainChunk,
+  exploredLevel,
+  flooredCells,
+  footprintTouchesExplored,
+  groundExtent,
+  maskedFloorExploredRects,
+  mergeRuns,
+  wallExploredRuns,
+  type ExploredLevel,
+  type Run,
+} from "./clip"
 import { emptyEncodedCellMask, emptyEncodedGrades, encodedMaskIsEmpty, maskMatchesGrid } from "./masks"
 import { connectorsOnly, rememberedFootprint } from "./memory"
 import { MAX_TERRAIN_PROFILE } from "./playerViewSchema"
@@ -328,7 +340,10 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
         const ex = exploredOf(m.levelId)
         if (!ex) break
         // Masked floors clip their covered rects; the mask itself stays in host memory.
-        for (const r of memo(floorCache, ex, m, [], () => maskedFloorExploredRects(grid, m as MemoryFloor, ex.mask))) {
+        // Over the ground extent (explored cells, and floored cells one sub-cell beyond), like terrain:
+        // the player's fog may show a sub-cell past what the host perceived where their GPU sees it.
+        const ground = groundExtent(ex, flooredCells(scene, m.levelId))
+        for (const r of memo(floorCache, ex, m, [ground], () => maskedFloorExploredRects(grid, m as MemoryFloor, ground))) {
           const pid = pieceId(id, r.x, r.z)
           const piece: PlayerFloor = { id: pid, type: "floor", levelId: m.levelId, rect: { x: r.x, z: r.z, w: r.w, d: r.d }, material: m.material }
           if (m.thickness !== undefined) piece.thickness = m.thickness
@@ -478,10 +493,11 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
     const hm = scene.levels[levelId].heightmap
     const ex = exploredOf(levelId)
     if (!hm || !ex) continue
+    const ground = groundExtent(ex, flooredCells(scene, levelId))
     const chunks: Record<string, string> = {}
     let any = false
     for (const key of Object.keys(hm.chunks).sort()) {
-      const clipped = clipTerrainChunk(hm.chunks[key], key, hm.resolution, grid, ex.mask)
+      const clipped = clipTerrainChunk(hm.chunks[key], key, hm.resolution, grid, ground)
       if (clipped !== null) {
         chunks[key] = clipped
         any = true

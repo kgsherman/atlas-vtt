@@ -410,6 +410,17 @@ Per fragment, in one forward pass:
    (`uViewersAll`), because an eye without a slot may perceive what the slotted ones do not. The darkvision colour lift fades over the last
    `AT_DV_FEATHER` = 1.5 ft of its range (a look, not a rule), and scales a dark colour up (hue kept, at
    most 3×) before adding any grey, so painted night battlemaps keep their colours; grade 2 stays grey.
+   **Fog styles** (`ViewState.fogStyle`, the player's "Fog edges" choice in the camera dock's render popover,
+   remembered per device, `components/canvas/fogStyle.ts`; the low tier always draws "grid"):
+   - "smooth": the mask carries a **band** of candidate sub-cells, every unperceived sub-cell next to a
+     perceived one (§4.4). While GPU line of sight is ready for every eye (`uViewersAll`, `atLosReady`), the
+     band counts as perceived and the per-pixel tests above (line of sight, light for colour cells, sense
+     ranges) decide it, so fog edges follow the true shadow line (a pillar's umbra is a clean wedge, not a
+     row of sub-cell bumps). Otherwise the band is fog, as before.
+   - "grid": whole cells. A cell with any perceived sub-cell is perceived whole at its grade, one with any
+     explored sub-cell explored whole; no GPU line of sight, light or sense refinement, and caps never look
+     further toward the viewer (`atSurfaceMask`'s 2.5 / 5 ft lookups need the GPU to veto them). Edges are
+     blended over about a quarter cell above the low tier (`atCellEdge`), hard on low.
 4. **Fog**: perceived → lit colour (grey/tinted per grade); else explored (host explored mask) → memory
    style: desaturated albedo × constant, **no light terms** (stale lights can't make memory look lit);
    else black. Player mode: directional term = local sun shadow × `sunlit` mask.
@@ -530,9 +541,13 @@ direction D"), stored as octahedral linear-distance maps:
 
 ### 4.4 Host mask textures (`render/fog`)
 
-Per level, the engine expands `HostLevelMasks` into R8 layers of `DataArrayTexture`s at 4 texels per cell
-(coarse bits + 4×4 partial sub-cells): perception grade (0..3 scaled), explored, sunlit. LINEAR filtering with
-`smoothstep(0.5, 1.0, v)` so edges only feather **inward**. Only changed levels are re-uploaded (`addLayerUpdate`).
+Per level, the engine expands `HostLevelMasks` into one RGBA8 layer of a `DataArrayTexture` at 4 texels per cell
+(coarse bits + 4×4 partial sub-cells, `render/fog/maskExpand.ts`): r = perceived (1, or 0.5 for the smooth
+style's band), g = explored, b = sunlit, a = grade (nearest fetch). LINEAR filtering; perceived edges use
+`smoothstep(0.75, 1, r)` (the band is fog: edges feather **inward**) or, with GPU line of sight ready,
+`smoothstep(0.25, 0.5, r)` (band included, feathering into its outer half); explored uses `smoothstep(0.5, 1, g)`.
+Band texels take the best neighbouring grade and sunlit value. The "grid" style expands cells whole and has no
+band. Only changed levels, or all on a style change, are re-uploaded (`addLayerUpdate`).
 
 ### 4.5 Cameras & quality
 
@@ -952,8 +967,11 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
   - **viewers**: the player's tokens (owners) + party PC tokens if shared vision and the player owns ≥ 1 PC.
   - **objects**: from `memory[uid]` only (observed objects are refreshed there first), CLIPPED to explored
     cells with no dilation: walls → parametric runs whose inflated footprint overlaps explored cells or
-    explored sub-cells, widened to contain any sent opening; floors → per-row runs of explored cells (whole
-    cells, even partly explored ones) merged to rects; piece ids
+    explored sub-cells, widened to contain any sent opening; floors → per-row runs of the **ground extent**
+    (whole cells) merged to rects: every cell with an explored sub-cell, plus the cells a sub-cell ring around
+    the explored sub-cells reaches (`core/vision artExtent`) where the live level's effective floors cover
+    the whole cell (`clip.ts flooredCells` / `groundExtent`: a ring cell over a stairwell the player has not
+    seen gets no floor). The ring is what smooth fog's band (§4.1) draws on; piece ids
     `${id}@${x},${z}`; openings re-parented (`wallId` = piece, `offset` rebased). Pieces keep the wall's
     `height` and `followTerrain` (memory written before v2 has none: true). A follow-terrain piece on a
     heightmap level also carries `terrainProfile`: the host's base line (world Y) at the piece's
@@ -985,8 +1003,8 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
     sent connector or own token, copied field by field (`playerLevel`), so `terrainEdits` never reaches a
     player (tests check that the serialised view contains neither `terrainEdits` nor `baseChunks`, and that
     a shape edit in a live session reaches players as heightmap chunk diffs only).
-    **terrain**: the baked heightmap's chunks overlapping explored cells, samples touching no explored cell
-    zeroed. **masks**: perception (current), explored (persistent), sunlit (current ∧ perceived).
+    **terrain**: the baked heightmap's chunks overlapping the ground extent, samples touching none of its
+    cells zeroed. **masks**: perception (current), explored (persistent), sunlit (current ∧ perceived).
   - **table**: chat log and combat as the player may see them (§6.5 "Filter").
   - Wire schema (`playerViewSchema.ts`): walls' `followTerrain` defaults to true (views and saved games from
     before v2), `terrainProfile` is optional, ≤ 4096 finite numbers; remembered walls (`memoryObjectSchema`)
@@ -1891,9 +1909,11 @@ per storey, transparent outside the drawn area on upper floors/basements).
 - **Players never receive a whole image.** During a session the host uploads, **per player**, the part of
   each backdrop that player has explored, in chunks of 4×4 grid cells (`net/assets/chunks.ts`; `tilePx` =
   stored px per cell, a chunk image is 4·tilePx square, ≤ 1024 px). A chunk is clipped to the player's
-  explored 4×4 **sub-cells** (1.25 ft on a 5 ft grid): a cell explored only on one side of a wall carries
-  only that side's art, and everything else is transparent. What remains beyond the explored area is at most
-  the canvas's antialiasing at the clip edges. The tile edge (`tilePx`) and the cells a backdrop covers
+  **art extent** (`core/session artExtents`, passed by hostRunner): every cell with an explored 4×4 sub-cell
+  whole (grid fog shows whole cells), and every sub-cell (1.25 ft on a 5 ft grid) next to an explored one
+  (smooth fog's band, §4.1); everything else is transparent. So a player can receive map art up to one cell
+  (a partly explored cell) and one sub-cell beyond what they perceived — a deliberate trade for fog edges,
+  since map art is low-risk; tokens, walls, objects and the explored mask itself stay exact. The tile edge (`tilePx`) and the cells a backdrop covers
   (`backdropCellRange`: positive-area overlap, with calibrated edges within a small tolerance of a grid line
   snapped to it) come from one module, `core/session/backdrop`, which the filter, the host tiler, the tile
   source and the player compositor all use.
@@ -2158,7 +2178,7 @@ Security advisors report only the intentional warnings:
   and the player page too; the step-up rule no longer oscillates (§4.5); no context MSAA, medium gets a
   lite post pass (§10); engines release their WebGL context (`e2e/engine-leak.mjs`).
 - Backdrops: one dirty rect per chunk and one mip rebuild per update; player canvases cover only the
-  explored area within the ceiling's texel budget; chunks clipped to explored sub-cells (§9).
+  explored area within the ceiling's texel budget; chunks clipped to the art extent (§9).
 - Multiplayer: move results no longer wait for intermediate-step vision (§5.2 Moves); hello and
   rate-limited-reply budgets (§6.2); waiting players notice a session ended from the library (§6.3).
 - Play and editor: stairs climbed by dragging past the top or with Go up / Go down, and the view level
@@ -2352,9 +2372,10 @@ Known gaps and deliberate limits:
 
 **Map images**
 
-- Chunks are clipped to explored sub-cells, so what a player can download beyond what they perceived is
-  at most the canvas antialiasing at the clip edges. Floors are still clipped per cell (`clip.ts`), which
-  reveals only floor extent, not art.
+- Chunks are clipped to the art extent (explored cells whole and a one sub-cell ring, §9), so a player can
+  download art up to a cell beyond what they perceived (the far side of an off-grid wall crossing a partly
+  explored cell) and one sub-cell past it everywhere else. Floors and terrain reach the same cells where the
+  level is floored (`clip.ts`). Accepted for smooth and grid fog; tokens and objects are unaffected.
 - Chunk images are cropped and encoded on the DM's main thread (OffscreenCanvas → WebP, ~2 ms per tile),
   not in a worker.
 - Local mode crops tiles from the locally stored image. It is dev only and not a security boundary, like
@@ -2496,11 +2517,11 @@ Known gaps and deliberate limits:
   the receiver's normal offset puts the test point inside the slab. The cap rule (§4.2) covers wall tops
   only. Repro: `dev/render.html?sample=crooked-lantern&mode=dm-play&at=66,89.5&zoom=3&lights=floating&moon=0&camera=orbit&orbit=0,55`
   (only the orbit camera sees these faces now that the top-down camera looks straight down).
-- Fog and perception edges along diagonal line-of-sight boundaries are scalloped (bumps of a 1.25 ft
-  sub-cell). The host sends perception per 4×4 sub-cell, and the GPU line-of-sight refinement can only
-  remove perception inside it, so the valleys (sub-cells the host says are not perceived) stay. Straight
-  edges would need finer or analytic edges from the host. The darkvision / blindsight range, which the
-  host also draws as a staircase, is already cut per pixel (§4.1).
+- Smooth fog (§4.1) needs GPU line of sight for every eye: on the low tier (grid fog), with more viewers or eyes
+  than the uniform slots, and for the frame or two before a moved eye's tile is captured, the band is fog and
+  edges along diagonal line-of-sight boundaries show the host's 1.25 ft sub-cell staircase. The band also
+  reaches only one sub-cell past the host's edge: a point the GPU sees further out (the host's sample
+  there missed a sliver of view) stays fog.
 - On low, a thin light leak can show along the base of a wall on the side facing away from the light: a
   coarse 256² light-atlas texel straddles the wall's bottom edge (0.05 ft below the ground), so a
   neighbouring texel passes under it. A smaller receiver epsilon did not help; deeper wall bottoms in

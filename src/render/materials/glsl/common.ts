@@ -62,7 +62,10 @@ uniform sampler2D uViewerAtlas;
 // Vision: 0 = off, 1 = fog (player), 2 = preview (DM).
 uniform int uVisionMode;
 uniform float uGpuRefine;
-// Host masks, one RGBA layer per level: r = perceived, g = explored, b = sunlit, a = grade / 3.
+// 1 = grid fog: whole cells, no per-pixel refinement (render/fog/maskExpand "grid").
+uniform float uFogGrid;
+// Host masks, one RGBA layer per level: r = perceived (1) or the smooth-fog band (0.5), g = explored,
+// b = sunlit, a = grade / 3.
 uniform sampler2DArray uMasks;
 uniform vec4 uMaskGrid; // 1/(width·cell), 1/(depth·cell), texture width, texture height
 
@@ -626,8 +629,8 @@ bool atLosReady() {
 // face faces (p.xz + n.xz·0.3); caps → the cell on the nearest viewer's side (0.6 ft toward it). That
 // suits thin caps (wall tops), but for a table, bed or tree canopy it lands under the object, which the
 // viewer usually cannot see, and the top would render as a hole. So when GPU line of sight is active
-// (it then tests the cap itself and removes perception it cannot confirm), perception may also come
-// from 2.5 and 5 ft toward the viewer (the near edge of props up to ~10 ft across). Explored / sunlit
+// (it then tests the cap itself and removes perception it cannot confirm: smooth fog only), perception
+// may also come from 2.5 and 5 ft toward the viewer (the near edge of props up to ~10 ft across). Explored / sunlit
 // always come from the 0.6 ft cell: farther lookups could cross a wall.
 vec4 atSurfaceMask(vec3 p, vec3 n, float surf, int layer, out float grade) {
   if (surf < 0.5) return atMaskSample(p.xz, layer, grade);
@@ -637,7 +640,7 @@ vec4 atSurfaceMask(vec3 p, vec3 n, float surf, int layer, out float grade) {
       vec3 h = atHoriz(uViewers[v * 3].xyz - p);
       if (dot(h, h) > 0.5) {
         vec4 best = atMaskSample(p.xz + h.xz * 0.6, layer, grade);
-        if (best.r < 1.0 && atLosReady()) {
+        if (best.r < 1.0 && atLosReady() && uFogGrid < 0.5) {
           for (int k = 0; k < 2; k++) {
             float g;
             vec4 m = atMaskSample(p.xz + h.xz * (k == 0 ? 2.5 : 5.0), layer, g);
@@ -749,6 +752,16 @@ vec3 atDmColour(vec3 albedo, vec3 light, float litHere) {
   bool dv = uDarkVision.x > 0.5;
   vec3 c = lit + albedo * max(mix(dv ? AT_DM_DV_FLOOR : AT_DM_FLOOR, AT_DM_LIT_FLOOR, l) - received, 0.0);
   return dv ? atDarkVisionLook(c, 1.0 - l) : c;
+}
+
+// Grid fog cell edge from a filtered mask channel (1 inside a cell, 0 outside; the linear filter ramps
+// across the 4-texel-per-cell border): a soft blend over about a quarter cell above the low tier, hard on low.
+float atCellEdge(float v) {
+#if AT_TIER >= 1
+  return smoothstep(0.0, 1.0, v);
+#else
+  return step(0.5, v);
+#endif
 }
 
 // Explored memory: desaturated albedo x constant, no light terms.

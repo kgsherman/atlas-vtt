@@ -120,18 +120,29 @@ void main() {
   // Darkvision in range by the rules (per-pixel edge AT_SENSE_EDGE), and the weight of its colour lift.
   float dvIn = 0.0;
   float dvLift = 0.0;
+  bool gridFog = uFogGrid > 0.5;
   if (uVisionMode != 0) {
     vec4 m = atSurfaceMask(p, n, vSurf, uLevelLayer, grade);
-    perceived = grade > 0.5 ? smoothstep(0.5, 1.0, m.r) : 0.0;
-    explored = smoothstep(0.5, 1.0, m.g);
-    sunlit = smoothstep(0.5, 1.0, m.b);
-    if (perceived > 0.0) perceived *= atViewerLos(p, n, vSurf);
     dvIn = atSenseWeight(p, 0, AT_SENSE_EDGE);
     dvLift = dvIn > 0.0 ? atSenseWeight(p, 0, AT_DV_FEATHER) : 0.0;
-    // Darkvision (grade 2) and blindsight (grade 1) end at their range per pixel (only removes
-    // perception): the host's cells and sub-cells drew the range as a staircase. A viewer's own
-    // footprint stays perceived by touch.
-    if (perceived > 0.0 && grade < 2.5 && uViewersAll > 0.5 && !atTouched(p)) perceived *= grade > 1.5 ? dvIn : atSenseWeight(p, 1, AT_SENSE_EDGE);
+    sunlit = smoothstep(0.5, 1.0, m.b);
+    if (gridFog) {
+      // Grid fog: whole cells at the host's grade, nothing refined per pixel.
+      perceived = grade > 0.5 ? atCellEdge(m.r) : 0.0;
+      explored = atCellEdge(m.g);
+    } else {
+      // Smooth fog: the band (r = 0.5, one sub-cell around the host's perceived sub-cells) counts as
+      // perceived only while every eye's GPU line of sight can confirm it per pixel; then the edge is the
+      // real shadow line (and light / sense range) instead of the host's sub-cell staircase.
+      bool los = uViewersAll > 0.5 && atLosReady();
+      perceived = grade > 0.5 ? (los ? smoothstep(0.25, 0.5, m.r) : smoothstep(0.75, 1.0, m.r)) : 0.0;
+      explored = smoothstep(0.5, 1.0, m.g);
+      if (perceived > 0.0) perceived *= atViewerLos(p, n, vSurf);
+      // Darkvision (grade 2) and blindsight (grade 1) end at their range per pixel (only removes
+      // perception): the host's cells and sub-cells drew the range as a staircase. A viewer's own
+      // footprint stays perceived by touch.
+      if (perceived > 0.0 && grade < 2.5 && uViewersAll > 0.5 && !atTouched(p)) perceived *= grade > 1.5 ? dvIn : atSenseWeight(p, 1, AT_SENSE_EDGE);
+    }
   }
 
   vec3 col;
@@ -160,8 +171,8 @@ void main() {
       vec3 unseen = uVisionMode == 1 ? atMemory(albedo) * (explored * atSenseShade(n)) : atPreviewDark(lit, albedo);
       // Per-pixel refinement of a colour cell on walkable surfaces (where the host samples): colour needs
       // light >= dim HERE, so colour / darkvision grey / unseen follow the light's radius and shadows
-      // instead of 5 ft cell steps. Only ever lowers the host grade.
-      if (grade > 2.5 && vSurf < 0.5) {
+      // instead of 5 ft cell steps. Only ever lowers the host grade. Smooth fog only.
+      if (grade > 2.5 && vSurf < 0.5 && !gridFog) {
         float litHere = max(lightsLit, atEnvLit(p, sunGate));
         if (litHere < 1.0) {
           vec3 low = atBlindsightAt(p) ? atGradeColour(1.0, albedo, light, 0.0, n) : unseen;

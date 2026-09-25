@@ -26,6 +26,7 @@ import { toast } from "sonner"
 import { useServices } from "@/app/services"
 import { EngineCanvas } from "@/components/canvas/EngineCanvas"
 import { useEngine } from "@/components/canvas/engineContext"
+import { useFogStyle } from "@/components/canvas/fogStyle"
 import { useQualityChoice } from "@/components/canvas/qualityChoice"
 import { useSuppressThemeHotkey } from "@/components/theme-provider"
 import { footprintCells, validateMove } from "@/core/movement"
@@ -63,7 +64,7 @@ import {
   type TemplateView,
 } from "@/play"
 import { backdropTexelBudget } from "@/render"
-import type { Engine, Quality } from "@/render/contracts"
+import type { Engine, FogStyle, Quality } from "@/render/contracts"
 
 import { usePlayCanvasInput, usePlayKeys, zoomCanvas } from "../input"
 import { StrandedMove } from "../StrandedMove"
@@ -174,6 +175,7 @@ function PlayerTable({
   const [engine, setEngine] = React.useState<Engine | null>(null)
   const quality = useQualityChoice()
   const [ceiling, setCeiling] = React.useState<Quality | null>(null)
+  const [fogStyle, setFogStyle] = useFogStyle()
   useSuppressThemeHotkey()
 
   // Backdrop canvases follow the engine's quality ceiling (the engine caps textures at the same budget).
@@ -597,6 +599,7 @@ function PlayerTable({
           activeLevelId={activeLevelId}
           selectedId={selectedId}
           grid={grid}
+          fogStyle={fogStyle}
           canvasRef={canvasRef}
         />
         <StrandedMove controller={controller} />
@@ -715,6 +718,11 @@ function PlayerTable({
                 onChange: quality.setChoice,
                 current: ceiling,
               },
+              fog: {
+                value: fogStyle,
+                onChange: setFogStyle,
+                smoothAvailable: ceiling !== "low",
+              },
             }}
           />
         ) : null}
@@ -740,6 +748,7 @@ function PlayerBridge({
   activeLevelId,
   selectedId,
   grid,
+  fogStyle,
   canvasRef,
 }: {
   client: AtlasPlayerClient
@@ -750,6 +759,7 @@ function PlayerBridge({
   activeLevelId: Id | null
   selectedId: Id | null
   grid: boolean
+  fogStyle: FogStyle
   canvasRef: React.RefObject<HTMLCanvasElement | null>
 }) {
   const { engine, canvas } = useEngine()
@@ -800,12 +810,13 @@ function PlayerBridge({
       vision: "fog",
       viewerTokenIds: visionTokenIds,
       hostMasks: masks,
+      fogStyle,
       primaryViewerId: selectedId,
       dimmedTokenIds: [],
       showHelpers: false,
       darkVision: false,
     })
-  }, [engine, visionTokenIds, masks, activeLevelId, selectedId, grid])
+  }, [engine, visionTokenIds, masks, activeLevelId, selectedId, grid, fogStyle])
 
   // Battlemap tiles.
   React.useEffect(

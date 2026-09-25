@@ -40,7 +40,7 @@ import {
   createWall,
   createWindow,
 } from "@/core/scene/factory"
-import { bytesToBase64, createHeightmap, denseHeights, writeHeights } from "@/core/scene/heightmap"
+import { bytesToBase64, chunkSamples, createHeightmap, decodeChunk, denseHeights, encodeChunk, parseChunkKey, writeHeights } from "@/core/scene/heightmap"
 import { parseScene } from "@/core/scene/schema"
 import { validateReferences } from "@/core/scene/integrity"
 import { effectiveFloorRects, floorRects, floorThickness, groundHeightAt, hasGroundAt, levelGround, sortedLevels, type Opening } from "@/core/scene/queries"
@@ -860,8 +860,10 @@ describe("host → player pipeline", () => {
   it("on terrain, the renderer draws the player's clipped wall pieces at the host's heights", () => {
     // A bumpy slope; wall W (2 ft thick, follow-terrain) runs past both grid edges along z = 20.5 with a
     // closed door and a window. The PC south of it sees by darkvision only, so W is explored in part and
-    // sent as pieces; the lattice row z = 22.5 behind W is never sent, so the client's own clipped ground
-    // under W's centreline is wrong: the pieces carry the host's base line (terrainProfile) instead.
+    // sent as pieces, which carry the host's base line (terrainProfile). The player is sent the ground
+    // under W's centreline too (explored cells and a one-cell ring), so to show that the pieces stand on
+    // that base line and not on the client's own ground, the client here loses its terrain from z = 21.25 on
+    // (the lattice rows behind W's near half, as when the ground there is not sent).
     const scene = createScene({ width: 16, depth: 8 })
     const ground = Object.keys(scene.levels)[0]
     scene.environment = { ...scene.environment, skyLevel: "dark", ambientLevel: "dark", directional: { ...scene.environment.directional, enabled: false } }
@@ -878,7 +880,19 @@ describe("host → player pipeline", () => {
     const host = new TestHost(scene, ["p1"])
     host.assign(pc.id, "p1")
     const { view } = host.refresh("p1")
-    const playerScene = viewToScene(view)
+    const received = viewToScene(view)
+    const hm = received.levels[ground].heightmap!
+    const n = chunkSamples(hm.resolution)
+    const spacing = 5 / hm.resolution
+    const chunks = Object.fromEntries(
+      Object.entries(hm.chunks).map(([key, b64]) => {
+        const samples = decodeChunk(b64, hm.resolution)
+        const { cj } = parseChunkKey(key)
+        for (let lz = 0; lz < n; lz++) if ((cj * n + lz) * spacing > 21.25) samples.fill(0, lz * n, (lz + 1) * n)
+        return [key, encodeChunk(samples)]
+      })
+    )
+    const playerScene: SceneLike = { ...received, levels: { ...received.levels, [ground]: { ...received.levels[ground], heightmap: { ...hm, chunks } } } }
 
     /** A wall's base line computed on a scene's own terrain (the client's clipped one, or the host's). */
     const profileIn = (sc: SceneLike, w: WallObject): WallProfile => {

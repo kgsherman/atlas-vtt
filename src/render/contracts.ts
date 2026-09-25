@@ -44,6 +44,8 @@ export interface HostLevelMasks {
   sunlit?: EncodedMask
 }
 
+export type FogStyle = "smooth" | "grid"
+
 export interface ViewState {
   mode: RenderMode
   camera: CameraKind
@@ -67,6 +69,12 @@ export interface ViewState {
   hostMasks: Record<Id, HostLevelMasks>
   /** Per-pixel GPU line-of-sight refinement inside host-perceived cells (off on the low tier). */
   gpuVisionRefine: boolean
+  /**
+   * How fog edges are drawn in "fog"/"preview": "smooth" = per pixel (GPU line of sight, light and sense
+   * ranges decide within a sub-cell of the host's edge), "grid" = whole cells (a cell with anything
+   * perceived shows whole), slightly blurred above the low tier. The low tier always draws "grid".
+   */
+  fogStyle: FogStyle
   /** Tokens drawn darkened (DM preview: not visible to the previewed token). */
   dimmedTokenIds: Id[]
   /**

@@ -20,6 +20,7 @@ import {
 } from "lucide-react"
 
 import { QualitySelect } from "@/components/canvas/QualitySelect"
+import { FOG_STYLE_ITEMS } from "@/components/canvas/fogStyle"
 import type { QualityChoice } from "@/components/canvas/qualityChoice"
 import { CommandKbd } from "@/components/keybindings/CommandKbd"
 import { KeybindingsDialog } from "@/components/keybindings/KeybindingsDialog"
@@ -45,7 +46,7 @@ import { hotkeyLabel } from "@/lib/hotkeys"
 import { cn } from "@/lib/utils"
 import { keysOf } from "@/lib/keymap"
 import { PLAY_COMMANDS, PLAY_POINTER_HELP, type PlayTool } from "@/play"
-import type { Quality } from "@/render/contracts"
+import type { FogStyle, Quality } from "@/render/contracts"
 
 /** Gilt-framed, frosted panel look for everything floating over the map. */
 export const glass = "atlas-gilt-frame atlas-sheen bg-card/88 backdrop-blur-md"
@@ -120,6 +121,13 @@ export interface CameraDockProps {
     /** The tier the engine runs at now (shown after "Auto"). */
     current?: Quality | null
   }
+  /** Fog edge style (smooth per pixel / whole cells); omitted = no choice. */
+  fog?: {
+    value: FogStyle
+    onChange(style: FogStyle): void
+    /** False on the low tier, which always draws the grid. */
+    smoothAvailable: boolean
+  }
   className?: string
   side?: "top" | "bottom"
 }
@@ -133,6 +141,7 @@ export function CameraDock({
   grid,
   onGrid,
   quality,
+  fog,
   className,
   side = "top",
 }: CameraDockProps) {
@@ -176,7 +185,7 @@ export function CameraDock({
         active={grid}
         onClick={() => onGrid(!grid)}
       />
-      {quality ? (
+      {quality || fog ? (
         <Popover>
           <Tooltip>
             <TooltipTrigger
@@ -186,7 +195,7 @@ export function CameraDock({
                     <Button
                       variant="ghost"
                       size="icon-sm"
-                      aria-label="Render quality"
+                      aria-label={quality ? "Render quality" : "Fog edges"}
                     />
                   }
                 />
@@ -195,29 +204,37 @@ export function CameraDock({
               <Gauge />
             </TooltipTrigger>
             <TooltipContent side={side}>
-              Render quality ·{" "}
-              {quality.value === "auto"
-                ? `Auto${quality.current ? ` (${quality.current})` : ""}`
-                : quality.value}
+              {quality
+                ? `Render quality · ${
+                    quality.value === "auto"
+                      ? `Auto${quality.current ? ` (${quality.current})` : ""}`
+                      : quality.value
+                  }`
+                : "Fog edges"}
             </TooltipContent>
           </Tooltip>
           <PopoverContent side={side} className="w-60 gap-3">
-            <PopoverHeader>
-              <PopoverTitle>Render quality</PopoverTitle>
-              <PopoverDescription>
-                Auto picks a tier for this device and steps down when frames get
-                slow.
-              </PopoverDescription>
-            </PopoverHeader>
-            <QualitySelect
-              value={quality.value}
-              onValueChange={quality.onChange}
-              current={quality.current}
-              side={side}
-              align="start"
-              size="default"
-              className="w-full"
-            />
+            {quality ? (
+              <>
+                <PopoverHeader>
+                  <PopoverTitle>Render quality</PopoverTitle>
+                  <PopoverDescription>
+                    Auto picks a tier for this device and steps down when frames
+                    get slow.
+                  </PopoverDescription>
+                </PopoverHeader>
+                <QualitySelect
+                  value={quality.value}
+                  onValueChange={quality.onChange}
+                  current={quality.current}
+                  side={side}
+                  align="start"
+                  size="default"
+                  className="w-full"
+                />
+              </>
+            ) : null}
+            {fog ? <FogStyleChoice fog={fog} /> : null}
           </PopoverContent>
         </Popover>
       ) : null}
@@ -231,6 +248,45 @@ export function CameraDock({
         />
       ) : null}
     </HudPanel>
+  )
+}
+
+/** Smooth / Grid fog edges (inside the camera dock's render popover). */
+function FogStyleChoice({ fog }: { fog: NonNullable<CameraDockProps["fog"]> }) {
+  const shown = fog.smoothAvailable ? fog.value : "grid"
+  return (
+    <div className="flex flex-col gap-2">
+      <PopoverHeader>
+        <PopoverTitle>Fog edges</PopoverTitle>
+        <PopoverDescription>
+          {fog.smoothAvailable
+            ? "Smooth follows walls and shadows exactly; Grid shows whole squares."
+            : "Low quality always shows whole squares."}
+        </PopoverDescription>
+      </PopoverHeader>
+      <ToggleGroup
+        value={[shown]}
+        onValueChange={(v) => {
+          const next = v[0] as FogStyle | undefined
+          if (next) fog.onChange(next)
+        }}
+        variant="outline"
+        spacing={0}
+        className="w-full"
+        aria-label="Fog edges"
+      >
+        {FOG_STYLE_ITEMS.map((item) => (
+          <ToggleGroupItem
+            key={item.value}
+            value={item.value}
+            disabled={item.value === "smooth" && !fog.smoothAvailable}
+            className="flex-1 aria-pressed:bg-primary aria-pressed:text-primary-foreground data-[pressed]:bg-primary data-[pressed]:text-primary-foreground"
+          >
+            {item.label}
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
+    </div>
   )
 }
 

@@ -10,12 +10,12 @@
 import { clipPolygonHalfPlane, polygonArea } from "../geometry/polygon"
 import { segmentCellIntervals } from "../grid/grid"
 import { chunkSamples, decodeChunk, encodeChunk, parseChunkKey } from "../scene/heightmap"
-import { decodeFloorMask, floorRects } from "../scene/queries"
-import type { FloorMask, GridSettings, Id, Rect, TerrainResolution, Vec2 } from "../scene/types"
-import { cellTouched, getCell } from "../vision/mask"
+import { decodeFloorMask, effectiveFloorRects, floorRects } from "../scene/queries"
+import type { FloorMask, GridSettings, Id, Rect, SceneLike, TerrainResolution, Vec2 } from "../scene/types"
+import { artExtent, cellTouched, createCellMask, getCell, setCell } from "../vision/mask"
 import { maskTouchesShape, type ObjectFootprint } from "../vision/observe"
 import { SUBCELLS, type CellMask, type EncodedMask, type GradeMask } from "../vision/types"
-import { decodeMaskCached, exploredAsGrades, exploredTouched } from "./masks"
+import { decodeMaskCached, encodeMaskCached, exploredAsGrades, exploredTouched } from "./masks"
 
 /** Minimum overlap area (ft²) for a strip/cell overlap to count (filters touching-only contacts). */
 const AREA_EPS = 1e-6
@@ -26,15 +26,89 @@ const RUN_JOIN_EPS = 1e-6
 export interface ExploredLevel {
   mask: CellMask
   grades: GradeMask
+  /** Floors, terrain and map art are sent over this (core/vision artExtent): explored cells + one sub-cell. */
+  extent: CellMask
 }
 
 const levelCache = new WeakMap<EncodedMask, ExploredLevel>()
+
+interface FlooredMemo {
+  levels: SceneLike["levels"]
+  grid: SceneLike["grid"]
+  byLevel: Map<Id, CellMask>
+}
+const flooredCache = new WeakMap<object, FlooredMemo>()
+
+/**
+ * Cells a level's effective floors (floors minus stairwell cutouts, core/scene effectiveFloorRects) cover
+ * wholly, from the live scene. Cached per scene revision (objects, levels and grid identity).
+ */
+export function flooredCells(scene: Pick<SceneLike, "levels" | "objects" | "grid">, levelId: Id): CellMask {
+  let memo = flooredCache.get(scene.objects)
+  if (!memo || memo.levels !== scene.levels || memo.grid !== scene.grid) {
+    memo = { levels: scene.levels, grid: scene.grid, byLevel: new Map() }
+    flooredCache.set(scene.objects, memo)
+  }
+  let out = memo.byLevel.get(levelId)
+  if (!out) {
+    const { width, depth, cellSize: s } = scene.grid
+    out = createCellMask(width, depth)
+    for (const { rect: r } of effectiveFloorRects(scene, levelId)) {
+      const i0 = Math.max(0, Math.ceil(r.x / s - 1e-9))
+      const j0 = Math.max(0, Math.ceil(r.z / s - 1e-9))
+      const i1 = Math.min(width, Math.floor((r.x + r.w) / s + 1e-9))
+      const j1 = Math.min(depth, Math.floor((r.z + r.d) / s + 1e-9))
+      for (let j = j0; j < j1; j++) for (let i = i0; i < i1; i++) setCell(out, j * width + i, true)
+    }
+    memo.byLevel.set(levelId, out)
+  }
+  return out
+}
+
+const extentEncCache = new WeakMap<EncodedMask, EncodedMask>()
+
+/**
+ * A player's explored masks as the sub-cells of map art to ship them (core/vision artExtent), per level.
+ * The same explored object always maps to the same extent object, so consumers can compare by identity.
+ */
+export function artExtents(explored: Readonly<Record<Id, EncodedMask>>): Record<Id, EncodedMask> {
+  const out: Record<Id, EncodedMask> = {}
+  for (const [levelId, enc] of Object.entries(explored)) {
+    let ext = extentEncCache.get(enc)
+    if (!ext) extentEncCache.set(enc, (ext = encodeMaskCached(exploredLevel(enc).extent)))
+    out[levelId] = ext
+  }
+  return out
+}
+
+const groundCache = new WeakMap<ExploredLevel, WeakMap<CellMask, CellMask>>()
+
+/**
+ * What a player is sent floors and terrain over: the art extent, except that beyond the explored cells
+ * only cells the level wholly floors (`floored`, flooredCells) are kept. A ring cell over a stairwell the
+ * player has not seen yet must not get a floor piece that would cover the hole on their client.
+ */
+export function groundExtent(ex: ExploredLevel, floored: CellMask): CellMask {
+  let byFloored = groundCache.get(ex)
+  if (!byFloored) groundCache.set(ex, (byFloored = new WeakMap()))
+  let out = byFloored.get(floored)
+  if (!out) {
+    out = createCellMask(ex.extent.width, ex.extent.depth)
+    const n = ex.extent.width * ex.extent.depth
+    for (let c = 0; c < n; c++) {
+      if (!cellTouched(ex.extent, c)) continue
+      if (cellTouched(ex.mask, c) || getCell(floored, c)) setCell(out, c, true)
+    }
+    byFloored.set(floored, out)
+  }
+  return out
+}
 
 export function exploredLevel(enc: EncodedMask): ExploredLevel {
   let ex = levelCache.get(enc)
   if (!ex) {
     const mask = decodeMaskCached(enc)
-    ex = { mask, grades: exploredAsGrades(mask) }
+    ex = { mask, grades: exploredAsGrades(mask), extent: artExtent(mask) }
     levelCache.set(enc, ex)
   }
   return ex

@@ -46,6 +46,7 @@ import type { HostEditor } from "./hostEditor"
 import { HostContextMenuContent } from "./HostContextMenu"
 import { resolveMenuTarget, type MenuTarget } from "./menuTarget"
 import type { HostActions } from "./hostActions"
+import { useFogStyle } from "@/components/canvas/fogStyle"
 
 export interface PreviewInfo {
   tokenIds: Id[]
@@ -238,6 +239,7 @@ function HostBridge({
 
   // ---- view --------------------------------------------------------------------------------------
   const [editView, setEditView] = React.useState(0)
+  const [fogStyle] = useFogStyle()
   React.useEffect(() => {
     if (!editor) return
     return editor.ctx.store.subscribe((s, prev) => {
@@ -274,10 +276,21 @@ function HostBridge({
       vision: previewing ? "preview" : "off",
       viewerTokenIds: previewing ? preview : [],
       hostMasks: previewing ? masks.masks : {},
+      fogStyle,
       dimmedTokenIds: previewing ? masks.dimmed : [],
       primaryViewerId: previewing ? (preview[0] ?? null) : null,
     })
-  }, [engine, editor, editView, camera, activeLevelId, grid, preview, masks])
+  }, [
+    engine,
+    editor,
+    editView,
+    camera,
+    activeLevelId,
+    grid,
+    preview,
+    masks,
+    fogStyle,
+  ])
 
   // ---- overlays ----------------------------------------------------------------------------------
   React.useEffect(() => {

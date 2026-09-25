@@ -13,7 +13,7 @@ import { sampleById } from "../scene/samples"
 import { blockShape, cylinderShape, writeTerrain } from "../scene/terrainShapes"
 import type { DoorObject, Id, Scene, SceneLike, WallObject, WindowObject } from "../scene/types"
 import { openingFrame, wallBaseKnots, wallProfile, type WallProfile } from "../scene/wallProfile"
-import { createGradeMask, decodeGrades, decodeMask } from "../vision/mask"
+import { artExtent, createGradeMask, decodeGrades, decodeMask } from "../vision/mask"
 import type { GradeMask, VisibilityResult } from "../vision/types"
 import { buildOcclusionWorld, primitiveBounds, primitiveTopAt, TerrainSampler } from "../occlusion"
 import type { OccluderPrimitive } from "../occlusion/types"
@@ -303,7 +303,7 @@ describe("clipping to explored cells", () => {
     expect(pieces[0].b.z).toBeCloseTo(25, 6)
   })
 
-  it("a level-wide floor arrives as explored rects (rows merged)", () => {
+  it("a level-wide floor arrives over the explored cells and a one-cell ring (rows merged)", () => {
     const { scene, ground } = flatScene(20, 20)
     const floorId = Object.keys(scene.objects)[0]
     const cells: [number, number][] = []
@@ -311,9 +311,12 @@ describe("clipping to explored cells", () => {
     cells.push([7, 5])
     const { view } = know(withPlayer(scene), synthVis(scene, { [ground]: cells }, [floorId]))
     const floors = Object.values(view.objects).filter((o) => o.type === "floor")
+    // The ground extent: explored cells and the (floored) cells next to them — cols 0–5 × rows 1–4 and
+    // cols 6–8 × rows 4–6 — merged row by row.
     expect(floors).toEqual([
-      { id: `${floorId}@5,10`, type: "floor", levelId: ground, rect: { x: 5, z: 10, w: 20, d: 10 }, material: "grass" },
-      { id: `${floorId}@35,25`, type: "floor", levelId: ground, rect: { x: 35, z: 25, w: 5, d: 5 }, material: "grass" },
+      { id: `${floorId}@0,5`, type: "floor", levelId: ground, rect: { x: 0, z: 5, w: 30, d: 15 }, material: "grass" },
+      { id: `${floorId}@0,20`, type: "floor", levelId: ground, rect: { x: 0, z: 20, w: 45, d: 5 }, material: "grass" },
+      { id: `${floorId}@30,25`, type: "floor", levelId: ground, rect: { x: 30, z: 25, w: 15, d: 10 }, material: "grass" },
     ])
   })
 
@@ -325,7 +328,9 @@ describe("clipping to explored cells", () => {
     // cell counts as explored for floors (the explored mask still hides its other half).
     const half = 0b0011_0011_0011_0011
     const { view } = know(withPlayer(scene), synthVis(scene, { [ground]: [[2, 2], [3, 2, half]] }, [floorId, small.id]))
-    expect(view.objects[`${floorId}@10,10`]).toEqual({ id: `${floorId}@10,10`, type: "floor", levelId: ground, rect: { x: 10, z: 10, w: 10, d: 5 }, material: "grass" })
+    // With the ring of cells next to them (the half cell's own ring stops inside it: cell (4, 2) is not
+    // touched), cols 1–3 × rows 1–3.
+    expect(view.objects[`${floorId}@5,5`]).toEqual({ id: `${floorId}@5,5`, type: "floor", levelId: ground, rect: { x: 5, z: 5, w: 15, d: 15 }, material: "grass" })
     expect(view.objects[`${small.id}@11,11`]).toEqual({ id: `${small.id}@11,11`, type: "floor", levelId: ground, rect: { x: 11, z: 11, w: 9, d: 2 }, material: "wood" })
     expect(Object.values(view.objects).filter((o) => o.type === "floor")).toHaveLength(2)
   })
@@ -339,9 +344,10 @@ describe("clipping to explored cells", () => {
     for (let j = 4; j < 6; j++) for (let i = 0; i < 2; i++) cells.push([i, j])
     const { view } = know(withPlayer(scene), synthVis(scene, { [ground]: cells }, [floorId]))
     const rects = Object.values(view.objects).flatMap((o) => (o.type === "floor" ? [o.rect] : []))
+    // With the one-cell ring: rows 0–4 cols 0–6, rows 5–6 cols 0–2.
     expect(rects).toEqual([
-      { x: 0, z: 0, w: 30, d: 20 },
-      { x: 0, z: 20, w: 10, d: 10 },
+      { x: 0, z: 0, w: 35, d: 25 },
+      { x: 0, z: 25, w: 15, d: 10 },
     ])
   })
 
@@ -583,16 +589,17 @@ describe("wall pieces on terrain", () => {
   it("a follow wall crossing unexplored cells keeps the host's tops; the terrain there stays clipped", () => {
     const { scene, ground } = flatScene(8, 4)
     withTerrain(scene, ground)
-    // The centreline z = 9.5 lies in row 1 (unexplored); the 2 ft thick strip reaches row 2 (explored), so
-    // the ground under the piece depends on samples z = 7.5 the client never receives.
-    const wall = add(scene, createWall(ground, { x: 0, z: 9.5 }, { x: 40, z: 9.5 }, { height: 8, thickness: 2 }))
-    const cells: [number, number][] = [2, 3, 4, 5].map((i) => [i, 2])
+    // The centreline z = 9.5 lies in row 1 (unexplored, and beyond the one-cell ring of row 3); the 12 ft
+    // thick strip reaches row 3 (explored), so the ground under the piece depends on samples z = 7.5 the
+    // client never receives.
+    const wall = add(scene, createWall(ground, { x: 0, z: 9.5 }, { x: 40, z: 9.5 }, { height: 8, thickness: 12 }))
+    const cells: [number, number][] = [2, 3, 4, 5].map((i) => [i, 3])
     const { view } = know(withPlayer(scene), synthVis(scene, { [ground]: cells }, [wall.id]))
     const [p] = piecesOf(scene, view)
     expect(piecesOf(scene, view)).toHaveLength(1)
     expect(p.piece).toMatchObject({ a: { x: 10, z: 9.5 }, b: { x: 30, z: 9.5 }, followTerrain: true })
 
-    // The terrain sent is exactly what the explored cells allow: no sample of row z = 7.5 (sz = 3).
+    // The terrain sent is exactly what the ground extent allows: no sample of row z = 7.5 (sz = 3).
     const without: Scene = { ...scene, objects: Object.fromEntries(Object.entries(scene.objects).filter(([id]) => id !== wall.id)) }
     expect(know(withPlayer(without), synthVis(without, { [ground]: cells })).view.terrain).toEqual(view.terrain)
     const chunk = decodeChunk(view.terrain[ground]["0,0"], 2)
@@ -698,7 +705,7 @@ describe("terrain", () => {
     return { scene, ground }
   }
 
-  it("sends only chunks overlapping explored cells, with samples touching no explored cell zeroed", () => {
+  it("sends only chunks overlapping the ground extent, with samples touching none of its cells zeroed", () => {
     const { scene, ground } = terrainScene()
     const { view } = know(withPlayer(scene), synthVis(scene, { [ground]: [[3, 3]] }))
     expect(view.scene.levels[ground].terrainResolution).toBe(2)
@@ -707,20 +714,21 @@ describe("terrain", () => {
     const n = 16
     for (let sz = 0; sz < n; sz++) {
       for (let sx = 0; sx < n; sx++) {
-        // Cell (3, 3) spans samples 6..8 (inclusive) on both axes at resolution 2.
-        const inside = sx >= 6 && sx <= 8 && sz >= 6 && sz <= 8
+        // Cell (3, 3) and its ring (2..4, 2..4) span samples 4..10 (inclusive) on both axes at resolution 2.
+        const inside = sx >= 4 && sx <= 10 && sz >= 4 && sz <= 10
         expect(samples[sz * n + sx]).toBe(inside ? 3 : 0)
       }
     }
   })
 
-  it("includes the neighbouring chunk when an explored cell touches its first sample column", () => {
+  it("includes the neighbouring chunk when the extent touches its first sample column", () => {
     const { scene, ground } = terrainScene()
-    const { view } = know(withPlayer(scene), synthVis(scene, { [ground]: [[7, 3]] }))
+    // Cell (6, 3): its ring reaches column 7, whose last samples are the first column of chunk (1, 0).
+    const { view } = know(withPlayer(scene), synthVis(scene, { [ground]: [[6, 3]] }))
     expect(Object.keys(view.terrain[ground]).sort()).toEqual(["0,0", "1,0"])
     const right = decodeChunk(view.terrain[ground]["1,0"], 2)
     for (let sz = 0; sz < 16; sz++) {
-      for (let sx = 0; sx < 16; sx++) expect(right[sz * 16 + sx]).toBe(sx === 0 && sz >= 6 && sz <= 8 ? 3 : 0)
+      for (let sx = 0; sx < 16; sx++) expect(right[sz * 16 + sx]).toBe(sx === 0 && sz >= 4 && sz <= 10 ? 3 : 0)
     }
   })
 
@@ -851,10 +859,11 @@ describe("invariants on The Crooked Lantern (every PC)", () => {
   it.each(pcs.map((t, k) => [t.name, `p${k}`]))("%s: every piece of data is justified by explored cells or visibility", (_name, uid) => {
     const { view, vis } = host.refresh(uid)
     expect(playerViewSchema.parse(view)).toEqual(view)
-    const explored = (levelId: Id) => (view.masks[levelId] ? decodeMask(view.masks[levelId].explored) : null)
+    // Floors and terrain reach over the art extent: explored cells and those one sub-cell beyond.
+    const explored = (levelId: Id) => (view.masks[levelId] ? artExtent(decodeMask(view.masks[levelId].explored)) : null)
     const touched = (m: ReturnType<typeof explored>, i: number, j: number) =>
       !!m && i >= 0 && j >= 0 && i < m.width && j < m.depth && (((m.bits[(j * m.width + i) >> 3] >> ((j * m.width + i) & 7)) & 1) === 1 || m.partial.has(j * m.width + i))
-    // Floor pieces cover explored cells only.
+    // Floor pieces cover the extent only.
     for (const o of Object.values(view.objects)) {
       if (o.type !== "floor") continue
       const m = explored(o.levelId)
@@ -862,7 +871,7 @@ describe("invariants on The Crooked Lantern (every PC)", () => {
         for (let i = Math.floor(o.rect.x / 5); i < Math.ceil((o.rect.x + o.rect.w) / 5); i++) expect(touched(m, i, j)).toBe(true)
       }
     }
-    // Non-zero terrain samples touch an explored cell.
+    // Non-zero terrain samples touch a cell of the extent.
     for (const [levelId, chunks] of Object.entries(view.terrain)) {
       const res = view.scene.levels[levelId].terrainResolution!
       const m = explored(levelId)

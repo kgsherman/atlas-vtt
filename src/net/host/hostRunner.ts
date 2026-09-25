@@ -68,6 +68,7 @@ import {
   type StateRequest,
   type TablePing,
 } from "@/core/session"
+import { artExtents } from "@/core/session/clip"
 import { parseGameStateDetailed } from "@/core/session/persist"
 import { createGameState, isEmptyDelta, ownsToken } from "@/core/session/state"
 import type { VisibilityResult } from "@/core/vision/types"
@@ -1632,7 +1633,8 @@ export class HostRunnerImpl implements HostRunner {
       if (tiler?.publishing) {
         // Backdrop chunks of newly explored cells upload in the background; wait a little so they are
         // usually announced before the view revealing their cells, but never hold the game up for them.
-        const uploads = tiler.sync(uid, own(this.state!.explored, uid) ?? {}, this.focusPoints(uid))
+        // Map art over the art extent (explored cells whole and one sub-cell beyond, ARCHITECTURE §9).
+        const uploads = tiler.sync(uid, artExtents(own(this.state!.explored, uid) ?? {}), this.focusPoints(uid))
         await this.within(uploads, this.t.tileWaitMs)
         if (!this.hosting(gen) || conn.closed) return null
         if (conn.lastVisTag !== this.sceneTag || viewerTokenIds(this.state!, uid).join(",") !== key) {

@@ -179,6 +179,8 @@ export interface SharedUniforms {
   uVisionMode: THREE.IUniform<number>
   /** 1 = per-pixel LOS refinement against the viewer atlas. */
   uGpuRefine: THREE.IUniform<number>
+  /** 1 = grid fog (whole cells, no per-pixel perception refinement), 0 = smooth (render/fog/maskExpand). */
+  uFogGrid: THREE.IUniform<number>
   uMasks: THREE.IUniform<THREE.Texture | null>
   /** x = 1/(width·cellSize), y = 1/(depth·cellSize), z = texture width, w = texture height (texels). */
   uMaskGrid: THREE.IUniform<THREE.Vector4>
@@ -220,6 +222,7 @@ export function createSharedUniforms(): SharedUniforms {
     uViewerAtlas: { value: placeholderFloatTexture() },
     uVisionMode: { value: VISION_MODE.off },
     uGpuRefine: { value: 0 },
+    uFogGrid: { value: 0 },
     uMasks: { value: placeholderMaskTexture() },
     uMaskGrid: { value: new THREE.Vector4(0, 0, 1, 1) },
     uTime: { value: 0 },

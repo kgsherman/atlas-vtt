@@ -88,6 +88,80 @@ export function isEmptyMask(m: CellMask): boolean {
   return true
 }
 
+const SUB_ROW = (1 << SUBCELLS) - 1
+
+/**
+ * One cell's sub-cells dilated by one sub-cell (8-neighbourhood) into the 3×3 block of cells around it:
+ * out[(dj + 1)·3 + di + 1] = the sub-cells of cell (i + di, j + dj) within one sub-cell of a set one.
+ * Rows are handled as 6-bit strips (sub-cell columns −1..4) so no sub-cell is visited on its own.
+ */
+export function dilateSubmask(sub: number, out: number[]): void {
+  const n = SUBCELLS
+  const wide = new Array<number>(n + 2).fill(0)
+  for (let sz = 0; sz < n; sz++) {
+    const r = ((sub >> (sz * n)) & SUB_ROW) << 1
+    wide[sz + 1] = r | (r << 1) | (r >> 1)
+  }
+  for (let k = 0; k < 9; k++) out[k] = 0
+  for (let k = 0; k < n + 2; k++) {
+    const row = wide[k] | (k > 0 ? wide[k - 1] : 0) | (k < n + 1 ? wide[k + 1] : 0)
+    if (row === 0) continue
+    // Strip k: row n − 1 of the cell above (k = 0), rows 0..n − 1 of the cell, row 0 of the one below.
+    const block = (k === 0 ? 0 : k === n + 1 ? 2 : 1) * 3
+    const sz = k === 0 ? n - 1 : k === n + 1 ? 0 : k - 1
+    if (row & 1) out[block] |= 1 << (sz * n + n - 1)
+    const own = (row >> 1) & SUB_ROW
+    if (own) out[block + 1] |= own << (sz * n)
+    if (row & (1 << (n + 1))) out[block + 2] |= 1 << (sz * n)
+  }
+}
+
+/** The set sub-cells and every sub-cell next to one (8-neighbourhood, across cell borders). */
+export function dilateSubcells(m: CellMask): CellMask {
+  const out = createCellMask(m.width, m.depth)
+  const W = m.width
+  const D = m.depth
+  const block = new Array<number>(9).fill(0)
+  const visit = (idx: number, sub: number): void => {
+    const i = idx % W
+    const j = (idx - i) / W
+    dilateSubmask(sub, block)
+    for (let dj = -1; dj <= 1; dj++) {
+      const jj = j + dj
+      if (jj < 0 || jj >= D) continue
+      for (let di = -1; di <= 1; di++) {
+        const ii = i + di
+        const bits = block[(dj + 1) * 3 + di + 1]
+        if (ii >= 0 && ii < W && bits !== 0) setSubcells(out, jj * W + ii, bits)
+      }
+    }
+  }
+  const n = W * D
+  for (let k = 0; k < m.bits.length; k++) {
+    const byte = m.bits[k]
+    if (byte === 0) continue
+    for (let b = 0; b < 8; b++) {
+      const idx = k * 8 + b
+      if (idx < n && byte & (1 << b)) visit(idx, FULL_SUBMASK)
+    }
+  }
+  for (const [idx, sub] of m.partial) if (!getCell(m, idx)) visit(idx, sub)
+  return out
+}
+
+/**
+ * What a player is sent floors, terrain and map art for, given their explored mask (ARCHITECTURE §6.2):
+ * every cell with any explored sub-cell, whole (grid-style fog shows whole cells), and every sub-cell next
+ * to an explored one (smooth fog lets the GPU decide those per pixel). Walls, objects and the explored
+ * mask itself stay exact.
+ */
+export function artExtent(explored: CellMask): CellMask {
+  // Fully explored cells are already whole in the dilation; partly explored ones become whole.
+  const out = dilateSubcells(explored)
+  for (const idx of explored.partial.keys()) setCell(out, idx, true)
+  return out
+}
+
 /** Copy the overlapping region into a mask of new dimensions (grid resize; origin fixed at 0,0). */
 export function resizeCellMask(m: CellMask, width: number, depth: number): CellMask {
   const out = createCellMask(width, depth)

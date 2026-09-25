@@ -38,7 +38,12 @@ const fakeView = (userId: string): PlayerView => ({
   viewVersion: 1,
   sessionId: SID,
   userId,
-  scene: { name: "Keep", grid: { cellSize: 5, width: 4, depth: 4, diagonalRule: "5-5-5", visionOrigin: "square" }, environment: {} as PlayerView["scene"]["environment"], levels: {} },
+  scene: {
+    name: "Keep",
+    grid: { cellSize: 5, width: 4, depth: 4, diagonalRule: "5-5-5", visionOrigin: "square" },
+    environment: {} as PlayerView["scene"]["environment"],
+    levels: {},
+  },
   objects: {},
   tokens: {},
   terrain: {},

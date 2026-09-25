@@ -31,6 +31,8 @@ I want to build a browser-based virtual tabletop (VTT) called Atlas VTT in TypeS
 - Vision types per token: normal, darkvision (with range, rendered greyscale), blindsight, and blind
 - Fog of war with three states: currently visible, previously explored (dimmed, shows static geometry only, no tokens), and unexplored (black)
 - Each player sees only what their own tokens can see; shared vision for party members is a toggle
+- Players choose how fog edges look: smooth (edges follow walls and shadows exactly) or grid (whole squares, softly
+  blended; the only style on the lowest quality setting)
 - The DM always sees everything, with an option to preview any token's vision
 - Performance target: 60fps on a mid-range laptop with ~20 lights and ~15 tokens. Explain the techniques you use to get there (shadow map budgeting, light culling, caching static occlusion, etc.)
 

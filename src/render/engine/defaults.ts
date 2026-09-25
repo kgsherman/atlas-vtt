@@ -13,6 +13,7 @@ export const DEFAULT_VIEW: ViewState = {
   viewerTokenIds: [],
   hostMasks: {},
   gpuVisionRefine: true,
+  fogStyle: "smooth",
   dimmedTokenIds: [],
   primaryViewerId: null,
   showHelpers: true,

@@ -2,9 +2,10 @@
  * Backdrop tiles (ARCHITECTURE §9 "Players never receive a whole image"). Per player and level, the
  * host keeps that player's explored cells of the battlemap in Storage as chunks of TILE_CHUNK × TILE_CHUNK
  * cells (net/assets/chunks.ts: `{sessionId}/{userId}/{levelId}/{ci}_{cj}.webp`, readable only by that
- * player and the DM). After every knowledge update (`sync`), chunks whose explored cells changed are
- * re-drawn (only explored sub-cells, tilePx per cell — the stored px per cell: a partly explored cell
- * is clipped to its explored 4×4 sub-cells, so no art beyond what the player perceived is shipped) and
+ * player and the DM). After every knowledge update (`sync`, given the sub-cells to ship: hostRunner passes
+ * the player's art extent, core/session artExtents — explored cells whole and one sub-cell beyond, which
+ * the player's fog may show), chunks whose cells changed are re-drawn (only those sub-cells, tilePx per
+ * cell — the stored px per cell: a partly covered cell is clipped to its 4×4 sub-cells) and
  * uploaded in the background, nearest to the player's tokens first, a few at a time, backing off when
  * Storage rate-limits. A partly explored cell that grows (or shrinks) re-cuts its chunk under a new
  * `rev`. Each finished upload is announced to the player (`onChunks` → `{t: "tiles"}`) so their

@@ -8,7 +8,7 @@ import * as THREE from "three"
 
 import { sortedLevels } from "@/core/scene/queries"
 import type { Id, SceneLike } from "@/core/scene/types"
-import type { HostLevelMasks } from "../contracts"
+import type { FogStyle, HostLevelMasks } from "../contracts"
 import type { SharedUniforms } from "../lighting/uniforms"
 import { placeholderMaskTexture } from "../materials/placeholders"
 import { expandLevelMasks, maskLayerBytes, maskSignature, MASK_TEXELS_PER_CELL } from "./maskExpand"
@@ -19,6 +19,7 @@ export class HostMaskTextures {
   private depth = 0
   private cellSize = 5
   private layers: Id[] = []
+  private style: FogStyle = "smooth"
   private readonly signatures = new Map<Id, string>()
   private readonly levelUniforms = new Map<Id, THREE.IUniform<number>>()
   private readonly shared: SharedUniforms
@@ -50,7 +51,7 @@ export class HostMaskTextures {
    * Bring the texture in line with the scene's levels and the host masks. Returns true if anything was
    * (re)uploaded.
    */
-  sync(scene: Pick<SceneLike, "grid" | "levels">, masks: Record<Id, HostLevelMasks>): boolean {
+  sync(scene: Pick<SceneLike, "grid" | "levels">, masks: Record<Id, HostLevelMasks>, style: FogStyle = "smooth"): boolean {
     const levels = sortedLevels(scene).map((l) => l.id)
     const { width, depth, cellSize } = scene.grid
     if (levels.length === 0 || width <= 0 || depth <= 0) {
@@ -86,9 +87,10 @@ export class HostMaskTextures {
       this.depth = depth
     }
     this.cellSize = cellSize
-    if (relayout) {
+    if (relayout || style !== this.style) {
       this.layers = levels
       this.signatures.clear()
+      this.style = style
     }
     const tex = this.texture!
     const data = tex.image.data as Uint8Array
@@ -98,7 +100,7 @@ export class HostMaskTextures {
       const sig = maskSignature(m)
       if (this.signatures.get(id) === sig) return
       this.signatures.set(id, sig)
-      expandLevelMasks(m, width, depth, data.subarray(layer * layerBytes, (layer + 1) * layerBytes))
+      expandLevelMasks(m, width, depth, data.subarray(layer * layerBytes, (layer + 1) * layerBytes), style)
       changedLayers.push(layer)
     })
     if (this.fullUploadPending) {

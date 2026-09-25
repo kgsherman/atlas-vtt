@@ -429,6 +429,22 @@ describe("AtlasLightingSystem", () => {
     expect(sys.shared.uViewersAll.value).toBe(0)
   })
 
+  it("draws grid fog when the view asks for it, and always on the low tier (no GPU line of sight)", () => {
+    const { sys } = setup(0)
+    const grid = () => sys.shared.uFogGrid.value
+    sys.setView({ ...DEFAULT_VIEW_STATE, mode: "player", vision: "fog" })
+    expect(sys.fogStyle).toBe("smooth")
+    expect(grid()).toBe(0)
+    sys.setView({ ...DEFAULT_VIEW_STATE, mode: "player", vision: "fog", fogStyle: "grid" })
+    expect(grid()).toBe(1)
+    sys.setView({ ...DEFAULT_VIEW_STATE, mode: "player", vision: "fog", fogStyle: "smooth" })
+    sys.setQuality("low")
+    expect(sys.fogStyle).toBe("grid")
+    expect(grid()).toBe(1)
+    sys.setQuality("high")
+    expect(grid()).toBe(0)
+  })
+
   it("switches atlas resolution and wide PCF with the quality tier", () => {
     const { sys, renderer, camera } = setup(5)
     sys.setQuality("high")

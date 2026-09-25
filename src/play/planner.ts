@@ -330,7 +330,13 @@ export class MovePlanner {
     return {
       cell: tokenAnchor(
         this.scene ?? {
-          grid: { cellSize: 5, width: 1, depth: 1, diagonalRule: "5-5-5", visionOrigin: "square" },
+          grid: {
+            cellSize: 5,
+            width: 1,
+            depth: 1,
+            diagonalRule: "5-5-5",
+            visionOrigin: "square",
+          },
         },
         token
       ),

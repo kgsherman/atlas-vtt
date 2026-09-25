@@ -26,6 +26,7 @@ import { withModeParam } from "@/app/mode"
 import { inviteLink } from "@/app/roomCodeInput"
 import { paths } from "@/app/routes"
 import { useServices } from "@/app/services"
+import { useFogStyle } from "@/components/canvas/fogStyle"
 import { useQualityChoice } from "@/components/canvas/qualityChoice"
 import {
   EditorContext,
@@ -357,6 +358,7 @@ function HostConsole({
   )
   const hosting = snap.status === "hosting"
   const quality = useQualityChoice()
+  const [fogStyle, setFogStyle] = useFogStyle()
   useSuppressThemeHotkey()
 
   const activeLevelId =
@@ -1228,6 +1230,11 @@ function HostConsole({
                       }
                       grid={grid}
                       onGrid={setGrid}
+                      fog={{
+                        value: fogStyle,
+                        onChange: setFogStyle,
+                        smoothAvailable: quality.choice !== "low",
+                      }}
                     />
                     <HudPanel className="p-1">
                       <ShortcutsButton host />

@@ -8,7 +8,7 @@ import { createFloor } from "../scene/factory"
 import { bytesToBase64 } from "../scene/heightmap"
 import { floorRects } from "../scene/queries"
 import type { FloorMask, FloorObject, Id, Rect, Scene } from "../scene/types"
-import { cellTouched, createGradeMask, decodeMask } from "../vision/mask"
+import { artExtent, cellTouched, createGradeMask, decodeMask } from "../vision/mask"
 import type { GradeMask, VisibilityResult } from "../vision/types"
 import { maskedFloorExploredRects } from "./clip"
 import { applyPatchOps, diffViews } from "./diff"
@@ -66,7 +66,8 @@ const inRects = (rects: Rect[], x: number, z: number) => rects.some((r) => x > r
 /** Asserts every floor piece of `sourceId` lies inside the floor's covered rects and inside explored cells. */
 function expectPiecesInside(view: PlayerView, source: FloorObject, cellSize: number): number {
   const covered = floorRects(source)
-  const explored = decodeMask(view.masks[source.levelId].explored)
+  // Floors reach over the art extent: explored cells and the cells one sub-cell beyond.
+  const explored = artExtent(decodeMask(view.masks[source.levelId].explored))
   let area = 0
   const pieces = Object.values(view.objects).filter((o): o is PlayerFloor => o.type === "floor" && o.id.startsWith(`${source.id}@`))
   for (const p of pieces) {
