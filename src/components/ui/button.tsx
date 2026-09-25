@@ -35,6 +35,25 @@ const buttonVariants = cva(
       },
     },
     compoundVariants: [
+      // Framed plates need room inside the frame (icon sizes stay square).
+      {
+        variant: ["default", "outline"],
+        size: "default",
+        class:
+          "h-8 px-3 has-data-[icon=inline-end]:pr-2.5 has-data-[icon=inline-start]:pl-2.5",
+      },
+      {
+        variant: ["default", "outline"],
+        size: "sm",
+        class:
+          "h-7 px-2.5 has-data-[icon=inline-end]:pr-2 has-data-[icon=inline-start]:pl-2",
+      },
+      {
+        variant: ["default", "outline"],
+        size: "lg",
+        class:
+          "h-9 px-3.5 has-data-[icon=inline-end]:pr-3 has-data-[icon=inline-start]:pl-3",
+      },
       {
         variant: "decision",
         class:

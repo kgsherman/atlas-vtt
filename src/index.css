@@ -334,9 +334,9 @@
   background-image: linear-gradient(to right, transparent, color-mix(in oklch, var(--gilt) 32%, transparent) 20%, color-mix(in oklch, var(--gilt) 32%, transparent) 80%, transparent);
 }
 
-/* Gold small-caps section heading. */
+/* Small-caps section heading. */
 @utility atlas-rubric {
   font-weight: 600;
   letter-spacing: 0.1em;
-  color: color-mix(in oklch, var(--gilt) 70%, var(--muted-foreground));
+  color: var(--foreground);
 }
