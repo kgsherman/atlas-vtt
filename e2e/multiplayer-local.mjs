@@ -477,8 +477,11 @@ try {
     "exploration kept growing while moving"
   )
   wire.A.push(...(await drainWire(A.page)))
+  // In front: a background tab reloading next to the DM's software-rendered one can go unscheduled for
+  // many seconds on a small machine (its messages then arrive all at once), and a screenshot needs a frame.
+  await A.page.bringToFront()
   await A.page.reload({ waitUntil: "domcontentloaded" })
-  await waitPlayerLive(A.page)
+  await waitPlayerLive(A.page, 60000)
   await waitFor(
     A.page,
     (id) =>

@@ -267,8 +267,7 @@ try {
   const vb = await playerView(B.page)
   if (vb.templates?.[hands.id])
     checks.ok(
-      vb.templates[hands.id].name === "Aerin" &&
-        !vb.templates[hands.id].mine,
+      vb.templates[hands.id].name === "Aerin" && !vb.templates[hands.id].mine,
       "B sees A's cone by A's name"
     )
 
@@ -378,7 +377,9 @@ try {
   )
   const aura = withAura.find((t) => t.tokenId === npc.id)
   checks.ok(
-    aura.shape === "sphere" && aura.size === 15 && aura.label === "Spirit Guardians",
+    aura.shape === "sphere" &&
+      aura.size === 15 &&
+      aura.label === "Spirit Guardians",
     "the aura is carried by the NPC",
     aura
   )
@@ -415,7 +416,9 @@ try {
   await shot(dm, OUT, "06-dm-aura")
 
   // ---- removing, reloading ---------------------------------------------------------------------------------
-  checks.step("A removes their cone from its card; a reload brings the rest back")
+  checks.step(
+    "A removes their cone from its card; a reload brings the rest back"
+  )
   await A.page.bringToFront()
   await A.page.locator(`[data-template-id="${hands.id}"] button`).click()
   const aCard = A.page.locator("[data-slot=template-card]")
@@ -479,11 +482,13 @@ try {
   await dm.getByRole("tab", { name: /Table/ }).click()
   await dm.getByRole("button", { name: "Clear all areas" }).click()
   await waitTemplates(dm, (l) => l.length === 0, "no templates")
+  // A's tab is in the background next to the DM's software-rendered one: on a small machine it can go
+  // unscheduled for many seconds (the host's messages then arrive all at once), so give it time.
   await waitFor(
     A.page,
     () => !window.__atlasPlayer.client.getSnapshot().view?.templates,
     null,
-    { timeout: 15000, label: "A has no templates" }
+    { timeout: 60000, label: "A has no templates" }
   )
   checks.ok(true, "the host and A's view hold no template any more")
   checks.eq(seriousErrors(logs), [], "no console errors")
