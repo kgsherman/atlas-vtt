@@ -9,7 +9,7 @@
 // card, whole then halved for a save: the log holds each roll and A's hit points drop by exactly that →
 // the DM hides the Fireball: it leaves every view → the DM gives an NPC a Spirit Guardians aura, which
 // follows it when it moves → A removes their template from its card → A reloads and the templates come
-// back → no player ever received another player's id.
+// back → no player ever received another player's id → the DM clears every area from the Table tab.
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/templates-local.mjs
 import {
@@ -472,6 +472,20 @@ try {
     [],
     "B's frames never hold A's id (A's templates travel by name)"
   )
+
+  // ---- clearing -----------------------------------------------------------------------------------------
+  checks.step("The DM clears every area from the Table tab")
+  await dm.bringToFront()
+  await dm.getByRole("tab", { name: /Table/ }).click()
+  await dm.getByRole("button", { name: "Clear all areas" }).click()
+  await waitTemplates(dm, (l) => l.length === 0, "no templates")
+  await waitFor(
+    A.page,
+    () => !window.__atlasPlayer.client.getSnapshot().view?.templates,
+    null,
+    { timeout: 15000, label: "A has no templates" }
+  )
+  checks.ok(true, "the host and A's view hold no template any more")
   checks.eq(seriousErrors(logs), [], "no console errors")
 } catch (err) {
   checks.fail("unexpected error", err)

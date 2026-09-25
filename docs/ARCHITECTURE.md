@@ -1358,6 +1358,7 @@ balcony's wall or the cellar under the paving.
   ("8d6 Fireball", the host's dice) dealt as `change-token-status` damage to every creature caught whose hit
   points are tracked, halved (rounded down) for those marked as having saved. The template's label is the
   roll's label after a `#` (`damageInput`), so a player's label never extends the formula.
+  The host's Table tab counts the areas on the map and clears them all (`template-delete` with `null`).
 
 ---
 
@@ -2058,7 +2059,7 @@ stay within [−π, π] and a template that does not parse is dropped rather tha
 templates are `cannot` for their owner; the label follows a `#`; cells are kept while objects change out
 of reach, and the largest area is 120 ft). Final verification (2026-09-25, after the review's fixes):
 `tsc -b` 0 errors, `eslint .` clean, `npx vitest run` 2084 tests pass (4 live Supabase files skipped); on
-SwiftShader `templates-local` 29/29 (new), `table-local` 35/35 and `keybindings` 33/33.
+SwiftShader `templates-local` 30/30 (new), `table-local` 35/35 and `keybindings` 33/33.
 
 **Terrain review fixes (2026-09-23)**, each with a regression test that fails on the previous code:
 - Document: "Apply to terrain" bakes the downward closure, so the terrain no longer changes (§3, §7);

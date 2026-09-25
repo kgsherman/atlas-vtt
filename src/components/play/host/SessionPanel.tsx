@@ -28,6 +28,7 @@ import {
   ScanEye,
   Sun,
   Swords,
+  Trash2,
   TriangleAlert,
   UserMinus,
   UserPlus,
@@ -820,6 +821,8 @@ function TableTab({ state, actions }: SessionPanelProps) {
   const confirm = useConfirm()
   const env = state.scene.environment
   const moon = env.directional.kind === "moon"
+  const templateCount = state.templates?.length ?? 0
+  const hiddenTemplates = state.templates?.filter((t) => t.hidden).length ?? 0
   const resetAll = async () => {
     const ok = await confirm({
       title: "Reset the fog of war for everyone?",
@@ -892,6 +895,24 @@ function TableTab({ state, actions }: SessionPanelProps) {
           onClick={() => void resetAll()}
         >
           <RotateCcw data-icon="inline-start" /> Reset for everyone…
+        </Button>
+      </div>
+      <Separator />
+      <div className="flex flex-col gap-2">
+        <span className="text-xs font-medium">Areas of effect</span>
+        <span className="text-[0.6875rem] text-muted-foreground">
+          {templateCount === 0
+            ? "None on the map. Place one with the Area tool (T)."
+            : `${templateCount} on the map (${hiddenTemplates} hidden from players). Remove one from its card, or all of them at once.`}
+        </span>
+        <Button
+          variant="outline"
+          size="sm"
+          className="self-start"
+          disabled={templateCount === 0}
+          onClick={() => actions.removeTemplates(null)}
+        >
+          <Trash2 data-icon="inline-start" /> Clear all areas
         </Button>
       </div>
     </div>
