@@ -70,6 +70,8 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
   Players stay connected, keep the chat and follow their characters to the new map, starting with fresh
   fog. If the live map has unsaved edits, the DM can save them first.
 
+![Change map, step 2: the DM ticks who comes along from the tavern (the players' characters by default) and picks where they arrive on the Stress Test](docs/screenshots/crooked-lantern-dm-change-map.png)
+
 **At the table**
 - Chat and dice for the DM and every player (Enter opens the dock). Type `/r 1d20+5 to hit`, a bare
   `2d6+3`, or click a quick die (d4 to d%, advantage, disadvantage). Notation covers keep / drop (`4d6dl1`,
