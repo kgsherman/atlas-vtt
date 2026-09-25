@@ -112,7 +112,9 @@ function DisplayNameForm({ onDone }: { onDone: () => void }) {
           }}
           autoComplete="nickname"
         />
-        {invalid && <FieldError>Use 1 to {DISPLAY_NAME_MAX} characters.</FieldError>}
+        {invalid && (
+          <FieldError>{value.trim() ? `That's a bit long. Keep it to ${DISPLAY_NAME_MAX} characters.` : "Your party needs something to call you."}</FieldError>
+        )}
       </Field>
     </form>
   )
