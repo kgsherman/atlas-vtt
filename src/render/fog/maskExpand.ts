@@ -67,9 +67,10 @@ export function expandLevelMasks(masks: HostLevelMasks | undefined, width: numbe
   const grid = style === "grid"
   // Smooth style: per texel perceived grade (0 = not) and sunlit, for the band pass.
   const texH = depth * n
-  const pg = grid ? null : new Uint8Array(texW * texH)
-  const ps = grid ? null : new Uint8Array(texW * texH)
-  const anyPerceived = grid ? null : new Uint8Array(width * depth)
+  // Per texel: the grade of texels with r > 0 (perceived; smooth: then the band too) and their sunlit value.
+  const pg = new Uint8Array(texW * texH)
+  const ps = new Uint8Array(texW * texH)
+  const anyPerceived = new Uint8Array(width * depth)
   for (let j = 0; j < depth; j++) {
     for (let i = 0; i < width; i++) {
       const g = i < grades.width && j < grades.depth ? grades.grades[j * grades.width + i] : 0
@@ -81,9 +82,9 @@ export function expandLevelMasks(masks: HostLevelMasks | undefined, width: numbe
         if (eSub !== 0) eSub = 0xffff
       }
       if (pSub === 0 && eSub === 0 && sSub === 0) continue
-      if (pSub !== 0 && anyPerceived) anyPerceived[j * width + i] = 1
+      if (pSub !== 0) anyPerceived[j * width + i] = 1
       const base = j * n * texW + i * n
-      if (pg && ps && pSub !== 0) {
+      if (pSub !== 0) {
         for (let sz = 0; sz < n; sz++) {
           for (let sx = 0; sx < n; sx++) {
             const bit = 1 << (sz * n + sx)
@@ -109,28 +110,61 @@ export function expandLevelMasks(masks: HostLevelMasks | undefined, width: numbe
       }
     }
   }
-  if (!pg || !ps || !anyPerceived) return
-  // The band: unperceived texels next to perceived ones, only around cells with something perceived.
+  const extra = { grade: new Uint8Array(texW * texH), sun: new Uint8Array(texW * texH) }
+  const exploredByte = (t: number) => (LITTLE_ENDIAN ? (words[t] >>> 8) & 0xff : (words[t] >>> 16) & 0xff)
+  if (!grid) {
+    // The band: unperceived texels next to perceived ones.
+    const band = ring(pg, ps, anyPerceived, width, depth, texW, extra)
+    for (const t of band) {
+      words[t] = packRgba(MASK_BAND, exploredByte(t), sunlit ? (extra.sun[t] ? 255 : 0) : 255, extra.grade[t] * 85)
+      pg[t] = extra.grade[t]
+      ps[t] = extra.sun[t]
+    }
+  }
+  // The grade ring: texels next to any with r > 0 take their grade with r = 0. The shader reads the grade
+  // from the nearest texel and the r edge filtered: without the ring, a texel whose filtered r is still
+  // high (a notch between band or perceived texels) would be cut off by its grade 0 as a hard square.
+  for (const t of ring(pg, ps, anyPerceived, width, depth, texW, extra)) {
+    words[t] = packRgba(0, exploredByte(t), sunlit ? (extra.sun[t] ? 255 : 0) : 255, extra.grade[t] * 85)
+  }
+}
+
+/**
+ * Texels with grade 0 next to one with a grade (8-neighbourhood) in cells around `near` cells: their best
+ * neighbouring grade and whether a neighbour with a grade is sunlit go to `out`; returns their indices.
+ */
+function ring(
+  grades: Uint8Array,
+  sun: Uint8Array,
+  near: Uint8Array,
+  width: number,
+  depth: number,
+  texW: number,
+  out: { grade: Uint8Array; sun: Uint8Array }
+): number[] {
+  const n = SUBCELLS
+  const texH = depth * n
+  const found: number[] = []
   for (let j = 0; j < depth; j++) {
     for (let i = 0; i < width; i++) {
-      let near = false
-      for (let dj = -1; dj <= 1 && !near; dj++) {
+      let close = false
+      for (let dj = -1; dj <= 1 && !close; dj++) {
         for (let di = -1; di <= 1; di++) {
           const ii = i + di
           const jj = j + dj
-          if (ii >= 0 && jj >= 0 && ii < width && jj < depth && anyPerceived[jj * width + ii]) {
-            near = true
+          if (ii >= 0 && jj >= 0 && ii < width && jj < depth && near[jj * width + ii]) {
+            close = true
             break
           }
         }
       }
-      if (!near) continue
+      if (!close) continue
       for (let y = j * n; y < (j + 1) * n; y++) {
         for (let x = i * n; x < (i + 1) * n; x++) {
           const t = y * texW + x
-          if (pg[t] !== 0) continue
+          if (grades[t] !== 0) continue
           let grade = 0
-          let sun = 0
+          let lit = 0
           for (let dy = -1; dy <= 1; dy++) {
             const yy = y + dy
             if (yy < 0 || yy >= texH) continue
@@ -138,18 +172,19 @@ export function expandLevelMasks(masks: HostLevelMasks | undefined, width: numbe
               const xx = x + dx
               if (xx < 0 || xx >= texW) continue
               const k = yy * texW + xx
-              if (pg[k] > grade) grade = pg[k]
-              if (pg[k] !== 0 && ps[k] !== 0) sun = 1
+              if (grades[k] > grade) grade = grades[k]
+              if (grades[k] !== 0 && sun[k] !== 0) lit = 1
             }
           }
           if (grade === 0) continue
-          const w = words[t]
-          const e = LITTLE_ENDIAN ? (w >>> 8) & 0xff : (w >>> 16) & 0xff
-          words[t] = packRgba(MASK_BAND, e, sunlit ? (sun ? 255 : 0) : 255, grade * 85)
+          out.grade[t] = grade
+          out.sun[t] = lit
+          found.push(t)
         }
       }
     }
   }
+  return found
 }
 
 /** Cheap change signature of a level's encoded masks (strings compare by value). */

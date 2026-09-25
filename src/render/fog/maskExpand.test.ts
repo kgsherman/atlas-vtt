@@ -29,11 +29,17 @@ describe("expandLevelMasks", () => {
     for (let y = 0; y < 4; y++) {
       for (let x = 0; x < 4; x++) {
         expect(texel(out, x, y)).toEqual([255, 255, 255, 255]) // cell (0,0): grade 3
-        expect(texel(out, 4 + x, y)).toEqual([0, 255, 0, 0]) // cell (1,0): explored only
         expect(texel(out, 8 + x, 4 + y)).toEqual([255, 255, 0, 170]) // cell (2,1): grade 2
-        expect(texel(out, x, 4 + y)).toEqual([0, 0, 0, 0]) // cell (0,1): nothing
       }
     }
+    // Cell (1,0), explored only: its texels next to a perceived cell carry that cell's grade and sunlit
+    // value with r = 0 (the grade ring), the others nothing but explored.
+    for (let y = 0; y < 4; y++) expect(texel(out, 4, y)).toEqual([0, 255, 255, 255])
+    expect(texel(out, 7, 3)).toEqual([0, 255, 0, 170])
+    expect(texel(out, 5, 1)).toEqual([0, 255, 0, 0])
+    // Cell (0,1): the ring along cell (0,0), nothing below it.
+    expect(texel(out, 1, 4)).toEqual([0, 0, 255, 255])
+    expect(texel(out, 1, 6)).toEqual([0, 0, 0, 0])
   })
 
   it("expands partial sub-cells exactly (bit = sz·4 + sx), with a one-texel band around them (smooth style)", () => {
@@ -56,14 +62,32 @@ describe("expandLevelMasks", () => {
       [6, 1],
     ])
       expect(texel(out, x, y), `${x}, ${y}`).toEqual([MASK_BAND, 0, 255, 255])
-    expect(texel(out, 7, 0)).toEqual([0, 0, 255, 0])
-    expect(texel(out, 4, 2)).toEqual([0, 0, 255, 0])
+    // One texel further, the grade ring (r = 0); beyond it, nothing.
+    expect(texel(out, 7, 0)).toEqual([0, 0, 255, 255])
+    expect(texel(out, 4, 2)).toEqual([0, 0, 255, 255])
     expect(texel(out, 4, 3)).toEqual([0, 255, 255, 0])
     expect(texel(out, 5, 3)).toEqual([0, 0, 255, 0])
     // The same masks in grid style: the partly perceived / explored cell is whole, and there is no band.
     expandLevelMasks({ perception: encodeGrades(grades), explored: encodeMask(explored) }, W, D, out, "grid")
     for (let y = 0; y < 4; y++) for (let x = 4; x < 8; x++) expect(texel(out, x, y)).toEqual([255, 255, 255, 255])
-    expect(texel(out, 3, 0)).toEqual([0, 0, 255, 0])
+    expect(texel(out, 3, 0)).toEqual([0, 0, 255, 255])
+    expect(texel(out, 2, 0)).toEqual([0, 0, 255, 0])
+  })
+
+  it("gives a gap between band texels a grade, so the filtered edge decides it instead of a hard square", () => {
+    // Two perceived sub-cells with an unperceived one between them, in row 0 of cell (1,0); the texel below
+    // the gap (x 6, y 1) is band (next to the perceived ones), the one below that (x 6, y 2) is not.
+    const grades = createGradeMask(W, D)
+    grades.grades[1] = 3
+    grades.partial.set(1, 0b0000_0000_0000_1010) // sub-cells (1,0) and (3,0)
+    const out = new Uint8Array(maskLayerBytes(W, D))
+    expandLevelMasks({ perception: encodeGrades(grades), explored: encodeMask(createCellMask(W, D)) }, W, D, out)
+    expect(texel(out, 6, 0)).toEqual([MASK_BAND, 0, 255, 255])
+    expect(texel(out, 6, 1)).toEqual([MASK_BAND, 0, 255, 255])
+    // Two texels away: r = 0 but the grade, so where the filtered r of the band around it is still high the
+    // shader fades it out smoothly rather than cutting it off at the texel's edge.
+    expect(texel(out, 6, 2)).toEqual([0, 0, 255, 255])
+    expect(texel(out, 6, 3)).toEqual([0, 0, 255, 0])
   })
 
   it("gives band texels the best neighbouring grade and their sunlit value (keeping their explored bit)", () => {
@@ -78,7 +102,7 @@ describe("expandLevelMasks", () => {
     expandLevelMasks({ perception: encodeGrades(grades), explored: encodeMask(explored), sunlit: encodeMask(sunlit) }, W, D, out)
     expect(texel(out, 4, 1)).toEqual([MASK_BAND, 255, 0, 170]) // next to cell (0,0) only
     expect(texel(out, 7, 1)).toEqual([MASK_BAND, 255, 255, 255]) // next to cell (2,0), which is sunlit
-    expect(texel(out, 5, 1)).toEqual([0, 255, 0, 0])
+    expect(texel(out, 5, 1)).toEqual([0, 255, 0, 170]) // the grade ring around the band of cell (0,0)
     expect(texel(out, 1, 4)).toEqual([MASK_BAND, 0, 0, 170]) // below cell (0,0)
   })
 
@@ -104,7 +128,7 @@ describe("expandLevelMasks", () => {
     const out = new Uint8Array(maskLayerBytes(W, D))
     expandLevelMasks({ perception: encodeGrades(grades), explored: encodeMask(explored) }, W, D, out, "grid")
     expect(texel(out, 4, 0)).toEqual([255, 0, 255, 85])
-    expect(texel(out, 8, 4)).toEqual([0, 255, 255, 0])
+    expect(texel(out, 9, 5)).toEqual([0, 255, 255, 0])
   })
 })
 

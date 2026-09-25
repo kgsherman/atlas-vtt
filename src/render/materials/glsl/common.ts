@@ -98,6 +98,8 @@ export const COMMON_FUNCTIONS_GLSL = /* glsl */ `
 // the monochrome senses' perception ends per pixel over the last AT_SENSE_EDGE ft (see world.ts).
 #define AT_DV_FEATHER 1.5
 #define AT_SENSE_EDGE 0.5
+// Ground error (ft) of the GPU line of sight up to which the smooth-fog band is fully trusted (atBandTrust).
+#define AT_BAND_TRUST_FT 2.0
 #define AT_BLINDSIGHT_LEVEL 0.11
 #define AT_BLINDSIGHT_TINT vec3(0.02, 0.05, 0.09)
 #define AT_MEMORY_SCALE 0.17
@@ -687,6 +689,32 @@ float atViewerLos(vec3 p, vec3 n, float surf) {
     if (best >= 1.0) break;
   }
   return best;
+}
+
+// How far the smooth-fog band can be trusted at ground point p (1 = fully, 0 = not). The GPU line of
+// sight lifts a ground point by k·d (1.5 texels' angle times the distance) against self-shadowing, so
+// where it looks over a low edge (a terrain lip, a ledge, a low wall) its shadow line can fall up to
+// k·d / sin(elevation) of ground too far out: several feet for a view 100 ft away at a low angle, which
+// would confirm the whole band. Within about 30 ft of an eye at head height the error stays well under
+// a couple of sub-cells; beyond, the edge follows the host's own samples instead (atFogEdge).
+float atBandTrust(vec3 p) {
+  float best = 1e9;
+  for (int v = 0; v < min(uViewerCount, AT_MAX_EYES); v++) {
+    vec4 v1 = uViewers[v * 3 + 1];
+    vec3 rel = p - uViewers[v * 3].xyz;
+    float d = length(rel);
+    float k = 1.5 * AT_SQRT_4PI / max(v1.z - 2.0, 1.0);
+    best = min(best, k * d / max(-rel.y / max(d, 1e-3), 0.02));
+  }
+  return 1.0 - smoothstep(AT_BAND_TRUST_FT, 2.0 * AT_BAND_TRUST_FT, best);
+}
+
+// Smooth fog's perceived weight from the filtered mask r (1 perceived, 0.5 band, 0 not): with the band
+// trusted (GPU line of sight then decides it per pixel), everything up to its outer edge; otherwise a
+// contour through the boundary between the host's perceived and unperceived sub-cells, which the linear
+// filter rounds into a smooth curve instead of the sub-cell staircase.
+float atFogEdge(float r, float trust) {
+  return mix(smoothstep(0.625, 0.875, r), smoothstep(0.25, 0.5, r), trust);
 }
 
 // Albedo luma compressed toward the middle, for the monochrome senses: dark materials (barrels,

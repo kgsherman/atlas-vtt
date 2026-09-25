@@ -416,7 +416,15 @@ Per fragment, in one forward pass:
      perceived one (§4.4). While GPU line of sight is ready for every eye (`uViewersAll`, `atLosReady`), the
      band counts as perceived and the per-pixel tests above (line of sight, light for colour cells, sense
      ranges) decide it, so fog edges follow the true shadow line (a pillar's umbra is a clean wedge, not a
-     row of sub-cell bumps). Otherwise the band is fog, as before.
+     row of sub-cell bumps) — where the GPU is precise enough (`atBandTrust`). The ground point's lift
+     against self-shadowing (k·d) lets a view that grazes a low edge (terrain lip, ledge, low wall) see up
+     to k·d / sin(elevation) of ground too far: several feet 100 ft away at a low angle, which would confirm
+     the whole band and draw the host's staircase one sub-cell too far out. So the band is trusted fully
+     while that error is ≤ `AT_BAND_TRUST_FT` (2 ft, roughly 30 ft from an eye at head height) and not at
+     all beyond twice that; there, and when line of sight is not ready, the edge is a contour through the
+     boundary between the host's perceived and unperceived sub-cells (`atFogEdge`: `smoothstep(0.625,
+     0.875, r)`), which the linear filter draws as smooth curves. Found on a player's view 95 ft from their
+     token over a terrain lip: fine-grid ray casts put the true edge where the host's samples do.
    - "grid": whole cells. A cell with any perceived sub-cell is perceived whole at its grade, one with any
      explored sub-cell explored whole; no GPU line of sight, light or sense refinement, and caps never look
      further toward the viewer (`atSurfaceMask`'s 2.5 / 5 ft lookups need the GPU to veto them). Edges are
@@ -544,10 +552,13 @@ direction D"), stored as octahedral linear-distance maps:
 Per level, the engine expands `HostLevelMasks` into one RGBA8 layer of a `DataArrayTexture` at 4 texels per cell
 (coarse bits + 4×4 partial sub-cells, `render/fog/maskExpand.ts`): r = perceived (1, or 0.5 for the smooth
 style's band), g = explored, b = sunlit, a = grade (nearest fetch). LINEAR filtering; perceived edges use
-`smoothstep(0.75, 1, r)` (the band is fog: edges feather **inward**) or, with GPU line of sight ready,
-`smoothstep(0.25, 0.5, r)` (band included, feathering into its outer half); explored uses `smoothstep(0.5, 1, g)`.
+`atFogEdge` (§4.1: a contour through the perceived / band texel boundary, or with the band trusted
+`smoothstep(0.25, 0.5, r)`, band included, feathering into its outer half); explored uses `smoothstep(0.5, 1, g)`.
 Band texels take the best neighbouring grade and sunlit value. The "grid" style expands cells whole and has no
-band. Only changed levels, or all on a style change, are re-uploaded (`addLayerUpdate`).
+band. In both styles the **grade ring** — texels next to any with r > 0 — carries the neighbours' grade with
+r = 0: the grade is read from the nearest texel, and without it a texel whose filtered r is still high (a
+one-texel gap between band texels, the outer half of a grid cell's blend) was cut off at its edge as a hard
+square. Only changed levels, or all on a style change, are re-uploaded (`addLayerUpdate`).
 
 ### 4.5 Cameras & quality
 
@@ -2518,10 +2529,10 @@ Known gaps and deliberate limits:
   only. Repro: `dev/render.html?sample=crooked-lantern&mode=dm-play&at=66,89.5&zoom=3&lights=floating&moon=0&camera=orbit&orbit=0,55`
   (only the orbit camera sees these faces now that the top-down camera looks straight down).
 - Smooth fog (§4.1) needs GPU line of sight for every eye: on the low tier (grid fog), with more viewers or eyes
-  than the uniform slots, and for the frame or two before a moved eye's tile is captured, the band is fog and
-  edges along diagonal line-of-sight boundaries show the host's 1.25 ft sub-cell staircase. The band also
-  reaches only one sub-cell past the host's edge: a point the GPU sees further out (the host's sample
-  there missed a sliver of view) stays fog.
+  than the uniform slots, for the frame or two before a moved eye's tile is captured, and beyond about 30 ft
+  from an eye at head height (`atBandTrust`), edges follow the host's 1.25 ft sub-cells, smoothed into curves
+  rather than drawn per pixel. The band also reaches only one sub-cell past the host's edge: a point the GPU
+  sees further out (the host's sample there missed a sliver of view) stays fog.
 - On low, a thin light leak can show along the base of a wall on the side facing away from the light: a
   coarse 256² light-atlas texel straddles the wall's bottom edge (0.05 ft below the ground), so a
   neighbouring texel passes under it. A smaller receiver epsilon did not help; deeper wall bottoms in

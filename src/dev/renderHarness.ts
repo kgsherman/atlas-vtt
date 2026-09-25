@@ -7,6 +7,9 @@
  *             Forgotten Adventures maps in test_maps/ as a 27×47, 3-level scene with backdrops (dev/vineyard.ts)
  *   scene     URL of an exported `.atlas.json` (e.g. /test_maps/lodge.atlas.json) instead of `sample`: the
  *             document is migrated and parsed like an import, and its embedded images become the backdrops
+ *   view      URL of a PlayerView JSON (or `{ view }`), e.g. captured from a player's tab: player mode renders
+ *             exactly what that player was sent (viewToScene + the view's own masks, its vision tokens as
+ *             viewers). With `scene`, that file's images are the backdrops of the view's levels (same ids).
  *   mode      editor | dm-play | player                              (editor)
  *   vision    off | fog | preview                                    (player → fog, otherwise off)
  *   level     active level index in elevation order (0 = lowest)    (the first viewer's level, else the
@@ -41,6 +44,7 @@
  *   dark      1 = DM dark vision (vision off only)
  *   stats     0 hides the stats corner (F3 toggles it)
  *   moon      0 | 1 overrides the directional light's on/off state
+ *   sky       bright | dim | dark overrides the environment's sky level
  *   lights    0 turns every point light off; "name,name" keeps only these lights on
  *   pipeline  1 = player mode renders what a player is actually sent: GameState → core/vision →
  *             updateKnowledge → filterForPlayer → viewToScene, with the view's own masks (ARCHITECTURE §6.2)
@@ -58,7 +62,7 @@ import { sampleById, SAMPLE_SCENES } from "@/core/scene/samples"
 import { parseScene } from "@/core/scene/schema"
 import { MATERIAL_COLORS } from "@/core/scene/defaults"
 import type { Id, MaterialId, Scene, SceneLike, Token, Vec2, Vec3 } from "@/core/scene/types"
-import { createGameState, filterForPlayer, reduceDm, updateKnowledge, viewerTokenIds, viewToScene, type GameState } from "@/core/session"
+import { createGameState, filterForPlayer, reduceDm, updateKnowledge, viewerTokenIds, viewToScene, type GameState, type PlayerView } from "@/core/session"
 import { createEngine, DEFAULT_VIEW, pickInitialQuality, probeQuality, type QualityProbe } from "@/render"
 import type { Engine, FrameStats, HostLevelMasks, Quality, RenderMode, ViewState, VisionMode } from "@/render"
 import { AtlasEngine } from "@/render/engine/engine"
@@ -155,8 +159,10 @@ function placeTokens(scene: Scene, spec: string | null): void {
   }
 }
 
-/** moon / lights parameters: switch the directional light and point lights for isolated checks. */
+/** moon / lights / sky parameters: switch the directional light and point lights, set the sky level. */
 function overrideEnvironment(scene: Scene): void {
+  const sky = params.get("sky")
+  if (sky === "bright" || sky === "dim" || sky === "dark") scene.environment = { ...scene.environment, skyLevel: sky }
   const moon = params.get("moon")
   if (moon !== null) scene.environment.directional = { ...scene.environment.directional, enabled: moon !== "0" }
   const lights = params.get("lights")
@@ -305,11 +311,13 @@ async function main(): Promise<void> {
   })
 
   const sceneUrl = params.get("scene")
+  const viewUrl = params.get("view")
+  const playerView = viewUrl ? await loadPlayerView(viewUrl) : null
   const sampleId = param("sample", [...SAMPLE_SCENES.map((s) => s.id), "vineyard-test"], "crooked-lantern")
   const file = sceneUrl ? await loadSceneFile(sceneUrl) : null
   const vineyard = !file && sampleId === "vineyard-test" ? await buildVineyardScene() : null
-  const scene = file ? file.scene : vineyard ? vineyard.scene : sampleById(sampleId)!.build()
-  const mode = param<RenderMode>("mode", ["editor", "dm-play", "player"], "editor")
+  const scene = playerView ? (viewToScene(playerView) as Scene) : file ? file.scene : vineyard ? vineyard.scene : sampleById(sampleId)!.build()
+  const mode = param<RenderMode>("mode", ["editor", "dm-play", "player"], playerView ? "player" : "editor")
   const vision = param<VisionMode>("vision", ["off", "fog", "preview"], mode === "player" ? "fog" : "off")
   const qualityParam = param<Quality | "auto">("quality", ["low", "medium", "high", "ultra", "auto"], "high")
   const probe = qualityParam === "auto" ? await probeQuality({ force: flag("reprobe", false) }) : null
@@ -325,7 +333,7 @@ async function main(): Promise<void> {
     for (const o of Object.values(scene.objects)) if (o.type === "floor") scene.objects[o.id] = { ...o, material: floorMaterial as MaterialId }
   }
 
-  let viewers = findTokens(scene, params.get("viewer"))
+  let viewers = playerView ? playerView.visionTokenIds.filter((id) => Object.hasOwn(scene.tokens, id)).map((id) => scene.tokens[id]) : findTokens(scene, params.get("viewer"))
   if (viewers.length === 0 && vision !== "off") {
     const pcs = Object.values(scene.tokens)
       .filter((t) => t.kind === "pc" && !t.hidden)
@@ -348,7 +356,10 @@ async function main(): Promise<void> {
       .split(";")
       .map((s) => xz(s))
       .filter((p): p is Vec2 => p !== null)
-    if (mode === "player" && flag("pipeline", false)) {
+    if (playerView) {
+      hostMasks = playerView.masks
+      visibleTokens = Object.keys(scene.tokens)
+    } else if (mode === "player" && flag("pipeline", false)) {
       const outcome = playerPipeline(scene, viewers, trail)
       engineScene = outcome.scene
       hostMasks = outcome.masks
@@ -463,7 +474,7 @@ async function main(): Promise<void> {
   // A scene file's embedded images, placed as its levels' backdrops say.
   if (file) {
     for (const level of Object.values(scene.levels)) {
-      const b = level.backdrop
+      const b = playerView && Object.hasOwn(file.scene.levels, level.id) ? file.scene.levels[level.id].backdrop : level.backdrop
       const url = b && Object.hasOwn(file.assetsData, b.assetId) ? file.assetsData[b.assetId] : undefined
       if (!b || !url) continue
       handle.pending++
@@ -500,6 +511,14 @@ async function main(): Promise<void> {
       statsEl.textContent = formatStats(s, info)
     }
   })
+}
+
+/** A PlayerView captured from a player's tab (the view itself, or an object holding it as `view`). */
+async function loadPlayerView(url: string): Promise<PlayerView> {
+  const json = (await (await fetch(url)).json()) as { view?: PlayerView } & Partial<PlayerView>
+  const view = json.view ?? (json as PlayerView)
+  if (!view || typeof view !== "object" || !view.scene || !view.masks) throw new Error(`${url}: not a PlayerView`)
+  return view
 }
 
 /**

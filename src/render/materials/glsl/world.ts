@@ -132,10 +132,11 @@ void main() {
       explored = atCellEdge(m.g);
     } else {
       // Smooth fog: the band (r = 0.5, one sub-cell around the host's perceived sub-cells) counts as
-      // perceived only while every eye's GPU line of sight can confirm it per pixel; then the edge is the
-      // real shadow line (and light / sense range) instead of the host's sub-cell staircase.
+      // perceived only while every eye's GPU line of sight can confirm it per pixel, and precisely enough
+      // (atBandTrust); then the edge is the real shadow line (and light / sense range) instead of the
+      // host's sub-cell staircase. Elsewhere it follows the host's samples, smoothed (atFogEdge).
       bool los = uViewersAll > 0.5 && atLosReady();
-      perceived = grade > 0.5 ? (los ? smoothstep(0.25, 0.5, m.r) : smoothstep(0.75, 1.0, m.r)) : 0.0;
+      perceived = grade > 0.5 ? atFogEdge(m.r, los ? atBandTrust(p) : 0.0) : 0.0;
       explored = smoothstep(0.5, 1.0, m.g);
       if (perceived > 0.0) perceived *= atViewerLos(p, n, vSurf);
       // Darkvision (grade 2) and blindsight (grade 1) end at their range per pixel (only removes
