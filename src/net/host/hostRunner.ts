@@ -478,7 +478,8 @@ export class HostRunnerImpl implements HostRunner {
       const seeded = loaded.seeded
       if (gen !== this.gen) return
       const needsOrigin = state.origin === undefined
-      if (!this.sceneRowId && (needsOrigin || Object.values(state.scene.levels).some((l) => l.backdrop))) {
+      // The session row names the map the session started on: after a map change (mapSerial) it is not this one.
+      if (!this.sceneRowId && (needsOrigin || (!state.mapSerial && Object.values(state.scene.levels).some((l) => l.backdrop)))) {
         // Backdrop images may be stored under the scene's library id (only the seed carries it), and
         // games saved before the library link was recorded learn it here.
         try {
@@ -1032,8 +1033,9 @@ export class HostRunnerImpl implements HostRunner {
     if (reducesVisibility(cmd)) this.knowledgeRev++
     if (cmd.t === "apply-scene-patches") this.sceneEdits++
     if (cmd.t === "load-scene") {
-      // Another map: its images live under its own library row; moves still in flight belong to the old one.
-      this.sceneRowId = this.state.origin?.sceneId ?? this.sceneRowId
+      // Another map: its images live under its own id or library row, never the previous map's (a duplicate
+      // shares asset ids with it); moves still in flight belong to the old one.
+      this.sceneRowId = this.state.origin?.sceneId ?? null
       this.inFlightMoves.clear()
       this.applyDelta(r.delta, true)
       for (const conn of this.conns.values()) {
@@ -1565,7 +1567,6 @@ export class HostRunnerImpl implements HostRunner {
     if (conn.lastSent === null) {
       conn.lastSent = view
       conn.staleMap = false
-    conn.staleMap = false
       conn.log.clear()
     } else if (view !== conn.lastSent) {
       const ops = diffViews(conn.lastSent, view)
@@ -1575,8 +1576,6 @@ export class HostRunnerImpl implements HostRunner {
         conn.seq++
         conn.lastSent = view
         conn.staleMap = false
-      conn.staleMap = false
-    conn.staleMap = false
       }
     }
     conn.needsSnapshot = false

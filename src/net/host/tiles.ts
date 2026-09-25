@@ -116,7 +116,7 @@ export function subcellClipRects(submask: number, ox: number, oy: number, px: nu
   let open = new Map<string, PixelRect>()
   for (let sz = 0; sz < SUBCELLS; sz++) {
     const next = new Map<string, PixelRect>()
-    for (let sx = 0; sx < SUBCELLS; ) {
+    for (let sx = 0; sx < SUBCELLS;) {
       if ((submask & (1 << (sz * SUBCELLS + sx))) === 0) {
         sx++
         continue
@@ -223,13 +223,23 @@ interface LevelSpec {
   range: BackdropCellRange
   opacity: number
   tintWalls: boolean
-  /** Changes when anything affecting the tile pixels changes. */
+  /**
+   * Changes when anything affecting the tile pixels changes, the document included: a duplicated map keeps
+   * its level and asset ids, so after a switch to it the same level id and placement are another image.
+   */
   key: string
+  /** Decoded image cache key: the document and the asset (a duplicate's copy is decoded from its own folder). */
+  imageKey: string
+  /** Folders (scene ids) the image is looked up under, in order (read when the spec is made). */
+  folders: string[]
+  /** Chunk rev salt (a hash of `key`): chunks re-announced after a switch never reuse an earlier rev. */
+  salt: number
 }
 
 /**
  * What one chunk object holds: the cells with pixels (mask bits), each cell's explored sub-cells
- * (`subs[bit]`: FULL_SUBMASK, a partial sub-mask, or 0) and `rev`, a non-zero hash of `subs`.
+ * (`subs[bit]`: FULL_SUBMASK, a partial sub-mask, or 0) and `rev`, a non-zero hash of `subs` salted with
+ * the level's backdrop (document, image and placement).
  */
 export interface ChunkTarget {
   cells: number
@@ -237,9 +247,13 @@ export interface ChunkTarget {
   rev: number
 }
 
-/** Non-zero uint32 FNV-1a hash of a chunk's 16 sub-cell masks (the chunk content version). */
-export function chunkRev(subs: readonly number[]): number {
-  let h = 0x811c9dc5
+/**
+ * Non-zero uint32 FNV-1a hash of a chunk's 16 sub-cell masks (the chunk content version). `salt` identifies
+ * what the pixels are cut from (the tiler passes a hash of the backdrop's document, image and placement),
+ * so the same cells of another map never announce the same rev: players cache chunks by rev.
+ */
+export function chunkRev(subs: readonly number[], salt = 0): number {
+  let h = (0x811c9dc5 ^ salt) >>> 0
   for (let bit = 0; bit < TILE_CHUNK * TILE_CHUNK; bit++) {
     const v = subs[bit] ?? 0
     h = Math.imul(h ^ (v & 0xff), 0x01000193)
@@ -247,6 +261,13 @@ export function chunkRev(subs: readonly number[]): number {
   }
   h >>>= 0
   return h === 0 ? 1 : h
+}
+
+/** uint32 FNV-1a hash of a string's UTF-16 code units. */
+function hashString(s: string): number {
+  let h = 0x811c9dc5
+  for (let k = 0; k < s.length; k++) h = Math.imul(h ^ s.charCodeAt(k), 0x01000193)
+  return h >>> 0
 }
 
 function sameTarget(a: ChunkTarget | undefined, b: ChunkTarget | undefined): boolean {
@@ -280,6 +301,9 @@ interface Job {
   at: number
 }
 
+/** The Storage object a job writes (or removes). */
+const pathOf = (job: Job) => `${job.uid}|${job.levelId}|${job.key}`
+
 export interface TilerTimers {
   setTimeout(fn: () => void, ms: number): unknown
   clearTimeout(handle: unknown): void
@@ -289,7 +313,7 @@ export interface BackdropTilerOptions {
   assets: AssetStore
   sessionId: string
   codec: TileCodec | null
-  /** Scene ids under which the scene's assets may be stored, tried in order. */
+  /** Scene ids under which the scene's assets may be stored, tried in order (read by every setScene). */
   assetSceneIds: () => string[]
   /**
    * Chunks of a player's level were uploaded (entries `[ci, cj, cells, rev]`) or removed (`[ci, cj, 0]`);
@@ -334,11 +358,18 @@ export class BackdropTiler {
   private levels = new Map<Id, LevelSpec>()
   private grid: GridSettings | null = null
   private readonly players = new Map<string, Map<Id, PlayerLevel>>()
-  private readonly images = new Map<Id, { image: Promise<TileImage | null>; users: number; lastUsed: number }>()
+  /** Decoded images by LevelSpec.imageKey (document + asset). */
+  private readonly images = new Map<string, { image: Promise<TileImage | null>; users: number; lastUsed: number }>()
   /** Levels whose image could not be loaded: no tiles for them. */
   private readonly unavailable = new Set<Id>()
   private queue: Job[] = []
   private active = 0
+  /**
+   * Storage paths (`uid|levelId|chunk key`) with an upload or removal in flight. One job per path at a
+   * time, across generations too: after a reset (another map) an old job still uploading must land before
+   * the new one starts, or the object could end up holding the old map under the new rev.
+   */
+  private readonly busyPaths = new Set<string>()
   /** Rate limited: no new uploads before this time. */
   private pausedUntil = 0
   private backoffMs = 0
@@ -359,11 +390,15 @@ export class BackdropTiler {
     return this.o.assets.mode === "supabase" && this.o.codec !== null && this.levels.size > 0
   }
 
-  /** (Re)read backdrop placements. Levels whose image or placement changed start over for everyone. */
+  /**
+   * (Re)read backdrop placements. Levels whose image or placement changed start over for everyone, and so
+   * does every level when the document changed (another map, even one sharing level and asset ids).
+   */
   setScene(scene: Scene): void {
     const gridChanged = !this.grid || this.grid.width !== scene.grid.width || this.grid.depth !== scene.grid.depth || this.grid.cellSize !== scene.grid.cellSize
     this.grid = scene.grid
     const next = new Map<Id, LevelSpec>()
+    const folders = [...new Set(this.o.assetSceneIds())]
     for (const level of Object.values(scene.levels)) {
       const b = level.backdrop
       if (!b) continue
@@ -373,7 +408,19 @@ export class BackdropTiler {
       // The tile size the filter announces to players (no backdrop for them: nothing to cut either).
       const tilePx = playerBackdrop(scene, level.id)?.tilePx
       if (!range || tilePx === undefined) continue
-      const key = [b.assetId, asset.width, asset.height, b.rect.x, b.rect.z, b.rect.w, b.rect.d, scene.grid.cellSize, scene.grid.width, scene.grid.depth].join("|")
+      const key = [
+        scene.id,
+        b.assetId,
+        asset.width,
+        asset.height,
+        b.rect.x,
+        b.rect.z,
+        b.rect.w,
+        b.rect.d,
+        scene.grid.cellSize,
+        scene.grid.width,
+        scene.grid.depth,
+      ].join("|")
       next.set(level.id, {
         levelId: level.id,
         assetId: b.assetId,
@@ -385,6 +432,9 @@ export class BackdropTiler {
         opacity: b.opacity,
         tintWalls: b.tintWalls,
         key,
+        imageKey: `${scene.id}/${b.assetId}`,
+        folders,
+        salt: hashString(key),
       })
     }
     for (const [id, prev] of this.levels) {
@@ -398,9 +448,9 @@ export class BackdropTiler {
       }
     }
     this.levels = next
-    // Release decoded images no level uses any more.
-    const used = new Set([...next.values()].map((l) => l.assetId))
-    for (const [assetId, entry] of this.images) if (!used.has(assetId) && entry.users === 0) this.releaseImage(assetId)
+    // Release decoded images no level uses any more (ones being cut from are released by the idle sweep).
+    const used = new Set([...next.values()].map((l) => l.imageKey))
+    for (const [imageKey, entry] of this.images) if (!used.has(imageKey) && entry.users === 0) this.releaseImage(imageKey)
     this.pump()
   }
 
@@ -454,7 +504,7 @@ export class BackdropTiler {
           }
         }
       }
-      st.target = new Map([...desired].map(([key, t]) => [key, { cells: t.cells, subs: t.subs, rev: chunkRev(t.subs) }]))
+      st.target = new Map([...desired].map(([key, t]) => [key, { cells: t.cells, subs: t.subs, rev: chunkRev(t.subs, spec.salt) }]))
       // Chunks behind their target: new cells, or fewer after a fog reset (shrunk or deleted).
       for (const key of new Set([...desired.keys(), ...st.uploaded.keys()])) {
         if (behind(st, key) && !st.queued.has(key) && !st.inflight.has(key)) {
@@ -526,10 +576,15 @@ export class BackdropTiler {
     const now = this.now()
     if (now < this.pausedUntil) return this.wakeAt(this.pausedUntil)
     let soonest = Infinity
-    for (let k = 0; k < this.queue.length && this.active < limit; ) {
+    for (let k = 0; k < this.queue.length && this.active < limit;) {
       const job = this.queue[k]
       if (job.at > now) {
         soonest = Math.min(soonest, job.at)
+        k++
+        continue
+      }
+      // Its object is being written (or removed) by an earlier job: wait for it (run() pumps when done).
+      if (this.busyPaths.has(pathOf(job))) {
         k++
         continue
       }
@@ -551,14 +606,19 @@ export class BackdropTiler {
 
   private wakeAt(at: number): void {
     if (this.wakeTimer !== null || this.disposed) return
-    this.wakeTimer = this.timers.setTimeout(() => {
-      this.wakeTimer = null
-      this.pump()
-    }, Math.max(0, at - this.now()))
+    this.wakeTimer = this.timers.setTimeout(
+      () => {
+        this.wakeTimer = null
+        this.pump()
+      },
+      Math.max(0, at - this.now())
+    )
   }
 
   private async run(job: Job, st: PlayerLevel, target: ChunkTarget | null): Promise<void> {
     const { ci, cj } = chunkFromKey(job.key)
+    const path = pathOf(job)
+    this.busyPaths.add(path)
     let ok = false
     try {
       if (!target || target.cells === 0) {
@@ -585,6 +645,7 @@ export class BackdropTiler {
     } finally {
       this.active--
       st.inflight.delete(job.key)
+      this.busyPaths.delete(path)
     }
     const current = this.players.get(job.uid)?.get(job.levelId)
     if (current === st && !this.disposed) {
@@ -617,11 +678,12 @@ export class BackdropTiler {
     const codec = this.o.codec
     const grid = this.grid
     if (!spec || !codec || !grid) return null
-    const entry = this.acquireImage(spec.assetId)
+    const entry = this.acquireImage(spec)
     try {
       const image = await entry.image
       if (!image) {
-        this.unavailable.add(levelId)
+        // Only while the level still shows this image (a job of an earlier map may finish after a switch).
+        if (this.levels.get(levelId)?.key === spec.key) this.unavailable.add(levelId)
         return null
       }
       const size = Math.min(MAX_CHUNK_PX, TILE_CHUNK * spec.tilePx)
@@ -650,21 +712,21 @@ export class BackdropTiler {
     }
   }
 
-  private acquireImage(assetId: Id): { image: Promise<TileImage | null>; users: number; lastUsed: number } {
-    let entry = this.images.get(assetId)
+  private acquireImage(spec: LevelSpec): { image: Promise<TileImage | null>; users: number; lastUsed: number } {
+    let entry = this.images.get(spec.imageKey)
     if (!entry) {
-      entry = { image: this.loadImage(assetId), users: 0, lastUsed: this.now() }
-      this.images.set(assetId, entry)
+      entry = { image: this.loadImage(spec), users: 0, lastUsed: this.now() }
+      this.images.set(spec.imageKey, entry)
     }
     entry.users++
     entry.lastUsed = this.now()
     return entry
   }
 
-  private releaseImage(assetId: Id): void {
-    const entry = this.images.get(assetId)
+  private releaseImage(imageKey: string): void {
+    const entry = this.images.get(imageKey)
     if (!entry) return
-    this.images.delete(assetId)
+    this.images.delete(imageKey)
     void entry.image.then((img) => img && this.o.codec?.release(img)).catch(() => {})
   }
 
@@ -676,18 +738,19 @@ export class BackdropTiler {
       this.sweepTimer = null
       const now = this.now()
       let busy = false
-      for (const [assetId, entry] of this.images) {
+      for (const [imageKey, entry] of this.images) {
         if (entry.users > 0 || now - entry.lastUsed < idle) busy = true
-        else this.releaseImage(assetId)
+        else this.releaseImage(imageKey)
       }
       if (busy) this.scheduleSweep()
     }, idle)
   }
 
-  private async loadImage(assetId: Id): Promise<TileImage | null> {
+  private async loadImage(spec: LevelSpec): Promise<TileImage | null> {
     const codec = this.o.codec
+    const assetId = spec.assetId
     if (!codec) return null
-    for (const sceneId of [...new Set(this.o.assetSceneIds())]) {
+    for (const sceneId of spec.folders) {
       try {
         const blob = await this.o.assets.getImage(sceneId, assetId)
         if (blob) return await codec.decode(blob)
@@ -705,7 +768,7 @@ export class BackdropTiler {
     if (this.sweepTimer !== null) this.timers.clearTimeout(this.sweepTimer)
     this.wakeTimer = null
     this.sweepTimer = null
-    for (const assetId of [...this.images.keys()]) this.releaseImage(assetId)
+    for (const imageKey of [...this.images.keys()]) this.releaseImage(imageKey)
     this.levels.clear()
     this.players.clear()
     this.queue = []

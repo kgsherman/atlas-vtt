@@ -686,7 +686,7 @@ export class PlayController {
 
   /**
    * The scene changed (a patch arrived): refresh an in-progress drag preview; a stranded move whose
-   * token moved (or left) is dismissed.
+   * token moved (or left), or whose target level is gone (e.g. another map), is dismissed.
    */
   sceneChanged(): void {
     this.cache = null
@@ -704,7 +704,13 @@ export class PlayController {
         scene && Object.hasOwn(scene.tokens, s.tokenId)
           ? scene.tokens[s.tokenId]
           : null
-      if (!t || t.position.x !== s.from.x || t.position.z !== s.from.z)
+      if (
+        !scene ||
+        !t ||
+        t.position.x !== s.from.x ||
+        t.position.z !== s.from.z ||
+        !Object.hasOwn(scene.levels, s.levelId)
+      )
         this.stranded = null
     }
     this.emit()

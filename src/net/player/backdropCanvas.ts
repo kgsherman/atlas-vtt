@@ -21,6 +21,10 @@
  * and `dirtyRects` (one rect per touched 4×4-cell chunk): the engine uploads the list region by region,
  * so exploring two distant spots never re-uploads everything between them.
  *
+ * Another map (the view's scene.mapSerial changed) rebuilds every layer, also one whose level id and
+ * placement did not change (a duplicated scene): the tile source keeps what the host announced, so the new
+ * layer draws from the new map's chunks, never keeping the old map's pixels.
+ *
  * Cells that stop being explored (DM fog reset) are cleared again. `refreshCells` redraws cells whose
  * tile changed (a partly explored cell the host re-cut with more of its sub-cells). Everything here is
  * main-thread canvas work but cheap: one `drawImage` of a ~140² bitmap per explored cell, coalesced into
@@ -155,7 +159,13 @@ export interface BackdropLayout {
 }
 
 /** Size of the canvas for a backdrop rect at `tilePx` per cell, within the side and pixel budgets. */
-export function backdropLayout(rect: Rect, cellSize: number, tilePx: number, maxSide = BACKDROP_DEFAULTS.maxCanvasSide, maxPixels = BACKDROP_DEFAULTS.maxCanvasPixels): BackdropLayout {
+export function backdropLayout(
+  rect: Rect,
+  cellSize: number,
+  tilePx: number,
+  maxSide = BACKDROP_DEFAULTS.maxCanvasSide,
+  maxPixels = BACKDROP_DEFAULTS.maxCanvasPixels
+): BackdropLayout {
   const fullW = (rect.w / cellSize) * tilePx
   const fullH = (rect.d / cellSize) * tilePx
   let scale = 1
@@ -168,12 +178,25 @@ export function backdropLayout(rect: Rect, cellSize: number, tilePx: number, max
 }
 
 /** Whole canvas pixels per cell for a backdrop (the layout's scale rounded down, at least 1). */
-export function backdropPxPerCell(rect: Rect, cellSize: number, tilePx: number, maxSide = BACKDROP_DEFAULTS.maxCanvasSide, maxPixels = BACKDROP_DEFAULTS.maxCanvasPixels): number {
+export function backdropPxPerCell(
+  rect: Rect,
+  cellSize: number,
+  tilePx: number,
+  maxSide = BACKDROP_DEFAULTS.maxCanvasSide,
+  maxPixels = BACKDROP_DEFAULTS.maxCanvasPixels
+): number {
   return Math.max(1, Math.floor(backdropLayout(rect, cellSize, tilePx, maxSide, maxPixels).pxPerCell + 1e-9))
 }
 
 /** Pixel rect of grid cell (i, j) in a canvas covering `rect` (edges rounded so neighbours abut exactly). */
-export function cellPixelRect(i: number, j: number, cellSize: number, rect: Rect, width: number, height: number): { x: number; y: number; w: number; h: number } {
+export function cellPixelRect(
+  i: number,
+  j: number,
+  cellSize: number,
+  rect: Rect,
+  width: number,
+  height: number
+): { x: number; y: number; w: number; h: number } {
   const sx = width / rect.w
   const sy = height / rect.d
   const x0 = Math.round((i * cellSize - rect.x) * sx)
@@ -246,6 +269,8 @@ interface LayerState {
   levelId: Id
   /** Stable layout inputs (a different key rebuilds the layer). */
   key: string
+  /** The map it shows (PlayerView scene.mapSerial, 0 for the first): part of the key. */
+  map: number
   /** The backdrop rect (world feet). */
   backdrop: Rect
   cellSize: number
@@ -295,8 +320,13 @@ interface LayerState {
   focus: Array<{ x: number; z: number }>
 }
 
-function layoutKey(b: PlayerBackdrop, cellSize: number, gridW: number, gridD: number, ppc: number): string {
-  return [b.rect.x, b.rect.z, b.rect.w, b.rect.d, b.tilePx, cellSize, gridW, gridD, ppc].join(",")
+/**
+ * `map`: the view's map marker. Another map rebuilds the layer even when a level id and its placement are
+ * the same (a duplicated scene): its cells are drawn afresh from the current tile entries, never kept
+ * from the old map's image.
+ */
+function layoutKey(b: PlayerBackdrop, cellSize: number, gridW: number, gridD: number, ppc: number, map: number): string {
+  return [b.rect.x, b.rect.z, b.rect.w, b.rect.d, b.tilePx, cellSize, gridW, gridD, ppc, map].join(",")
 }
 
 function isUsableBackdrop(b: PlayerBackdrop | undefined): b is PlayerBackdrop {
@@ -357,6 +387,7 @@ export class BackdropCompositor {
       if (!view || !Object.hasOwn(backdrops, levelId) || !isUsableBackdrop(backdrops[levelId])) this.removeLayer(levelId)
     }
     if (!view || !grid) return
+    const map = view.scene.mapSerial ?? 0
 
     for (const levelId of Object.keys(backdrops)) {
       const b = backdrops[levelId]
@@ -365,14 +396,14 @@ export class BackdropCompositor {
       const gridW = explored?.width ?? grid.width
       const gridD = explored?.depth ?? grid.depth
       const ppc = backdropPxPerCell(b.rect, grid.cellSize, b.tilePx, this.maxSide, this.maxPixels)
-      const key = layoutKey(b, grid.cellSize, gridW, gridD, ppc)
+      const key = layoutKey(b, grid.cellSize, gridW, gridD, ppc, map)
       let layer = this.byLevel.get(levelId)
       if (layer && layer.key !== key) {
         this.removeLayer(levelId)
         layer = undefined
       }
       if (!layer) {
-        const created = this.createLayer(levelId, key, b, grid.cellSize, gridW, gridD, ppc)
+        const created = this.createLayer(levelId, key, map, b, grid.cellSize, gridW, gridD, ppc)
         if (!created) continue
         layer = created
       }
@@ -439,7 +470,7 @@ export class BackdropCompositor {
       const b: PlayerBackdrop = { rect: layer.backdrop, opacity: layer.opacity, tintWalls: layer.tintWalls, tilePx: layer.tilePx }
       const ppc = backdropPxPerCell(layer.backdrop, layer.cellSize, layer.tilePx, this.maxSide, this.maxPixels)
       if (ppc === layer.ppc) continue
-      layer.key = layoutKey(b, layer.cellSize, layer.gridW, layer.gridD, ppc)
+      layer.key = layoutKey(b, layer.cellSize, layer.gridW, layer.gridD, ppc, layer.map)
       this.rescale(layer, ppc)
     }
   }
@@ -486,7 +517,16 @@ export class BackdropCompositor {
    * Layer bookkeeping only: the canvas is created with the first explored cell. null when the backdrop
    * covers no grid cell (nothing could ever be drawn).
    */
-  private createLayer(levelId: Id, key: string, b: PlayerBackdrop, cellSize: number, gridW: number, gridD: number, ppc: number): LayerState | null {
+  private createLayer(
+    levelId: Id,
+    key: string,
+    map: number,
+    b: PlayerBackdrop,
+    cellSize: number,
+    gridW: number,
+    gridD: number,
+    ppc: number
+  ): LayerState | null {
     const r = b.rect
     const limits = backdropCellRange(r, { cellSize, width: gridW, depth: gridD })
     if (!limits) return null
@@ -495,6 +535,7 @@ export class BackdropCompositor {
     const layer: LayerState = {
       levelId,
       key,
+      map,
       backdrop: { x: r.x, z: r.z, w: r.w, d: r.d },
       cellSize,
       gridW,
@@ -642,7 +683,12 @@ export class BackdropCompositor {
     return true
   }
 
-  private install(layer: LayerState, made: { canvas: BackdropCanvas; ctx: Ctx2D }, cells: BackdropCellRange, geo: { px0: number; py0: number; width: number; height: number; rect: Rect }): void {
+  private install(
+    layer: LayerState,
+    made: { canvas: BackdropCanvas; ctx: Ctx2D },
+    cells: BackdropCellRange,
+    geo: { px0: number; py0: number; width: number; height: number; rect: Rect }
+  ): void {
     layer.canvas = made.canvas
     layer.ctx = made.ctx
     layer.cells = cells
@@ -874,12 +920,15 @@ export class BackdropCompositor {
       layer.missing.add(k)
       return
     }
-    const handle = this.clock.setTimeout(() => {
-      layer.retryTimers.delete(k)
-      if (!layer.alive || this.disposed || !layer.wanted.has(k)) return
-      this.enqueue(layer, [k])
-      this.pump()
-    }, this.retryDelays[attempt - 1])
+    const handle = this.clock.setTimeout(
+      () => {
+        layer.retryTimers.delete(k)
+        if (!layer.alive || this.disposed || !layer.wanted.has(k)) return
+        this.enqueue(layer, [k])
+        this.pump()
+      },
+      this.retryDelays[attempt - 1]
+    )
     layer.retryTimers.set(k, handle)
   }
 
@@ -925,7 +974,8 @@ export class BackdropCompositor {
       z1: Math.min(r.z + r.d, (j + 1) * cs),
     }
     if (!(b.x1 > b.x0 && b.z1 > b.z0)) return
-    const grow = (d: Bounds | null | undefined): Bounds => (d ? { x0: Math.min(d.x0, b.x0), z0: Math.min(d.z0, b.z0), x1: Math.max(d.x1, b.x1), z1: Math.max(d.z1, b.z1) } : { ...b })
+    const grow = (d: Bounds | null | undefined): Bounds =>
+      d ? { x0: Math.min(d.x0, b.x0), z0: Math.min(d.z0, b.z0), x1: Math.max(d.x1, b.x1), z1: Math.max(d.z1, b.z1) } : { ...b }
     layer.dirty = grow(layer.dirty)
     const ck = chunkKey(Math.floor(i / TILE_CHUNK), Math.floor(j / TILE_CHUNK))
     layer.dirtyChunks.set(ck, grow(layer.dirtyChunks.get(ck)))

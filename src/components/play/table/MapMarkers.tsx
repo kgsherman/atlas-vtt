@@ -1,7 +1,8 @@
 /**
  * HTML markers over the map, placed with Engine.project on every frame (no React render per frame):
  *  - PingLayer: pings as expanding rings with the pinger's name; one off screen shows at the edge with
- *    an arrow toward it. A "look here" ping (the DM's Shift + long press) also centres the camera;
+ *    an arrow toward it. A "look here" ping (the DM's Shift + long press) also centres the camera. They
+ *    go when the map changes;
  *  - TokenBadges: health bars under tokens and condition icons at their top-right (clear of the turn
  *    marker's label above the acting token);
  *  - TurnMarker: a slowly turning ring around the token whose turn it is (following it as it walks),
@@ -42,18 +43,37 @@ interface LivePing {
   at: Vec3
 }
 
+/** The scene document's id, when it has one (the DM's Scene; a player's rebuilt scene has none). */
+function documentId(scene: SceneLike | null): string | null {
+  return scene && "id" in scene && typeof scene.id === "string"
+    ? scene.id
+    : null
+}
+
 export function PingLayer({
   subscribe,
   scene,
+  map,
   onFocus,
 }: {
   subscribe: (cb: (p: MapPing) => void) => () => void
   scene: SceneLike | null
+  /**
+   * Which map is shown (default: the scene document's id). When it changes the pings on screen go: they
+   * point at places of the old map. Players pass their view's map marker (their scene has no id).
+   */
+  map?: string | number
   /** A focus ping arrived: centre the camera there. */
   onFocus?: (point: Vec3) => void
 }) {
   const { engine, canvas } = useEngine()
   const [pings, setPings] = React.useState<LivePing[]>([])
+  const mapKey = map ?? documentId(scene)
+  const [pingsMap, setPingsMap] = React.useState(mapKey)
+  if (pingsMap !== mapKey) {
+    setPingsMap(mapKey)
+    setPings([])
+  }
   const sceneRef = React.useRef(scene)
   const focusRef = React.useRef(onFocus)
   React.useEffect(() => {

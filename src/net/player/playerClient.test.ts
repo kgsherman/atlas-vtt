@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { createScene, createWall } from "@/core/scene/factory"
 import { createHeightmap, sampleCounts, writeHeights } from "@/core/scene/heightmap"
 import type { Scene } from "@/core/scene/types"
+import { diffViews } from "@/core/session/diff"
 import { add, addToken, flatScene, TestHost } from "@/core/session/test-utils"
 import type { ClientToHost, HostToClient, PlayerView, PlayerWall } from "@/core/session/types"
 
@@ -18,6 +19,7 @@ import {
   bindBackdropsToEngine,
   buildPlayerScene,
   describeRequestResult,
+  isOtherMap,
   looksLikeView,
   parseStoredView,
   pendingMovesOverlay,
@@ -406,7 +408,15 @@ describe("PlayerClient: stored views", () => {
     const link = ch.openPlayer(P1)
     const hellos: ClientToHost[] = []
     link.onRequest((raw) => hellos.push(raw as ClientToHost))
-    const client = createPlayerClient({ sessionId: realSid, transport: newTab(), repo: playerRepo, identity, tiles: stubTiles(), timings: FAST, backdrop: { createCanvas: fakeCanvas } })
+    const client = createPlayerClient({
+      sessionId: realSid,
+      transport: newTab(),
+      repo: playerRepo,
+      identity,
+      tiles: stubTiles(),
+      timings: FAST,
+      backdrop: { createCanvas: fakeCanvas },
+    })
     cleanups.push(() => client.stop())
     await client.start()
     await waitFor(() => hellos.length === 1, "hello")
@@ -435,7 +445,15 @@ describe("PlayerClient: stored views", () => {
     const first = new FakeHost({ transport: hostT, sessionId: realSid, sim, dmUserId: DM, persist: { repo, hostEpoch } })
     cleanups.push(() => first.stop())
     first.start()
-    const client = createPlayerClient({ sessionId: realSid, transport: newTab(), repo: playerRepo, identity, tiles: stubTiles(), timings: FAST, backdrop: { createCanvas: fakeCanvas } })
+    const client = createPlayerClient({
+      sessionId: realSid,
+      transport: newTab(),
+      repo: playerRepo,
+      identity,
+      tiles: stubTiles(),
+      timings: FAST,
+      backdrop: { createCanvas: fakeCanvas },
+    })
     cleanups.push(() => client.stop())
     await client.start()
     await waitFor(() => client.getSnapshot().status === "live", "live")
@@ -444,7 +462,10 @@ describe("PlayerClient: stored views", () => {
     await waitFor(() => client.getSnapshot().status === "host-offline", "host offline")
     expect(client.getSnapshot().hostOnline).toBe(false)
     expect(client.getSnapshot().view).not.toBeNull()
-    const reqId = client.requestMove(token.id, [{ cell: { i: 2, j: 2 }, levelId: token.levelId }, { cell: { i: 3, j: 2 }, levelId: token.levelId }])
+    const reqId = client.requestMove(token.id, [
+      { cell: { i: 2, j: 2 }, levelId: token.levelId },
+      { cell: { i: 3, j: 2 }, levelId: token.levelId },
+    ])
     await Promise.resolve()
     expect(client.getSnapshot().pending).toEqual([])
     expect(client.getSnapshot().results.at(-1)).toEqual({ reqId, ok: false, local: "host-offline", kind: "move" })
@@ -466,7 +487,15 @@ describe("PlayerClient: stored views", () => {
     const { repo, playerRepo, realSid, hostEpoch } = await sessionWithMember()
     const view = sim.refresh(P1).view
     await repo.upsertPlayerView({ sessionId: realSid, userId: P1, hostEpoch, epoch: "old", seq: 7, view })
-    const client = createPlayerClient({ sessionId: realSid, transport: newTab(), repo: playerRepo, identity, tiles: stubTiles(), timings: FAST, backdrop: { createCanvas: fakeCanvas } })
+    const client = createPlayerClient({
+      sessionId: realSid,
+      transport: newTab(),
+      repo: playerRepo,
+      identity,
+      tiles: stubTiles(),
+      timings: FAST,
+      backdrop: { createCanvas: fakeCanvas },
+    })
     cleanups.push(() => client.stop())
     await client.start()
     await waitFor(() => client.getSnapshot().status === "host-offline", "host offline")
@@ -479,10 +508,24 @@ describe("PlayerClient: stored views", () => {
     const newTab = tabs()
     const { sim } = world()
     const session = await sessionWithMember()
-    const first = new FakeHost({ transport: newTab(), sessionId: session.realSid, sim, dmUserId: DM, persist: { repo: session.repo, hostEpoch: session.hostEpoch } })
+    const first = new FakeHost({
+      transport: newTab(),
+      sessionId: session.realSid,
+      sim,
+      dmUserId: DM,
+      persist: { repo: session.repo, hostEpoch: session.hostEpoch },
+    })
     cleanups.push(() => first.stop())
     first.start()
-    const client = createPlayerClient({ sessionId: session.realSid, transport: newTab(), repo: session.playerRepo, identity, tiles: stubTiles(), timings: FAST, backdrop: { createCanvas: fakeCanvas } })
+    const client = createPlayerClient({
+      sessionId: session.realSid,
+      transport: newTab(),
+      repo: session.playerRepo,
+      identity,
+      tiles: stubTiles(),
+      timings: FAST,
+      backdrop: { createCanvas: fakeCanvas },
+    })
     cleanups.push(() => client.stop())
     await client.start()
     await waitFor(() => client.getSnapshot().status === "live", "live")
@@ -511,7 +554,15 @@ describe("PlayerClient: stored views", () => {
     cleanups.push(() => host.stop())
     host.start()
     const spy = vi.spyOn(playerRepo, "sessionInfo")
-    const client = createPlayerClient({ sessionId: realSid, transport: newTab(), repo: playerRepo, identity, tiles: stubTiles(), timings: FAST, backdrop: { createCanvas: fakeCanvas } })
+    const client = createPlayerClient({
+      sessionId: realSid,
+      transport: newTab(),
+      repo: playerRepo,
+      identity,
+      tiles: stubTiles(),
+      timings: FAST,
+      backdrop: { createCanvas: fakeCanvas },
+    })
     cleanups.push(() => client.stop())
     await client.start()
     await waitFor(() => client.getSnapshot().status === "live", "live")
@@ -525,7 +576,15 @@ describe("PlayerClient: stored views", () => {
     const newTab = tabs()
     const { playerRepo, realSid, kick } = await sessionWithMember()
     await kick()
-    const client = createPlayerClient({ sessionId: realSid, transport: newTab(), repo: playerRepo, identity, tiles: stubTiles(), timings: FAST, backdrop: { createCanvas: fakeCanvas } })
+    const client = createPlayerClient({
+      sessionId: realSid,
+      transport: newTab(),
+      repo: playerRepo,
+      identity,
+      tiles: stubTiles(),
+      timings: FAST,
+      backdrop: { createCanvas: fakeCanvas },
+    })
     cleanups.push(() => client.stop())
     await client.start()
     await waitFor(() => client.getSnapshot().status === "kicked", "kicked")
@@ -536,7 +595,16 @@ describe("PlayerClient: membership", () => {
   it("notices a kick while the channels cannot join (RLS keeps refusing)", async () => {
     const newTab = tabs()
     const repo = stubRepo({
-      sessionInfo: async () => ({ sessionId: SID, status: "active", roomCode: "ABCD1234", role: "player", memberStatus: "kicked", displayName: "Alice", dmDisplayName: null, createdAt: "" }),
+      sessionInfo: async () => ({
+        sessionId: SID,
+        status: "active",
+        roomCode: "ABCD1234",
+        role: "player",
+        memberStatus: "kicked",
+        displayName: "Alice",
+        dmDisplayName: null,
+        createdAt: "",
+      }),
     })
     const client = makeClient(newTab({ joinDelayMs: 60_000 }), { repo })
     await client.start()
@@ -548,7 +616,16 @@ describe("PlayerClient: membership", () => {
     const newTab = tabs()
     let kicked = false
     const repo = stubRepo({
-      sessionInfo: async () => ({ sessionId: SID, status: "active", roomCode: "ABCD1234", role: "player", memberStatus: kicked ? "kicked" : "active", displayName: "Alice", dmDisplayName: null, createdAt: "" }),
+      sessionInfo: async () => ({
+        sessionId: SID,
+        status: "active",
+        roomCode: "ABCD1234",
+        role: "player",
+        memberStatus: kicked ? "kicked" : "active",
+        displayName: "Alice",
+        dmDisplayName: null,
+        createdAt: "",
+      }),
     })
     const host = rawHost(newTab())
     const client = makeClient(newTab(), { repo })
@@ -561,7 +638,18 @@ describe("PlayerClient: membership", () => {
   it("reports an ended session and non-members while stuck connecting", async () => {
     const newTab = tabs()
     const ended = makeClient(newTab({ joinDelayMs: 60_000 }), {
-      repo: stubRepo({ sessionInfo: async () => ({ sessionId: SID, status: "ended", roomCode: "X", role: "player", memberStatus: "active", displayName: null, dmDisplayName: null, createdAt: "" }) }),
+      repo: stubRepo({
+        sessionInfo: async () => ({
+          sessionId: SID,
+          status: "ended",
+          roomCode: "X",
+          role: "player",
+          memberStatus: "active",
+          displayName: null,
+          dmDisplayName: null,
+          createdAt: "",
+        }),
+      }),
     })
     const stranger = makeClient(newTab({ joinDelayMs: 60_000 }), { repo: stubRepo({ sessionInfo: async () => null }) })
     await Promise.all([ended.start(), stranger.start()])
@@ -584,16 +672,27 @@ describe("PlayerClient: requests", () => {
   it("resolves pending moves from results in patches and standalone results", async () => {
     const { client, token, host } = await live()
     const lvl = token.levelId
-    const ok = client.requestMove(token.id, [{ cell: { i: 2, j: 2 }, levelId: lvl }, { cell: { i: 3, j: 2 }, levelId: lvl }])
+    const ok = client.requestMove(token.id, [
+      { cell: { i: 2, j: 2 }, levelId: lvl },
+      { cell: { i: 3, j: 2 }, levelId: lvl },
+    ])
     expect(client.getSnapshot().pending).toEqual([expect.objectContaining({ reqId: ok, kind: "move", tokenId: token.id })])
-    expect(pendingMovesOverlay(client.getSnapshot().pending)).toEqual({ [token.id]: [{ cell: { i: 2, j: 2 }, levelId: lvl }, { cell: { i: 3, j: 2 }, levelId: lvl }] })
+    expect(pendingMovesOverlay(client.getSnapshot().pending)).toEqual({
+      [token.id]: [
+        { cell: { i: 2, j: 2 }, levelId: lvl },
+        { cell: { i: 3, j: 2 }, levelId: lvl },
+      ],
+    })
     await waitFor(() => client.getSnapshot().pending.length === 0, "move settled")
     expect(client.getSnapshot().results.at(-1)).toMatchObject({ reqId: ok, ok: true })
     expect(client.getSnapshot().scene?.tokens[token.id].position).toEqual({ x: 17.5, z: 12.5 })
     expect(host.sent.at(-1)?.msg.t).toBe("patch")
 
     // Wrong start → rejected without a view change → standalone result.
-    const bad = client.requestMove(token.id, [{ cell: { i: 0, j: 0 }, levelId: lvl }, { cell: { i: 1, j: 0 }, levelId: lvl }])
+    const bad = client.requestMove(token.id, [
+      { cell: { i: 0, j: 0 }, levelId: lvl },
+      { cell: { i: 1, j: 0 }, levelId: lvl },
+    ])
     await waitFor(() => client.getSnapshot().pending.length === 0, "rejection")
     const res = client.getSnapshot().results.at(-1)
     expect(res).toMatchObject({ reqId: bad, ok: false, reason: "path-start-mismatch" })
@@ -639,7 +738,10 @@ describe("PlayerClient: requests", () => {
     const { client, token, host } = await live()
     host.autoReply = false
     const before = client.getSnapshot()
-    const reqId = client.requestMove(token.id, [{ cell: { i: 2, j: 2 }, levelId: token.levelId }, { cell: { i: 3, j: 2 }, levelId: token.levelId }])
+    const reqId = client.requestMove(token.id, [
+      { cell: { i: 2, j: 2 }, levelId: token.levelId },
+      { cell: { i: 3, j: 2 }, levelId: token.levelId },
+    ])
     const other = client.requestDoor("door-1", "open")
     const view = JSON.parse(JSON.stringify(host.lastView(P1))) as PlayerView
     // E.g. the host re-linked us after a channel rejoin: same view, one result on board.
@@ -701,6 +803,114 @@ describe("PlayerClient: requests", () => {
     await host.send(P1, { t: "snapshot", epoch: "brand-new", seq: 0, view: host.lastView(P1)! })
     await waitFor(() => client.getSnapshot().epoch === "brand-new", "new epoch")
     expect(client.getSnapshot().pending).toEqual([])
+  })
+
+  it("follows the DM to another map: the scene is replaced, requests about the old map's places are dropped and their verdicts never reported", async () => {
+    const { client, token, host, sim, scene } = await live({ timings: { ...FAST, pendingTimeoutMs: 5000 } })
+    host.autoReply = false
+    const before = client.getSnapshot()
+    expect(before.mapChanges).toBe(0)
+    const lvl = token.levelId
+    const move = client.requestMove(token.id, [
+      { cell: { i: 2, j: 2 }, levelId: lvl },
+      { cell: { i: 3, j: 2 }, levelId: lvl },
+    ])
+    const jump = client.requestJump(token.id, lvl, { x: 32.5, z: 32.5 })
+    const door = client.requestDoor("door-1", "open")
+    const fireball = {
+      shape: "sphere" as const,
+      levelId: lvl,
+      x: 20,
+      z: 20,
+      elevation: 0,
+      angle: 0,
+      size: 20,
+      width: 5,
+      height: 40,
+      label: "Fireball",
+      color: "#F97316",
+      tokenId: null,
+    }
+    const template = client.placeTemplate(fireball)
+    const unplace = client.removeTemplate("tpl-1")
+    const said = client.say("Wait for me!", "all")
+    const prone = client.changeTokenStatus(token.id, { conditions: { add: ["prone"] } })
+    expect(client.getSnapshot().pending).toHaveLength(7)
+
+    // The DM moves the game to a crypt, bringing the PC along (same token id, on the crypt's level).
+    const { scene: crypt, ground: cryptGround } = flatScene(6, 6, "bright")
+    crypt.name = "The Sunken Crypt"
+    crypt.tokens[token.id] = { ...structuredClone(scene.tokens[token.id]), levelId: cryptGround, position: { x: 7.5, z: 7.5 } }
+    sim.dm({ t: "load-scene", scene: crypt, carried: { [token.id]: token.id } })
+    await host.flush(P1)
+    await waitFor(() => client.getSnapshot().mapChanges === 1, "on the new map")
+    const snap = client.getSnapshot()
+    expect(host.sent.at(-1)?.msg.t).toBe("patch")
+    expect(client.sceneChangeSince(before.scene)).toBeNull()
+    expect(snap.view?.scene).toMatchObject({ name: "The Sunken Crypt", mapSerial: 1 })
+    expect(snap.scene?.tokens[token.id]).toMatchObject({ levelId: cryptGround, position: { x: 7.5, z: 7.5 } })
+    expect(snap.view?.controlledTokenIds).toEqual([token.id])
+    expect(snap.pending.map((p) => p.reqId)).toEqual([said, prone])
+    expect(snap.results).toEqual([])
+
+    // Late verdicts on the old map's places are not reported; the chat's and the token's are.
+    const seq = host.currentSeq(P1)
+    const verdicts = [
+      { reqId: move, ok: false, reason: "path-start-mismatch" as const },
+      { reqId: jump, ok: false, reason: "cannot" as const },
+      { reqId: door, ok: false, reason: "cannot" as const },
+      { reqId: template, ok: false, reason: "cannot" as const },
+      { reqId: unplace, ok: false, reason: "cannot" as const },
+      { reqId: said, ok: true },
+      { reqId: prone, ok: true },
+    ]
+    for (const result of verdicts) await host.send(P1, { t: "result", epoch: host.epoch, seq, result })
+    await waitFor(() => client.getSnapshot().pending.length === 0, "chat and status settled")
+    expect(client.getSnapshot().results).toEqual([
+      { reqId: said, ok: true, kind: "say" },
+      { reqId: prone, ok: true, kind: "token-status" },
+    ])
+
+    // A resync onto the same map (e.g. the host restarted) is no map change.
+    await host.send(P1, { t: "snapshot", epoch: "restarted", seq: 0, view: structuredClone(host.lastView(P1)!) })
+    await waitFor(() => client.getSnapshot().epoch === "restarted", "new host run")
+    expect(client.getSnapshot().mapChanges).toBe(1)
+  })
+
+  it("counts another map adopted from a snapshot (not the first view) and ignores late verdicts about the old one", async () => {
+    const newTab = tabs()
+    const w = world()
+    const host = rawHost(newTab())
+    const client = makeClient(newTab(), { timings: { ...FAST, pendingTimeoutMs: 5000 } })
+    await client.start()
+    await waitFor(() => host.hellos().length === 1, "hello")
+    const first = w.sim.refresh(P1).view
+    await host.send({ t: "snapshot", epoch: "e1", seq: 1, view: first, nonce: host.hellos()[0].nonce })
+    await waitFor(() => client.getSnapshot().status === "live", "live")
+    expect(client.getSnapshot().mapChanges).toBe(0)
+
+    const onFirst = client.getSnapshot().scene
+    const move = client.requestMove(w.token.id, [{ cell: { i: 2, j: 2 }, levelId: w.ground }])
+    const said = client.say("Coming!", "all")
+    // A duplicated map (same level and token ids) sent whole, e.g. a patch too large for one message.
+    const copy = structuredClone(w.scene)
+    copy.id = "copy-of-the-keep"
+    w.sim.dm({ t: "load-scene", scene: copy, carried: { [w.token.id]: w.token.id } })
+    const second = w.sim.refresh(P1).view
+    await host.send({ t: "snapshot", epoch: "e1", seq: 2, view: second, results: [{ reqId: move, ok: false, reason: "cannot" }] })
+    await waitFor(() => client.getSnapshot().mapChanges === 1, "map change")
+    expect(client.sceneChangeSince(onFirst)).toBeNull()
+    expect(client.getSnapshot().view?.scene.mapSerial).toBe(1)
+    expect(client.getSnapshot().results).toEqual([])
+    // The same map again (a later snapshot of it): still one.
+    await host.send({ t: "snapshot", epoch: "e1", seq: 3, view: structuredClone(second) })
+    await waitFor(() => client.getSnapshot().seq === 3, "resync")
+    expect(client.getSnapshot().mapChanges).toBe(1)
+    await host.send({ t: "result", epoch: "e1", seq: 3, result: { reqId: move, ok: false, reason: "path-start-mismatch" } })
+    await host.send({ t: "result", epoch: "e1", seq: 3, result: { reqId: said, ok: false, reason: "rate-limited" } })
+    await waitFor(() => client.getSnapshot().results.length > 0, "chat verdict")
+    // (A snapshot clears every overlay: the chat's verdict arrives as a plain result.)
+    expect(client.getSnapshot().results).toEqual([{ reqId: said, ok: false, reason: "rate-limited" }])
   })
 
   it("is closed for good after being kicked", async () => {
@@ -780,6 +990,88 @@ describe("PlayerClient: backdrops", () => {
     expect(calls.at(-1)).toBe(`set ${ground} null null`)
   })
 
+  it("draws another map's backdrop afresh, even on a duplicate sharing the level id and placement", async () => {
+    const newTab = tabs()
+    const { scene, ground } = flatScene(6, 6, "bright")
+    scene.levels[ground].backdrop = { assetId: "map", rect: { x: 0, z: 0, w: 30, d: 30 }, opacity: 1, tintWalls: false }
+    const token = addToken(scene, ground, 12.5, 12.5)
+    const sim = new TestHost(scene, [P1])
+    sim.assign(token.id, P1)
+    const host = fakeHost(newTab(), sim, { tilePx: 64 })
+    // A tile source that serves the chunks the host announced (rev = which map's pixels they hold).
+    const chunks = new Map<string, number>()
+    const chunkOf = (levelId: string, cell: { i: number; j: number }) => `${levelId}:${Math.floor(cell.i / 4)},${Math.floor(cell.j / 4)}`
+    for (const c of ["0,0", "1,0", "0,1", "1,1"]) chunks.set(`${ground}:${c}`, 1)
+    const drawn: string[] = []
+    const tiles = {
+      getTile: vi.fn(async (levelId: string, cell: { i: number; j: number }) => {
+        const rev = chunks.get(chunkOf(levelId, cell))
+        drawn.push(`${rev ?? "none"}:${levelId}:${cell.i},${cell.j}`)
+        return rev === undefined ? null : ({ width: 64, height: 64, close() {} } as unknown as ImageBitmap)
+      }),
+      setChunks: vi.fn((levelId: string, entries: Array<[number, number, number, number?]>, reset: boolean) => {
+        if (reset) for (const k of [...chunks.keys()]) if (k.startsWith(`${levelId}:`)) chunks.delete(k)
+        for (const [ci, cj, mask, rev] of entries) {
+          if (mask) chunks.set(`${levelId}:${ci},${cj}`, rev ?? 0)
+          else chunks.delete(`${levelId}:${ci},${cj}`)
+        }
+        return []
+      }),
+      dispose: vi.fn(),
+    }
+    const client = makeClient(newTab(), { tiles })
+    const events: string[] = []
+    client.onBackdrop((ev) => events.push(`${ev.kind} ${ev.levelId}`))
+    await client.start()
+    await waitFor(() => events.includes(`set ${ground}`) && drawn.length === 36, "first map drawn")
+    expect(drawn.every((d) => d.startsWith("1:"))).toBe(true)
+    const calls: string[] = []
+    bindBackdropsToEngine(client, {
+      setLevelImage: (levelId, image) => calls.push(`set ${levelId} ${image ? "canvas" : "null"}`),
+      updateLevelImage: (levelId) => calls.push(`update ${levelId}`),
+    })
+    const firstCanvas = client.backdropCanvas(ground)
+
+    // The night version of the same map: same level id, same placement, other pixels. As the real host
+    // does, the level's chunks are reset and the new map's announced (rev 2) just before the view.
+    const night = structuredClone(scene)
+    night.id = "night-keep"
+    sim.dm({ t: "load-scene", scene: night, carried: { [token.id]: token.id } })
+    const full = 0xffff
+    await host.send(P1, {
+      t: "tiles",
+      epoch: host.epoch,
+      levelId: ground,
+      chunks: [
+        [0, 0, full, 2],
+        [1, 0, full, 2],
+        [0, 1, full, 2],
+        [1, 1, full, 2],
+      ],
+      reset: true,
+    })
+    await host.flush(P1)
+    await waitFor(() => client.getSnapshot().mapChanges === 1, "on the night map")
+    await waitFor(() => drawn.filter((d) => d.startsWith("2:")).length === 36 && events.filter((e) => e === `set ${ground}`).length === 2, "night map drawn")
+    // Every cell was drawn again from the chunks announced before the view, none from the old map's.
+    expect(drawn.slice(36).every((d) => d.startsWith("2:"))).toBe(true)
+    const announced = (list: string[]) => list.filter((e) => !e.startsWith("update"))
+    expect(announced(events)).toEqual([`set ${ground}`, `remove ${ground}`, `set ${ground}`])
+    expect(client.backdropCanvas(ground)).not.toBe(firstCanvas)
+    await waitFor(() => client.backdropLayers()[0]?.stats.drawn === 36, "all night tiles drawn")
+    expect(announced(calls)).toEqual([`set ${ground} canvas`, `set ${ground} null`, `set ${ground} canvas`])
+
+    // A map without that level: its image goes.
+    const { scene: crypt, ground: cryptGround } = flatScene(6, 6, "bright")
+    crypt.tokens[token.id] = { ...structuredClone(scene.tokens[token.id]), levelId: cryptGround }
+    sim.dm({ t: "load-scene", scene: crypt, carried: { [token.id]: token.id } })
+    await host.flush(P1)
+    await waitFor(() => client.getSnapshot().mapChanges === 2, "in the crypt")
+    expect(events.at(-1)).toBe(`remove ${ground}`)
+    expect(client.backdropLayers()).toEqual([])
+    expect(calls.at(-1)).toBe(`set ${ground} null`)
+  })
+
   it("bindBackdropsToEngine maps set / update / remove events", () => {
     let emit: (ev: Parameters<Parameters<Parameters<typeof bindBackdropsToEngine>[0]["onBackdrop"]>[0]>[0]) => void = () => {}
     const fake = {
@@ -791,7 +1083,17 @@ describe("PlayerClient: backdrops", () => {
     }
     const calls: unknown[][] = []
     bindBackdropsToEngine(fake, { setLevelImage: (...a) => calls.push(["set", ...a]), updateLevelImage: (...a) => calls.push(["update", ...a]) })
-    const layer = { levelId: "l", canvas: fakeCanvas(10, 10), rect: { x: 0, z: 0, w: 5, d: 5 }, opacity: 1, tintWalls: false, tilePx: 10, pxPerCell: 10, announced: true, stats: { wanted: 1, drawn: 1, pending: 0, missing: 0 } }
+    const layer = {
+      levelId: "l",
+      canvas: fakeCanvas(10, 10),
+      rect: { x: 0, z: 0, w: 5, d: 5 },
+      opacity: 1,
+      tintWalls: false,
+      tilePx: 10,
+      pxPerCell: 10,
+      announced: true,
+      stats: { wanted: 1, drawn: 1, pending: 0, missing: 0 },
+    }
     const dirty = { x: 0, z: 0, w: 105, d: 205 }
     const dirtyRects = [
       { x: 0, z: 0, w: 5, d: 5 },
@@ -822,6 +1124,36 @@ describe("sceneChangeFromOps", () => {
     expect(sceneChangeFromOps([{ op: "set", path: ["scene", "levels", "l2"], value: {} }], view, view)).toEqual({ structure: true })
     expect(sceneChangeFromOps([{ op: "set", path: ["scene", "name"], value: "x" }], view, view)).toBe("none")
     expect(sceneChangeFromOps([{ op: "set", path: [], value: view }], view, view)).toBeNull()
+  })
+
+  it("replaces everything on another map, even a duplicate sharing level and token ids", () => {
+    const w = world()
+    const a = w.sim.refresh(P1).view
+    // A duplicated map: same ids, another document; the party carried along.
+    const copy = structuredClone(w.scene)
+    copy.id = "copy-of-the-keep"
+    copy.name = "The Keep (night)"
+    copy.tokens[w.token.id].position = { x: 27.5, z: 27.5 }
+    w.sim.dm({ t: "load-scene", scene: copy, carried: { [w.token.id]: w.token.id } })
+    const b = w.sim.refresh(P1).view
+    expect(b.scene.mapSerial).toBe(1)
+    expect(Object.keys(b.scene.levels)).toEqual(Object.keys(a.scene.levels))
+    expect(isOtherMap(a, b)).toBe(true)
+    expect(isOtherMap(b, a)).toBe(true)
+    expect(isOtherMap(a, a)).toBe(false)
+    expect(isOtherMap(b, structuredClone(b))).toBe(false)
+    expect(sceneChangeFromOps(diffViews(a, b), a, b)).toBeNull()
+    // The next map again: another marker.
+    w.sim.dm({ t: "load-scene", scene: structuredClone(w.scene), carried: { [w.token.id]: w.token.id } })
+    const c = w.sim.refresh(P1).view
+    expect(isOtherMap(b, c)).toBe(true)
+    expect(sceneChangeFromOps(diffViews(b, c), b, c)).toBeNull()
+
+    // In-map changes are not another map: a level added, a rename, a token moving.
+    const level = { ...a.scene.levels[w.ground], id: "attic", name: "Attic", elevation: 10 }
+    const more = { ...a, scene: { ...a.scene, name: "Renamed", levels: { ...a.scene.levels, attic: level } } }
+    expect(isOtherMap(a, more)).toBe(false)
+    expect(sceneChangeFromOps(diffViews(a, more), a, more)).toEqual({ structure: true })
   })
 })
 
@@ -918,6 +1250,8 @@ describe("PlayerClient: the table and pings", () => {
     await host.send({ t: "ping", epoch: "other-epoch", ping: { ...ping, x: 99 } })
     await host.send({ t: "ping", epoch: "e1", ping: { ...ping, x: "far" } } as never)
     await host.send({ t: "ping", epoch: "e1", ping: { ...ping, extra: 1 } } as never)
+    // On a level of another map (sent just before a map change, arriving after it): not ours to draw.
+    await host.send({ t: "ping", epoch: "e1", ping: { ...ping, levelId: "old-map-level" } })
     await waitFor(() => got.length >= 2, "host ping")
     await sleep(40)
     expect(got).toEqual([expect.objectContaining({ mine: true }), { ...ping, mine: false }])

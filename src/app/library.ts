@@ -1,12 +1,13 @@
 /**
- * Scene-library operations used by the home and shared pages (duplicate, samples, import/export,
- * copying a shared scene). Each returns user-facing warnings for partial successes (e.g. a map image
- * that could not be copied) and throws LibraryError / NetError on failure.
+ * Scene-library operations used by the home and shared pages and the host console (duplicate, samples,
+ * import/export, copying a shared scene, loading a scene to play). Each returns user-facing warnings for
+ * partial successes (e.g. a map image that could not be copied) and throws LibraryError / NetError on failure.
  */
 import { newId } from "@/core/scene/factory"
 import { sampleById } from "@/core/scene/samples"
 import type { ParseSceneResult } from "@/core/scene/schema"
 import type { Scene } from "@/core/scene/types"
+import type { SceneOrigin } from "@/core/session/types"
 import { exportSceneFile, exportSceneFileWithAssets, importSceneFileWithAssets, type SceneSummary, type SharedScene } from "@/net/scenesRepo"
 import { describeNetError, isNetError } from "@/net/supabase"
 
@@ -49,6 +50,25 @@ function requireScene(parsed: ParseSceneResult, action: string): Scene {
     throw new LibraryError(`This scene was saved by a newer version of Atlas, so it can't be ${action} here. Update the app and try again.`)
   }
   throw new LibraryError(`This scene's data is not valid, so it can't be ${action}.`, parsed.issues.slice(0, 5))
+}
+
+export interface PlayableScene {
+  /** The latest version, migrated to the current schema (its name follows the library row). */
+  scene: Scene
+  /** What a game playing it records as its origin (GameState.origin): the row and the version loaded. */
+  origin: SceneOrigin
+  name: string
+}
+
+/**
+ * The latest version of a library scene, ready to play, with the origin to record (the DM changing
+ * the map mid-session). Documents saved by a newer version of Atlas, or invalid ones, are refused
+ * (LibraryError); a row deleted meanwhile rejects with NetError("not_found").
+ */
+export async function loadLibraryScene(services: Pick<AppServices, "scenes">, sceneId: string): Promise<PlayableScene> {
+  const loaded = await services.scenes.load(sceneId)
+  const scene = requireScene(loaded.parsed, "played")
+  return { scene, origin: { sceneId: loaded.summary.id, version: loaded.version, dirty: false }, name: loaded.summary.name }
 }
 
 /** A copy of a document with a fresh identity (never shares ids with its source). */
@@ -193,7 +213,10 @@ export async function importSceneFile(services: AppServices, file: Blob): Promis
   const scene = parsed.scene
   try {
     // A second entry with an identical name is ambiguous in the library: suffix it.
-    scene.name = importedName(scene.name, (await services.scenes.list()).map((s) => s.name))
+    scene.name = importedName(
+      scene.name,
+      (await services.scenes.list()).map((s) => s.name)
+    )
   } catch {
     // Listing failed: keep the file's name.
   }

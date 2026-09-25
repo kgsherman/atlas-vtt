@@ -44,6 +44,10 @@ describe("sub-cell clips", () => {
     expect(new Set([chunkRev(a), chunkRev(b), chunkRev(c)]).size).toBe(3)
     expect(chunkRev(b)).toBe(chunkRev([...b]))
     expect(Number.isInteger(chunkRev(c)) && chunkRev(c) < 2 ** 32).toBe(true)
+    // Salted (what the pixels are cut from): the same cells of another image get another rev.
+    expect(chunkRev(b, 0)).toBe(chunkRev(b))
+    expect(chunkRev(b, 0x1234abcd)).not.toBe(chunkRev(b))
+    expect(chunkRev(b, 0xfedcba98)).toBeGreaterThan(0)
   })
 })
 
@@ -184,11 +188,33 @@ describe("BackdropTiler", () => {
     expect(t.publishing).toBe(true)
     expect(t.backdrops([levelId])).toEqual({ [levelId]: { rect: { x: 0, z: 0, w: 135, d: 235 }, opacity: 1, tintWalls: false, tilePx: 10 } })
     // Cells (0,0), (1,0) share chunk (0,0); (5,0) is chunk (1,0); partly explored (4,5) → chunk (1,1).
-    await t.sync("p1", explored(levelId, [[0, 0], [1, 0], [5, 0]], [[4, 5]]))
+    await t.sync(
+      "p1",
+      explored(
+        levelId,
+        [
+          [0, 0],
+          [1, 0],
+          [5, 0],
+        ],
+        [[4, 5]]
+      )
+    )
     expect(uploads.map((u) => `${u.uid}:${u.ci},${u.cj}:${u.parts}`).sort()).toEqual(["p1:0,0:2", "p1:1,0:1", "p1:1,1:1"])
     expect(chunks[0].size).toBe(40)
     const withoutRev = (e: ChunkEntry) => e.slice(0, 3)
-    expect(notices.flatMap((n) => n.entries).map(withoutRev).sort()).toEqual([[0, 0, bit(0, 0) | bit(1, 0)], [1, 0, bit(5, 0)], [1, 1, bit(4, 5)]].sort())
+    expect(
+      notices
+        .flatMap((n) => n.entries)
+        .map(withoutRev)
+        .sort()
+    ).toEqual(
+      [
+        [0, 0, bit(0, 0) | bit(1, 0)],
+        [1, 0, bit(5, 0)],
+        [1, 1, bit(4, 5)],
+      ].sort()
+    )
     // Every uploaded chunk is announced with its content rev.
     expect(notices.flatMap((n) => n.entries).every((e) => e.length === 4 && e[3] > 0)).toBe(true)
     // The partly explored cell (4, 5) — sub-cell (0, 0) only — is clipped to that sub-cell: 10 px per
@@ -207,12 +233,34 @@ describe("BackdropTiler", () => {
     // Chunk (0,0) is re-cut with one cell; (1,0) and (1,1) are deleted and announced with mask 0.
     expect(n).toBe(before + 1)
     expect(deletes.sort()).toEqual([`p1:${levelId}:1,0`, `p1:${levelId}:1,1`])
-    expect(notices.slice(-3).flatMap((x) => x.entries).map(withoutRev).sort()).toEqual([[0, 0, bit(0, 0)], [1, 0, 0], [1, 1, 0]].sort())
+    expect(
+      notices
+        .slice(-3)
+        .flatMap((x) => x.entries)
+        .map(withoutRev)
+        .sort()
+    ).toEqual(
+      [
+        [0, 0, bit(0, 0)],
+        [1, 0, 0],
+        [1, 1, 0],
+      ].sort()
+    )
     // Removals carry no rev.
-    expect(notices.slice(-3).flatMap((x) => x.entries).filter((e) => e[2] === 0).every((e) => e.length === 3)).toBe(true)
-    const full = new Array(16).fill(0)
-    full[0] = 0xffff
-    expect(t.table("p1")).toEqual([{ levelId, entries: [[0, 0, bit(0, 0), chunkRev(full)]] }])
+    expect(
+      notices
+        .slice(-3)
+        .flatMap((x) => x.entries)
+        .filter((e) => e[2] === 0)
+        .every((e) => e.length === 3)
+    ).toBe(true)
+    // The table holds the rev last announced for the chunk (salted with the backdrop, so read back).
+    const rev = notices
+      .flatMap((x) => x.entries)
+      .filter((e) => e[0] === 0 && e[1] === 0)
+      .at(-1)![3]
+    expect(rev).toBeGreaterThan(0)
+    expect(t.table("p1")).toEqual([{ levelId, entries: [[0, 0, bit(0, 0), rev]] }])
     // Another player gets their own chunks.
     await t.sync("p2", explored(levelId, [[0, 0]]))
     expect(uploads.filter((u) => u.uid === "p2")).toHaveLength(1)
@@ -325,7 +373,13 @@ describe("BackdropTiler", () => {
     moved.levels[levelId].backdrop!.rect = { x: 5, z: 0, w: 130, d: 235 }
     t.setScene(moved)
     expect(notices.at(-1)).toEqual({ uid: "p1", levelId, entries: [], reset: true })
-    await t.sync("p1", explored(levelId, [[0, 0], [1, 0]]))
+    await t.sync(
+      "p1",
+      explored(levelId, [
+        [0, 0],
+        [1, 0],
+      ])
+    )
     // The image now starts at x = 5: only cell (1, 0) overlaps it.
     expect(uploads.at(-1)).toMatchObject({ ci: 0, cj: 0, parts: 1 })
     // An image that cannot be loaded: nothing is uploaded and the backdrop is not offered.
@@ -360,11 +414,24 @@ describe("BackdropTiler", () => {
       const { t } = tiler(store, codec, { now: () => Date.now(), imageIdleMs: 1000 })
       t.setScene(scene)
       await t.sync("p1", explored(levelId, [[0, 0]]))
-      await t.sync("p1", explored(levelId, [[0, 0], [9, 9]]))
+      await t.sync(
+        "p1",
+        explored(levelId, [
+          [0, 0],
+          [9, 9],
+        ])
+      )
       expect(decodes).toBe(1)
       await vi.advanceTimersByTimeAsync(2500)
       expect(releases).toBe(1)
-      await t.sync("p1", explored(levelId, [[0, 0], [9, 9], [20, 20]]))
+      await t.sync(
+        "p1",
+        explored(levelId, [
+          [0, 0],
+          [9, 9],
+          [20, 20],
+        ])
+      )
       expect(decodes).toBe(2)
       t.dispose()
       await vi.advanceTimersByTimeAsync(0)
@@ -372,5 +439,124 @@ describe("BackdropTiler", () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  /**
+   * Two documents sharing the level id, asset id and placement (a duplicated map): images come from the
+   * current document's folder (blob text = folder), and every chunk object holds "folder:parts".
+   */
+  function twinDocs() {
+    const { scene: a, levelId } = backdropScene()
+    const b = structuredClone(a)
+    b.id = "doc-B"
+    const doc = { current: a as Scene }
+    const { store } = fakeAssets("supabase")
+    const folders: string[] = []
+    const stored = new Map<string, string>()
+    const puts: string[] = []
+    let hold: Promise<void> | null = null
+    const assets: AssetStore = {
+      ...store,
+      getImage: async (sceneId, assetId) => {
+        folders.push(`${sceneId}/${assetId}`)
+        return new Blob([sceneId])
+      },
+      putTileChunk: async (_sid, uid, lid, ci, cj, blob) => {
+        const text = await blob.text()
+        puts.push(text)
+        if (hold) await hold
+        stored.set(`${uid}|${lid}|${ci},${cj}`, text)
+      },
+    }
+    let decodes = 0
+    const codec: TileCodec = {
+      decode: async (blob) => {
+        decodes++
+        return { width: 270, height: 470, tag: await blob.text() } as TileImage
+      },
+      encodeChunk: async (img, parts) => new Blob([`${(img as TileImage & { tag: string }).tag}:${parts.length}`]),
+      release: () => {},
+    }
+    const { t, notices } = tiler(assets, codec, { assetSceneIds: () => [doc.current.id] })
+    return {
+      a,
+      b,
+      levelId,
+      doc,
+      t,
+      notices,
+      folders,
+      stored,
+      puts,
+      decodes: () => decodes,
+      /** Hold every upload until the returned function is called. */
+      holdUploads: () => {
+        let release!: () => void
+        hold = new Promise((r) => (release = r))
+        return () => {
+          hold = null
+          release()
+        }
+      },
+    }
+  }
+
+  it("a switch to a duplicated map (same level id, image and placement) starts over from the new document's image", async () => {
+    const d = twinDocs()
+    const { a, b, levelId, t, notices } = d
+    t.setScene(a)
+    const cells: Array<[number, number]> = [
+      [0, 0],
+      [5, 0],
+    ]
+    await t.sync("p1", explored(levelId, cells))
+    const before = notices.flatMap((n) => n.entries)
+    expect(before).toHaveLength(2)
+    expect([...d.stored.values()]).toEqual([`${a.id}:1`, `${a.id}:1`])
+    // Another revision of the same document changes nothing.
+    t.setScene(structuredClone(a))
+    expect(notices.some((n) => n.reset)).toBe(false)
+    // The duplicate: every player's chunks of the level start over…
+    d.doc.current = b
+    t.setScene(b)
+    expect(notices.at(-1)).toEqual({ uid: "p1", levelId, entries: [], reset: true })
+    const mark = notices.length
+    await t.sync("p1", explored(levelId, cells))
+    // … cut from the duplicate's own image (decoded again, from its folder) …
+    expect(d.decodes()).toBe(2)
+    expect(d.folders).toEqual([`${a.id}/map1`, "doc-B/map1"])
+    expect([...d.stored.values()]).toEqual(["doc-B:1", "doc-B:1"])
+    // … and announced under new revs for the very same cells (players cache chunks by rev).
+    const after = notices.slice(mark).flatMap((n) => n.entries)
+    expect(after.map((e) => e.slice(0, 3)).sort()).toEqual(before.map((e) => e.slice(0, 3)).sort())
+    for (const e of after) expect(before.find((x) => x[0] === e[0] && x[1] === e[1])![3]).not.toBe(e[3])
+    expect(t.table("p1")).toEqual([{ levelId, entries: expect.arrayContaining(after) }])
+    t.dispose()
+  })
+
+  it("an upload of the previous map still in flight lands before the new map's upload to the same object starts", async () => {
+    const d = twinDocs()
+    const { a, b, levelId, t, notices } = d
+    t.setScene(a)
+    const release = d.holdUploads()
+    const first = t.sync("p1", explored(levelId, [[0, 0]]))
+    await vi.waitFor(() => expect(d.puts).toEqual([`${a.id}:1`]))
+    d.doc.current = b
+    t.setScene(b)
+    const second = t.sync("p1", explored(levelId, [[0, 0]]))
+    await new Promise((r) => setTimeout(r, 20))
+    // The same object: the new map's job waits for the old one.
+    expect(d.puts).toEqual([`${a.id}:1`])
+    release()
+    await Promise.all([first, second])
+    expect(d.puts).toEqual([`${a.id}:1`, "doc-B:1"])
+    expect([...d.stored.entries()]).toEqual([[`p1|${levelId}|0,0`, "doc-B:1"]])
+    // The old upload is never announced after the reset; the new one is.
+    const reset = notices.findIndex((n) => n.reset)
+    expect(reset).toBeGreaterThanOrEqual(0)
+    const announced = notices.slice(reset + 1).flatMap((n) => n.entries)
+    expect(announced).toHaveLength(1)
+    expect(t.table("p1")).toEqual([{ levelId, entries: announced }])
+    t.dispose()
   })
 })

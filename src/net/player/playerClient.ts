@@ -23,6 +23,8 @@
  *    as "not-connected" and expiring requests are not blamed on the DM (`networkOffline` in the snapshot).
  *  - Pending requests are overlays only: cleared by their result, by a snapshot / epoch change, or
  *    after 5 s ("DM not responding").
+ *  - Another map (the view's scene.mapSerial changed: the DM moved the game): the scene is replaced,
+ *    requests about the old map's places are dropped and their verdicts ignored, `mapChanges` counts it.
  */
 import type { PathStep } from "@/core/movement/types"
 import { HP_LIMITS, isTokenCondition, type TokenStatusChange } from "@/core/scene/tokenStatus"
@@ -49,7 +51,15 @@ import type { Engine, SceneChange } from "@/render/contracts"
 import { isChunkEntry } from "../assets/chunks"
 import type { PlayerViewRow } from "../sessionsRepo"
 import type { PlayerChannels, Unsubscribe } from "../transport"
-import { BackdropCompositor, defaultClock, type BackdropCanvas, type BackdropCompositorOptions, type BackdropEvent, type BackdropLayer, type CompositorClock } from "./backdropCanvas"
+import {
+  BackdropCompositor,
+  defaultClock,
+  type BackdropCanvas,
+  type BackdropCompositorOptions,
+  type BackdropEvent,
+  type BackdropLayer,
+  type CompositorClock,
+} from "./backdropCanvas"
 import type { PendingRequest, PlayerClient, PlayerClientOptions, PlayerSnapshot, PlayerStatus } from "./types"
 
 // ---------------------------------------------------------------------------
@@ -96,6 +106,11 @@ export interface PlayerClientSnapshot extends PlayerSnapshot {
    * "You're offline, reconnecting…" rather than blaming the DM. Requests are refused as "not-connected".
    */
   networkOffline: boolean
+  /**
+   * Views of another map adopted since start (the DM moved the game: `isOtherMap`), by patch or snapshot.
+   * Never counts the first view or a resync onto the same map; the play page greets each new map once.
+   */
+  mapChanges: number
 }
 
 export type ClientClock = CompositorClock
@@ -288,10 +303,22 @@ export function buildPlayerScene(view: PlayerView): SceneLike {
 }
 
 /**
+ * `next` shows another map than `prev`: the DM moved the game (load-scene), even to a duplicated map that
+ * shares level and token ids. The host's map marker says so (scene.mapSerial, absent on the first map).
+ */
+export function isOtherMap(prev: Pick<PlayerView, "scene">, next: Pick<PlayerView, "scene">): boolean {
+  return (prev.scene.mapSerial ?? 0) !== (next.scene.mapSerial ?? 0)
+}
+
+/** Requests about places of the map: meaningless once the game moved to another one. */
+const MAP_BOUND: ReadonlySet<PendingRequest["kind"]> = new Set(["move", "jump", "door", "template", "template-remove"])
+
+/**
  * What a patch changes in the reconstructed scene: a SceneChange, "none" (masks/flags only), or
- * null (replace everything).
+ * null (replace everything, e.g. another map: nothing of the old one animates into it).
  */
 export function sceneChangeFromOps(ops: readonly PatchOp[], prev: PlayerView, next: PlayerView): SceneChange | "none" | null {
+  if (isOtherMap(prev, next)) return null
   const objects = new Set<Id>()
   const tokens = new Set<Id>()
   const terrain = new Set<Id>()
@@ -490,6 +517,8 @@ class PlayerClientImpl implements AtlasPlayerClient {
   private revision = 0
   private scene: SceneLike | null = null
   private sceneHistory: Array<{ scene: SceneLike; change: SceneChange | null }> = []
+  /** Views of another map adopted (PlayerClientSnapshot.mapChanges). */
+  private mapChanges = 0
   /** A live reply/patch from the current host run confirmed our state since the last disruption. */
   private synced = false
   private readonly seenEpochs = new Set<string>()
@@ -909,11 +938,16 @@ class PlayerClientImpl implements AtlasPlayerClient {
     this.changed()
   }
 
-  /** Someone pointed at a spot (only the current host run's pings; malformed ones are dropped). */
+  /**
+   * Someone pointed at a spot (only the current host run's pings on a level of the map we show; malformed
+   * ones are dropped). Pings travel outside the view's order: one from just before a map change may land
+   * after it.
+   */
   private onHostPing(msg: Extract<HostToClient, { t: "ping" }>): void {
     if (msg.epoch !== this.epoch) return
     const res = playerPingSchema.safeParse(msg.ping)
     if (!res.success) return
+    if (!this.view || !Object.hasOwn(this.view.scene.levels, res.data.levelId)) return
     this.emitPing({ ...res.data, mine: false })
   }
 
@@ -987,6 +1021,8 @@ class PlayerClientImpl implements AtlasPlayerClient {
       this.revision++
       this.synced = true
       if (ours) this.helloAnswered()
+      // Before its results: verdicts on the old map's places are not the player's business any more.
+      if (isOtherMap(view, next)) this.leaveMap()
       this.updateScene(sceneChangeFromOps(msg.ops, view, next))
       this.compositor.sync(next)
       this.applyResults(msg.results)
@@ -1019,8 +1055,25 @@ class PlayerClientImpl implements AtlasPlayerClient {
     }
   }
 
+  /**
+   * The DM moved the game to another map: count it, and drop the requests about the old map's places
+   * (moves, jumps, doors, templates) without a word; their late verdicts are skipped too. Chat, rolls,
+   * initiative, turns and token changes stay pending (a snapshot then clears every overlay, as always;
+   * their verdicts are still reported).
+   */
+  private leaveMap(): void {
+    this.mapChanges++
+    const stale = this.pending.filter((p) => MAP_BOUND.has(p.kind))
+    if (stale.length === 0) return
+    for (const p of stale) this.hostSettled.add(p.reqId)
+    this.pending = this.pending.filter((p) => !MAP_BOUND.has(p.kind))
+    this.armPendingTimer()
+  }
+
   private replaceView(view: PlayerView, epoch: string, seq: number, source: "live" | "row"): void {
     if (epoch !== this.epoch) this.onEpochChange()
+    // Never on the first view, nor on a resync onto the same map (host restart, snapshot_ready).
+    if (this.view && isOtherMap(this.view, view)) this.leaveMap()
     this.view = view
     this.viewSource = source
     this.epoch = epoch
@@ -1227,7 +1280,8 @@ class PlayerClientImpl implements AtlasPlayerClient {
 
   rollInitiative(tokenId: Id, bonus: number): string {
     const reqId = this.newRequestId()
-    if (!Number.isInteger(bonus) || Math.abs(bonus) > TABLE_LIMITS.maxInitiativeBonus) this.pushResult({ reqId, ok: false, reason: "invalid" }, "invalid", "initiative")
+    if (!Number.isInteger(bonus) || Math.abs(bonus) > TABLE_LIMITS.maxInitiativeBonus)
+      this.pushResult({ reqId, ok: false, reason: "invalid" }, "invalid", "initiative")
     else this.submit({ reqId, kind: "initiative", tokenId, sentAt: 0 }, { t: "initiative", reqId, tokenId, bonus })
     this.changed()
     return reqId
@@ -1442,6 +1496,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
         hostUnresponsive: this.hostUnresponsive,
         viewSource: this.viewSource,
         networkOffline: this.networkOffline,
+        mapChanges: this.mapChanges,
       })
     }
     return this.snap
@@ -1500,7 +1555,10 @@ export function createAtlasPlayerClient(opts: PlayerClientRuntimeOptions): Atlas
  * Wire a client's backdrop canvases to an engine: replays the layers that already have content, then
  * follows set/update/remove events. Returns an unsubscribe that also removes the images.
  */
-export function bindBackdropsToEngine(client: Pick<AtlasPlayerClient, "onBackdrop" | "backdropLayers">, engine: Pick<Engine, "setLevelImage" | "updateLevelImage">): () => void {
+export function bindBackdropsToEngine(
+  client: Pick<AtlasPlayerClient, "onBackdrop" | "backdropLayers">,
+  engine: Pick<Engine, "setLevelImage" | "updateLevelImage">
+): () => void {
   const shown = new Set<Id>()
   for (const layer of client.backdropLayers()) {
     if (!layer.announced) continue

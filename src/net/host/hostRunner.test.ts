@@ -10,11 +10,12 @@ import { produce, produceWithPatches } from "immer"
 import { afterEach, describe, expect, it } from "vitest"
 
 import type { PathStep } from "@/core/movement/types"
-import { createDoor, createWall } from "@/core/scene/factory"
+import { createDoor, createWall, newId } from "@/core/scene/factory"
 import { sampleById } from "@/core/scene/samples"
 import { blockShape, writeTerrain } from "@/core/scene/terrainShapes"
 import type { Id, Scene } from "@/core/scene/types"
 import { dmSayCommand, playerViewSchema } from "@/core/session"
+import { parseGameStateDetailed } from "@/core/session/persist"
 import { add, addToken, flatScene } from "@/core/session/test-utils"
 import type { PlayerDoor, PlayerView } from "@/core/session/types"
 import { deepEqual } from "@/core/session/util"
@@ -23,8 +24,23 @@ import { cellTouched, decodeMask } from "@/core/vision/mask"
 import { createLocalScenesRepo } from "../scenesRepo"
 import { NetError } from "../supabase"
 import { sameVisionLevels, type HostRunnerImpl } from "./hostRunner"
-import { createSessionFixture, DM, fakeLocks, FakeWorker, Mirror, P1, P2, P3, recordingAssets, sleep, startHost, TEST_TIMING, waitFor, type SessionFixture } from "./test-utils"
-import type { TileCodec } from "./tiles"
+import {
+  createSessionFixture,
+  DM,
+  fakeLocks,
+  FakeWorker,
+  Mirror,
+  P1,
+  P2,
+  P3,
+  recordingAssets,
+  sleep,
+  startHost,
+  TEST_TIMING,
+  waitFor,
+  type SessionFixture,
+} from "./test-utils"
+import type { TileCodec, TileImage } from "./tiles"
 import type { HostPingEvent } from "./types"
 import { createInThreadVisionClient, createWorkerVisionClient, type WorkerLike } from "./visionClient"
 import { responseTransferables, VisionWorkerCore, type VisionRequest } from "./visionProtocol"
@@ -98,6 +114,15 @@ function corridor() {
   const eve = addToken(scene, ground, 7.5, 7.5, { name: "Eve", vision: { darkvision: 10, blindsight: 0, blind: false } })
   const fay = addToken(scene, ground, 62.5, 7.5, { name: "Fay" })
   return { scene, ground, eve, fay }
+}
+
+/** Bright 12×6 meadow cut in two by a wall at x = 25; a wolf on the far side. */
+function meadow() {
+  const { scene, ground } = flatScene(12, 6, "bright")
+  scene.name = "The Meadow"
+  add(scene, createWall(ground, { x: 25, z: 0 }, { x: 25, z: 30 }))
+  const wolf = addToken(scene, ground, 52.5, 22.5, { name: "SENTINEL_WOLF", label: "Wolf", kind: "monster" })
+  return { scene, ground, wolf }
 }
 
 /**
@@ -303,7 +328,16 @@ describe("host runner — joining and syncing", () => {
     a.dispatch({ t: "assign-token", tokenId: c.eve.id, userId: P1, assigned: true })
     const m = mirror(fx, P1)
     await settle(a, [[P1, m]])
-    const reqId = m.move(c.eve.id, walk(c.ground, [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1]]))
+    const reqId = m.move(
+      c.eve.id,
+      walk(c.ground, [
+        [1, 1],
+        [2, 1],
+        [3, 1],
+        [4, 1],
+        [5, 1],
+      ])
+    )
     await waitFor(() => m.result(reqId) !== undefined, "move result")
     await settle(a, [[P1, m]])
     expect(m.explored(c.ground, 3, 1)).toBe(true)
@@ -343,7 +377,18 @@ describe("host runner — requests", () => {
     expect(m1.explored(c.ground, 4, 1)).toBe(false)
 
     // Walk east into the wall at x = 45: the legal prefix (to (8, 1)) is applied.
-    const path = walk(c.ground, [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1], [6, 1], [7, 1], [8, 1], [9, 1], [10, 1]])
+    const path = walk(c.ground, [
+      [1, 1],
+      [2, 1],
+      [3, 1],
+      [4, 1],
+      [5, 1],
+      [6, 1],
+      [7, 1],
+      [8, 1],
+      [9, 1],
+      [10, 1],
+    ])
     const r1 = m1.move(c.eve.id, path)
     await waitFor(() => m1.result(r1) !== undefined, "move result")
     expect(m1.result(r1)).toEqual({ reqId: r1, ok: false, applied: 7, reason: "blocked" })
@@ -362,11 +407,23 @@ describe("host runner — requests", () => {
     expect(m2.explored(c.ground, 4, 1)).toBe(false)
 
     // Corner cutting in the dark, unperceived: reported as "blocked".
-    const r2 = m2.move(c.fay.id, walk(c.ground, [[12, 1], [13, 2]]))
+    const r2 = m2.move(
+      c.fay.id,
+      walk(c.ground, [
+        [12, 1],
+        [13, 2],
+      ])
+    )
     await waitFor(() => m2.result(r2) !== undefined, "corner result")
     expect(m2.result(r2)).toEqual({ reqId: r2, ok: false, applied: 0, reason: "blocked" })
     // Not the player's token.
-    const r3 = m2.move(c.eve.id, walk(c.ground, [[8, 1], [7, 1]]))
+    const r3 = m2.move(
+      c.eve.id,
+      walk(c.ground, [
+        [8, 1],
+        [7, 1],
+      ])
+    )
     await waitFor(() => m2.result(r3) !== undefined, "not-owner result")
     expect(m2.result(r3)).toEqual({ reqId: r3, ok: false, reason: "not-owner" })
     // Garbage and forged payloads are dropped silently.
@@ -386,10 +443,24 @@ describe("host runner — requests", () => {
     h.dispatch({ t: "assign-token", tokenId: k.bo.id, userId: P1, assigned: true })
     const m = mirror(fx, P1)
     await settle(h, [[P1, m]])
-    const r = m.move(k.bo.id, walk(k.ground, [[1, 1], [2, 2]]))
+    const r = m.move(
+      k.bo.id,
+      walk(k.ground, [
+        [1, 1],
+        [2, 2],
+      ])
+    )
     await waitFor(() => m.result(r) !== undefined, "result")
     expect(m.result(r)).toEqual({ reqId: r, ok: false, applied: 0, reason: "corner-cutting" })
-    const ok = m.move(k.bo.id, walk(k.ground, [[1, 1], [1, 2], [2, 2], [3, 2]]))
+    const ok = m.move(
+      k.bo.id,
+      walk(k.ground, [
+        [1, 1],
+        [1, 2],
+        [2, 2],
+        [3, 2],
+      ])
+    )
     await waitFor(() => m.result(ok) !== undefined, "result")
     expect(m.result(ok)).toEqual({ reqId: ok, ok: true, applied: 3 })
     await settle(h, [[P1, m]])
@@ -428,7 +499,15 @@ describe("host runner — requests", () => {
     // Through the open door Ada sees the goblin — by label only.
     expect(m1.view!.tokens[k.goblin.id]).toMatchObject({ label: "Goblin" })
     // Through it she walks.
-    const walkThrough = m1.move(k.ada.id, walk(k.ground, [[5, 3], [6, 3], [7, 3], [8, 3]]))
+    const walkThrough = m1.move(
+      k.ada.id,
+      walk(k.ground, [
+        [5, 3],
+        [6, 3],
+        [7, 3],
+        [8, 3],
+      ])
+    )
     await waitFor(() => m1.result(walkThrough) !== undefined, "walk result")
     expect(m1.result(walkThrough)).toEqual({ reqId: walkThrough, ok: true, applied: 3 })
   })
@@ -492,16 +571,34 @@ describe("host runner — requests", () => {
     const m = mirror(fx, P1)
     await settle(h, [[P1, m]])
     delay = 150
-    const a = m.move(k.bo.id, walk(k.ground, [[1, 1], [1, 2]]))
+    const a = m.move(
+      k.bo.id,
+      walk(k.ground, [
+        [1, 1],
+        [1, 2],
+      ])
+    )
     await sleep(30)
     // The first move's result is still on its way (its vision pass is slow): refused.
-    const b = m.move(k.bo.id, walk(k.ground, [[1, 2], [1, 3]]))
+    const b = m.move(
+      k.bo.id,
+      walk(k.ground, [
+        [1, 2],
+        [1, 3],
+      ])
+    )
     await waitFor(() => m.result(a) !== undefined && m.result(b) !== undefined, "move results")
     expect(m.result(a)).toMatchObject({ ok: true, applied: 1 })
     expect(m.result(b)).toMatchObject({ ok: false, reason: "rate-limited" })
     delay = 0
     await settle(h, [[P1, m]])
-    const c = m.move(k.bo.id, walk(k.ground, [[1, 2], [1, 3]]))
+    const c = m.move(
+      k.bo.id,
+      walk(k.ground, [
+        [1, 2],
+        [1, 3],
+      ])
+    )
     await waitFor(() => m.result(c) !== undefined, "third move")
     expect(m.result(c)).toMatchObject({ ok: true, applied: 1 })
   })
@@ -516,7 +613,19 @@ describe("host runner — step probes", () => {
     const m = mirror(fx, P1)
     await settle(h, [[P1, m]])
     const mark = worker.ops.length
-    const r = m.move(c.eve.id, walk(c.ground, [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1], [6, 1], [7, 1], [8, 1]]))
+    const r = m.move(
+      c.eve.id,
+      walk(c.ground, [
+        [1, 1],
+        [2, 1],
+        [3, 1],
+        [4, 1],
+        [5, 1],
+        [6, 1],
+        [7, 1],
+        [8, 1],
+      ])
+    )
     await waitFor(() => m.result(r) !== undefined, "move result")
     // The result did not wait for the six step probes (60 ms each).
     expect(worker.probesDone).toBeLessThan(6)
@@ -545,10 +654,28 @@ describe("host runner — step probes", () => {
       [P1, m1],
       [P2, m2],
     ])
-    const long = m1.move(c.eve.id, walk(c.ground, [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1], [6, 1], [7, 1], [8, 1]]))
+    const long = m1.move(
+      c.eve.id,
+      walk(c.ground, [
+        [1, 1],
+        [2, 1],
+        [3, 1],
+        [4, 1],
+        [5, 1],
+        [6, 1],
+        [7, 1],
+        [8, 1],
+      ])
+    )
     await waitFor(() => m1.result(long) !== undefined, "long move result")
     const t0 = Date.now()
-    const short = m2.move(c.fay.id, walk(c.ground, [[12, 1], [11, 1]]))
+    const short = m2.move(
+      c.fay.id,
+      walk(c.ground, [
+        [12, 1],
+        [11, 1],
+      ])
+    )
     await waitFor(() => m2.result(short) !== undefined, "short move result")
     // Six probes × 150 ms are queued; the short move waited for at most the one in flight.
     expect(Date.now() - t0).toBeLessThan(500)
@@ -566,7 +693,18 @@ describe("host runner — step probes", () => {
     h.dispatch({ t: "assign-token", tokenId: hl.eve.id, userId: P1, assigned: true })
     const m = mirror(fx, P1)
     await settle(h, [[P1, m]])
-    const path = walk(hl.ground, [[1, 2], [2, 2], [3, 2], [4, 2], [5, 2], [6, 2], [7, 2], [8, 2], [9, 2], [10, 2]])
+    const path = walk(hl.ground, [
+      [1, 2],
+      [2, 2],
+      [3, 2],
+      [4, 2],
+      [5, 2],
+      [6, 2],
+      [7, 2],
+      [8, 2],
+      [9, 2],
+      [10, 2],
+    ])
     // Past the closed door; the DM opens it while the steps are still being evaluated.
     const r = m.move(hl.eve.id, path)
     await waitFor(() => m.result(r) !== undefined, "move result")
@@ -603,11 +741,29 @@ describe("host runner — in-flight moves", () => {
       [P2, m2],
     ])
     delay = 150
-    const own = m1.move(k.bo.id, walk(k.ground, [[1, 1], [1, 2]]))
+    const own = m1.move(
+      k.bo.id,
+      walk(k.ground, [
+        [1, 1],
+        [1, 2],
+      ])
+    )
     await sleep(30)
     // Bo's move is in flight: the owner is told to wait, anyone else only that it is not theirs.
-    const probe = m2.move(k.bo.id, walk(k.ground, [[1, 2], [1, 3]]))
-    const again = m1.move(k.bo.id, walk(k.ground, [[1, 2], [1, 3]]))
+    const probe = m2.move(
+      k.bo.id,
+      walk(k.ground, [
+        [1, 2],
+        [1, 3],
+      ])
+    )
+    const again = m1.move(
+      k.bo.id,
+      walk(k.ground, [
+        [1, 2],
+        [1, 3],
+      ])
+    )
     await waitFor(() => [own, again].every((r) => m1.result(r) !== undefined) && m2.result(probe) !== undefined, "results")
     expect(m2.result(probe)).toEqual({ reqId: probe, ok: false, reason: "not-owner" })
     expect(m1.result(again)).toMatchObject({ ok: false, reason: "rate-limited" })
@@ -659,6 +815,27 @@ describe("host runner — saving the map to the library", () => {
     await expect(h.saveMapToLibrary({ force: true })).rejects.toMatchObject({ code: "not_found" })
     void fx
   })
+
+  it("a map change landing while a save is on its way keeps the new map's origin", async () => {
+    const { k, h, scenes, sceneId } = await librarySession()
+    const t = meadow()
+    const other = await scenes.create(t.scene)
+    const origin = { sceneId: other.id, version: 1, dirty: false }
+    const saving = h.saveMapToLibrary()
+    const changed = h.changeMap(t.scene, { tokenIds: [], arrival: { levelId: t.ground, x: 7.5, z: 7.5 }, origin })
+    expect(await saving).toBe(2)
+    expect(await changed).toMatchObject({ ok: true, saved: true })
+    // The save wrote the keep to its own library scene, and did not stamp that scene on the meadow.
+    expect(h.getSnapshot().library).toEqual(origin)
+    const kept = await scenes.load(sceneId)
+    expect(kept.version).toBe(2)
+    expect(kept.parsed.ok && kept.parsed.scene.id).toBe(k.scene.id)
+    // The next save goes to the meadow's library scene.
+    expect(await h.saveMapToLibrary()).toBe(2)
+    const saved = await scenes.load(other.id)
+    expect(saved.parsed.ok && saved.parsed.scene.id).toBe(t.scene.id)
+    expect((await scenes.load(sceneId)).version).toBe(2)
+  })
 })
 
 describe("host runner — stored player views", () => {
@@ -687,7 +864,13 @@ describe("host runner — stored player views", () => {
     expect(stored?.view.controlledTokenIds).toEqual([k.ada.id])
     expect(Date.now() - t0).toBeLessThan(1000)
     // The player's own move: stored soon as well.
-    const r = m1.move(k.ada.id, walk(k.ground, [[5, 3], [4, 3]]))
+    const r = m1.move(
+      k.ada.id,
+      walk(k.ground, [
+        [5, 3],
+        [4, 3],
+      ])
+    )
     await waitFor(() => m1.result(r) !== undefined, "move")
     await settle(h, [
       [P1, m1],
@@ -760,7 +943,13 @@ describe("host runner — link rejoins and lost results", () => {
     // The view channel drops; the request still reaches the host.
     dropLink(150, new RegExp(`:view:${P1}$`))
     await sleep(20)
-    const r = m.move(k.ada.id, walk(k.ground, [[5, 3], [4, 3]]))
+    const r = m.move(
+      k.ada.id,
+      walk(k.ground, [
+        [5, 3],
+        [4, 3],
+      ])
+    )
     await waitFor(() => m.result(r) !== undefined, "result after the rejoin", 3000)
     expect(m.result(r)).toMatchObject({ ok: true, applied: 1 })
     await settle(h, [[P1, m]])
@@ -770,7 +959,13 @@ describe("host runner — link rejoins and lost results", () => {
   it("re-delivers the results of a lost patch with the catch-up", async () => {
     const { k, h, m } = await linked()
     m.dropPatches = 1
-    const r = m.move(k.ada.id, walk(k.ground, [[5, 3], [4, 3]]))
+    const r = m.move(
+      k.ada.id,
+      walk(k.ground, [
+        [5, 3],
+        [4, 3],
+      ])
+    )
     await waitFor(() => h.debugIdle() && h.debugPlayer(P1)!.seq === m.seq + 1, "patch sent (and lost)")
     expect(m.result(r)).toBeUndefined()
     // The client's pending timeout → hello with its old seq.
@@ -803,7 +998,13 @@ describe("host runner — membership and hosting", () => {
     // Later changes and requests: P1 keeps playing, P2 hears nothing.
     h.dispatch({ t: "move-token", tokenId: k.ada.id, levelId: k.ground, x: 22.5, z: 22.5 })
     await m2.hello()
-    m2.move(k.bo.id, walk(k.ground, [[1, 1], [1, 2]]))
+    m2.move(
+      k.bo.id,
+      walk(k.ground, [
+        [1, 1],
+        [1, 2],
+      ])
+    )
     await settle(h, [[P1, m1]])
     await sleep(100)
     expect(m2.messages.length).toBe(count)
@@ -904,7 +1105,13 @@ describe("host runner — membership and hosting", () => {
     h.dispatch({ t: "set-movement-locked", locked: true })
     await settle(h, [[P1, m]])
     expect(m.view!.flags.movementLocked).toBe(true)
-    const r = m.move(k.ada.id, walk(k.ground, [[5, 3], [4, 3]]))
+    const r = m.move(
+      k.ada.id,
+      walk(k.ground, [
+        [5, 3],
+        [4, 3],
+      ])
+    )
     await waitFor(() => m.result(r) !== undefined, "locked move")
     expect(m.result(r)).toMatchObject({ ok: false, reason: "movement-locked" })
     // Hide Bo through an editor patch: saved right away (despite the 60 s throttle) and gone for P1.
@@ -937,16 +1144,27 @@ describe("host runner — backdrop tiles", () => {
     encodeChunk: async (_i, parts, size) => new Blob([`${size}:${parts.length}`]),
     release: () => {},
   }
-  /** Explored backdrop cells of a view that no announced chunk holds yet. */
-  const unannounced = (m: Mirror, view: PlayerView, levelId: string): string[] => {
+  /** Explored backdrop cells of a view that no announced chunk holds yet (the backdrop covers cells 0..w-1 × 0..d-1). */
+  const unannounced = (m: Mirror, view: PlayerView, levelId: string, w = 14, d = 8): string[] => {
     const out: string[] = []
     const ex = view.masks[levelId]?.explored
     if (!ex) return out
     const mask = decodeMask(ex)
-    // The backdrop covers cells 0..13 × 0..7.
-    for (let j = 0; j < 8; j++) for (let i = 0; i < 14; i++) if (cellTouched(mask, j * ex.width + i) && !m.hasTile(levelId, i, j)) out.push(`${i},${j}`)
+    for (let j = 0; j < d; j++) for (let i = 0; i < w; i++) if (cellTouched(mask, j * ex.width + i) && !m.hasTile(levelId, i, j)) out.push(`${i},${j}`)
     return out
   }
+  /** A codec whose chunks say which image they were cut from ("folder/assetId", the recorded image's blob). */
+  const tagged: TileCodec = {
+    decode: async (blob) => ({ width: 140, height: 80, tag: await blob.text() }) as TileImage,
+    encodeChunk: async (image, parts, size) => new Blob([`${(image as TileImage & { tag: string }).tag}:${size}:${parts.length}`]),
+    release: () => {},
+  }
+  /** Every chunk entry announced to a mirror from message `from` on: [levelId, ci, cj, mask, rev?], resets as "reset". */
+  const announced = (m: Mirror, levelId: string, from = 0) =>
+    m.messages
+      .slice(from)
+      .filter((x): x is Extract<typeof x, { t: "tiles" }> => x.t === "tiles" && x.levelId === levelId)
+      .flatMap((x) => [...(x.reset ? ["reset" as const] : []), ...x.chunks])
 
   it("uploads each player's explored cells in chunks and announces them before the views revealing them", async () => {
     const k = withBackdrop()
@@ -972,13 +1190,29 @@ describe("host runner — backdrop tiles", () => {
       const [uid, levelId, at] = key.split("|")
       expect(uid).toBe(P1)
       const mask = m.tiles.get(levelId)?.get(at) ?? 0
-      expect(text).toBe(`40:${mask.toString(2).split("").filter((b) => b === "1").length}`)
+      expect(text).toBe(
+        `40:${
+          mask
+            .toString(2)
+            .split("")
+            .filter((b) => b === "1").length
+        }`
+      )
     }
     // Open the door and walk through: new cells, new chunks, still announced in time.
     const open = m.door(k.door.id, "open")
     await waitFor(() => m.result(open) !== undefined, "door")
     await settle(h, [[P1, m]])
-    const r = m.move(k.ada.id, walk(k.ground, [[5, 3], [6, 3], [7, 3], [8, 3], [9, 3]]))
+    const r = m.move(
+      k.ada.id,
+      walk(k.ground, [
+        [5, 3],
+        [6, 3],
+        [7, 3],
+        [8, 3],
+        [9, 3],
+      ])
+    )
     await waitFor(() => m.result(r) !== undefined, "walk")
     await settle(h, [[P1, m]])
     expect(assets.uploads.length).toBeGreaterThan(first)
@@ -1008,6 +1242,104 @@ describe("host runner — backdrop tiles", () => {
     await waitFor(() => (m.tiles.get(k.ground)?.size ?? 0) > 0 && unannounced(m, m.view!, k.ground).length === 0, "chunks announced", 5000)
     await h.stop()
   })
+
+  it("a map switch resets the old map's chunks and publishes the new map's, cut from its own image folder", async () => {
+    const k = withBackdrop()
+    const t = meadow()
+    t.scene.assets = { map2: { id: "map2", kind: "image", name: "Meadow map", mime: "image/webp", width: 120, height: 60, bytes: 999 } }
+    t.scene.levels[t.ground].backdrop = { assetId: "map2", rect: { x: 0, z: 0, w: 60, d: 30 }, opacity: 1, tintWalls: false }
+    const fx = await fixture(k.scene, [P1])
+    const rowA = (await fx.dmRepo.listMySessions()).find((s) => s.id === fx.sessionId)!.sceneId!
+    // The meadow's image was uploaded under its library row (not its document id).
+    const rowB = (await createLocalScenesRepo(fx.store).create(t.scene)).id
+    const assets = recordingAssets("supabase", {
+      hasImage: (folder, assetId) => (folder === k.scene.id && assetId === "map") || (folder === rowB && assetId === "map2"),
+    })
+    const opts = { assets: assets.store, tileCodec: tagged }
+    const { host: h } = host(fx, opts)
+    await h.start()
+    h.dispatch({ t: "assign-token", tokenId: k.ada.id, userId: P1, assigned: true })
+    const late: string[] = []
+    const m: Mirror = mirror(fx, P1, {
+      onView: (view) => late.push(...(view.scene.mapSerial ? unannounced(m, view, t.ground, 12, 6) : unannounced(m, view, k.ground))),
+    })
+    await settle(h, [[P1, m]])
+    expect(m.tiles.get(k.ground)?.size).toBeGreaterThan(0)
+    const uploads = assets.uploads.length
+    const lookups = assets.images.length
+    const mark = m.messages.length
+    const origin = { sceneId: rowB, version: 1, dirty: false }
+    expect(await h.changeMap(t.scene, { tokenIds: [k.ada.id], arrival: { levelId: t.ground, x: 7.5, z: 12.5 }, origin })).toMatchObject({ ok: true })
+    await settle(h, [[P1, m]])
+    await waitFor(() => (m.tiles.get(t.ground)?.size ?? 0) > 0 && unannounced(m, m.view!, t.ground, 12, 6).length === 0, "the meadow's chunks")
+    // The keep's chunks were withdrawn; the meadow's were announced before the views revealing them.
+    expect(announced(m, k.ground, mark)).toEqual(["reset"])
+    expect(m.tiles.get(k.ground)?.size).toBe(0)
+    expect(late).toEqual([])
+    const fresh = assets.uploads.slice(uploads)
+    expect(fresh.length).toBeGreaterThan(0)
+    for (const key of fresh) {
+      expect(key.split("|")[1]).toBe(t.ground)
+      expect(assets.chunks.get(key)).toMatch(new RegExp(`^${rowB}/map2:`))
+    }
+    // Looked up under the meadow's own folders, never the first map's library row.
+    expect(assets.images.slice(lookups)).toEqual([`${t.scene.id}/map2`, `${rowB}/map2`])
+    expect(h.getSnapshot().library).toEqual(origin)
+    // A reloaded client learns the meadow's chunks only.
+    const m2 = mirror(fx, P1)
+    await waitFor(() => m2.view?.scene.mapSerial === 1 && m2.tiles.size > 0, "reloaded client")
+    expect([...m2.tiles.keys()]).toEqual([t.ground])
+    expect(unannounced(m2, m2.view!, t.ground, 12, 6)).toEqual([])
+    // A restarted host (the session row still names the keep's library scene) keeps to the meadow's folders.
+    const restartLookups = assets.images.length
+    await h.stop()
+    const b = host(fx, opts).host
+    await b.start()
+    await settle(b, [
+      [P1, m],
+      [P1, m2],
+    ])
+    await waitFor(() => assets.images.length > restartLookups && unannounced(m, m.view!, t.ground, 12, 6).length === 0, "chunks after the restart")
+    expect(assets.images.slice(restartLookups).every((f) => f.startsWith(`${t.scene.id}/`) || f.startsWith(`${rowB}/`))).toBe(true)
+    expect(assets.images.some((f) => f.startsWith(`${rowA}/`))).toBe(false)
+  })
+
+  it("a switch to a duplicated map (same level id, image and placement) re-cuts every chunk from the copy under new revs", async () => {
+    const k = withBackdrop()
+    const dup = structuredClone(k.scene)
+    dup.id = newId()
+    dup.name = "The Keep (copy)"
+    const assets = recordingAssets("supabase", { hasImage: (folder) => folder === k.scene.id || folder === dup.id })
+    const fx = await fixture(k.scene, [P1])
+    const { host: h } = host(fx, { assets: assets.store, tileCodec: tagged })
+    await h.start()
+    h.dispatch({ t: "assign-token", tokenId: k.ada.id, userId: P1, assigned: true })
+    const m = mirror(fx, P1)
+    await settle(h, [[P1, m]])
+    const revs = new Map<string, number>()
+    for (const e of announced(m, k.ground)) if (e !== "reset" && e.length === 4) revs.set(`${e[0]},${e[1]},${e[2]}`, e[3])
+    expect(revs.size).toBeGreaterThan(0)
+    const mark = m.messages.length
+    const at = k.scene.tokens[k.ada.id].position
+    expect(await h.changeMap(dup, { tokenIds: [k.ada.id], arrival: { levelId: k.ground, ...at }, origin: null })).toMatchObject({ ok: true })
+    await settle(h, [[P1, m]])
+    await waitFor(() => (m.tiles.get(k.ground)?.size ?? 0) > 0 && unannounced(m, m.view!, k.ground).length === 0, "the copy's chunks")
+    const after = announced(m, k.ground, mark)
+    // Everything known for the level starts over: announced again under new revs, even for the same cells.
+    expect(after[0]).toBe("reset")
+    const entries = after.slice(1).filter((e) => e !== "reset")
+    expect(entries.length).toBeGreaterThan(0)
+    let same = 0
+    for (const e of entries) {
+      expect(e).toHaveLength(4)
+      const before = revs.get(`${e[0]},${e[1]},${e[2]}`)
+      if (before !== undefined) same++
+      expect(e[3]).not.toBe(before)
+    }
+    expect(same).toBeGreaterThan(0)
+    // Every chunk the player now knows was cut from the copy's image.
+    for (const at of m.tiles.get(k.ground)!.keys()) expect(assets.chunks.get(`${P1}|${k.ground}|${at}`)).toMatch(new RegExp(`^${dup.id}/map:`))
+  })
 })
 
 describe("host runner — leak test (The Crooked Lantern)", () => {
@@ -1032,11 +1364,36 @@ describe("host runner — leak test (The Crooked Lantern)", () => {
     // Brunhild steps out from behind the pillar and walks around the common room; Pip scouts.
     const g = brunhild.levelId
     const moves = [
-      m1.move(brunhild.id, walk(g, [[14, 13], [14, 12], [15, 12], [16, 12]])),
-      m2.move(pip.id, walk(pip.levelId, [[30, 9], [29, 9], [28, 9], [27, 9]])),
+      m1.move(
+        brunhild.id,
+        walk(g, [
+          [14, 13],
+          [14, 12],
+          [15, 12],
+          [16, 12],
+        ])
+      ),
+      m2.move(
+        pip.id,
+        walk(pip.levelId, [
+          [30, 9],
+          [29, 9],
+          [28, 9],
+          [27, 9],
+        ])
+      ),
     ]
     await waitFor(() => m1.result(moves[0]) !== undefined && m2.result(moves[1]) !== undefined, "moves")
-    const back = m1.move(brunhild.id, walk(g, [[16, 12], [15, 12], [14, 12], [13, 12], [12, 12]]))
+    const back = m1.move(
+      brunhild.id,
+      walk(g, [
+        [16, 12],
+        [15, 12],
+        [14, 12],
+        [13, 12],
+        [12, 12],
+      ])
+    )
     await waitFor(() => m1.result(back) !== undefined, "move back")
     // The DM moves the hidden bandit around and toggles its torch: still nothing for players.
     h.dispatch({ t: "move-token", tokenId: bandit.id, levelId: g, x: 77.5, z: 62.5 })
@@ -1056,13 +1413,28 @@ describe("host runner — leak test (The Crooked Lantern)", () => {
       const all = [...m.raw, JSON.stringify(row?.view ?? null)].join("\n")
       expect(m.raw.length).toBeGreaterThan(2)
       for (const id of [bandit.id, torch.id, secret.id]) expect(all).not.toContain(id)
-      for (const s of ["dmNotes", "Old Moss", "Bandit", "barkeep has the key", "Pantry door", "Contraband", "secret", "loose stones", "attachedTokenId", "hidden", "blocksMovement"]) {
+      for (const s of [
+        "dmNotes",
+        "Old Moss",
+        "Bandit",
+        "barkeep has the key",
+        "Pantry door",
+        "Contraband",
+        "secret",
+        "loose stones",
+        "attachedTokenId",
+        "hidden",
+        "blocksMovement",
+      ]) {
         expect(all, s).not.toContain(s)
       }
       expect(playerViewSchema.parse(m.view)).toEqual(m.view)
     }
     // Without shared vision earlier, P1 never learned Pip's name; with it on, it is allowed.
-    const beforeShared = m1.raw.slice(0, m1.raw.findIndex((r) => r.includes('"sharedVision":true')))
+    const beforeShared = m1.raw.slice(
+      0,
+      m1.raw.findIndex((r) => r.includes('"sharedVision":true'))
+    )
     expect(beforeShared.join("\n")).not.toContain("Pip Thistledown")
 
     // Revealing the secret door to P1: sent as a wooden door, never as "secret".
@@ -1138,7 +1510,19 @@ describe("host runner — live changes", () => {
     h.dispatch({ t: "assign-token", tokenId: c.eve.id, userId: P1, assigned: true })
     const m = mirror(fx, P1)
     await settle(h, [[P1, m]])
-    const r = m.move(c.eve.id, walk(c.ground, [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1], [6, 1], [7, 1], [8, 1]]))
+    const r = m.move(
+      c.eve.id,
+      walk(c.ground, [
+        [1, 1],
+        [2, 1],
+        [3, 1],
+        [4, 1],
+        [5, 1],
+        [6, 1],
+        [7, 1],
+        [8, 1],
+      ])
+    )
     await waitFor(() => m.result(r) !== undefined, "move")
     await settle(h, [[P1, m]])
     expect(m.explored(c.ground, 2, 1)).toBe(true)
@@ -1171,10 +1555,228 @@ describe("host runner — live changes", () => {
     expect(m.view!.tokens[k.ada.id]).toBeUndefined()
     await waitFor(() => m.broadcasts.some((b) => b.t === "status" && b.sceneName === "The Corridor"), "status with the new map name")
     // Moves validate against the new map's occlusion world.
-    const r = m.move(c.eve.id, walk(c.ground, [[1, 1], [2, 1]]))
+    const r = m.move(
+      c.eve.id,
+      walk(c.ground, [
+        [1, 1],
+        [2, 1],
+      ])
+    )
     await waitFor(() => m.result(r) !== undefined, "move on the new map")
     expect(m.result(r)).toMatchObject({ ok: true, applied: 1 })
     expect(m.applyErrors).toEqual([])
+  })
+})
+
+describe("host runner — changing the map", () => {
+  const texts = (m: Mirror) =>
+    Object.values(m.view?.table?.log ?? {})
+      .sort((a, b) => a.at - b.at)
+      .map((x) => x.text)
+  const pings = (m: Mirror) => m.messages.filter((x) => x.t === "ping")
+  const cellOf = (h: HostRunnerImpl, tokenId: Id): [number, number] => {
+    const p = h.getSnapshot().state!.scene.tokens[tokenId].position
+    return [Math.floor(p.x / 5), Math.floor(p.z / 5)]
+  }
+
+  /** The keep with Ada (P1) and Bo (P2) wounded, both assigned, both players linked. */
+  async function party(extra: Parameters<typeof startHost>[1] = {}) {
+    const k = keep()
+    k.scene.tokens[k.ada.id].hp = { current: 7, max: 12, temp: 0 }
+    k.scene.tokens[k.bo.id].hp = { current: 3, max: 10, temp: 2 }
+    const { fx, h } = await hosted(k.scene, [P1, P2], extra)
+    h.dispatch({ t: "assign-token", tokenId: k.ada.id, userId: P1, assigned: true })
+    h.dispatch({ t: "assign-token", tokenId: k.bo.id, userId: P2, assigned: true })
+    const m1 = mirror(fx, P1)
+    const m2 = mirror(fx, P2)
+    const both: Array<[string, Mirror]> = [
+      [P1, m1],
+      [P2, m2],
+    ]
+    await settle(h, both)
+    return { k, fx, h, m1, m2, both }
+  }
+
+  it("carries the party: owners kept, exact hit points for their owners only, the log goes on, moves validate on the new map", async () => {
+    const { k, h, m1, m2, both } = await party()
+    await m1.send({ t: "say", reqId: "s1", text: "Off we go", to: "all" })
+    await waitFor(() => texts(m2).includes("Off we go"), "chat")
+    expect(m1.view!.scene.mapSerial).toBeUndefined()
+    const t = meadow()
+    const r = await h.changeMap(t.scene, { tokenIds: [k.ada.id, k.bo.id], arrival: { levelId: t.ground, x: 7.5, z: 12.5 }, origin: null })
+    expect(r).toEqual({ ok: true, carried: { [k.ada.id]: k.ada.id, [k.bo.id]: k.bo.id }, saved: true })
+    await settle(h, both)
+    const state = h.getSnapshot().state!
+    // Nobody re-assigned anything: the carried tokens keep their owners, and only they have any.
+    expect(state.owners).toEqual({ [k.ada.id]: [P1], [k.bo.id]: [P2] })
+    expect(m1.view!.controlledTokenIds).toEqual([k.ada.id])
+    expect(m2.view!.controlledTokenIds).toEqual([k.bo.id])
+    expect(Object.keys(m1.view!.scene.levels)).toEqual([t.ground])
+    expect(m1.view!.tokens[k.ada.id]).toMatchObject({ levelId: t.ground, hp: { current: 7, max: 12, temp: 0 }, name: "Ada Lovelace" })
+    // Bo stands next to Ada: P1 sees him, with a band at most (his exact hit points are P2's).
+    expect(m1.view!.tokens[k.bo.id]).toMatchObject({ label: "Bo", health: "bloodied" })
+    expect(m1.view!.tokens[k.bo.id].hp).toBeUndefined()
+    expect(m2.view!.tokens[k.bo.id].hp).toEqual({ current: 3, max: 10, temp: 2 })
+    expect(m2.view!.tokens[k.ada.id].hp).toBeUndefined()
+    // Left behind: the keep's other tokens; beyond the wall: the wolf.
+    for (const id of [k.goblin.id, k.assassin.id, t.wolf.id]) expect(m1.view!.tokens[id]).toBeUndefined()
+    // The chat log goes on, with the notice; the view says which map of the game this is.
+    expect(texts(m1)).toEqual(["Off we go", "The party travels to The Meadow"])
+    expect(texts(m2)).toEqual(["Off we go", "The party travels to The Meadow"])
+    expect(state.table!.log.map((x) => x.text)).toEqual(["Off we go", "The party travels to The Meadow"])
+    expect(m1.view!.scene.mapSerial).toBe(1)
+    expect(m2.view!.scene.mapSerial).toBe(1)
+    await waitFor(() => m1.broadcasts.some((b) => b.t === "status" && b.sceneName === "The Meadow"), "status with the new map name")
+    // Moves validate against the meadow's walls (the keep had none at x = 25).
+    const [i, j] = cellOf(h, k.ada.id)
+    const path: Array<[number, number]> = []
+    for (let x = i; x <= 7; x++) path.push([x, j])
+    const mv = m1.move(k.ada.id, walk(t.ground, path))
+    await waitFor(() => m1.result(mv) !== undefined, "move on the new map")
+    expect(m1.result(mv)).toEqual({ reqId: mv, ok: false, applied: 4 - i, reason: "blocked" })
+    await settle(h, both)
+    expect(cellOf(h, k.ada.id)).toEqual([4, j])
+    for (const m of [m1, m2]) {
+      expect(playerViewSchema.parse(m.view)).toEqual(m.view)
+      expect(m.applyErrors).toEqual([])
+      expect(m.raw.join("\n")).not.toContain("SENTINEL_")
+    }
+  })
+
+  it("a duplicated map: only the carried token keeps its owner, the twins left behind are nobody's", async () => {
+    const { k, h, m1, m2, both } = await party()
+    const dup = structuredClone(k.scene)
+    dup.id = newId()
+    dup.name = "The Keep (copy)"
+    const r = await h.changeMap(dup, { tokenIds: [k.ada.id], arrival: { levelId: k.ground, x: 12.5, z: 12.5 }, origin: null })
+    expect(r).toMatchObject({ ok: true, carried: { [k.ada.id]: k.ada.id } })
+    await settle(h, both)
+    const state = h.getSnapshot().state!
+    // Bo's twin stands on the copy, but P2 does not control (or see through) it.
+    expect(Object.keys(state.scene.tokens).sort()).toEqual(Object.keys(k.scene.tokens).sort())
+    expect(state.owners).toEqual({ [k.ada.id]: [P1] })
+    expect(m1.view!.controlledTokenIds).toEqual([k.ada.id])
+    expect(cellOf(h, k.ada.id)).toEqual([2, 2])
+    expect(m2.view!.controlledTokenIds).toEqual([])
+    expect(m2.view!.tokens).toEqual({})
+    const mv = m2.move(
+      k.bo.id,
+      walk(k.ground, [
+        [1, 1],
+        [1, 2],
+      ])
+    )
+    await waitFor(() => m2.result(mv) !== undefined, "move of a twin")
+    expect(m2.result(mv)).toEqual({ reqId: mv, ok: false, reason: "not-owner" })
+  })
+
+  it("the swap is saved before it resolves: a restarted host resumes the new map with the carried owners", async () => {
+    const k = keep()
+    const t = meadow()
+    const fx = await fixture(k.scene, [P1])
+    const scenes = createLocalScenesRepo(fx.store)
+    const row = await scenes.create(t.scene)
+    const a = host(fx, { scenes }).host
+    await a.start()
+    a.dispatch({ t: "assign-token", tokenId: k.ada.id, userId: P1, assigned: true })
+    const m = mirror(fx, P1)
+    await settle(a, [[P1, m]])
+    const origin = { sceneId: row.id, version: 1, dirty: false }
+    const r = await a.changeMap(t.scene, { tokenIds: [k.ada.id], arrival: { levelId: t.ground, x: 7.5, z: 12.5 }, origin })
+    expect(r).toEqual({ ok: true, carried: { [k.ada.id]: k.ada.id }, saved: true })
+    expect(a.getSnapshot().library).toEqual(origin)
+    const stored = await fx.dmRepo.loadSessionState(fx.sessionId)
+    if (stored?.content.kind !== "game") throw new Error("the game was not saved")
+    const parsed = parseGameStateDetailed(stored.content.state)
+    if (!parsed.ok) throw new Error("the saved game does not parse")
+    expect(parsed.state.scene.id).toBe(t.scene.id)
+    expect(parsed.state.origin).toEqual(origin)
+    expect(parsed.state.mapSerial).toBe(1)
+    await settle(a, [[P1, m]])
+    const epochA = a.getSnapshot().epoch
+    await a.stop()
+
+    const b = host(fx, { scenes }).host
+    await b.start()
+    expect(b.getSnapshot().status).toBe("hosting")
+    const state = b.getSnapshot().state!
+    expect(state.scene.id).toBe(t.scene.id)
+    expect(state.owners).toEqual({ [k.ada.id]: [P1] })
+    expect(state.table!.log.map((x) => x.text)).toEqual(["The party travels to The Meadow"])
+    expect(b.getSnapshot().library).toEqual(origin)
+    await settle(b, [[P1, m]])
+    expect(m.epoch).not.toBe(epochA)
+    expect(m.view!.scene.mapSerial).toBe(1)
+    expect(m.view!.controlledTokenIds).toEqual([k.ada.id])
+    expect(Object.keys(m.view!.scene.levels)).toEqual([t.ground])
+    expect(m.applyErrors).toEqual([])
+  })
+
+  it("until a client has the new map's view, its moves are refused and its pings dropped", async () => {
+    let delay = 0
+    const { k, h, m1, m2, both } = await party({ createVisionClient: slowVision(() => delay) })
+    const seen: HostPingEvent[] = []
+    h.onPing((ev) => seen.push(ev))
+    const t = meadow()
+    // Views of the new map take a while (slow vision): the clients still show the keep meanwhile.
+    delay = 400
+    const changing = h.changeMap(t.scene, { tokenIds: [k.ada.id, k.bo.id], arrival: { levelId: t.ground, x: 7.5, z: 12.5 }, origin: null })
+    const [ai, aj] = cellOf(h, k.ada.id)
+    const [bi, bj] = cellOf(h, k.bo.id)
+    const step = (
+      [
+        [ai, aj - 1],
+        [ai, aj + 1],
+        [ai - 1, aj],
+        [ai + 1, aj],
+      ] as Array<[number, number]>
+    ).find(([i, j]) => i >= 0 && j >= 0 && i < 5 && j < 6 && !(i === bi && j === bj))!
+    const stale = m1.move(k.ada.id, walk(t.ground, [[ai, aj], step]))
+    const door = m1.door(k.door.id, "open")
+    // A ping on the keep's level (gone), and one on the meadow's (not in the client's view yet).
+    await m1.send({ t: "ping", levelId: k.ground, x: 12, z: 14 })
+    await m1.send({ t: "ping", levelId: t.ground, x: 12, z: 14 })
+    await waitFor(() => m1.result(stale) !== undefined && m1.result(door) !== undefined, "results")
+    expect(m1.result(stale)).toEqual({ reqId: stale, ok: false, reason: "cannot" })
+    expect(m1.result(door)).toEqual({ reqId: door, ok: false, reason: "cannot" })
+    delay = 0
+    expect(await changing).toMatchObject({ ok: true })
+    await settle(h, both)
+    expect(cellOf(h, k.ada.id)).toEqual([ai, aj])
+    expect(seen).toEqual([])
+    expect(pings(m2)).toEqual([])
+    // With the new view in hand, the same requests go through.
+    const fresh = m1.move(k.ada.id, walk(t.ground, [[ai, aj], step]))
+    await waitFor(() => m1.result(fresh) !== undefined, "move")
+    expect(m1.result(fresh)).toMatchObject({ ok: true, applied: 1 })
+    await m1.send({ t: "ping", levelId: t.ground, x: 12, z: 14 })
+    await waitFor(() => seen.length === 1 && pings(m2).length === 1, "ping on the new map")
+    expect(seen[0]).toMatchObject({ ping: { levelId: t.ground }, from: P1 })
+  })
+
+  it("refusals leave the game as it was", async () => {
+    const { k, h, m1, both } = await party()
+    const before = h.getSnapshot().state!
+    const t = meadow()
+    const same = await h.changeMap(structuredClone(before.scene), { tokenIds: [k.ada.id], arrival: { levelId: k.ground, x: 7.5, z: 7.5 }, origin: null })
+    expect(same).toEqual({ ok: false, error: "same-map", unplaced: [] })
+    // One square, two travellers.
+    const tiny = flatScene(1, 1, "bright")
+    const full = await h.changeMap(tiny.scene, { tokenIds: [k.ada.id, k.bo.id], arrival: { levelId: tiny.ground, x: 2.5, z: 2.5 }, origin: null })
+    expect(full).toMatchObject({ ok: false, error: "no-room" })
+    expect(!full.ok && full.unplaced.length).toBe(1)
+    const lost = await h.changeMap(t.scene, { tokenIds: [k.ada.id], arrival: { levelId: "nowhere", x: 7.5, z: 7.5 }, origin: null })
+    expect(lost).toEqual({ ok: false, error: "unknown-level", unplaced: [] })
+    await sleep(50)
+    await settle(h, both)
+    const after = h.getSnapshot().state!
+    expect(after.scene).toBe(before.scene)
+    expect(after.owners).toBe(before.owners)
+    expect(after.table).toBe(before.table)
+    expect(after.origin).toEqual(before.origin)
+    expect(after.mapSerial).toBeUndefined()
+    expect(m1.view!.scene.name).toBe("The Keep")
+    expect(m1.view!.scene.mapSerial).toBeUndefined()
   })
 })
 
@@ -1268,7 +1870,19 @@ describe("host runner — terrain editing data", () => {
     await settle(h, [[P1, m]])
     const knowledgeRev = () => (h as unknown as { knowledgeRev: number }).knowledgeRev
     const rev = knowledgeRev()
-    const r = m.move(c.eve.id, walk(c.ground, [[1, 1], [2, 1], [3, 1], [4, 1], [5, 1], [6, 1], [7, 1], [8, 1]]))
+    const r = m.move(
+      c.eve.id,
+      walk(c.ground, [
+        [1, 1],
+        [2, 1],
+        [3, 1],
+        [4, 1],
+        [5, 1],
+        [6, 1],
+        [7, 1],
+        [8, 1],
+      ])
+    )
     await waitFor(() => m.result(r) !== undefined, "move result")
     expect(m.result(r)).toMatchObject({ ok: true, applied: 7 })
     // The DM renames the shape while the six step probes (60 ms each) are still being evaluated: the
@@ -1334,7 +1948,12 @@ describe("host runner — the table (chat, dice, combat, pings)", () => {
     const roll = Object.values(m2.view!.table!.log).find((x) => x.kind === "roll")!
     expect(roll.roll).toMatchObject({ formula: "1d20 + 2", total: 15 })
     // The DM sees everything.
-    expect(h.getSnapshot().state!.table!.log.map((x) => x.text).sort()).toEqual(["Hello table", "SENTINEL_DM_NOTE", "SENTINEL_WHISPER", "to hit"])
+    expect(
+      h
+        .getSnapshot()
+        .state!.table!.log.map((x) => x.text)
+        .sort()
+    ).toEqual(["Hello table", "SENTINEL_DM_NOTE", "SENTINEL_WHISPER", "to hit"])
     expect(m1.raw.join("\n")).not.toContain("SENTINEL_WHISPER")
     expect(m2.raw.join("\n")).not.toContain("SENTINEL_DM_NOTE")
     expect(playerViewSchema.parse(m1.view)).toEqual(m1.view)

@@ -120,14 +120,25 @@ function scriptedTiles() {
 
 const L = "lvl"
 
-function view(opts: { w?: number; d?: number; cells: Array<[number, number]>; partial?: Array<[number, number, number]>; rect?: { x: number; z: number; w: number; d: number }; tilePx?: number; token?: { x: number; z: number }; backdrop?: boolean }): PlayerView {
+function view(opts: {
+  w?: number
+  d?: number
+  cells: Array<[number, number]>
+  partial?: Array<[number, number, number]>
+  rect?: { x: number; z: number; w: number; d: number }
+  tilePx?: number
+  token?: { x: number; z: number }
+  backdrop?: boolean
+}): PlayerView {
   const w = opts.w ?? 4
   const d = opts.d ?? 3
   const mask = createCellMask(w, d)
   for (const [i, j] of opts.cells) setCell(mask, j * w + i)
   for (const [i, j, sub] of opts.partial ?? []) setSubcells(mask, j * w + i, sub)
   const explored = encodeMask(mask)
-  const tokens = opts.token ? { t1: { id: "t1", levelId: L, position: opts.token, size: "medium", height: 6, color: "#ffffff", imageUrl: null, label: null } } : {}
+  const tokens = opts.token
+    ? { t1: { id: "t1", levelId: L, position: opts.token, size: "medium", height: 6, color: "#ffffff", imageUrl: null, label: null } }
+    : {}
   return {
     viewVersion: 1,
     sessionId: "s",
@@ -137,7 +148,10 @@ function view(opts: { w?: number; d?: number; cells: Array<[number, number]>; pa
     tokens,
     terrain: {},
     masks: { [L]: { perception: explored, explored, sunlit: explored } },
-    backdrops: opts.backdrop === false ? {} : { [L]: { rect: opts.rect ?? { x: 0, z: 0, w: w * 5, d: d * 5 }, opacity: 1, tintWalls: false, tilePx: opts.tilePx ?? 140 } },
+    backdrops:
+      opts.backdrop === false
+        ? {}
+        : { [L]: { rect: opts.rect ?? { x: 0, z: 0, w: w * 5, d: d * 5 }, opacity: 1, tintWalls: false, tilePx: opts.tilePx ?? 140 } },
     controlledTokenIds: opts.token ? ["t1"] : [],
     visionTokenIds: [],
     flags: { movementLocked: false, sharedVision: false, enforceSpeed: false },
@@ -198,7 +212,14 @@ describe("backdrop layout", () => {
 describe("BackdropCompositor", () => {
   it("draws explored tiles, announces once with content, then only updates new cells", async () => {
     const { clock, canvases, tiles, events, comp } = setup()
-    comp.sync(view({ cells: [[0, 0], [1, 0]] }))
+    comp.sync(
+      view({
+        cells: [
+          [0, 0],
+          [1, 0],
+        ],
+      })
+    )
     expect(canvases.made).toHaveLength(1)
     expect([canvases.made[0].canvas.width, canvases.made[0].canvas.height]).toEqual([560, 420])
     await clock.advance(60)
@@ -212,7 +233,13 @@ describe("BackdropCompositor", () => {
     expect(events[0]).toMatchObject({ kind: "set", levelId: L, dirty: { x: 0, z: 0, w: 10, d: 5 } })
 
     // Exploration grows by one cell: one fetch, one update with that cell's rect.
-    const grown = view({ cells: [[0, 0], [1, 0], [2, 2]] })
+    const grown = view({
+      cells: [
+        [0, 0],
+        [1, 0],
+        [2, 2],
+      ],
+    })
     comp.sync(grown)
     await clock.advance(60)
     expect(tiles.calls).toHaveLength(3)
@@ -234,7 +261,16 @@ describe("BackdropCompositor", () => {
     await clock.advance(60)
     expect(events.map((e) => e.kind)).toEqual(["set"])
     // Three more cells, fetched one at a time: one update once the burst is through (150 ms window).
-    comp.sync(view({ cells: [[0, 0], [1, 0], [2, 0], [3, 0]] }))
+    comp.sync(
+      view({
+        cells: [
+          [0, 0],
+          [1, 0],
+          [2, 0],
+          [3, 0],
+        ],
+      })
+    )
     await clock.advance(100)
     expect(tiles.calls).toHaveLength(4)
     expect(events).toHaveLength(1)
@@ -278,17 +314,39 @@ describe("BackdropCompositor", () => {
 
     // A give-up is also retried when exploration grows.
     tiles.answers.set("lvl:1,0", ["null", "null", "null"])
-    comp.sync(view({ cells: [[0, 0], [1, 0]] }))
+    comp.sync(
+      view({
+        cells: [
+          [0, 0],
+          [1, 0],
+        ],
+      })
+    )
     await clock.advance(1000)
     expect(comp.layer(L)?.stats.missing).toBe(1)
-    comp.sync(view({ cells: [[0, 0], [1, 0], [2, 0]] }))
+    comp.sync(
+      view({
+        cells: [
+          [0, 0],
+          [1, 0],
+          [2, 0],
+        ],
+      })
+    )
     await clock.advance(0)
     expect(tiles.calls.filter((c) => c === "lvl:1,0")).toHaveLength(4)
   })
 
   it("clears cells that are no longer explored (fog reset)", async () => {
     const { clock, canvases, events, comp } = setup()
-    comp.sync(view({ cells: [[0, 0], [1, 0]] }))
+    comp.sync(
+      view({
+        cells: [
+          [0, 0],
+          [1, 0],
+        ],
+      })
+    )
     await clock.advance(60)
     comp.sync(view({ cells: [[0, 0]] }))
     await clock.advance(60)
@@ -325,6 +383,74 @@ describe("BackdropCompositor", () => {
     expect(comp.layers()).toEqual([])
   })
 
+  it("rebuilds a layer on another map even when level id and placement stay (a duplicated scene)", async () => {
+    const { clock, canvases, tiles, events, comp } = setup()
+    const onMap = (serial: number | undefined, cells: Array<[number, number]>) => {
+      const v = view({ cells })
+      if (serial !== undefined) v.scene.mapSerial = serial
+      return v
+    }
+    comp.sync(
+      onMap(undefined, [
+        [0, 0],
+        [1, 0],
+      ])
+    )
+    await clock.advance(60)
+    expect(tiles.calls).toHaveLength(2)
+    // The same map again (a snapshot after a host restart, masks re-sent): the layer and its pixels stay.
+    comp.sync(
+      onMap(undefined, [
+        [0, 0],
+        [1, 0],
+      ])
+    )
+    await clock.advance(60)
+    expect(tiles.calls).toHaveLength(2)
+    expect(events.map((e) => e.kind)).toEqual(["set"])
+
+    // Another map: the old canvas is released, every explored cell is fetched again (the tile source
+    // holds the new map's chunks: the host reset the level and announced them, maybe before this view).
+    comp.sync(
+      onMap(1, [
+        [0, 0],
+        [1, 0],
+      ])
+    )
+    expect(events.at(-1)).toEqual({ kind: "remove", levelId: L })
+    expect(canvases.made[0].canvas.width).toBe(0)
+    await clock.advance(60)
+    expect(tiles.calls).toHaveLength(4)
+    expect(canvases.made).toHaveLength(2)
+    expect(events.at(-1)).toMatchObject({ kind: "set", layer: { canvas: canvases.made[1].canvas } })
+    expect(comp.layer(L)?.stats).toEqual({ wanted: 2, drawn: 2, pending: 0, missing: 0 })
+
+    // A tile of the old map still on its way when the map changes is never drawn on the new one.
+    const release = tiles.hold()
+    comp.sync(
+      onMap(1, [
+        [0, 0],
+        [1, 0],
+        [2, 0],
+      ])
+    )
+    await clock.advance(0)
+    comp.sync(onMap(2, [[0, 0]]))
+    release()
+    await clock.advance(60)
+    expect(canvases.made).toHaveLength(3)
+    expect(canvases.made[1].ops.filter((o) => o.tile === "lvl:2,0")).toEqual([])
+    expect(canvases.made[2].ops.filter((o) => o.op === "draw").map((o) => o.tile)).toEqual(["lvl:0,0"])
+
+    // A new pixel budget keeps the layer on its map (no teardown on the next view of it).
+    comp.setMaxCanvasPixels(1e4)
+    const made = canvases.made.length
+    comp.sync(onMap(2, [[0, 0]]))
+    await clock.advance(60)
+    expect(canvases.made).toHaveLength(made)
+    expect(events.at(-1)?.kind).toBe("set")
+  })
+
   it("fetches nearest-first around the player's token, within the concurrency limit", async () => {
     const { clock, tiles, comp } = setup({ concurrency: 2 })
     const all: Array<[number, number]> = []
@@ -352,7 +478,16 @@ describe("BackdropCompositor", () => {
 
   it("reports one dirty rect per touched chunk; `dirty` stays their union", async () => {
     const { clock, events, comp } = setup()
-    comp.sync(view({ w: 27, d: 47, cells: [[0, 0], [20, 40]] }))
+    comp.sync(
+      view({
+        w: 27,
+        d: 47,
+        cells: [
+          [0, 0],
+          [20, 40],
+        ],
+      })
+    )
     await clock.advance(60)
     expect(events).toHaveLength(1)
     expect(events[0]).toMatchObject({
@@ -364,7 +499,18 @@ describe("BackdropCompositor", () => {
       ],
     })
     // Two far-apart cells in one flush: two small regions, not the box between them.
-    comp.sync(view({ w: 27, d: 47, cells: [[0, 0], [20, 40], [1, 0], [21, 41]] }))
+    comp.sync(
+      view({
+        w: 27,
+        d: 47,
+        cells: [
+          [0, 0],
+          [20, 40],
+          [1, 0],
+          [21, 41],
+        ],
+      })
+    )
     await clock.advance(200)
     expect(events).toHaveLength(2)
     const ev = events[1]
@@ -379,7 +525,17 @@ describe("BackdropCompositor", () => {
 
   it("merges cells of one 4×4 chunk into one dirty rect, including cells cleared by a fog reset", async () => {
     const { clock, events, comp } = setup()
-    comp.sync(view({ w: 8, d: 8, cells: [[0, 0], [3, 3], [5, 5]] }))
+    comp.sync(
+      view({
+        w: 8,
+        d: 8,
+        cells: [
+          [0, 0],
+          [3, 3],
+          [5, 5],
+        ],
+      })
+    )
     await clock.advance(60)
     expect(events[0]).toMatchObject({
       kind: "set",
@@ -402,14 +558,31 @@ describe("BackdropCompositor", () => {
 
   it("clips dirty rects to a backdrop rect that is not cell-aligned", async () => {
     const { clock, events, comp } = setup()
-    comp.sync(view({ cells: [[0, 0], [3, 2]], rect: { x: 2.5, z: 2.5, w: 15, d: 10 } }))
+    comp.sync(
+      view({
+        cells: [
+          [0, 0],
+          [3, 2],
+        ],
+        rect: { x: 2.5, z: 2.5, w: 15, d: 10 },
+      })
+    )
     await clock.advance(60)
     expect(events[0]).toMatchObject({
       kind: "set",
       layer: { rect: { x: 2.5, z: 2.5, w: 15, d: 10 } },
       dirtyRects: [{ x: 2.5, z: 2.5, w: 15, d: 10 }],
     })
-    comp.sync(view({ cells: [[0, 0], [3, 2], [0, 2]], rect: { x: 2.5, z: 2.5, w: 15, d: 10 } }))
+    comp.sync(
+      view({
+        cells: [
+          [0, 0],
+          [3, 2],
+          [0, 2],
+        ],
+        rect: { x: 2.5, z: 2.5, w: 15, d: 10 },
+      })
+    )
     await clock.advance(60)
     expect(events[1]).toMatchObject({ kind: "update", dirtyRects: [{ x: 2.5, z: 10, w: 2.5, d: 2.5 }] })
   })
@@ -451,7 +624,17 @@ describe("BackdropCompositor: canvas sized to the explored area", () => {
     expect(events.map((e) => e.kind)).toEqual(["set"])
     expect(comp.layer(L)?.rect).toEqual({ x: 40, z: 40, w: 20, d: 20 })
     const first = canvases.made[0].canvas
-    comp.sync(view({ w: 27, d: 47, cells: [[8, 8], [4, 8]], rect: FULL }))
+    comp.sync(
+      view({
+        w: 27,
+        d: 47,
+        cells: [
+          [8, 8],
+          [4, 8],
+        ],
+        rect: FULL,
+      })
+    )
     // Grown to the left by at least half its width, chunk-aligned: cells 4..11.
     expect(canvases.made).toHaveLength(2)
     const grown = canvases.made[1]
@@ -470,7 +653,17 @@ describe("BackdropCompositor: canvas sized to the explored area", () => {
 
   it("never shrinks on a fog reset; loses the canvas when nothing stays explored", async () => {
     const { clock, canvases, events, comp } = setup()
-    comp.sync(view({ w: 27, d: 47, cells: [[0, 0], [9, 0]], rect: FULL }))
+    comp.sync(
+      view({
+        w: 27,
+        d: 47,
+        cells: [
+          [0, 0],
+          [9, 0],
+        ],
+        rect: FULL,
+      })
+    )
     await clock.advance(60)
     const size = [canvases.made[0].canvas.width, canvases.made[0].canvas.height]
     comp.sync(view({ w: 27, d: 47, cells: [[0, 0]], rect: FULL }))
@@ -504,7 +697,17 @@ describe("BackdropCompositor: canvas sized to the explored area", () => {
     expect(canvases.made[1].ops[0]).toMatchObject({ op: "draw", x: 0, y: 0, w: 4 * ppc, h: 4 * ppc })
     expect(events.at(-1)).toMatchObject({ kind: "set", layer: { pxPerCell: ppc, canvas: canvases.made[1].canvas } })
     // The next view with the same backdrop keeps the rescaled layer (no teardown, no refetch).
-    comp.sync(view({ w: 27, d: 47, cells: [[0, 0], [1, 0]], rect: FULL }))
+    comp.sync(
+      view({
+        w: 27,
+        d: 47,
+        cells: [
+          [0, 0],
+          [1, 0],
+        ],
+        rect: FULL,
+      })
+    )
     await clock.advance(200)
     expect(canvases.made).toHaveLength(2)
     expect(events.filter((e) => e.kind === "remove")).toEqual([])
@@ -512,10 +715,20 @@ describe("BackdropCompositor: canvas sized to the explored area", () => {
 
   it("refreshCells draws a cell again over its old pixels", async () => {
     const { clock, canvases, tiles, events, comp } = setup()
-    comp.sync(view({ cells: [[0, 0], [1, 0]] }))
+    comp.sync(
+      view({
+        cells: [
+          [0, 0],
+          [1, 0],
+        ],
+      })
+    )
     await clock.advance(60)
     expect(tiles.calls).toHaveLength(2)
-    comp.refreshCells(L, [{ i: 1, j: 0 }, { i: 3, j: 2 }])
+    comp.refreshCells(L, [
+      { i: 1, j: 0 },
+      { i: 3, j: 2 },
+    ])
     await clock.advance(60)
     // Only the drawn, still explored cell is fetched again.
     expect(tiles.calls).toEqual(["lvl:0,0", "lvl:1,0", "lvl:1,0"])
@@ -526,7 +739,15 @@ describe("BackdropCompositor: canvas sized to the explored area", () => {
     expect(events.at(-1)).toMatchObject({ kind: "update", dirtyRects: [{ x: 5, z: 0, w: 5, d: 5 }] })
     // A refresh while the old tile is still on its way fetches once more after it landed.
     const release = tiles.hold()
-    comp.sync(view({ cells: [[0, 0], [1, 0], [2, 0]] }))
+    comp.sync(
+      view({
+        cells: [
+          [0, 0],
+          [1, 0],
+          [2, 0],
+        ],
+      })
+    )
     await clock.advance(0)
     comp.refreshCells(L, [{ i: 2, j: 0 }])
     release()

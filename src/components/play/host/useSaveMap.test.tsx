@@ -18,6 +18,7 @@ import { NetError } from "@/net/supabase"
 
 import {
   changedSinceStart,
+  LIBRARY_SCENE_DELETED,
   useSaveMap,
   type SaveMap,
   type SaveMapRunner,
@@ -28,6 +29,7 @@ vi.mock("sonner", () => ({
     success: vi.fn(),
     error: vi.fn(),
     info: vi.fn(),
+    dismiss: vi.fn(),
   }),
 }))
 const { toast } = await import("sonner")
@@ -56,7 +58,14 @@ const SESSION_START = "2026-09-01T10:00:00.000Z"
 
 type Library = HostSnapshot["library"]
 
-function fakeServices(opts: { exists?: boolean; updatedAt?: string } = {}) {
+function fakeServices(
+  opts: {
+    exists?: boolean
+    updatedAt?: string
+    /** Another library row (a map the DM changed to); `gate` holds its lookup until resolved. */
+    other?: { name: string; gate?: Promise<void> }
+  } = {}
+) {
   const summary = {
     id: "row-1",
     name: "The Crooked Lantern",
@@ -81,8 +90,13 @@ function fakeServices(opts: { exists?: boolean; updatedAt?: string } = {}) {
       ],
     },
     scenes: {
-      get: async (id: string) =>
-        id === "row-1" && opts.exists !== false ? summary : null,
+      get: async (id: string) => {
+        if (id === "row-2" && opts.other) {
+          await opts.other.gate
+          return { ...summary, id: "row-2", name: opts.other.name }
+        }
+        return id === "row-1" && opts.exists !== false ? summary : null
+      },
     },
   } as unknown as AppServices
   return services
@@ -188,7 +202,7 @@ describe("useSaveMap", () => {
     expect(ok).toBe(false)
     expect(ref.current.dirty).toBe(true)
     expect(toast.error).toHaveBeenCalledWith(
-      "The library map was changed since this session started",
+      "This map was changed in your library since it was loaded",
       expect.objectContaining({
         action: expect.objectContaining({ label: "Overwrite" }),
       })
@@ -198,6 +212,110 @@ describe("useSaveMap", () => {
     })
     expect(ok).toBe(true)
     expect(saveMapToLibrary).toHaveBeenLastCalledWith({ force: true })
+  })
+
+  it("follows the origin to the library scene of a new map", async () => {
+    let open = () => {}
+    const gate = new Promise<void>((r) => (open = r))
+    const { runner, saveMapToLibrary, box } = fakeRunner({
+      sceneId: "row-1",
+      version: 4,
+      dirty: true,
+    })
+    const ref = await mount(
+      fakeServices({ other: { name: "The Sunken Crypt", gate } }),
+      runner,
+      box
+    )
+    expect(ref.current.library).toMatchObject({ status: "linked" })
+    // The DM changes the map: the game's origin is now the new map's row, clean.
+    box.library = { sceneId: "row-2", version: 1, dirty: false }
+    await ref.rerender()
+    expect(ref.current.library).toEqual({ status: "loading" })
+    expect(ref.current.dirty).toBe(false)
+    await act(async () => {
+      open()
+      await gate
+    })
+    expect(ref.current.library).toEqual({
+      status: "linked",
+      sceneId: "row-2",
+      name: "The Sunken Crypt",
+    })
+    expect(saveMapToLibrary).not.toHaveBeenCalled()
+  })
+
+  it("never overwrites the old map's library scene with the new map from a stale conflict toast", async () => {
+    const { runner, saveMapToLibrary, box } = fakeRunner(
+      { sceneId: "row-1", version: 4, dirty: true },
+      async (o) => {
+        if (!o?.force) throw new NetError("version_conflict", "conflict")
+        return 6
+      }
+    )
+    const ref = await mount(
+      fakeServices({ other: { name: "The Sunken Crypt" } }),
+      runner,
+      box
+    )
+    await act(async () => {
+      await ref.current.save({ confirm: false })
+    })
+    const call = vi
+      .mocked(toast.error)
+      .mock.calls.find(
+        ([title]) =>
+          title === "This map was changed in your library since it was loaded"
+      )
+    const opts = call?.[1] as {
+      id?: string
+      action?: { onClick(e?: unknown): void }
+    }
+    expect(opts.action).toBeDefined()
+    expect(saveMapToLibrary).toHaveBeenCalledTimes(1)
+
+    // The game moves to another map before the DM clicks "Overwrite".
+    box.library = { sceneId: "row-2", version: 1, dirty: false }
+    await ref.rerender()
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(ref.current.library).toMatchObject({
+      status: "linked",
+      sceneId: "row-2",
+    })
+    expect(toast.dismiss).toHaveBeenCalledWith(opts.id)
+    await act(async () => {
+      opts.action!.onClick()
+      await Promise.resolve()
+    })
+    expect(saveMapToLibrary).toHaveBeenCalledTimes(1)
+  })
+
+  it("overwrites from the conflict toast while the game still plays that map", async () => {
+    const { runner, saveMapToLibrary, box } = fakeRunner(
+      { sceneId: "row-1", version: 4, dirty: true },
+      async (o) => {
+        if (!o?.force) throw new NetError("version_conflict", "conflict")
+        return 6
+      }
+    )
+    const ref = await mount(fakeServices(), runner, box)
+    await act(async () => {
+      await ref.current.save({ confirm: false })
+    })
+    const opts = vi.mocked(toast.error).mock.calls[0][1] as {
+      action: { onClick(e?: unknown): void }
+    }
+    await act(async () => {
+      opts.action.onClick()
+      await Promise.resolve()
+    })
+    expect(saveMapToLibrary).toHaveBeenLastCalledWith({ force: true })
+    expect(toast.success).toHaveBeenCalledWith(
+      "Saved version 6",
+      expect.anything()
+    )
   })
 
   it("asks first when no base version is known and the library changed since the session started", async () => {
@@ -218,7 +336,7 @@ describe("useSaveMap", () => {
     expect(ok).toBe(false)
     expect(saveMapToLibrary).not.toHaveBeenCalled()
     expect(toast.error).toHaveBeenCalledWith(
-      "The library map was changed since this session started",
+      "This map was changed in your library since it was loaded",
       expect.anything()
     )
     await act(async () => {
@@ -238,6 +356,10 @@ describe("useSaveMap", () => {
     })
     expect(ok).toBe(false)
     expect(none.saveMapToLibrary).not.toHaveBeenCalled()
+    expect(toast.error).toHaveBeenCalledWith(
+      "There is no library scene to save to",
+      { description: LIBRARY_SCENE_DELETED }
+    )
     act(() => root?.unmount())
 
     // Deleted from the library after the session started.

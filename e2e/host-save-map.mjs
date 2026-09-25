@@ -1,6 +1,6 @@
 // "Save map to library" end to end (local mode, The Crooked Lantern). Map edits made during a live session ("Edit map") only
 // change the session; the host console's "Save map to library" writes them as a new version of the
-// library scene the session was started from.
+// library scene the live map comes from.
 //
 //   1. DM opens a copy of the sample, starts a session, adds a crate in Edit map, saves the map to the
 //      library, ends the session, and finds the crate in the editor.
@@ -237,7 +237,7 @@ try {
     .getByRole("button", { name: "Save map" })
     .click()
   checks.ok(
-    await toast(dm, /changed since this session started/),
+    await toast(dm, /changed in your library since it was loaded/),
     "the host's save is refused with a conflict"
   )
   checks.ok(

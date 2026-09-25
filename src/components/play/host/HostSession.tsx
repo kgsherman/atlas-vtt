@@ -5,7 +5,8 @@
  * players, tokens, combat, table rules), the table (chat & dice dock, initiative order, turn ring,
  * pings: a long press, Shift for "everyone look here"), areas of effect (TemplateLayer: everyone's
  * templates, tested against the host runner's occlusion world; the DM moves, hides, removes and rolls
- * damage for any of them) and "Edit map" — the full editor tools against the live scene.
+ * damage for any of them), "Edit map" — the full editor tools against the live scene — and "Change
+ * map" (ChangeMapDialog: another library map, the party carried along, HostRunner.changeMap).
  */
 import * as React from "react"
 import { toast } from "sonner"
@@ -14,6 +15,7 @@ import { Crown } from "lucide-react"
 import { useLocation } from "wouter"
 
 import { paths } from "@/app/routes"
+import { plural } from "@/app/format"
 import { useServices } from "@/app/services"
 import { useQualityChoice } from "@/components/canvas/qualityChoice"
 import {
@@ -32,8 +34,9 @@ import {
 import { useSuppressThemeHotkey } from "@/components/theme-provider"
 import { Button } from "@/components/ui/button"
 import { footprintCells } from "@/core/movement/footprint"
-import { sortedLevels } from "@/core/scene/queries"
+import { groundHeightAt, sortedLevels } from "@/core/scene/queries"
 import type { Id } from "@/core/scene/types"
+import type { Arrival } from "@/core/session/changeMap"
 import { playerTokenImageAllowed } from "@/core/session/tokenImages"
 import type { GameState, TableAudience } from "@/core/session/types"
 import { createHostRunner, type HostRunnerImpl } from "@/net/host"
@@ -44,6 +47,7 @@ import {
   PlayController,
   specOf,
   templateInput,
+  tokenDisplayName,
   type PlayTool,
   type TemplateView,
 } from "@/play"
@@ -82,6 +86,12 @@ import {
   usePreference,
   useSessionResource,
 } from "../useSessionResource"
+import { ChangeMapDialog } from "./ChangeMapDialog"
+import {
+  changeMapErrorText,
+  type ChangeMapOutcome,
+  type ChangeMapRequest,
+} from "./changeMapModel"
 import { createHostActions, tokenPoint } from "./hostActions"
 import { HostStatusBar, HostTopBar, type HostMode } from "./HostChrome"
 import {
@@ -295,6 +305,9 @@ function HostConsole({
   )
   const saveMap = useSaveMap(runner, snap)
   const [ending, setEnding] = React.useState(false)
+  const [changing, setChanging] = React.useState(false)
+  // Hosting lost (standby / ended): the dialog closes and stays closed when hosting resumes.
+  if (changing && !hosting) setChanging(false)
 
   // ---- Token Maker link: a Token Maker tab re-skins any token through this console -------------------
   const services = useServices()
@@ -655,6 +668,75 @@ function HostConsole({
     }
   }
 
+  /**
+   * Move the game to another map (ChangeMapDialog), after saving the live map to the library when
+   * `req.save`. The host builds the change from its own live state (a player's change a moment ago
+   * travels too). Resolves true once changed; false or an error text keeps the dialog open.
+   */
+  const pendingFocus = React.useRef<{ sceneId: Id; arrival: Arrival } | null>(
+    null
+  )
+  const changeMap = async (
+    req: ChangeMapRequest
+  ): Promise<ChangeMapOutcome> => {
+    // A save in flight would stamp the old map's library row on the new map (checked at confirm time).
+    if (saveMap.saving)
+      return "The map is being saved to your library. Try again in a moment."
+    if (req.save && !(await saveMap.save({ confirm: false }))) return false
+    // The editor's undo history belongs to the old map: dispose of it before the swap.
+    if (editor) exitEdit()
+    controller.cancel()
+    // The swap is dispatched at once (the call then awaits the game's save): the camera goes to the
+    // arrival as soon as the new map is in the engine.
+    pendingFocus.current = { sceneId: req.scene.id, arrival: req.arrival }
+    const r = await runner.changeMap(req.scene, {
+      tokenIds: req.tokenIds,
+      arrival: req.arrival,
+      origin: req.origin,
+    })
+    if (!r.ok) {
+      pendingFocus.current = null
+      // Refused: the old map is still live, so its tokens name the ones left without room.
+      const tokens = runner.getSnapshot().state?.scene.tokens ?? {}
+      const names = r.unplaced.map((id) =>
+        Object.hasOwn(tokens, id) ? tokenDisplayName(tokens[id]) : "a token"
+      )
+      return changeMapErrorText(r.error, names)
+    }
+    // Local choices that name the old map's tokens, areas and levels.
+    setSelected(null)
+    setTemplateId(null)
+    setPreview(null)
+    setLevelChoice(req.arrival.levelId)
+    setEditView((v) => ({
+      ghostAdjacent: v.ghostAdjacent,
+      darkVision: v.darkVision,
+    }))
+    const n = Object.keys(r.carried).length
+    toast.success(`Now playing “${req.name}”`, {
+      description:
+        n === 0 ? "No tokens came along." : `${plural(n, "token")} came along.`,
+    })
+    if (!r.saved)
+      toast.warning("The map change isn't saved yet", {
+        description:
+          "Atlas keeps trying in the background. If this tab closes before then, the previous map may come back.",
+      })
+    return true
+  }
+  // Once the new map is in the engine (HostViewport's layout effect runs first), look at the arrival.
+  React.useEffect(() => {
+    const p = pendingFocus.current
+    if (!p || !engine || scene.id !== p.sceneId) return
+    pendingFocus.current = null
+    if (!Object.hasOwn(scene.levels, p.arrival.levelId)) return
+    const at = { x: p.arrival.x, z: p.arrival.z }
+    engine.focus(
+      { ...at, y: groundHeightAt(scene, p.arrival.levelId, at) },
+      { distance: 60 }
+    )
+  }, [scene, engine])
+
   // Dev automation handle.
   React.useEffect(() => {
     if (!import.meta.env.DEV) return
@@ -676,6 +758,7 @@ function HostConsole({
         sidebar={sidebar}
         onSidebar={setSidebar}
         onEnd={() => setEnding(true)}
+        onChangeMap={() => setChanging(true)}
         saveMap={saveMap}
       />
       <div className="flex min-h-0 flex-1">
@@ -778,16 +861,13 @@ function HostConsole({
                         onDamage={(formula, targets) => {
                           const r = actions.rollAreaDamage(formula, targets)
                           if (!r.ok) return r.error
-                          toast.success(
-                            `Rolled ${r.total} damage`,
-                            {
-                              id: "area-damage",
-                              description:
-                                r.hit === 0
-                                  ? "No creature caught has tracked hit points."
-                                  : `Dealt to ${r.hit} ${r.hit === 1 ? "creature" : "creatures"}.`,
-                            }
-                          )
+                          toast.success(`Rolled ${r.total} damage`, {
+                            id: "area-damage",
+                            description:
+                              r.hit === 0
+                                ? "No creature caught has tracked hit points."
+                                : `Dealt to ${r.hit} ${r.hit === 1 ? "creature" : "creatures"}.`,
+                          })
                           return null
                         }}
                         onFocusToken={focusToken}
@@ -953,6 +1033,14 @@ function HostConsole({
             : scene.name
         }
         onEnd={endSession}
+      />
+      <ChangeMapDialog
+        open={changing && hosting}
+        onOpenChange={setChanging}
+        state={state}
+        currentSceneId={snap.library?.sceneId ?? null}
+        saveMap={saveMap}
+        onChange={changeMap}
       />
       <HostStatusBar
         snap={snap}

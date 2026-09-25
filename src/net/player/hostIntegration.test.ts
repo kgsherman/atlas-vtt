@@ -48,67 +48,73 @@ function fakeCanvas(width: number, height: number): BackdropCanvas {
   return { width, height, getContext: () => ctx } as unknown as BackdropCanvas
 }
 
-describe("player client ↔ real host runner", () => {
-  it("joins, moves, survives the DM leaving and coming back", async () => {
-    const store = createMemoryStore()
-    let as = DM
-    const dmRepo = createLocalSessionsRepo({ store, userId: () => as })
-    const playerRepo = createLocalSessionsRepo({ store, userId: () => P1 })
-    const scene = createScene({ name: "Keep", width: 10, depth: 10 })
-    scene.environment.skyLevel = "bright"
-    scene.environment.ambientLevel = "bright"
-    const ground = Object.keys(scene.levels)[0]
-    const token = createToken(ground, { x: 12.5, z: 12.5 }, { name: "Brunhild" })
-    scene.tokens[token.id] = token
-    const summary = await createLocalScenesRepo(store).create(scene)
-    const { sessionId, roomCode } = await dmRepo.createSession(summary.id)
-    as = P1
-    await dmRepo.joinSession(roomCode, "Alice")
-    as = DM
+/** A session on "Keep" (a bright 10×10 room, Brunhild owned by P1) with the host running and P1 live. */
+async function liveSession() {
+  const store = createMemoryStore()
+  let as = DM
+  const dmRepo = createLocalSessionsRepo({ store, userId: () => as })
+  const playerRepo = createLocalSessionsRepo({ store, userId: () => P1 })
+  const scene = createScene({ name: "Keep", width: 10, depth: 10 })
+  scene.environment.skyLevel = "bright"
+  scene.environment.ambientLevel = "bright"
+  const ground = Object.keys(scene.levels)[0]
+  const token = createToken(ground, { x: 12.5, z: 12.5 }, { name: "Brunhild" })
+  scene.tokens[token.id] = token
+  const summary = await createLocalScenesRepo(store).create(scene)
+  const { sessionId, roomCode } = await dmRepo.createSession(summary.id)
+  as = P1
+  await dmRepo.joinSession(roomCode, "Alice")
+  as = DM
 
-    const namespace = `atlas-int-${crypto.randomUUID()}`
-    const transport = () => {
-      const t = new LocalTransport({ namespace, rate: null })
-      cleanups.push(() => t.dispose())
-      return t
-    }
-    const dmIdentity: AtlasIdentity = { userId: DM, isAnonymous: false, displayName: "DM", mode: "local" }
-    const newHost = () => {
-      const h = createHostRunner({
-        sessionId,
-        transport: transport(),
-        repo: dmRepo,
-        identity: dmIdentity,
-        assets,
-        createVisionClient: createInThreadVisionClient,
-        locks: null,
-        tileCodec: null,
-        watchVisibility: false,
-        tokenImageBase: IMAGES,
-      })
-      cleanups.push(() => h.stop())
-      return h
-    }
-    const host = newHost()
-    await host.start()
-    await waitFor(() => host.getSnapshot().status === "hosting", "hosting")
-    const hostTokenId = Object.keys(host.getSnapshot().state!.scene.tokens)[0]
-    host.dispatch({ t: "assign-token", tokenId: hostTokenId, userId: P1, assigned: true })
-
-    const client = createPlayerClient({
+  const namespace = `atlas-int-${crypto.randomUUID()}`
+  const transport = () => {
+    const t = new LocalTransport({ namespace, rate: null })
+    cleanups.push(() => t.dispose())
+    return t
+  }
+  const dmIdentity: AtlasIdentity = { userId: DM, isAnonymous: false, displayName: "DM", mode: "local" }
+  const newHost = () => {
+    const h = createHostRunner({
       sessionId,
       transport: transport(),
-      repo: playerRepo,
-      identity: { userId: P1, isAnonymous: true, displayName: "Alice", mode: "local" },
-      tiles: { getTile: async () => null, dispose() {} },
-      timings: { hostPresenceGraceMs: 150, pendingTimeoutMs: 2000 },
-      backdrop: { createCanvas: fakeCanvas },
+      repo: dmRepo,
+      identity: dmIdentity,
+      assets,
+      createVisionClient: createInThreadVisionClient,
+      locks: null,
+      tileCodec: null,
+      watchVisibility: false,
+      tokenImageBase: IMAGES,
     })
-    cleanups.push(() => client.stop())
-    await client.start()
-    await waitFor(() => client.getSnapshot().status === "live" && (client.getSnapshot().view?.controlledTokenIds.length ?? 0) > 0, "live with a token")
-    const tokenId = client.getSnapshot().view!.controlledTokenIds[0]
-    expect(tokenId).toBe(hostTokenId)
+    cleanups.push(() => h.stop())
+    return h
+  }
+  const host = newHost()
+  await host.start()
+  await waitFor(() => host.getSnapshot().status === "hosting", "hosting")
+  const hostTokenId = Object.keys(host.getSnapshot().state!.scene.tokens)[0]
+  host.dispatch({ t: "assign-token", tokenId: hostTokenId, userId: P1, assigned: true })
+
+  const client = createPlayerClient({
+    sessionId,
+    transport: transport(),
+    repo: playerRepo,
+    identity: { userId: P1, isAnonymous: true, displayName: "Alice", mode: "local" },
+    tiles: { getTile: async () => null, dispose() {} },
+    timings: { hostPresenceGraceMs: 150, pendingTimeoutMs: 2000 },
+    backdrop: { createCanvas: fakeCanvas },
+  })
+  cleanups.push(() => client.stop())
+  await client.start()
+  await waitFor(() => client.getSnapshot().status === "live" && (client.getSnapshot().view?.controlledTokenIds.length ?? 0) > 0, "live with a token")
+  const tokenId = client.getSnapshot().view!.controlledTokenIds[0]
+  expect(tokenId).toBe(hostTokenId)
+  return { host, newHost, client, ground, tokenId }
+}
+
+describe("player client ↔ real host runner", () => {
+  it("joins, moves, survives the DM leaving and coming back", async () => {
+    const { host, newHost, client, ground, tokenId } = await liveSession()
 
     const reqId = client.requestMove(tokenId, [
       { cell: { i: 2, j: 2 }, levelId: ground },
@@ -145,5 +151,39 @@ describe("player client ↔ real host runner", () => {
     await again.start()
     await waitFor(() => client.getSnapshot().status === "live" && client.getSnapshot().epoch !== epochBefore, "live with the new host run")
     expect(client.getSnapshot().scene?.tokens[tokenId].position).toEqual({ x: 22.5, z: 17.5 })
+  }, 20_000)
+
+  it("follows the DM to another map with the party: counted once, the token there and still theirs", async () => {
+    const { host, client, tokenId } = await liveSession()
+    const before = client.getSnapshot()
+    expect(before.mapChanges).toBe(0)
+    const crypt = createScene({ name: "The Sunken Crypt", width: 8, depth: 8 })
+    crypt.environment.skyLevel = "bright"
+    crypt.environment.ambientLevel = "bright"
+    const cryptGround = Object.keys(crypt.levels)[0]
+    const res = await host.changeMap(crypt, { tokenIds: [tokenId], arrival: { levelId: cryptGround, x: 22.5, z: 22.5 }, origin: null })
+    expect(res).toMatchObject({ ok: true, carried: { [tokenId]: tokenId } })
+
+    await waitFor(() => client.getSnapshot().mapChanges === 1, "on the new map")
+    const snap = client.getSnapshot()
+    expect(snap.view?.scene).toMatchObject({ name: "The Sunken Crypt", mapSerial: 1 })
+    expect(Object.keys(snap.view!.scene.levels)).toEqual([cryptGround])
+    expect(client.sceneChangeSince(before.scene)).toBeNull()
+    const token = snap.scene!.tokens[tokenId]
+    expect(token.levelId).toBe(cryptGround)
+    expect(snap.view?.controlledTokenIds).toEqual([tokenId])
+    expect(snap.view?.visionTokenIds).toEqual([tokenId])
+
+    // It plays on there: a step east is accepted by the host on the new map.
+    const i = Math.floor(token.position.x / 5)
+    const j = Math.floor(token.position.z / 5)
+    const reqId = client.requestMove(tokenId, [
+      { cell: { i, j }, levelId: cryptGround },
+      { cell: { i: i + 1, j }, levelId: cryptGround },
+    ])
+    await waitFor(() => client.getSnapshot().results.some((r) => r.reqId === reqId), "move settled")
+    expect(client.getSnapshot().results.find((r) => r.reqId === reqId)).toMatchObject({ ok: true })
+    await waitFor(() => client.getSnapshot().scene?.tokens[tokenId]?.position.x === token.position.x + 5, "token moved")
+    expect(client.getSnapshot().mapChanges).toBe(1)
   }, 20_000)
 })

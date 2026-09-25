@@ -7,7 +7,13 @@
 import { produceWithPatches, type Draft, type Patch } from "immer"
 
 import { sortedLevels } from "@/core/scene/queries"
-import type { Id, Level, Scene, SceneLike } from "@/core/scene/types"
+import type {
+  Id,
+  Level,
+  LevelBackdrop,
+  Scene,
+  SceneLike,
+} from "@/core/scene/types"
 import {
   createCellMask,
   createGradeMask,
@@ -84,6 +90,34 @@ export function sceneChangeBetween(
   }
   if (structure) change.structure = true
   return change
+}
+
+/**
+ * Storage folders (scene ids) that may hold the live map's backdrop images, in the order to try them: the
+ * document's own id, the library row it comes from (GameState.origin: images uploaded under a row id),
+ * then the row the session was started from. Unknown and repeated ids are left out.
+ */
+export function backdropFolders(
+  sceneId: Id,
+  originSceneId: Id | null | undefined,
+  rowSceneId: Id | null | undefined
+): Id[] {
+  const out: Id[] = []
+  for (const id of [sceneId, originSceneId, rowSceneId])
+    if (typeof id === "string" && id !== "" && !out.includes(id)) out.push(id)
+  return out
+}
+
+/**
+ * What a level's backdrop image looks like on the DM's view: when it changes, the image is loaded and
+ * applied again. The document is part of it, since a duplicated map keeps its level and asset ids.
+ */
+export function levelImageKey(
+  sceneId: Id,
+  backdrop: Pick<LevelBackdrop, "assetId" | "rect" | "opacity" | "tintWalls">
+): string {
+  const { assetId, rect: r, opacity, tintWalls } = backdrop
+  return `${sceneId}|${assetId}|${r.x},${r.z},${r.w},${r.d}|${opacity}|${tintWalls}`
 }
 
 /** True when a SceneChange carries nothing. */

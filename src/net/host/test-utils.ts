@@ -80,22 +80,30 @@ export async function waitFor(predicate: () => boolean, what = "condition", time
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-/** An AssetStore that records calls (no pixels). */
 /**
  * An AssetStore recording the host's tile chunk uploads (`chunks`: "uid|levelId|ci,cj" → encoded
- * blob text) and removals; `delayMs` slows every upload down.
+ * blob text) and removals; `delayMs` slows every upload down. Images (no pixels: the blob holds
+ * "folder/assetId") are found under the folders `hasImage` accepts (default: any); every lookup is
+ * recorded in `images` as "folder/assetId".
  */
-export function recordingAssets(mode: "supabase" | "local" = "local", opts: { delayMs?: number } = {}) {
+export function recordingAssets(
+  mode: "supabase" | "local" = "local",
+  opts: { delayMs?: number; hasImage?: (folder: string, assetId: string) => boolean } = {}
+) {
   const chunks = new Map<string, string>()
   const uploads: string[] = []
   const removed: string[] = []
+  const images: string[] = []
   let sessionsCleaned = 0
   const store: AssetStore = {
     mode,
     putImage: async () => {
       throw new Error("not used by the host")
     },
-    getImage: async () => new Blob(["image"]),
+    getImage: async (folder, assetId) => {
+      images.push(`${folder}/${assetId}`)
+      return !opts.hasImage || opts.hasImage(folder, assetId) ? new Blob([`${folder}/${assetId}`]) : null
+    },
     deleteImage: async () => {},
     copyImages: async () => {},
     putTileChunk: async (_sid, uid, levelId, ci, cj, blob) => {
@@ -120,7 +128,7 @@ export function recordingAssets(mode: "supabase" | "local" = "local", opts: { de
     deleteSceneImages: async () => 0,
     sweepUnreferencedImages: async () => ({ removed: 0, bytes: 0 }),
   }
-  return { store, chunks, uploads, removed, cleaned: () => sessionsCleaned }
+  return { store, chunks, uploads, removed, images, cleaned: () => sessionsCleaned }
 }
 
 export interface MirrorOptions {

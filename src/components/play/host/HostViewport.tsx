@@ -13,7 +13,10 @@ import { useServices } from "@/app/services"
 import { EngineCanvas } from "@/components/canvas/EngineCanvas"
 import { useEngine } from "@/components/canvas/engineContext"
 import { CursorKeys } from "@/components/editor/CursorKeys"
-import { loadLevelImage } from "@/components/editor/lib/levelImages"
+import {
+  loadLevelImage,
+  retainLevelImages,
+} from "@/components/editor/lib/levelImages"
 import { ContextMenu, ContextMenuTrigger } from "@/components/ui/context-menu"
 import type { Id, Scene } from "@/core/scene/types"
 import type { GameState } from "@/core/session/types"
@@ -29,6 +32,7 @@ import {
   tokenRouter,
   type PlayController,
 } from "@/play"
+import { backdropFolders, levelImageKey } from "@/play/host"
 import type {
   CameraKind,
   Engine,
@@ -42,7 +46,6 @@ import type { HostEditor } from "./hostEditor"
 import { HostContextMenuContent } from "./HostContextMenu"
 import { resolveMenuTarget, type MenuTarget } from "./menuTarget"
 import type { HostActions } from "./hostActions"
-
 
 export interface PreviewInfo {
   tokenIds: Id[]
@@ -172,7 +175,9 @@ function HostBridge({
     planner.setScene(scene, change)
     if (!change) {
       engine.setScene(scene)
-      if (!prev) engine.frameScene()
+      // The first map, or another one (a map change): the camera still frames the old coordinates. The
+      // page may then focus the arrival itself (its effects run after this layout effect).
+      if (!prev || prev.id !== scene.id) engine.frameScene()
     } else if (!isEmptyChange(change)) {
       engine.updateScene(scene, change)
     }
@@ -272,16 +277,7 @@ function HostBridge({
       dimmedTokenIds: previewing ? masks.dimmed : [],
       primaryViewerId: previewing ? (preview[0] ?? null) : null,
     })
-  }, [
-    engine,
-    editor,
-    editView,
-    camera,
-    activeLevelId,
-    grid,
-    preview,
-    masks,
-  ])
+  }, [engine, editor, editView, camera, activeLevelId, grid, preview, masks])
 
   // ---- overlays ----------------------------------------------------------------------------------
   React.useEffect(() => {
@@ -332,19 +328,25 @@ function HostBridge({
       alive = false
     }
   }, [hasBackdrops, rowSceneId, sessions, state.sessionId])
+  // After a map change the new map's images may live under its own library row (GameState.origin).
+  const originSceneId = state.origin?.sceneId ?? null
   const applied = React.useRef(new Map<Id, string>())
+  const imagesDoc = React.useRef<Id | null>(null)
   React.useEffect(() => {
     if (!engine) return
     const current = applied.current
     const present = new Set<Id>()
-    const sceneIds = [scene.id, rowSceneId].filter(
-      (s): s is string => typeof s === "string"
-    )
+    const sceneIds = backdropFolders(scene.id, originSceneId, rowSceneId)
+    // Another map: the previous one's decoded images (~100 MB each) need not stay cached.
+    if (imagesDoc.current !== null && imagesDoc.current !== scene.id)
+      retainLevelImages(scene.id)
+    imagesDoc.current = scene.id
     for (const level of Object.values(scene.levels)) {
       const b = level.backdrop
       if (!b) continue
       present.add(level.id)
-      const key = `${b.assetId}|${b.rect.x},${b.rect.z},${b.rect.w},${b.rect.d}|${b.opacity}|${b.tintWalls}`
+      // Keyed by document too: a duplicated map's level shows its own copy of the image.
+      const key = levelImageKey(scene.id, b)
       if (current.get(level.id) === key) continue
       current.set(level.id, key)
       const rect = { ...b.rect }
@@ -380,7 +382,7 @@ function HostBridge({
       current.delete(levelId)
       engine.setLevelImage(levelId, null, null)
     }
-  }, [engine, scene.levels, scene.id, rowSceneId, assets])
+  }, [engine, scene.levels, scene.id, originSceneId, rowSceneId, assets])
 
   // ---- input -------------------------------------------------------------------------------------
   usePlayCanvasInput({

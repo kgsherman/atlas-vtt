@@ -13,7 +13,7 @@ import {
   TriangleAlertIcon,
 } from "lucide-react"
 
-import { useSceneDigest, useSeenOnce } from "@/app/digestCache"
+import { useSceneDigest, useSeenOnce, type DigestEntry, type DigestStatus } from "@/app/digestCache"
 import { formatDateTime, formatRelativeTime, plural } from "@/app/format"
 import { useServices } from "@/app/services"
 import { useNow } from "@/app/useAsync"
@@ -68,28 +68,7 @@ export function SceneCard({ scene, busy, disabled: otherBusy = false, onAction, 
         className="relative block aspect-[16/10] w-full overflow-hidden bg-muted/40 outline-none focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-inset"
         aria-label={`Open ${scene.name} in the editor`}
       >
-        {digest ? (
-          <>
-            {entry?.image && (
-              // Letterbox fill for maps whose shape differs from the card: the same map, blurred.
-              <img src={entry.image} alt="" aria-hidden className="absolute inset-0 size-full scale-125 object-cover opacity-45 blur-2xl" />
-            )}
-            <SceneThumbnail
-              level={digest.primary}
-              palette={digest.palette}
-              cellSize={digest.grid.cellSize}
-              image={entry?.image}
-              className="relative transition-transform duration-500 ease-out group-hover/scene:scale-[1.03]"
-            />
-          </>
-        ) : status === "error" ? (
-          <div className="flex size-full flex-col items-center justify-center gap-1.5 text-muted-foreground">
-            <TriangleAlertIcon className="size-5" />
-            <span className="text-[0.7rem]">Preview unavailable</span>
-          </div>
-        ) : (
-          <Skeleton className="size-full rounded-none" />
-        )}
+        <SceneCardPreview entry={entry} status={status} thumbnailClassName="transition-transform duration-500 ease-out group-hover/scene:scale-[1.03]" />
         <div className="pointer-events-none absolute inset-0 bg-linear-to-t from-background/70 via-transparent to-transparent opacity-80" />
         <div className="absolute top-2 left-2 flex gap-1.5">
           {scene.visibility === "link" && (
@@ -151,6 +130,38 @@ export function SceneCard({ scene, busy, disabled: otherBusy = false, onAction, 
       </div>
     </Card>
   )
+}
+
+/**
+ * A library scene's thumbnail from the digest cache (useSceneDigest): its primary level over the same
+ * map image blurred, a placeholder while it loads, or a notice when it can't be read. Fills its box.
+ */
+export function SceneCardPreview({ entry, status, thumbnailClassName }: { entry: DigestEntry | null; status: DigestStatus; thumbnailClassName?: string }) {
+  const digest = entry?.digest
+  if (digest)
+    return (
+      <>
+        {entry?.image && (
+          // Letterbox fill for maps whose shape differs from the card: the same map, blurred.
+          <img src={entry.image} alt="" aria-hidden className="absolute inset-0 size-full scale-125 object-cover opacity-45 blur-2xl" />
+        )}
+        <SceneThumbnail
+          level={digest.primary}
+          palette={digest.palette}
+          cellSize={digest.grid.cellSize}
+          image={entry?.image}
+          className={cn("relative", thumbnailClassName)}
+        />
+      </>
+    )
+  if (status === "error")
+    return (
+      <div className="flex size-full flex-col items-center justify-center gap-1.5 text-muted-foreground">
+        <TriangleAlertIcon className="size-5" />
+        <span className="text-[0.7rem]">Preview unavailable</span>
+      </div>
+    )
+  return <Skeleton className="size-full rounded-none" />
 }
 
 function SceneMenu({ scene, disabled, onAction }: { scene: SceneSummary; disabled: boolean; onAction: SceneCardProps["onAction"] }) {

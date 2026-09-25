@@ -1,6 +1,6 @@
 /**
- * The DM console's top bar (scene, hosting status, play/edit switch, vision preview, sidebar, end
- * session) and bottom status bar (host pipeline stats, save state, frame rate).
+ * The DM console's top bar (scene, hosting status, play/edit switch, vision preview, sidebar, save
+ * map, change map, end session) and bottom status bar (host pipeline stats, save state, frame rate).
  */
 import * as React from "react"
 import { useStore } from "zustand"
@@ -12,6 +12,7 @@ import {
   Gauge,
   Hammer,
   LibraryBig,
+  Map as MapIcon,
   PanelRight,
   PanelRightClose,
   Play,
@@ -45,7 +46,7 @@ import type { FrameStats } from "@/render/contracts"
 import type { StoreApi } from "zustand/vanilla"
 
 import { StatusDot } from "../hud"
-import type { SaveMap } from "./useSaveMap"
+import { LIBRARY_SCENE_DELETED, type SaveMap } from "./useSaveMap"
 
 export type HostMode = "play" | "edit"
 
@@ -77,6 +78,7 @@ export function HostTopBar({
   sidebar,
   onSidebar,
   onEnd,
+  onChangeMap,
   saveMap,
 }: {
   snap: HostSnapshot
@@ -88,6 +90,8 @@ export function HostTopBar({
   sidebar: boolean
   onSidebar(open: boolean): void
   onEnd(): void
+  /** Open the Change map dialog. */
+  onChangeMap(): void
   saveMap: Pick<SaveMap, "library" | "dirty" | "saving" | "save">
 }) {
   const [, navigate] = useLocation()
@@ -241,6 +245,12 @@ export function HostTopBar({
         </TooltipContent>
       </Tooltip>
       <SaveMapButton saveMap={saveMap} />
+      <ChangeMapButton
+        hosting={hosting}
+        editing={mode === "edit"}
+        saving={saveMap.saving}
+        onClick={onChangeMap}
+      />
       <Button
         variant="destructive"
         size="sm"
@@ -268,7 +278,7 @@ function SaveMapButton({
         ? `The live map has edits that are not in “${lib.name}” yet. Save them as a new version.`
         : `Save the live map as a new version of “${lib.name}”.`
       : lib.status === "deleted"
-        ? "The scene this session was started from was deleted from your library."
+        ? LIBRARY_SCENE_DELETED
         : lib.status === "unavailable"
           ? `The library can't be reached: ${lib.error}`
           : "Looking up the library scene…"
@@ -298,6 +308,46 @@ function SaveMapButton({
       </TooltipTrigger>
       <TooltipContent side="bottom" className="max-w-64">
         {tip}
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
+/** "Change map": disabled (with the reason as its tooltip) unless hosting in Play with no save running. */
+function ChangeMapButton({
+  hosting,
+  editing,
+  saving,
+  onClick,
+}: {
+  hosting: boolean
+  editing: boolean
+  saving: boolean
+  onClick(): void
+}) {
+  const reason = !hosting
+    ? "This tab isn't hosting the session."
+    : editing
+      ? "Leave Edit map first (Done), then change the map."
+      : saving
+        ? "Saving the map to your library…"
+        : null
+  return (
+    <Tooltip>
+      {/* The span keeps the tooltip working while the button is disabled. */}
+      <TooltipTrigger render={<span className="inline-flex" />}>
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={reason !== null}
+          onClick={onClick}
+        >
+          <MapIcon data-icon="inline-start" /> Change map
+        </Button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom" className="max-w-64">
+        {reason ??
+          "Move the game to another map of your library and bring the party along"}
       </TooltipContent>
     </Tooltip>
   )

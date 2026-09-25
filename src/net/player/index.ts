@@ -16,6 +16,7 @@ export {
   bindBackdropsToEngine,
   buildPlayerScene,
   describeRequestResult,
+  isOtherMap,
   parseStoredView,
   pendingMovesOverlay,
   PLAYER_CLIENT_TIMINGS,

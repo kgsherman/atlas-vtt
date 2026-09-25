@@ -17,12 +17,15 @@ export function SampleSceneCard({
   disabled,
   onOpenCopy,
   onIntent,
+  actionLabel = "Open a copy",
 }: {
   sample: SampleScene
   busy: boolean
   disabled: boolean
   onOpenCopy(): void
   onIntent?(): void
+  /** The button's label (it always makes a library copy first). */
+  actionLabel?: string
 }) {
   const digest = React.useMemo(() => sceneDigest(sample.build()), [sample])
   return (
@@ -51,7 +54,7 @@ export function SampleSceneCard({
         <div className="mt-auto pt-1">
           <Button variant="outline" size="sm" onClick={onOpenCopy} onPointerEnter={onIntent} disabled={disabled}>
             {busy ? <Spinner className="size-3" data-icon="inline-start" /> : <CopyPlusIcon data-icon="inline-start" />}
-            Open a copy
+            {actionLabel}
           </Button>
         </div>
       </div>

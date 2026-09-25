@@ -1,15 +1,16 @@
 /**
  * "Save map to library" for the DM's host console (ARCHITECTURE §6.2): HostRunner.saveMapToLibrary
  * writes the live session's map (as it is now: token positions, hidden tokens, doors and lights
- * included) as a new version of the library scene the session was started from — the game's origin,
- * exposed as HostSnapshot.library. Earlier versions stay in version history.
+ * included) as a new version of the library scene the live map comes from (the one the session started
+ * from, or the one the DM last changed the map to) — the game's origin, exposed as
+ * HostSnapshot.library. Earlier versions stay in version history.
  *
  * The origin records the library version the live map is based on, so a version saved meanwhile
- * elsewhere (e.g. in the editor) is a version_conflict; the conflict toast offers "Overwrite" (force).
- * Games saved before the origin was recorded have no base version: their first save treats a library
- * scene updated after the session started as changed elsewhere and asks first. "Dirty" (the map was
- * edited in Edit map since the session started or the last save) is the origin's flag, stored with the
- * game, so it survives reloads and devices.
+ * elsewhere (e.g. in the editor) is a version_conflict; the conflict toast offers "Overwrite" (force),
+ * only while the game still plays that map. Games saved before the origin was recorded have no base
+ * version: their first save treats a library scene updated after the session started as changed
+ * elsewhere and asks first. "Dirty" (the map was edited in Edit map since it was loaded or last saved)
+ * is the origin's flag, stored with the game, so it survives reloads and devices.
  */
 import * as React from "react"
 import { toast } from "sonner"
@@ -23,14 +24,14 @@ import { isNetError } from "@/net/supabase"
 export type LibraryLink =
   | { status: "loading" }
   | { status: "linked"; sceneId: string; name: string }
-  /** The session's library scene was deleted (or the session has none). */
+  /** The live map's library scene was deleted (or the map has none). */
   | { status: "deleted" }
   | { status: "unavailable"; error: string }
 
 export interface SaveMap {
   library: LibraryLink
   saving: boolean
-  /** The map was edited (Edit map) since the session started or the last save to the library. */
+  /** The map was edited (Edit map) since it was loaded or last saved to the library. */
   dirty: boolean
   /**
    * Save to the library. `confirm` (default true) asks first; `force` overwrites a library scene
@@ -40,6 +41,13 @@ export interface SaveMap {
 }
 
 export type SaveMapRunner = Pick<HostRunner, "saveMapToLibrary">
+
+/** Why "Save map to library" has nothing to save to (the live map's library scene is gone). */
+export const LIBRARY_SCENE_DELETED =
+  "The library scene this map came from was deleted from your library."
+
+/** The version-conflict toast (one at a time; dismissed when the game moves to another map). */
+const CONFLICT_TOAST = "save-map-conflict"
 
 /** Whether the library scene changed after the session started (by its row's update time). */
 export function changedSinceStart(
@@ -68,6 +76,13 @@ export function useSaveMap(
   React.useEffect(() => {
     originRef.current = origin
   })
+  // A conflict about the previous map is moot once the game plays another one.
+  React.useEffect(
+    () => () => {
+      toast.dismiss(CONFLICT_TOAST)
+    },
+    [sceneId]
+  )
 
   // The library entry's name (and whether it still exists).
   React.useEffect(() => {
@@ -112,7 +127,7 @@ export function useSaveMap(
         toast.error("There is no library scene to save to", {
           description:
             library.status === "deleted"
-              ? "The scene this session was started from was deleted from your library."
+              ? LIBRARY_SCENE_DELETED
               : library.status === "unavailable"
                 ? library.error
                 : "Still looking up the library scene. Try again in a moment.",
@@ -127,17 +142,25 @@ export function useSaveMap(
         })
         if (!ok) return false
       }
+      const target = library.sceneId
       const conflict = () => {
-        toast.error("The library map was changed since this session started", {
-          description:
-            "Overwrite it with the live map, or keep the library version. Either way, earlier versions stay in version history.",
-          duration: 12_000,
-          action: {
-            label: "Overwrite",
-            onClick: () =>
-              void saveRef.current({ confirm: false, force: true }),
-          },
-        })
+        toast.error(
+          "This map was changed in your library since it was loaded",
+          {
+            id: CONFLICT_TOAST,
+            description:
+              "Overwrite it with the live map, or keep the library version. Either way, earlier versions stay in version history.",
+            duration: 12_000,
+            action: {
+              label: "Overwrite",
+              onClick: () => {
+                // The game may have moved to another map since: never write that one over this row.
+                if (originRef.current?.sceneId !== target) return
+                void saveRef.current({ confirm: false, force: true })
+              },
+            },
+          }
+        )
       }
       setSaving(true)
       try {

@@ -6,6 +6,7 @@ import type { Scene } from "@/core/scene/types"
 import type { AssetMeta, AssetStore } from "@/net/assets/types"
 import { createMemoryStore } from "@/net/localStore"
 import { readSceneFile } from "@/net/scenesRepo"
+import { isNetError } from "@/net/supabase"
 
 import { createServices } from "./createServices"
 import {
@@ -18,6 +19,7 @@ import {
   importedName,
   importSceneFile,
   LibraryError,
+  loadLibraryScene,
   nextCopyName,
   sweepUnusedImages,
   userMessage,
@@ -243,9 +245,67 @@ describe("library operations", () => {
   })
 })
 
+describe("loadLibraryScene", () => {
+  it("loads the latest version with the origin to record", async () => {
+    const s = await localServices()
+    const scene = createScene({ name: "Keep", width: 10, depth: 10 })
+    const summary = await s.scenes.create(scene)
+    const first = await loadLibraryScene(s, summary.id)
+    expect(first.origin).toEqual({ sceneId: summary.id, version: 1, dirty: false })
+    expect(first.scene.id).toBe(scene.id)
+    expect(first.name).toBe("Keep")
+
+    // A version saved meanwhile (e.g. in the editor): the origin follows it, the name follows the row.
+    await s.scenes.saveVersion(summary.id, { ...scene, name: "Keep (ruined)" })
+    const second = await loadLibraryScene(s, summary.id)
+    expect(second.origin).toEqual({ sceneId: summary.id, version: 2, dirty: false })
+    expect(second.name).toBe("Keep (ruined)")
+    expect(second.scene.name).toBe("Keep (ruined)")
+  })
+
+  it("refuses documents from a newer version of Atlas and invalid ones", async () => {
+    const s = await localServices()
+    const scene = createScene({ name: "Keep" })
+    const summary = await s.scenes.create(scene)
+    await s.scenes.saveVersion(summary.id, { ...scene, schemaVersion: 999 } as unknown as Scene)
+    const tooNew = await loadLibraryScene(s, summary.id).catch((e: unknown) => e)
+    expect(tooNew).toBeInstanceOf(LibraryError)
+    expect(userMessage(tooNew)).toMatch(/newer version of Atlas, so it can't be played here/)
+
+    await s.scenes.saveVersion(summary.id, { ...scene, levels: "nope" } as unknown as Scene)
+    const invalid = await loadLibraryScene(s, summary.id).catch((e: unknown) => e)
+    expect(invalid).toBeInstanceOf(LibraryError)
+    expect(userMessage(invalid)).toBe("This scene's data is not valid, so it can't be played.")
+  })
+
+  it("reports a row deleted meanwhile as not found", async () => {
+    const s = await localServices()
+    const summary = await s.scenes.create(createScene())
+    await s.scenes.remove(summary.id)
+    const err = await loadLibraryScene(s, summary.id).catch((e: unknown) => e)
+    expect(isNetError(err, "not_found")).toBe(true)
+  })
+
+  it("loads a sample's library copy", async () => {
+    const s = await localServices()
+    const { summary } = await createFromSample(s, "crooked-lantern")
+    const played = await loadLibraryScene(s, summary.id)
+    expect(played.origin).toEqual({ sceneId: summary.id, version: 1, dirty: false })
+    expect(played.name).toBe("The Crooked Lantern")
+    expect(Object.keys(played.scene.levels)).toHaveLength(4)
+  })
+})
+
 describe("map image cleanup", () => {
   const storeMap = (s: Awaited<ReturnType<typeof localServices>>, scene: Scene) =>
-    s.assets.putImage(scene.id, new Blob([PNG_BYTES], { type: "image/png" }), { id: "map1", kind: "image", name: "ground.webp", mime: "image/png", width: 1400, height: 1400 })
+    s.assets.putImage(scene.id, new Blob([PNG_BYTES], { type: "image/png" }), {
+      id: "map1",
+      kind: "image",
+      name: "ground.webp",
+      mime: "image/png",
+      width: 1400,
+      height: 1400,
+    })
 
   it("deleting a scene removes its map images", async () => {
     const s = await localServices()
@@ -291,7 +351,14 @@ describe("map image cleanup", () => {
     const scene = sceneWithBackdrop()
     scene.assets!.map2 = { ...scene.assets!.map1, id: "map2", name: "upper.webp" }
     await storeMap(s, scene)
-    await s.assets.putImage(scene.id, new Blob([PNG_BYTES], { type: "image/png" }), { id: "map2", kind: "image", name: "upper.webp", mime: "image/png", width: 1400, height: 1400 })
+    await s.assets.putImage(scene.id, new Blob([PNG_BYTES], { type: "image/png" }), {
+      id: "map2",
+      kind: "image",
+      name: "upper.webp",
+      mime: "image/png",
+      width: 1400,
+      height: 1400,
+    })
     const file = await exportScene(s, await s.scenes.create(scene))
     const put = s.assets.putImage.bind(s.assets)
     let puts = 0

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 /**
  * The HUD tells players when their own connection is down instead of blaming the DM
- * ("DM not responding" / "Waiting for the DM…").
+ * ("DM not responding" / "Waiting for the DM…"). Pings on the table go when the map changes.
  */
 import { act } from "react"
 import { createRoot, type Root } from "react-dom/client"
@@ -11,6 +11,7 @@ import { createScene } from "@/core/scene/factory"
 import type { PlayerView } from "@/core/session/types"
 import type { PlayerClientSnapshot } from "@/net/player"
 
+import { PingLayer, type MapPing } from "../table/MapMarkers"
 import { PlayerHud } from "./PlayerHud"
 
 let root: Root | null = null
@@ -57,6 +58,7 @@ function snapshot(over: Partial<PlayerClientSnapshot>): PlayerClientSnapshot {
     hostUnresponsive: false,
     viewSource: "live",
     networkOffline: false,
+    mapChanges: 0,
     ...over,
   }
 }
@@ -123,5 +125,56 @@ describe("PlayerHud connection state", () => {
     expect(render(snapshot({ status: "host-offline" }))).toContain(
       "Waiting for the DM…"
     )
+  })
+})
+
+describe("PingLayer across maps", () => {
+  it("clears the pings on screen when the map changes (a player's map marker, the DM's scene document)", () => {
+    let emit: (p: MapPing) => void = () => {}
+    const subscribe = (cb: (p: MapPing) => void) => {
+      emit = cb
+      return () => {}
+    }
+    host = document.createElement("div")
+    document.body.appendChild(host)
+    root = createRoot(host)
+    const shown = () => host!.querySelectorAll('[data-slot="map-ping"]').length
+    const scene = createScene()
+    const ping: MapPing = {
+      levelId: Object.keys(scene.levels)[0],
+      x: 5,
+      z: 5,
+      name: "Bo",
+      color: "",
+      focus: false,
+      mine: false,
+    }
+    const player = (map: number) =>
+      act(() =>
+        root!.render(
+          <PingLayer subscribe={subscribe} scene={scene} map={map} />
+        )
+      )
+    player(0)
+    act(() => emit(ping))
+    expect(shown()).toBe(1)
+    // Another view of the same map: the ping stays.
+    player(0)
+    expect(shown()).toBe(1)
+    player(1)
+    expect(shown()).toBe(0)
+    act(() => emit(ping))
+    expect(shown()).toBe(1)
+
+    // The DM's page passes its Scene: another document is another map.
+    const dm = (s: typeof scene) =>
+      act(() => root!.render(<PingLayer subscribe={subscribe} scene={s} />))
+    dm(scene)
+    act(() => emit(ping))
+    expect(shown()).toBe(1)
+    dm({ ...scene, name: "Renamed" })
+    expect(shown()).toBe(1)
+    dm(createScene())
+    expect(shown()).toBe(0)
   })
 })

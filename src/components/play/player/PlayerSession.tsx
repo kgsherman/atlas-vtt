@@ -16,7 +16,9 @@
  *    on the acting token), and pings (a long press; others' pings arrive from the host);
  *  - areas of effect (TemplateLayer): the view's templates and the one being placed, with what they
  *    reach computed against the planner's occlusion world (only what this player knows); placing,
- *    moving and removing one's own go to the host as requests.
+ *    moving and removing one's own go to the host as requests;
+ *  - another map (the DM moved the game, snap.mapChanges): whatever was under way is cancelled, a toast
+ *    names the new map and the camera jumps to the player's character there.
  */
 import * as React from "react"
 import { toast } from "sonner"
@@ -203,7 +205,9 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
     () =>
       new PlayController({
         role: "player",
-        scene: () => live.get().scene,
+        // The planner takes each scene in PlayerBridge's layout effect, before controller.sceneChanged();
+        // `live` only catches up in this component's passive effect.
+        scene: () => planner.getScene() ?? live.get().scene,
         activeLevelId: () => live.get().activeLevelId,
         canSelect: (id) => live.get().controlled.includes(id),
         canDrag: (id) => live.get().controlled.includes(id),
@@ -397,6 +401,44 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
     [focusToken]
   )
 
+  // ---- another map: the DM moved the game ----------------------------------------------------------
+  // Runs after live.set (declared above) and after PlayerBridge's effects (a child), so the engine and
+  // `live` already hold the new map and its view level. Not on the first view (the count starts there).
+  const seenMaps = React.useRef(snap.mapChanges)
+  React.useEffect(() => {
+    if (snap.mapChanges === seenMaps.current) return
+    seenMaps.current = snap.mapChanges
+    // Whatever was under way was about the old map: a drag, a stranded move, the ruler, a template.
+    controller.cancel()
+    if (controller.getTool() !== "move") controller.setTool("move")
+    setTemplateId(null)
+    const name = snap.view?.scene.name.trim() || "a new map"
+    toast.info(
+      controlled.length > 0
+        ? `The party travels to ${name}`
+        : `The DM moved the game to ${name}`,
+      // Where "Your turn" shows: clear of the chat dock and the turn order.
+      { id: "map-change", position: "top-right" }
+    )
+    // Straight to our character (the engine would glide there from the old map's spot, or stay put).
+    const target =
+      selectedId ??
+      snap.view?.visionTokenIds.find(
+        (id) => !!scene && Object.hasOwn(scene.tokens, id)
+      ) ??
+      null
+    if (target && engine) {
+      focusedOnce.current = true
+      focusToken(target, true)
+    } else {
+      // No engine yet, or nobody to look at: the first-focus effect jumps once there is.
+      focusedOnce.current = false
+      engine?.frameScene()
+    }
+    // The count says when the map changed; the rest is read as of this commit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snap.mapChanges])
+
   // ---- keyboard ----------------------------------------------------------------------------------
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
   usePlayKeys((action) => {
@@ -549,6 +591,7 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
         <PingLayer
           subscribe={client.onPing}
           scene={scene}
+          map={view?.scene.mapSerial ?? 0}
           onFocus={(p) => engine?.focus(p)}
         />
         <TemplateLayer
