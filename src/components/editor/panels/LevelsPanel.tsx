@@ -574,14 +574,50 @@ function BackdropSection({ level }: { level: Level }) {
     }
   }
 
+  // Browsers can't reveal a file in the OS file manager (and the image lives in IndexedDB or Supabase
+  // Storage, not on disk): save the stored image instead; the browser's downloads list shows the folder.
+  const download = async () => {
+    if (!asset) return
+    try {
+      const blob = await assets.getImage(sceneId, asset.id)
+      if (!blob) throw new Error("the map image is missing from storage")
+      const ext = asset.mime === "image/jpeg" ? "jpg" : asset.mime.replace("image/", "")
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = `${asset.name.replace(/\.[^./\\]+$/, "").trim() || level.name.trim() || "map"}.${ext}`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 10_000)
+    } catch (err) {
+      toast.error("Couldn't download the map image", { description: err instanceof Error ? err.message : String(err) })
+    }
+  }
+
   const pxPerCell = asset ? asset.width / Math.max(1, b.rect.w / cellSize) : null
 
   return (
-    <PanelSection title="Map image" action={asset ? <Badge variant="outline" className="font-normal">{asset.mime.replace("image/", "").toUpperCase()}</Badge> : null}>
+    <PanelSection
+      title="Map image"
+      action={
+        asset ? (
+          <>
+            <Badge variant="outline" className="font-normal">{asset.mime.replace("image/", "").toUpperCase()}</Badge>
+            <Tooltip>
+              <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="Download map image" onClick={() => void download()} />}>
+                <Download />
+              </TooltipTrigger>
+              <TooltipContent>Download {asset.name}</TooltipContent>
+            </Tooltip>
+          </>
+        ) : null
+      }
+    >
       <BackdropThumb sceneId={sceneId} assetId={b.assetId} aspect={b.rect.w / Math.max(0.01, b.rect.d)} />
       {asset ? (
-        <Hint className="truncate" >
-          <span title={asset.name}>{asset.name}</span> · {asset.width}×{asset.height}px{pxPerCell ? ` · ${trimNumber(pxPerCell, 0)} px/cell` : ""} · {formatBytes(asset.bytes)}
+        <Hint>
+          {asset.width}×{asset.height}px{pxPerCell ? ` · ${trimNumber(pxPerCell, 0)} px/cell` : ""} · {formatBytes(asset.bytes)}
         </Hint>
       ) : null}
       <FieldRow label="Opacity">
