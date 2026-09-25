@@ -230,6 +230,12 @@ export interface EditorState {
    * when the painted base is already flat (`hasPaintedBase`), even where shapes raise the terrain.
    */
   flattenTerrain(levelId: Id): boolean
+  /**
+   * Replace the painted terrain (the base) over the whole extent with `heights` (the dense lattice at the
+   * level's resolution, row-major by z); the shapes stay (rebaked on it). False without terrain or when
+   * `heights` has the wrong length.
+   */
+  setTerrainBase(levelId: Id, heights: Float32Array, label: string): boolean
   /** Delete every terrain shape of the level (the painted base becomes the heightmap). */
   clearTerrainShapes(levelId: Id): boolean
   /**
@@ -913,6 +919,19 @@ export function createEditorStore(opts: CreateEditorStoreOptions = {}): EditorSt
         const lattice = { samplesX, samplesZ, heights: new Float32Array(samplesX * samplesZ), spacing: sampleSpacing(grid.cellSize, hm.resolution) }
         const extent = { x: 0, z: 0, w: grid.width * grid.cellSize, d: grid.depth * grid.cellSize }
         return get().applyTerrainEdit(levelId, { base: { lattice, rects: [extent] } }, "Flatten terrain")
+      },
+
+      setTerrainBase(levelId, heights, label) {
+        const s = get()
+        if (!hasOwn(s.scene.levels, levelId)) return false
+        const hm = s.scene.levels[levelId].heightmap
+        if (!hm) return false
+        const grid = s.scene.grid
+        const { samplesX, samplesZ } = sampleCounts(grid, hm.resolution)
+        if (heights.length !== samplesX * samplesZ) return false
+        const lattice = { samplesX, samplesZ, heights: heights.slice(), spacing: sampleSpacing(grid.cellSize, hm.resolution) }
+        const extent = { x: 0, z: 0, w: grid.width * grid.cellSize, d: grid.depth * grid.cellSize }
+        return get().applyTerrainEdit(levelId, { base: { lattice, rects: [extent] } }, label)
       },
 
       clearTerrainShapes(levelId) {

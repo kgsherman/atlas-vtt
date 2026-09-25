@@ -1,5 +1,5 @@
 import * as React from "react"
-import { Copy, Eye, EyeOff, ImagePlus, Layers, Mountain, MoreHorizontal, Plus, Trash2, Image as ImageIcon, ArrowDownToLine } from "lucide-react"
+import { Copy, Download, Eye, EyeOff, ImagePlus, Layers, Mountain, MoreHorizontal, Plus, Trash2, Image as ImageIcon, ArrowDownToLine } from "lucide-react"
 import { toast } from "sonner"
 
 import { Badge } from "@/components/ui/badge"
@@ -17,7 +17,9 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useServices } from "@/app/services"
-import { heightRange, maxCellsForResolution, terrainResolutionFits } from "@/core/scene/heightmap"
+import { denseHeights, heightRange, maxCellsForResolution, terrainResolutionFits } from "@/core/scene/heightmap"
+import { MAX_TERRAIN_HEIGHT } from "@/core/scene/heightmapBrush"
+import { heightsFromGrey, heightsToGrey } from "@/core/scene/heightmapImage"
 import { SCENE_LIMITS } from "@/core/scene/schema"
 import { hasPaintedBase } from "@/core/scene/terrainShapes"
 import { TERRAIN_RESOLUTIONS, type GridSettings, type Id, type Level, type TerrainResolution } from "@/core/scene/types"
@@ -316,6 +318,146 @@ export function TerrainSection({ level }: { level: Level }) {
   )
 }
 
+/** Longest side, in pixels, an imported heightmap image is read at (finer than the finest lattice). */
+const HEIGHTMAP_IMPORT_MAX_SIDE = 2048
+
+/** The pixels of an image file, scaled down to HEIGHTMAP_IMPORT_MAX_SIDE. */
+async function readImagePixels(file: File): Promise<ImageData> {
+  const bitmap = await createImageBitmap(file)
+  try {
+    const scale = Math.min(1, HEIGHTMAP_IMPORT_MAX_SIDE / Math.max(bitmap.width, bitmap.height))
+    const w = Math.max(1, Math.round(bitmap.width * scale))
+    const h = Math.max(1, Math.round(bitmap.height * scale))
+    const canvas = document.createElement("canvas")
+    canvas.width = w
+    canvas.height = h
+    const ctx = canvas.getContext("2d", { willReadFrequently: true })
+    if (!ctx) throw new Error("This browser can't read images")
+    ctx.drawImage(bitmap, 0, 0, w, h)
+    return ctx.getImageData(0, 0, w, h)
+  } finally {
+    bitmap.close()
+  }
+}
+
+/**
+ * The level's terrain as a greyscale image (lowest black, highest white): a preview, import of an image
+ * as the painted ground (black and white heights chosen here) and PNG export. Shown while terrain is on.
+ */
+function HeightmapImageSection({ level }: { level: Level }) {
+  const { store } = useEditorContext()
+  const confirm = useConfirm()
+  const readOnly = useEditorState((s) => s.readOnly)
+  const grid = useEditorState((s) => s.scene.grid)
+  // Brush strokes change the heightmap every frame; the preview may lag behind them.
+  const hm = React.useDeferredValue(level.heightmap)
+  const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
+  const fileRef = React.useRef<HTMLInputElement | null>(null)
+  const [importing, setImporting] = React.useState(false)
+  const [black, setBlack] = React.useState(0)
+  const [white, setWhite] = React.useState(10)
+
+  const lattice = React.useMemo(() => {
+    if (!hm) return null
+    const dense = denseHeights(hm, grid)
+    let min = Infinity
+    let max = -Infinity
+    for (const h of dense.heights) {
+      if (h < min) min = h
+      if (h > max) max = h
+    }
+    return { ...dense, min, max }
+  }, [hm, grid])
+
+  React.useEffect(() => {
+    const canvas = canvasRef.current
+    if (!canvas || !lattice) return
+    const img = heightsToGrey(lattice.heights, lattice.samplesX, lattice.samplesZ, lattice.min, lattice.max)
+    canvas.width = img.width
+    canvas.height = img.height
+    canvas.getContext("2d")?.putImageData(new ImageData(img.data, img.width, img.height), 0, 0)
+  }, [lattice])
+
+  if (!lattice) return null
+  const flat = lattice.max - lattice.min < 1e-9
+
+  const importFile = async (file: File) => {
+    const current = store.getState().scene.levels[level.id]
+    if (
+      current &&
+      hasPaintedBase(current) &&
+      !(await confirm({
+        title: "Replace the painted terrain?",
+        description: `The painted heights of “${level.name}” are replaced by the image. Terrain shapes stay. You can undo this.`,
+        confirmLabel: "Replace terrain",
+        destructive: true,
+      }))
+    )
+      return
+    setImporting(true)
+    try {
+      const pixels = await readImagePixels(file)
+      const { samplesX, samplesZ } = lattice
+      const heights = heightsFromGrey(pixels, samplesX, samplesZ, black, white)
+      if (store.getState().setTerrainBase(level.id, heights, "Import heightmap image")) toast.success("Heightmap imported", { description: `${file.name} → ${trimNumber(black, 1)} to ${trimNumber(white, 1)} ft` })
+      else toast.error("The heightmap was not imported", { description: store.getState().lastRejected?.issues[0] ?? "The terrain did not change." })
+    } catch (err) {
+      toast.error("Couldn't read the image", { description: err instanceof Error ? err.message : String(err) })
+    } finally {
+      setImporting(false)
+    }
+  }
+
+  const exportPng = () => {
+    canvasRef.current?.toBlob((blob) => {
+      if (!blob) return void toast.error("Couldn't export the heightmap")
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement("a")
+      a.href = url
+      a.download = `${level.name.trim() || "level"} heightmap.png`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 10_000)
+    }, "image/png")
+  }
+
+  return (
+    <PanelSection title="Heightmap image" action={<Badge variant="outline" className="font-normal">{lattice.samplesX}×{lattice.samplesZ}</Badge>}>
+      <div className="relative overflow-hidden rounded-md border bg-muted" style={{ aspectRatio: `${Math.max(0.2, Math.min(5, grid.width / Math.max(1, grid.depth)))}` }}>
+        <canvas ref={canvasRef} className="block size-full" aria-label={`Heightmap of “${level.name}”`} role="img" />
+        {flat ? <div className="absolute inset-0 grid place-items-center text-[0.6875rem] text-muted-foreground">Flat terrain</div> : null}
+      </div>
+      <Hint>{flat ? `Everywhere ${trimNumber(lattice.min, 1)} ft` : `Black ${trimNumber(lattice.min, 1)} ft · white ${trimNumber(lattice.max, 1)} ft`} · {lattice.samplesX}×{lattice.samplesZ} samples</Hint>
+      <FieldRow label="Import range" hint="Heights that black and white map to when an image is imported (feet).">
+        <div className="grid grid-cols-2 gap-1.5">
+          <NumberInput aria-label="Height of black" prefix="Blk" unit="ft" value={black} min={-MAX_TERRAIN_HEIGHT} max={MAX_TERRAIN_HEIGHT} precision={1} disabled={readOnly} onCommit={setBlack} />
+          <NumberInput aria-label="Height of white" prefix="Wht" unit="ft" value={white} min={-MAX_TERRAIN_HEIGHT} max={MAX_TERRAIN_HEIGHT} precision={1} disabled={readOnly} onCommit={setWhite} />
+        </div>
+      </FieldRow>
+      <div className="flex items-center justify-between gap-2">
+        <Button variant="ghost" size="xs" disabled={readOnly || importing} onClick={() => fileRef.current?.click()}>
+          {importing ? <Spinner className="size-3" /> : <ImagePlus data-icon="inline-start" />} Import image…
+        </Button>
+        <Button variant="ghost" size="xs" disabled={flat} onClick={exportPng}>
+          <Download data-icon="inline-start" /> Export PNG
+        </Button>
+      </div>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          e.target.value = ""
+          if (file) void importFile(file)
+        }}
+      />
+    </PanelSection>
+  )
+}
+
 function BackdropThumb({ sceneId, assetId, aspect }: { sceneId: Id; assetId: Id; aspect: number }) {
   const { assets } = useServices()
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
@@ -520,6 +662,7 @@ export function LevelsPanel() {
           <LevelProperties level={level} />
           <BackdropSection level={level} />
           <TerrainSection level={level} />
+          {level.heightmap ? <HeightmapImageSection level={level} /> : null}
         </React.Fragment>
       ) : null}
     </div>

@@ -968,6 +968,24 @@ describe("editor store: terrain actions", () => {
     expect(store.getState().flattenTerrain(f.upperId)).toBe(false)
   })
 
+  it("setTerrainBase replaces the painted base and keeps the shapes", () => {
+    const { f, store, grid, b1 } = terrainFixture()
+    const before = store.getState().scene.levels[f.groundId]
+    const { samplesX, samplesZ } = baseLattice(before, grid)
+    expect(store.getState().setTerrainBase(f.groundId, new Float32Array(3), "Import heightmap image")).toBe(false)
+    expect(store.getState().setTerrainBase(f.groundId, new Float32Array(samplesX * samplesZ).fill(2), "Import heightmap image")).toBe(true)
+    const scene = store.getState().scene
+    const level = scene.levels[f.groundId]
+    expect(Object.keys(level.terrainEdits!.shapes).sort()).toEqual(["b1", "b2"])
+    expect(baseLattice(level, grid).heights.every((h) => h === 2)).toBe(true)
+    expect(levelGround(scene, f.groundId, 15, 15)).toBe(Math.max(2, shapeTopAt(b1, 15, 15)!))
+    expect(levelGround(scene, f.groundId, 80, 80)).toBe(2)
+    expectConsistent(level, grid)
+    expect(store.getState().setTerrainBase(f.upperId, new Float32Array(samplesX * samplesZ), "Import heightmap image")).toBe(false)
+    store.getState().undo()
+    expect(store.getState().scene.levels[f.groundId]).toEqual(before)
+  })
+
   it("clearTerrainShapes leaves the painted base as the heightmap", () => {
     const { f, store, grid } = terrainFixture()
     const painted = baseLattice(store.getState().scene.levels[f.groundId], grid).heights
