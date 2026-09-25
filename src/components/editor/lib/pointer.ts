@@ -4,11 +4,13 @@
  * position on the canvas (the frame of Engine.project) and the pressed buttons.
  */
 import type { SnapMode } from "@/core/grid/grid"
-import type { GridSettings, Vec2 } from "@/core/scene/types"
+import type { GridSettings, Vec2, Vec3 } from "@/core/scene/types"
 import type { EditorController } from "@/editor/controller"
 import { snapGround } from "@/editor/snapping"
 import type { ToolPointerEvent } from "@/editor/tools/types"
 import type { PickResult } from "@/render/contracts"
+
+import type { CursorReadout } from "./viewportInfo"
 
 export interface DomPointerLike {
   clientX: number
@@ -67,12 +69,15 @@ export function editorCursor(controller: Pick<EditorController, "store" | "tools
   return "crosshair"
 }
 
-/** Grid cell and world point under the cursor, for the status bar. */
-export function cursorReadout(grid: GridSettings, p: Vec2 | null): { i: number; j: number; x: number; z: number; inside: boolean } | null {
+/**
+ * Grid cell and world point under the cursor, for the status bar. `y` is relative to the active
+ * level's ground (`levelElevation`), like object Y values.
+ */
+export function cursorReadout(grid: GridSettings, p: Vec3 | null, levelElevation = 0): CursorReadout | null {
   if (!p) return null
   const i = Math.floor(p.x / grid.cellSize)
   const j = Math.floor(p.z / grid.cellSize)
-  return { i, j, x: p.x, z: p.z, inside: i >= 0 && j >= 0 && i < grid.width && j < grid.depth }
+  return { i, j, x: p.x, y: p.y - levelElevation, z: p.z, inside: i >= 0 && j >= 0 && i < grid.width && j < grid.depth }
 }
 
 /** Keyboard focus is in something that takes text: editor shortcuts must not fire. */

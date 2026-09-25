@@ -156,8 +156,8 @@ describe("pointer", () => {
     const free = toToolPointerEvent({ ...base, altKey: true }, pick, { grid, snapMode: "center", altHeld: false })
     expect(free.snapped).toEqual({ x: 6.2, z: 13.9 })
     expect(toToolPointerEvent(base, { ...pick, ground: null }, { grid, snapMode: "vertex", altHeld: false }, { button: 2 })).toMatchObject({ snapped: null, button: 2 })
-    expect(cursorReadout(grid, { x: 12, z: 49 })).toEqual({ i: 2, j: 9, x: 12, z: 49, inside: true })
-    expect(cursorReadout(grid, { x: -1, z: 3 })?.inside).toBe(false)
+    expect(cursorReadout(grid, { x: 12, y: 13, z: 49 }, 10)).toEqual({ i: 2, j: 9, x: 12, y: 3, z: 49, inside: true })
+    expect(cursorReadout(grid, { x: -1, y: 0, z: 3 })?.inside).toBe(false)
     expect(isTextEntryTarget(null)).toBe(false)
   })
 

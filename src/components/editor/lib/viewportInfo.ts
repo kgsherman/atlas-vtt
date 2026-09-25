@@ -10,6 +10,8 @@ export interface CursorReadout {
   i: number
   j: number
   x: number
+  /** Height above the active level's ground (feet). */
+  y: number
   z: number
   inside: boolean
 }
@@ -28,5 +30,5 @@ export function createViewportInfoStore(): ViewportInfoStore {
 export function sameCursor(a: CursorReadout | null, b: CursorReadout | null): boolean {
   if (a === b) return true
   if (!a || !b) return false
-  return a.i === b.i && a.j === b.j && Math.abs(a.x - b.x) < 0.05 && Math.abs(a.z - b.z) < 0.05
+  return a.i === b.i && a.j === b.j && Math.abs(a.x - b.x) < 0.05 && Math.abs(a.y - b.y) < 0.05 && Math.abs(a.z - b.z) < 0.05
 }

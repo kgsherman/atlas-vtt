@@ -17,7 +17,7 @@ import { EngineCanvas } from "@/components/canvas/EngineCanvas"
 import { useEngine } from "@/components/canvas/engineContext"
 import { useServices } from "@/app/services"
 import { groundHeightAt, tokenViewLevelId } from "@/core/scene/queries"
-import type { Id } from "@/core/scene/types"
+import type { Id, Vec3 } from "@/core/scene/types"
 import { editorViewState } from "@/editor/store"
 import type { Engine, Quality, ViewState } from "@/render/contracts"
 
@@ -284,8 +284,10 @@ function ViewportBridge({
 
     const refreshCursor = () => setCursor(canvas, previewRef.current ? "default" : editorCursor(controller, leftDown))
 
-    const updateCursor = (ground: { x: number; z: number } | null) => {
-      const next = cursorReadout(store.getState().scene.grid, ground)
+    const updateCursor = (ground: Vec3 | null) => {
+      const s = store.getState()
+      const level = Object.hasOwn(s.scene.levels, s.activeLevelId) ? s.scene.levels[s.activeLevelId] : null
+      const next = cursorReadout(s.scene.grid, ground, level?.elevation ?? 0)
       if (!sameCursor(next, info.getState().cursor)) info.setState({ cursor: next })
       refreshCursor()
     }
@@ -302,7 +304,7 @@ function ViewportBridge({
       if (previewRef.current) return
       const ev = background(build(e)).event
       controller.pointerMove(ev)
-      updateCursor(ev.ground)
+      updateCursor(ev.pick.ground)
     }
 
     const flushMove = () => {
@@ -354,7 +356,7 @@ function ViewportBridge({
         controller.pointerDown(ev)
       }
       if (controller.activeTool().capturesPointer) engine.setCameraControlsEnabled(false)
-      updateCursor(ev.ground)
+      updateCursor(ev.pick.ground)
     }
 
     const onPointerMove = (e: PointerEvent) => {

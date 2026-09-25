@@ -37,14 +37,14 @@ function Item({ icon, children, tooltip, className }: { icon?: React.ReactNode; 
 function CursorReadout({ info }: { info: ViewportInfoStore }) {
   const cursor = useStore(info, (s) => s.cursor)
   return (
-    <Item icon={<Crosshair className="size-3" />} tooltip="Cell (column, row) and position under the cursor" className="w-44 tabular-nums">
+    <Item icon={<Crosshair className="size-3" />} tooltip="Cell (column, row) and position (x, y, z) under the cursor; y is the height above the level's ground" className="w-56 tabular-nums">
       {cursor ? (
         <>
           <span className={cn(!cursor.inside && "text-destructive")}>
             {cursor.i}, {cursor.j}
           </span>
           <span className="text-muted-foreground">
-            ({trimNumber(cursor.x, 1)}, {trimNumber(cursor.z, 1)} ft)
+            ({trimNumber(cursor.x, 1)}, {trimNumber(cursor.y, 1)}, {trimNumber(cursor.z, 1)} ft)
           </span>
         </>
       ) : (
