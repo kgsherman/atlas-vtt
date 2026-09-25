@@ -258,6 +258,36 @@ describe("vision clients", () => {
     expect(await busy).toBe("rejected")
   })
 
+  it("a probe cancelled before it starts is skipped (worker and in-thread)", async () => {
+    const { scene, aldric } = lantern()
+    const state = createGameState({ sessionId: "s", roomCode: "R", scene })
+    const step = sceneWithTokenAt(state.scene, aldric.id, { cell: { i: 22, j: 11 }, levelId: aldric.levelId })
+    const fake = new FakeWorker()
+    const ops: string[] = []
+    const post = fake.postMessage.bind(fake)
+    fake.postMessage = (message: unknown) => {
+      ops.push((message as { op: string }).op)
+      post(message)
+    }
+    for (const client of [createWorkerVisionClient(fake), createInThreadVisionClient()]) {
+      ops.length = 0
+      void client.setScene(state.scene, 1)
+      const busy = client.compute([aldric.id], 1)
+      let stale = false
+      const skipped = client.probe(step, { tokens: [aldric.id] }, [[aldric.id]], { cancelled: () => stale })
+      const kept = client.probe(step, { tokens: [aldric.id] }, [[aldric.id]], { cancelled: () => false })
+      stale = true
+      await busy
+      expect(await skipped).toEqual({ stateSeq: -1, results: [] })
+      const r = await kept
+      expect(r.stateSeq).toBe(1)
+      expect(r.results).toHaveLength(1)
+      expect(client.pendingProbes).toBe(0)
+      if (client.kind === "worker") expect(ops).toEqual(["setScene", "compute", "probe"])
+      client.dispose()
+    }
+  })
+
   it("in-thread errors reject the call without breaking later ones", async () => {
     const client = createInThreadVisionClient()
     await expect(client.compute(["x"], 0)).rejects.toThrow(/before setScene/)

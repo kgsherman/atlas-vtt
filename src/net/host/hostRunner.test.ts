@@ -146,15 +146,15 @@ function slowVision(delay: () => number, probeDelay: () => number = () => 0, log
       update: inner.update,
       dispose: inner.dispose,
       compute: async (ids: Id[], tag: number) => {
-        log?.push(`compute ${ids.join(",")}`)
+        log?.push(`compute ${ids.join(",")} @${tag}`)
         const r = await inner.compute(ids, tag)
         const ms = delay()
         if (ms > 0) await sleep(ms)
         return r
       },
-      probe: async (scene: Scene, change: { objects?: Id[]; tokens?: Id[] }, sets: Id[][]) => {
-        log?.push("probe")
-        const r = await inner.probe(scene, change, sets)
+      probe: async (scene: Scene, change: { objects?: Id[]; tokens?: Id[] }, sets: Id[][], opts?: { cancelled?: () => boolean }) => {
+        log?.push(`probe ${sets.map((ids) => ids.join(",")).join(" | ")}`)
+        const r = await inner.probe(scene, change, sets, opts)
         const ms = probeDelay()
         if (ms > 0) await sleep(ms)
         log?.push("probe done")
@@ -726,6 +726,97 @@ describe("host runner — step probes", () => {
     expect(m.explored(hl.ground, 5, 2)).toBe(false)
     expect(m.explored(hl.ground, 5, 1)).toBe(false)
     expect(m.explored(hl.ground, 1, 2)).toBe(true)
+  })
+})
+
+describe("host runner — shared work", () => {
+  it("players sharing vision share one compute per revision, and one viewer set per step probe", async () => {
+    const c = corridor()
+    const log: string[] = []
+    const { fx, h } = await hosted(c.scene, [P1, P2], {
+      createVisionClient: slowVision(
+        () => 0,
+        () => 0,
+        log
+      ),
+    })
+    h.dispatch({ t: "assign-token", tokenId: c.eve.id, userId: P1, assigned: true })
+    h.dispatch({ t: "assign-token", tokenId: c.fay.id, userId: P2, assigned: true })
+    h.dispatch({ t: "set-shared-vision", enabled: true })
+    const m1 = mirror(fx, P1)
+    const m2 = mirror(fx, P2)
+    const both = [
+      [P1, m1],
+      [P2, m2],
+    ] satisfies [string, Mirror][]
+    await settle(h, [...both])
+    log.length = 0
+    const r = m1.move(
+      c.eve.id,
+      walk(c.ground, [
+        [1, 1],
+        [2, 1],
+        [3, 1],
+        [4, 1],
+      ])
+    )
+    await waitFor(() => m1.result(r) !== undefined, "move result")
+    await settle(h, [...both])
+    const party = [c.eve.id, c.fay.id].sort().join(",")
+    const computes = log.filter((l) => l.startsWith("compute"))
+    expect(computes.length).toBeGreaterThan(0)
+    expect(computes.every((l) => l.startsWith(`compute ${party} @`))).toBe(true)
+    // Both players need this view; no revision was computed twice.
+    expect(new Set(computes).size).toBe(computes.length)
+    // Two intermediate steps, each probed once for the one viewer set both players share.
+    expect(log.filter((l) => l.startsWith("probe ") && l !== "probe done")).toEqual([`probe ${party}`, `probe ${party}`])
+    expect(m1.view!.tokens[c.eve.id].position).toEqual(m2.view!.tokens[c.eve.id].position)
+    expect(m2.explored(c.ground, 3, 1)).toBe(true)
+  })
+
+  it("probes each place once until the scene changes in a way that matters", async () => {
+    const c = corridor()
+    const worker = new SerialWorker(0)
+    const { fx, h } = await hosted(c.scene, [P1], { createVisionClient: () => createWorkerVisionClient(worker) })
+    h.dispatch({ t: "assign-token", tokenId: c.eve.id, userId: P1, assigned: true })
+    const m = mirror(fx, P1)
+    await settle(h, [[P1, m]])
+    const probes = () => worker.ops.filter((op) => op === "probe").length
+    const move = async (cells: [number, number][]) => {
+      const r = m.move(c.eve.id, walk(c.ground, cells))
+      await waitFor(() => m.result(r) !== undefined, "move result")
+      expect(m.result(r)).toMatchObject({ ok: true, applied: cells.length - 1 })
+      await settle(h, [[P1, m]])
+    }
+    // Pacing between two cells: five intermediate steps, two places.
+    await move([
+      [1, 1],
+      [2, 1],
+      [1, 1],
+      [2, 1],
+      [1, 1],
+      [2, 1],
+      [3, 1],
+    ])
+    expect(probes()).toBe(2)
+    // Back over the same places: nothing new to see from them.
+    await move([
+      [3, 1],
+      [2, 1],
+      [1, 1],
+      [2, 1],
+    ])
+    expect(probes()).toBe(2)
+    // After a fog reset the places are seen afresh.
+    h.dispatch({ t: "reset-fog", userId: P1 })
+    await settle(h, [[P1, m]])
+    await move([
+      [2, 1],
+      [1, 1],
+      [0, 1],
+    ])
+    expect(probes()).toBe(3)
+    expect(m.explored(c.ground, 1, 1)).toBe(true)
   })
 })
 

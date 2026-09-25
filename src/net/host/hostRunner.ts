@@ -216,6 +216,30 @@ class PlayerConn {
 
 const EMPTY_STATS: HostStats = { visionMs: 0, flushMs: 0, messagesSent: 0, bytesSent: 0, pendingSends: 0, lastSaveAt: null }
 
+/** Step probes remembered for deduplication before the record starts over. */
+const MAX_PROBED_STEPS = 4096
+
+type VisionComputed = { stateSeq: number; result: VisibilityResult }
+
+/**
+ * What a step probe of `tokenId` sees besides the step itself: the mover's vision, where other tokens
+ * carry their lights (their moves do not change `knowledgeRev`), and whom the result goes to.
+ */
+function stepContext(scene: Scene, tokenId: Id, affected: string[], viewerKeys: string[]): string {
+  const t = scene.tokens[tokenId]
+  const carriers = new Set<Id>()
+  for (const o of Object.values(scene.objects)) {
+    if (o.type === "light" && o.attachedTokenId && o.attachedTokenId !== tokenId) carriers.add(o.attachedTokenId)
+  }
+  const lights = [...carriers]
+    .sort()
+    .flatMap((id) =>
+      Object.hasOwn(scene.tokens, id) ? [`${id}@${scene.tokens[id].levelId},${scene.tokens[id].position.x},${scene.tokens[id].position.z}`] : []
+    )
+  const v = t.vision
+  return [tokenId, t.size, t.eyeHeight, v.darkvision, v.blindsight, v.blind, lights.join(";"), affected.join(","), viewerKeys.join("|")].join("/")
+}
+
 function emptyVisibility(): VisibilityResult {
   return { perception: {}, sunlit: {}, visibleTokenIds: new Set(), observedObjectIds: new Set(), illuminatingLightIds: new Set() }
 }
@@ -312,6 +336,17 @@ export class HostRunnerImpl implements HostRunner {
    * results are discarded instead of adding exploration.
    */
   private knowledgeRev = 0
+  /**
+   * Visibility computes of one revision by viewer set: players with the same viewers (shared vision)
+   * share one compute, including one still in flight.
+   */
+  private visionMemo: { vision: VisionClient | null; tag: number; byKey: Map<string, Promise<VisionComputed | null>> } | null = null
+  /**
+   * Step positions already probed (or queued) since `knowledgeRev` last changed, by context (the mover,
+   * its vision, where other tokens carry lights, the players affected): the same place seen in the same
+   * context again adds no knowledge.
+   */
+  private probedSteps: { vision: VisionClient; rev: number; size: number; byContext: Map<string, Set<string>> } | null = null
   /** Editor edits applied so far (tells a library save whether the map changed while it ran). */
   private sceneEdits = 0
 
@@ -773,7 +808,24 @@ export class HostRunnerImpl implements HostRunner {
     this.markDirty("all")
   }
 
-  private async computeVision(viewers: Id[], tag: number): Promise<{ stateSeq: number; result: VisibilityResult } | null> {
+  /** computeVision, shared by every caller asking for the same viewers (`key`) on the same revision. */
+  private sharedVision(viewers: Id[], key: string, tag: number): Promise<VisionComputed | null> {
+    const vision = this.vision
+    let memo = this.visionMemo
+    if (!memo || memo.vision !== vision || memo.tag !== tag) memo = this.visionMemo = { vision, tag, byKey: new Map() }
+    const hit = memo.byKey.get(key)
+    if (hit) return hit
+    const byKey = memo.byKey
+    const p = this.computeVision(viewers, tag)
+    byKey.set(key, p)
+    // A failed or mismatched compute is not kept: the retry must ask the client again.
+    void p.then((r) => {
+      if ((!r || r.stateSeq !== tag) && byKey.get(key) === p) byKey.delete(key)
+    })
+    return p
+  }
+
+  private async computeVision(viewers: Id[], tag: number): Promise<VisionComputed | null> {
     if (viewers.length === 0) return { stateSeq: tag, result: emptyVisibility() }
     const vision = this.vision
     if (!vision) return null
@@ -1266,7 +1318,8 @@ export class HostRunnerImpl implements HostRunner {
    * the result and every other player's flush go first, the step exploration arrives in a follow-up
    * patch. A probe resolving after the scene changed in a way that matters (a door opened, fog reset,
    * a map edit…: `knowledgeRev`) is discarded, so a late step can never see through a door opened after
-   * the token walked past.
+   * the token walked past; one still queued then is skipped unrun. Players sharing a viewer set share its
+   * result, and a place already probed in the same context (`stepContext`) is not probed again.
    */
   private stepPasses(out: RequestOutcome, gen: number): void {
     const state = this.state!
@@ -1274,16 +1327,40 @@ export class HostRunnerImpl implements HostRunner {
     const tokenId = out.tokenId!
     const affected = [...this.conns.keys()].filter((uid) => Object.hasOwn(state.players, uid) && viewerTokenIds(state, uid).includes(tokenId))
     if (affected.length === 0) return
-    const viewerSets = affected.map((uid) => viewerTokenIds(state, uid))
+    // One viewer set per distinct set (shared vision: usually one for everybody).
+    const keyOf = new Map<string, number>()
+    const viewerSets: Id[][] = []
+    const setOf = affected.map((uid) => {
+      const ids = viewerTokenIds(state, uid)
+      const key = ids.join(",")
+      let k = keyOf.get(key)
+      if (k === undefined) {
+        k = viewerSets.push(ids) - 1
+        keyOf.set(key, k)
+      }
+      return k
+    })
     const rev = this.knowledgeRev
+    const stale = () => gen !== this.gen || vision !== this.vision || this.knowledgeRev !== rev
+    let probed = this.probedSteps
+    if (!probed || probed.vision !== vision || probed.rev !== rev || probed.size > MAX_PROBED_STEPS) {
+      probed = this.probedSteps = { vision, rev, size: 0, byContext: new Map() }
+    }
+    const context = stepContext(state.scene, tokenId, affected, [...keyOf.keys()])
+    let seen = probed.byContext.get(context)
+    if (!seen) probed.byContext.set(context, (seen = new Set()))
     for (const step of out.visited.slice(0, -1)) {
+      const at = `${step.levelId}|${step.cell.i},${step.cell.j}`
+      if (seen.has(at)) continue
+      seen.add(at)
+      probed.size++
       const scene = sceneWithTokenAt(state.scene, tokenId, step)
       vision
-        .probe(scene, { tokens: [tokenId], objects: out.delta.objects }, viewerSets)
+        .probe(scene, { tokens: [tokenId], objects: out.delta.objects }, viewerSets, { cancelled: stale })
         .then((r) => {
-          if (gen !== this.gen || vision !== this.vision || this.knowledgeRev !== rev) return
+          if (stale() || r.results.length === 0) return
           affected.forEach((uid, k) => {
-            const vis = r.results[k]
+            const vis = r.results[setOf[k]]
             if (vis) this.applyKnowledge(uid, vis, scene, true)
           })
         })
@@ -1421,7 +1498,7 @@ export class HostRunnerImpl implements HostRunner {
       let vis = conn.lastVis
       if (!vis || conn.lastVisTag !== this.sceneTag || conn.lastVisKey !== key) {
         const tag = this.sceneTag
-        const r = await this.computeVision(viewers, tag)
+        const r = await this.sharedVision(viewers, key, tag)
         if (!this.hosting(gen) || conn.closed) return null
         if (!r || r.stateSeq !== tag || tag !== this.sceneTag || viewerTokenIds(this.state!, uid).join(",") !== key) {
           this.staleResults++

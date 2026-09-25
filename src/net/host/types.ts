@@ -102,9 +102,15 @@ export interface VisionClient {
    * from `scene` (e.g. a moving token at an intermediate step of its path), without adopting it (the
    * client's revision and tag stay as they are). Probes wait until no setScene/update/compute is
    * outstanding and run one at a time, so a foreground call waits for at most one probe. `stateSeq`
-   * is the tag of the revision the probe was applied to.
+   * is the tag of the revision the probe was applied to. A probe whose `opts.cancelled()` is true by
+   * the time it would start is skipped: it resolves with no results (and `stateSeq` -1).
    */
-  probe(scene: GameState["scene"], change: { objects?: Id[]; tokens?: Id[] }, viewerSets: Id[][]): Promise<{ stateSeq: number; results: VisibilityResult[] }>
+  probe(
+    scene: GameState["scene"],
+    change: { objects?: Id[]; tokens?: Id[] },
+    viewerSets: Id[][],
+    opts?: { cancelled?: () => boolean }
+  ): Promise<{ stateSeq: number; results: VisibilityResult[] }>
   /** Probes queued or running. */
   readonly pendingProbes: number
   dispose(): void

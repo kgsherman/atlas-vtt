@@ -813,11 +813,17 @@ points whose segment from the centre is sight-blocked are skipped. (No "stands i
 **Moves**: the host evaluates visibility at every step of an applied path and ORs each result into explored
 and memory, so corridors walked past are explored. Only the final position is on the result's critical
 path: the intermediate steps are evaluated after the result, as low-priority **probes** in the vision worker
-that do not change its revision (one probe per step for all affected players, posted after the move's final
-revision). Their exploration arrives in a follow-up patch. A probe is discarded if, before it resolved, the
-scene changed in a way that matters (objects, terrain or structure: a door opened, a map edit — the move's
-own token change excepted) or a DM command reduced visibility (hide, fog reset…), so a late step can never
-see through a door opened after the token walked past.
+that do not change its revision (one probe per step for all affected players, one viewer set per distinct set
+of viewers, posted after the move's final revision). Their exploration arrives in a follow-up patch. A probe
+is discarded if, before it resolved, the scene changed in a way that matters (objects, terrain or structure:
+a door opened, a map edit — the move's own token change excepted) or a DM command reduced visibility (hide,
+fog reset…), so a late step can never see through a door opened after the token walked past; one still queued
+then is skipped without running. Until that happens, a place is probed once per context (the mover and its
+vision, where other tokens carry lights, the affected players and viewer sets): pacing back and forth or
+walking a corridor again queues nothing new.
+
+Players with the same viewer set (shared vision) share the host's `compute` of each revision, in flight or
+finished; knowledge and filtering stay per player.
 
 ### 5.3 Movement (`core/movement`)
 
@@ -965,9 +971,10 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
     never hold a profile. `viewToScene` copies both (missing `followTerrain` → true).
 - Vision worker contract (`VisionClient`, `net/host/types.ts`): `setScene` / `update(scene, change, stateSeq)`
   advance the worker's revision; `compute(viewerTokenIds, stateSeq)` answers for that revision;
-  `probe(scene, change, viewerSets)` evaluates each viewer set on the current revision with `change` taken
-  from `scene` (a moving token at an intermediate step) without adopting it, and reports the `stateSeq` it
-  was applied to; `pendingProbes` counts queued ones. Two lanes: probes wait until no setScene / update /
+  `probe(scene, change, viewerSets, { cancelled })` evaluates each viewer set on the current revision with
+  `change` taken from `scene` (a moving token at an intermediate step) without adopting it, and reports the
+  `stateSeq` it was applied to; one whose `cancelled()` is true when it would start is skipped (no results,
+  `stateSeq` −1); `pendingProbes` counts queued ones. Two lanes: probes wait until no setScene / update /
   compute is outstanding and run one at a time, so a foreground call waits for at most one probe and a
   flush never queues behind a long path's steps (§5.2 Moves).
 - Request rules: ≤ 8 req/s per player (burst 16), one in-flight move (or jump) per token, paths ≤ 256 steps,

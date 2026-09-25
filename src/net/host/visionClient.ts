@@ -11,7 +11,8 @@
  *
  * Probes (a move's intermediate steps) go through a low-priority lane: they are queued here and posted
  * one at a time, only while no setScene/update/compute is outstanding, so foreground work (the move's
- * result, other players' flushes) waits for at most one probe instead of the whole backlog.
+ * result, other players' flushes) waits for at most one probe instead of the whole backlog. A probe
+ * whose `cancelled()` is true by the time it would start is skipped (resolves with no results).
  */
 import type { Id, SceneLike } from "@/core/scene/types"
 import type { VisibilityResult, VisionChange } from "@/core/vision/types"
@@ -31,14 +32,17 @@ type Change = { objects?: Id[]; tokens?: Id[]; structure?: boolean; terrain?: Id
 
 type Ok = VisionResponse & { ok: true }
 
+type ProbeJob = { start: () => Promise<Ok>; cancelled?: () => boolean; resolve: (res: Ok | null) => void; reject: (err: Error) => void }
+
 /**
  * Foreground calls vs low-priority probes: a probe starts only while no foreground call is outstanding
- * and no other probe runs; every settled call drains the queue.
+ * and no other probe runs; every settled call drains the queue. Cancelled probes are dropped (resolve
+ * null) when they reach the front, never started.
  */
 class ProbeLane {
   private foreground = 0
   private running = false
-  private queue: Array<{ start: () => Promise<Ok>; resolve: (res: Ok) => void; reject: (err: Error) => void }> = []
+  private queue: ProbeJob[] = []
 
   get pending(): number {
     return this.queue.length + (this.running ? 1 : 0)
@@ -60,9 +64,9 @@ class ProbeLane {
     return p
   }
 
-  probe(start: () => Promise<Ok>): Promise<Ok> {
+  probe(start: () => Promise<Ok>, cancelled?: () => boolean): Promise<Ok | null> {
     return new Promise((resolve, reject) => {
-      this.queue.push({ start, resolve, reject })
+      this.queue.push({ start, cancelled, resolve, reject })
       this.drain()
     })
   }
@@ -75,7 +79,11 @@ class ProbeLane {
 
   private drain(): void {
     if (this.foreground > 0 || this.running) return
-    const job = this.queue.shift()
+    let job = this.queue.shift()
+    while (job?.cancelled?.()) {
+      job.resolve(null)
+      job = this.queue.shift()
+    }
     if (!job) return
     this.running = true
     let p: Promise<Ok>
@@ -91,7 +99,9 @@ class ProbeLane {
   }
 }
 
-function probeResult(res: Ok): { stateSeq: number; results: VisibilityResult[] } {
+/** A skipped probe (cancelled before it started) resolves with no results and tag -1. */
+function probeResult(res: Ok | null): { stateSeq: number; results: VisibilityResult[] } {
+  if (!res) return { stateSeq: -1, results: [] }
   return { stateSeq: res.tag, results: (res.results ?? []) as VisibilityResult[] }
 }
 
@@ -182,7 +192,7 @@ export function createInThreadVisionClient(): VisionClientExt {
       lastComputeMs = res.ms
       return { stateSeq: res.tag, result: res.result as VisibilityResult }
     },
-    async probe(scene, change, viewerSets) {
+    async probe(scene, change, viewerSets, opts) {
       if (disposed) throw new Error("vision client disposed")
       const vc = toVisionChange(change)
       const tokenId = vc.tokens?.[0] ?? ""
@@ -192,7 +202,7 @@ export function createInThreadVisionClient(): VisionClientExt {
       // (other tokens, a DM edit) without telling the engine.
       const diff = diffForChange(scene as SceneLike, vc)
       const sets = viewerSets.map((ids) => [...ids])
-      return probeResult(await lane.probe(() => run({ id: nextId++, op: "probe", tokenId, change: vc, diff, viewerSets: sets })))
+      return probeResult(await lane.probe(() => run({ id: nextId++, op: "probe", tokenId, change: vc, diff, viewerSets: sets }), opts?.cancelled))
     },
     dispose() {
       disposed = true
@@ -299,7 +309,7 @@ export function createWorkerVisionClient(worker: WorkerLike): VisionClientExt {
       lastComputeMs = res.ms
       return { stateSeq: res.tag, result: res.result as VisibilityResult }
     },
-    async probe(scene, change, viewerSets) {
+    async probe(scene, change, viewerSets, opts) {
       if (disposed) throw new Error("vision client disposed")
       if (failures.error) throw failures.error
       const vc = toVisionChange(change)
@@ -308,7 +318,7 @@ export function createWorkerVisionClient(worker: WorkerLike): VisionClientExt {
       // whatever revision is current when the probe runs.
       const diff = diffForChange(scene as SceneLike, vc)
       const sets = viewerSets.map((ids) => [...ids])
-      return probeResult(await lane.probe(() => call({ op: "probe", tokenId, change: vc, diff, viewerSets: sets })))
+      return probeResult(await lane.probe(() => call({ op: "probe", tokenId, change: vc, diff, viewerSets: sets }), opts?.cancelled))
     },
     dispose() {
       if (disposed) return
