@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
+import { createScene } from "@/core/scene/factory"
 import { backdropCellRange } from "@/core/session/backdrop"
 import { createCellMask, setCell, setSubcells } from "@/core/vision/mask"
 
+import { createMemoryStore } from "../localStore"
 import { exploredCellsInRect } from "../player/backdropCanvas"
 import type { AtlasClient } from "../supabase"
-import { createSupabaseTileSource, tileSourceRect } from "./tiles"
+import { createLocalAssetStore } from "./localAssets"
+import { createLocalTileSource, createSupabaseTileSource, tileSourceRect } from "./tiles"
 
 describe("tile geometry", () => {
   const grid = { cellSize: 5, width: 27, depth: 47 }
@@ -102,6 +105,78 @@ describe("Supabase tile source", () => {
     const second = "session-tiles/s/u/lvl/0_0.webp#512.8"
     expect(tagOf(await tiles.getTile("lvl", cell))).toBe(second)
     expect(downloads).toEqual([first, second])
+    tiles.dispose()
+  })
+})
+
+describe("local tile source", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  /** Canvases that remember what was drawn on them: a tile says which image it was cut from, and where. */
+  function stubCanvases() {
+    class FakeCanvas {
+      drawn = ""
+      width: number
+      height: number
+      constructor(width: number, height: number) {
+        this.width = width
+        this.height = height
+      }
+      getContext() {
+        return {
+          imageSmoothingQuality: "low",
+          clearRect: () => {},
+          drawImage: (image: { tag: string }, sx: number, sy: number) => {
+            this.drawn = `${image.tag}@${sx},${sy}`
+          },
+        }
+      }
+    }
+    vi.stubGlobal("OffscreenCanvas", FakeCanvas)
+    vi.stubGlobal("createImageBitmap", async (src: Blob | FakeCanvas) => ({
+      tag: src instanceof Blob ? await src.text() : src.drawn,
+      width: 400,
+      height: 400,
+      close() {},
+    }))
+  }
+  const tagOf = (b: ImageBitmap | null) => (b as unknown as { tag: string } | null)?.tag ?? null
+
+  it("cuts tiles from the stored scene of the map the view shows, never from another map's", async () => {
+    stubCanvases()
+    const store = createMemoryStore()
+    const images = createLocalAssetStore(store)
+    // A 400 px backdrop over 40 ft: 50 px per 5 ft cell.
+    const keep = createScene({ name: "Keep", width: 8, depth: 8 })
+    const level = Object.keys(keep.levels)[0]
+    const meta = { id: "img", kind: "image" as const, name: "map", mime: "image/webp" as const, width: 400, height: 400 }
+    keep.assets = { img: { ...meta, bytes: 4 } }
+    keep.levels[level].backdrop = { assetId: "img", rect: { x: 0, z: 0, w: 40, d: 40 }, opacity: 1, tintWalls: false }
+    // Its night copy: the same level and asset ids, other pixels, placed a cell further west.
+    const night = structuredClone(keep)
+    night.id = "night-keep"
+    night.levels[level].backdrop!.rect.x = -5
+    await images.putImage(keep.id, new Blob(["keep"]), meta)
+    await images.putImage(night.id, new Blob(["night"]), meta)
+    const save = (state: object) => store.put("sessions", "state:s1", { epoch: 1, state, updatedAt: "" })
+    const cell = { i: 1, j: 1 }
+
+    await save({ kind: "seed", scene: keep })
+    const tiles = createLocalTileSource(store, "s1")
+    tiles.setMap(0)
+    expect(tagOf(await tiles.getTile(level, cell))).toBe("keep@50,50")
+    // The DM moves the game to the night copy (saved before the view went out): the scene read a moment
+    // ago is not used for it.
+    await save({ scene: night, mapSerial: 1 })
+    tiles.setMap(1)
+    expect(tagOf(await tiles.getTile(level, cell))).toBe("night@100,50")
+    // Back to the keep with the view ahead of the save: nothing (the compositor retries) until it lands.
+    tiles.setMap(2)
+    expect(await tiles.getTile(level, cell)).toBeNull()
+    await save({ scene: keep, mapSerial: 2 })
+    expect(tagOf(await tiles.getTile(level, cell))).toBe("keep@50,50")
     tiles.dispose()
   })
 })

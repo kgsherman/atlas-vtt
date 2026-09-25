@@ -8,7 +8,10 @@
  *  - Join: view:{uid} → SUBSCRIBED → req:{uid} (PlayerChannels does this) → on every ready: hello{nonce, epoch, lastSeq}.
  *  - patch: applied iff epoch === local.epoch && baseSeq === local.seq; otherwise hello.
  *  - snapshot: replaces the view. snapshot_ready: reload the row; accepted only for the announced epoch
- *    with seq ≥ the announced seq, otherwise hello again.
+ *    with seq ≥ the announced seq and newer than ours, otherwise hello again (only when no later
+ *    snapshot_ready is being loaded). A later snapshot_ready does not throw a load in flight away, and a
+ *    result / patch / sync at a seq the row being loaded brings needs no hello (a slow row load would
+ *    otherwise never land: every hello is answered with another snapshot_ready).
  *  - sync: seq > local (or another epoch) → hello.
  *  - Replies carrying a nonce that is not ours (another tab of the same user) are dropped.
  *  - Epochs superseded by a HostBroadcast `status` from a newer host are ignored for good.
@@ -22,9 +25,13 @@
  *  - Our own network (transport.networkOnline, e.g. navigator.onLine) down: requests are refused locally
  *    as "not-connected" and expiring requests are not blamed on the DM (`networkOffline` in the snapshot).
  *  - Pending requests are overlays only: cleared by their result, by a snapshot / epoch change, or
- *    after 5 s ("DM not responding").
+ *    after 5 s ("DM not responding"). Results ahead of our view (a `result`, or a patch we cannot apply,
+ *    at a later seq of this run) wait for a view at or past their seq: they report on an update we do not
+ *    show yet (e.g. a map change still loading).
  *  - Another map (the view's scene.mapSerial changed: the DM moved the game): the scene is replaced,
  *    requests about the old map's places are dropped and their verdicts ignored, `mapChanges` counts it.
+ *    Those requests (move, jump, door, template) name the map they were made on (`map`): the host refuses
+ *    them once the game is on another one.
  */
 import type { PathStep } from "@/core/movement/types"
 import { HP_LIMITS, isTokenCondition, type TokenStatusChange } from "@/core/scene/tokenStatus"
@@ -217,6 +224,8 @@ export const PING_GAP_MS = 400
 
 const MAX_NONCES = 8
 const MAX_REQ_IDS = 256
+/** Result batches kept while ahead of our view (a `result` message holds one). */
+const MAX_HELD = 64
 const MAX_SCENE_HISTORY = 64
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -550,9 +559,13 @@ class PlayerClientImpl implements AtlasPlayerClient {
   private readonly reqOrder: string[] = []
   private sendTimes: number[] = []
   private hostUnresponsive = false
+  /** Results ahead of our view (same run, later seq): reported once a view at or past `seq` is adopted. */
+  private held: Array<{ seq: number; results: unknown[] }> = []
 
   // row loading
   private readyRowToken = 0
+  /** What the newest snapshot_ready load in flight brings (epoch, seq): messages up to it need no hello. */
+  private readyWant: { epoch: string; seq: number; at: number } | null = null
   private offlineRowToken = 0
   private rowAttempts = 0
   private rowTimer: unknown = null
@@ -566,6 +579,8 @@ class PlayerClientImpl implements AtlasPlayerClient {
   // backdrops
   private readonly compositor: BackdropCompositor
   private readonly backdropListeners = new Set<(ev: BackdropEvent) => void>()
+  /** The map the tile source was last told about (tiles.setMap). */
+  private tileMap: number | null = null
 
   // pings
   private readonly pingListeners = new Set<(ev: PingEvent) => void>()
@@ -922,8 +937,9 @@ class PlayerClientImpl implements AtlasPlayerClient {
         this.onSync(msg)
         break
       case "result":
-        this.applyResults([msg.result])
-        if (msg.epoch !== this.epoch || (isFiniteNum(msg.seq) && msg.seq > this.seq)) this.resync()
+        this.resultsAt(msg.epoch, msg.seq, [msg.result])
+        // Ahead of our view, or another run: we missed an update (unless the row being loaded brings it).
+        if ((msg.epoch !== this.epoch || (isFiniteNum(msg.seq) && msg.seq > this.seq)) && !this.rowBrings(msg.epoch, msg.seq)) this.resync()
         break
       case "tiles":
         this.onTiles(msg)
@@ -1011,7 +1027,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
         if (!looksLikeView(next)) throw new Error("patched view is malformed")
       } catch (err) {
         console.warn("[atlas player] patch failed, resyncing", err)
-        this.applyResults(msg.results)
+        this.resultsAt(msg.epoch, msg.seq, msg.results)
         this.resync()
         return
       }
@@ -1024,14 +1040,16 @@ class PlayerClientImpl implements AtlasPlayerClient {
       // Before its results: verdicts on the old map's places are not the player's business any more.
       if (isOtherMap(view, next)) this.leaveMap()
       this.updateScene(sceneChangeFromOps(msg.ops, view, next))
-      this.compositor.sync(next)
+      this.syncBackdrops(next)
+      this.releaseHeld(msg.seq)
       this.applyResults(msg.results)
       return
     }
-    this.applyResults(msg.results)
+    this.resultsAt(msg.epoch, msg.seq, msg.results)
     // Already have it (duplicate of a catch-up we applied): nothing to do.
     if (view && msg.epoch === this.epoch && isFiniteNum(msg.seq) && msg.seq <= this.seq) return
     if (msg.epoch !== this.epoch) this.onEpochChange()
+    if (this.rowBrings(msg.epoch, msg.seq)) return
     this.resync()
   }
 
@@ -1044,15 +1062,55 @@ class PlayerClientImpl implements AtlasPlayerClient {
     }
     if (msg.epoch === this.epoch && isFiniteNum(msg.seq) && msg.seq < this.seq) return
     if (msg.epoch !== this.epoch) this.onEpochChange()
+    if (this.rowBrings(msg.epoch, msg.seq)) return
     this.resync()
   }
 
   /** A different host run: earlier requests will never be answered (their overlays go away). */
   private onEpochChange(): void {
+    this.held = []
     if (this.pending.length) {
       this.pending = []
       this.armPendingTimer()
     }
+  }
+
+  /**
+   * Results that did not come with a view we adopted (a `result` message, or a patch we could not apply):
+   * reported now, except verdicts on pending requests about the map's places while they are ahead of our
+   * view in this run. Those are held: they may report on an update we do not show yet, e.g. a map change
+   * still loading, whose leaveMap must skip the verdicts about the old map. Chat, rolls and token changes
+   * never wait for a view.
+   */
+  private resultsAt(epoch: string, seq: unknown, results: unknown): void {
+    if (!(this.view && epoch === this.epoch && isFiniteNum(seq) && seq > this.seq) || !Array.isArray(results)) {
+      this.applyResults(results)
+      return
+    }
+    const placed = new Set(this.pending.filter((p) => MAP_BOUND.has(p.kind)).map((p) => p.reqId))
+    const held = results.filter((r) => isRecord(r) && typeof r.reqId === "string" && placed.has(r.reqId))
+    if (held.length < results.length) this.applyResults(results.filter((r) => !held.includes(r)))
+    if (held.length === 0) return
+    this.held.push({ seq, results: held })
+    if (this.held.length > MAX_HELD) this.held.shift()
+  }
+
+  /** A view at `seq` was adopted (after leaveMap): report the results that were waiting for it. */
+  private releaseHeld(seq: number): void {
+    const due = this.held.filter((h) => h.seq <= seq)
+    if (due.length === 0) return
+    this.held = this.held.filter((h) => h.seq > seq)
+    for (const h of due) this.applyResults(h.results)
+  }
+
+  /**
+   * The row being loaded (the newest snapshot_ready) brings (epoch, seq): no need to ask the host. A load
+   * outstanding for longer than the longest hello back-off no longer counts (a fetch that never settles must
+   * not keep us on the old view).
+   */
+  private rowBrings(epoch: unknown, seq: unknown): boolean {
+    const want = this.readyWant
+    return want !== null && epoch === want.epoch && isFiniteNum(seq) && seq <= want.seq && this.clock.now() - want.at <= this.t.helloRetryMaxMs
   }
 
   /**
@@ -1074,6 +1132,8 @@ class PlayerClientImpl implements AtlasPlayerClient {
     if (epoch !== this.epoch) this.onEpochChange()
     // Never on the first view, nor on a resync onto the same map (host restart, snapshot_ready).
     if (this.view && isOtherMap(this.view, view)) this.leaveMap()
+    // Before the overlays go, so they settle with their kind.
+    this.releaseHeld(seq)
     this.view = view
     this.viewSource = source
     this.epoch = epoch
@@ -1083,6 +1143,16 @@ class PlayerClientImpl implements AtlasPlayerClient {
     this.pending = []
     this.armPendingTimer()
     this.updateScene(null)
+    this.syncBackdrops(view)
+  }
+
+  /** Hand a view to the compositor; a tile source that crops from the stored scene learns its map first. */
+  private syncBackdrops(view: PlayerView): void {
+    const map = view.scene.mapSerial ?? 0
+    if (map !== this.tileMap) {
+      this.tileMap = map
+      this.opts.tiles.setMap?.(map)
+    }
     this.compositor.sync(view)
   }
 
@@ -1128,18 +1198,35 @@ class PlayerClientImpl implements AtlasPlayerClient {
   }
 
   private async loadReadyRow(epoch: string, seq: number): Promise<void> {
-    const token = ++this.readyRowToken
     // Already there (e.g. pushed because another tab of ours joined).
     if (this.epoch === epoch && this.seq >= seq && this.view && this.synced) return
+    const token = ++this.readyRowToken
+    // A later announcement of the same run supersedes an earlier one, never the reverse (the same one restarts
+    // the wait).
+    const want = this.readyWant
+    if (!want || want.epoch !== epoch || want.seq <= seq) this.readyWant = { epoch, seq, at: this.clock.now() }
     const res = await this.loadRow()
-    if (token !== this.readyRowToken || this.stopped || this.terminal) return
-    // Something newer (a later snapshot/patch) already arrived.
+    if (this.stopped || this.terminal) return
+    // The newest load is over: nothing it was to bring is on its way any more.
+    const newest = token === this.readyRowToken
+    if (newest) this.readyWant = null
+    // Something newer (a later snapshot/patch, or another row load) already arrived.
     if (this.epoch === epoch && this.seq >= seq && this.view && this.synced) return
-    if (res !== "failed" && res.row && res.view && res.row.epoch === epoch && res.row.seq >= seq) {
-      this.replaceView(res.view, res.row.epoch, res.row.seq, "row")
+    const row = res === "failed" ? null : res.row
+    const view = res === "failed" ? null : res.view
+    // What was announced: used even when a later snapshot_ready came meanwhile (on a slow link every load
+    // would be thrown away), unless older than what we hold. Only the newest load moves us to another run.
+    const announced = row !== null && view !== null && row.epoch === epoch && row.seq >= seq && !this.retired.has(epoch)
+    const notOlder = !this.view || (epoch === this.epoch ? announced && row.seq >= this.seq : newest)
+    if (announced && notOlder) {
+      // Within one wire epoch a seq identifies a view: at our own seq we already hold it.
+      if (!this.view || epoch !== this.epoch || row.seq > this.seq) this.replaceView(view, epoch, row.seq, "row")
       this.synced = true
-    } else {
+    } else if (newest) {
       this.resync()
+    } else {
+      // A later load is on its way.
+      return
     }
     this.evaluate()
     this.changed()
@@ -1232,7 +1319,10 @@ class PlayerClientImpl implements AtlasPlayerClient {
       this.pushResult({ reqId, ok: false, reason: "path-too-long" }, "invalid", "move")
     } else {
       const copy = path.map((s) => ({ cell: { i: s.cell.i, j: s.cell.j }, levelId: s.levelId }))
-      const msg: ClientToHost = end ? { t: "move", reqId, tokenId, path: copy, end: { x: end.x, z: end.z } } : { t: "move", reqId, tokenId, path: copy }
+      const map = this.currentMap()
+      const msg: ClientToHost = end
+        ? { t: "move", reqId, tokenId, path: copy, end: { x: end.x, z: end.z }, map }
+        : { t: "move", reqId, tokenId, path: copy, map }
       this.submit({ reqId, kind: "move", tokenId, path: copy, sentAt: 0 }, msg)
     }
     this.changed()
@@ -1241,14 +1331,14 @@ class PlayerClientImpl implements AtlasPlayerClient {
 
   requestJump(tokenId: Id, levelId: Id, position: Vec2): string {
     const reqId = this.newRequestId()
-    this.submit({ reqId, kind: "jump", tokenId, sentAt: 0 }, { t: "jump", reqId, tokenId, levelId, x: position.x, z: position.z })
+    this.submit({ reqId, kind: "jump", tokenId, sentAt: 0 }, { t: "jump", reqId, tokenId, levelId, x: position.x, z: position.z, map: this.currentMap() })
     this.changed()
     return reqId
   }
 
   requestDoor(doorId: Id, action: "open" | "close"): string {
     const reqId = this.newRequestId()
-    this.submit({ reqId, kind: "door", doorId, sentAt: 0 }, { t: "door", reqId, doorId, action })
+    this.submit({ reqId, kind: "door", doorId, sentAt: 0 }, { t: "door", reqId, doorId, action, map: this.currentMap() })
     this.changed()
     return reqId
   }
@@ -1319,7 +1409,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
   /** Place an area of effect, or with `id` move / change one of this player's own (host: core/session/templates). */
   placeTemplate(template: AreaTemplateInput, id?: Id): string {
     const reqId = this.newRequestId()
-    const msg: Extract<ClientToHost, { t: "template" }> = { t: "template", reqId, template: { ...template } }
+    const msg: Extract<ClientToHost, { t: "template" }> = { t: "template", reqId, template: { ...template }, map: this.currentMap() }
     if (id !== undefined) msg.id = id
     this.submit({ reqId, kind: "template", sentAt: 0 }, msg)
     this.changed()
@@ -1328,7 +1418,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
 
   removeTemplate(id: Id): string {
     const reqId = this.newRequestId()
-    this.submit({ reqId, kind: "template-remove", sentAt: 0 }, { t: "template-remove", reqId, id })
+    this.submit({ reqId, kind: "template-remove", sentAt: 0 }, { t: "template-remove", reqId, id, map: this.currentMap() })
     this.changed()
     return reqId
   }
@@ -1351,6 +1441,14 @@ class PlayerClientImpl implements AtlasPlayerClient {
     return () => {
       this.pingListeners.delete(cb)
     }
+  }
+
+  /**
+   * The map the view shows (scene.mapSerial, 0 for the first). Requests about its places name it, so the
+   * host refuses them once the game is on another map (e.g. one whose view is still loading here).
+   */
+  private currentMap(): number {
+    return this.view?.scene.mapSerial ?? 0
   }
 
   private newRequestId(): string {

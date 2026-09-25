@@ -80,6 +80,36 @@ describe("parseClientMessage", () => {
     expect(parseClientMessage({ t: "move", reqId: "r", tokenId: "t", path: new Array(1_000_000).fill(step(0, 0)) })).toBeNull()
   })
 
+  it("takes the map a place-bound request was made on (optional, a non-negative integer), only on those", () => {
+    const tpl = {
+      shape: "sphere",
+      levelId: "L1",
+      x: 10,
+      z: 10,
+      elevation: 0,
+      angle: 0,
+      size: 20,
+      width: 5,
+      height: 20,
+      label: "",
+      color: "#ff0000",
+      tokenId: null,
+    }
+    const tagged = [
+      { t: "move", reqId: "r", tokenId: "t", path: [step(0, 0)], map: 2 },
+      { t: "jump", reqId: "r", tokenId: "t", levelId: "L1", x: 1, z: 1, map: 0 },
+      { t: "door", reqId: "r", doorId: "d", action: "open", map: 1 },
+      { t: "template", reqId: "r", template: tpl, map: 3 },
+      { t: "template-remove", reqId: "r", id: "a1", map: 3 },
+    ]
+    for (const msg of tagged) {
+      expect(parseClientMessage(msg), msg.t).toEqual(msg)
+      for (const map of [-1, 1.5, "1", null, Infinity]) expect(parseClientMessage({ ...msg, map }), `${msg.t} ${String(map)}`).toBeNull()
+    }
+    expect(parseClientMessage({ t: "say", reqId: "r", text: "hi", to: "all", map: 1 })).toBeNull()
+    expect(parseClientMessage({ t: "ping", levelId: "L1", x: 1, z: 1, map: 1 })).toBeNull()
+  })
+
   it("validates hello fields", () => {
     expect(parseClientMessage({ t: "hello", nonce: "", epoch: null, lastSeq: null })).toBeNull()
     expect(parseClientMessage({ t: "hello", nonce: "n", epoch: null, lastSeq: -1 })).toBeNull()

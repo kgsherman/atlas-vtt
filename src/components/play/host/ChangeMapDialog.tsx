@@ -129,6 +129,12 @@ const SAMPLES = SAMPLE_SCENES.filter(
 
 type Busy = "load" | "save" | "change"
 type Step = "map" | "party" | "confirm"
+/** What the confirm step says comes along and stays behind. */
+interface Summary {
+  rows: PartyRow[]
+  tokenIds: Id[]
+  oldName: string
+}
 
 export interface ChangeMapDialogProps {
   open: boolean
@@ -189,6 +195,8 @@ function ChangeMapSteps({
   const [levelId, setLevelId] = React.useState<Id | null>(null)
   const [point, setPoint] = React.useState<Vec2 | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+  // The summary as the DM confirmed it: once the swap is dispatched, `state` is the new map's.
+  const [confirmed, setConfirmed] = React.useState<Summary | null>(null)
   // The live map's id when a load settles (the prop in that closure may be a render old).
   const liveSceneId = React.useRef(state.scene.id)
   React.useEffect(() => {
@@ -237,6 +245,8 @@ function ChangeMapSteps({
     if (save && choice.kind !== "offer") return
     setBusy(save ? "save" : "change")
     setError(null)
+    setConfirmed({ rows, tokenIds, oldName: state.scene.name })
+    let changed = false
     try {
       const outcome = await onChange({
         scene: picked.scene,
@@ -246,12 +256,15 @@ function ChangeMapSteps({
         arrival,
         save,
       })
-      if (outcome === true) onOpenChange(false)
+      changed = outcome === true
+      if (changed) onOpenChange(false)
       else if (typeof outcome === "string") setError(outcome)
     } catch (err) {
       setError(userMessage(err))
     } finally {
       setBusy(null)
+      // Changed: the dialog closes on what was confirmed.
+      if (!changed) setConfirmed(null)
     }
   }
 
@@ -327,6 +340,7 @@ function ChangeMapSteps({
   const choice = saveChoice(saveMap)
   const guard = saveChoiceText(choice)
   const blocked = busy !== null || saveMap.saving
+  const summary = confirmed ?? { rows, tokenIds, oldName: state.scene.name }
   return (
     <>
       {header}
@@ -335,9 +349,7 @@ function ChangeMapSteps({
         name={picked.name}
         digest={digest}
         arrival={arrival}
-        rows={rows}
-        tokenIds={tokenIds}
-        oldName={state.scene.name}
+        {...summary}
       />
       {guard ? (
         <Alert>
@@ -988,10 +1000,7 @@ function ConfirmSummary({
   name: string
   digest: LevelDigest & { palette: string[] }
   arrival: Vec2 & { levelId: Id }
-  rows: PartyRow[]
-  tokenIds: Id[]
-  oldName: string
-}) {
+} & Summary) {
   const ids = new Set(tokenIds)
   const coming = rows.filter((r) => ids.has(r.token.id))
   const left = rows.length - coming.length

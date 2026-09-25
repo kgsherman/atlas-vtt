@@ -1398,26 +1398,44 @@ players keep playing without rejoining.
   their new ids): a token left behind whose twin is on a duplicated map loses its owners, so a player never
   sees through a token the DM did not bring. Like any `load-scene` it clears explored masks, memory and
   revealed cells, ends combat and drops every area of effect. It posts the notice ("The party travels to
-  …", or "The game moves to …" when nobody came along) as a public system message, and bumps
-  `GameState.mapSerial` (saved with the game; sent as `view.scene.mapSerial` once > 0), which tells a
-  player's page that the map changed even when its level ids did not.
+  …", or "The game moves to …" when no visible token came along: hidden arrivals are not counted, players
+  must not learn of them) as a public system message, and bumps `GameState.mapSerial` (saved with the game;
+  sent as `view.scene.mapSerial` once > 0), which tells a player's page that the map changed even when its
+  level ids did not.
 - **Host** (`HostRunnerImpl.changeMap(target, {tokenIds, arrival, origin})`): builds the command from the
   runner's own state (a player's hit point change a moment earlier travels too, where the page's state
   could be a render behind) and dispatches it in the same step, reusing the occlusion world built for the
   placement in the full rebuild (tokens and lights are not occluders). It refuses `same-map` (the live
-  `Scene.id`: engines rebuild only for another id) and `not-hosting`, then awaits the game's save, so a
-  reload right after the change resumes on the new map (`saved: false` when that save failed; it is
-  retried). On `load-scene` the runner also looks for images under the new map's folders only (its id and
-  library row, never the previous map's, which a duplicate would share asset ids with; a restarted host
-  skips the session row's scene after a map change), forgets moves in flight, and marks every connection
-  `staleMap` until it is sent a view of the new map: meanwhile moves, jumps, doors and templates are
-  refused with `cannot` (they would be checked against the old map's view, and a duplicated map has the
-  same door and level ids), and pings need a level of the current map. The tiler resets every level (§9).
+  `Scene.id`: engines rebuild only for another id) and `not-hosting`. It returns right after the dispatch
+  and saves the game at once, so a reload right after the change resumes on the new map: `saved` is a
+  promise, false when that save failed (it is retried) or hosting stopped meanwhile. On `load-scene` the
+  runner also looks for images under the new map's folders only (its id and library row, never the
+  previous map's, which a duplicate would share asset ids with; a restarted host skips the session row's
+  scene after a map change), forgets moves in flight, and marks every connection `staleMap` until it is
+  sent a view of the new map (a patch or snapshot, or `snapshot_ready` once the stored view is written):
+  meanwhile moves, jumps, doors and templates are refused with `cannot` (they would be checked against the
+  old map's view, and a duplicated map has the same door and level ids), and pings need a level of the
+  current map. Those requests also say which map they were made on (`ClientToHost` `map`: the view's
+  `mapSerial`, 0 for the first); one made on another map is refused with `cannot` even after the new view
+  went out, since it may have left the client before that view arrived, and one made on this map applies
+  even while `staleMap` is still set (e.g. `snapshot_ready` got through but its acknowledgement timed out).
+  The tag is trusted: a client cannot name a map before holding its view, and a false one only gets its
+  own requests refused. Untagged requests rely on `staleMap` alone. The tiler resets every level (§9).
 - **Player** (`playerClient` `isOtherMap`, `PlayerClientSnapshot.mapChanges`): a view with another
-  `mapSerial` (by patch or snapshot) counts as a map change: the page does a full `engine.setScene`, the
-  pending move, jump, door and template requests are dropped (their verdicts are never shown; chat, rolls
-  and token requests still settle), host pings on levels the view does not know are dropped, pings on
-  screen are cleared, and the backdrop compositor rebuilds its layers (its layout key includes the map).
+  `mapSerial` (by patch, snapshot or the stored row of `snapshot_ready`) counts as a map change: the page
+  does a full `engine.setScene`, the pending move, jump, door and template requests are dropped (their
+  verdicts are never shown, also those that arrive first: verdicts on such requests at a seq ahead of the
+  view wait for a view that far, e.g. while the new map's row loads; chat, rolls and token requests settle
+  as their verdicts come), host
+  pings on levels the view does not know are dropped, pings on screen are cleared, and the backdrop
+  compositor rebuilds its layers (its layout key includes the map; a tile source that crops from the stored
+  scene, local mode's, is told the map first, `setMap`, and cuts nothing from another map's). Move, jump,
+  door and template requests name the map they were made on (`map`: the view's `mapSerial`, 0 for the
+  first). A new map too large for one broadcast arrives as `snapshot_ready`: a later `snapshot_ready` does
+  not throw the row load in flight away, and a result, patch or `sync` the row brings needs no hello (else,
+  on a slow link, each hello's answer would restart the load and the player would never get the map); a
+  load outstanding for longer than `helloRetryMaxMs` no longer counts, so a fetch that never settles does
+  not keep the player on the old map.
   The page cancels any gesture, returns to Move, clears the template selection, moves the camera to the
   player's token and says "The party travels to …" (or "The DM moved the game to …" when the player has no
   token there). A stranded move whose level is gone is dismissed.
@@ -2139,6 +2157,28 @@ templates are `cannot` for their owner; the label follows a `#`; cells are kept 
 of reach, and the largest area is 120 ft). Final verification (2026-09-25, after the review's fixes):
 `tsc -b` 0 errors, `eslint .` clean, `npx vitest run` 2084 tests pass (4 live Supabase files skipped); on
 SwiftShader `templates-local` 30/30 (new), `table-local` 35/35 and `keybindings` 33/33.
+
+**Changing the map (2026-09-25)** (§6.7). The DM moves a running game to another library map (or a copy of
+a sample) and brings the party: the chosen tokens arrive whole on free, standable squares around a point
+the DM picks, players keep their characters, the room and the chat, and follow them without rejoining.
+Unit tests: arrival placement (packing, large and hidden tokens, walls and props, standing tokens, no room,
+determinism); the carry (whole tokens with their lights, a duplicated map's twins replaced, id clashes
+renamed, refusals); the command and reducer (owners only for carried tokens, the notice counting visible
+arrivals only, `mapSerial`), views on the new map passing the strict schema, persistence; the host runner
+(views, owners and hit points after a change, moves on the new map, a restart resuming it, the library
+save racing a change, requests and pings from clients still on the old map, map-tagged requests, a view
+too large for a broadcast, backdrop tiles reset and re-cut, also on a duplicated map); the tiler (salted
+revs, one upload per path across a reset); the player client (a change by patch, snapshot or stored row,
+dropped requests and their verdicts, the backdrop layer rebuilt, pings, the stored-row load kept on a slow
+link); the dialog, its model, `loadLibraryScene` and the save hook. A review (four areas, each finding
+checked by a skeptic) confirmed 11 of 13 findings; all are fixed with regression tests, among them a view
+built with the previous map's vision when a change landed while tile notices were sent (a race for any
+DM change, older than this feature), a stored-view load that a slow link could restart forever, requests
+made on the old map applied to a duplicated new one, and the travel notice counting hidden tokens. A check
+of those fixes found three regressions (a stuck row load, chat verdicts held behind it, a request on the
+new map refused after a lost acknowledgement), each fixed with a test. Final verification (2026-09-25):
+`tsc -b` 0 errors, `eslint .` clean, `npx vitest run` 2163 tests pass (4 live Supabase files skipped); on
+SwiftShader: the end-to-end runs are recorded with the merge.
 
 **Terrain review fixes (2026-09-23)**, each with a regression test that fails on the previous code:
 - Document: "Apply to terrain" bakes the downward closure, so the terrain no longer changes (§3, §7);

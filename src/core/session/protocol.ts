@@ -48,6 +48,9 @@ const pathStepSchema = z.strictObject({
 
 const worldCoord = z.number().min(-PROTOCOL_LIMITS.maxWorldCoord).max(PROTOCOL_LIMITS.maxWorldCoord)
 
+/** The map a request tied to a place was made on (PlayerSceneInfo.mapSerial; absent: not said). */
+const mapSerial = z.int().min(0).optional()
+
 const helloSchema = z.strictObject({
   t: z.literal("hello"),
   nonce: tokenSchema,
@@ -64,6 +67,7 @@ const moveSchema = z.strictObject({
     .min(1)
     .max(PROTOCOL_LIMITS.maxPathSteps + 1),
   end: z.strictObject({ x: worldCoord, z: worldCoord }).optional(),
+  map: mapSerial,
 })
 
 const jumpSchema = z.strictObject({
@@ -73,6 +77,7 @@ const jumpSchema = z.strictObject({
   levelId: idSchema,
   x: worldCoord,
   z: worldCoord,
+  map: mapSerial,
 })
 
 const doorSchema = z.strictObject({
@@ -80,6 +85,7 @@ const doorSchema = z.strictObject({
   reqId: tokenSchema,
   doorId: idSchema,
   action: z.enum(["open", "close"]),
+  map: mapSerial,
 })
 
 /** Raw chat text (the host cleans it and keeps TABLE_LIMITS.maxText characters; emoji count double here). */
@@ -140,8 +146,8 @@ const templateInputSchema = z.strictObject({
   tokenId: idSchema.nullable(),
 })
 
-const templateSchema = z.strictObject({ t: z.literal("template"), reqId: tokenSchema, id: idSchema.optional(), template: templateInputSchema })
-const templateRemoveSchema = z.strictObject({ t: z.literal("template-remove"), reqId: tokenSchema, id: idSchema })
+const templateSchema = z.strictObject({ t: z.literal("template"), reqId: tokenSchema, id: idSchema.optional(), template: templateInputSchema, map: mapSerial })
+const templateRemoveSchema = z.strictObject({ t: z.literal("template-remove"), reqId: tokenSchema, id: idSchema, map: mapSerial })
 
 export const clientMessageSchema = z.discriminatedUnion("t", [
   helloSchema,

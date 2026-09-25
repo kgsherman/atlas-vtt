@@ -75,7 +75,17 @@ import type { VisibilityResult } from "@/core/vision/types"
 import type { ChunkEntry } from "../assets/chunks"
 import { isNetError, NetError } from "../supabase"
 import type { SessionMember } from "../sessionsRepo"
-import { encodePayload, MAX_BROADCAST_BYTES, sendFailure, utf8Length, type HostChannels, type HostPlayerLink, type PresenceEntry, type SendResult, type Unsubscribe } from "../transport"
+import {
+  encodePayload,
+  MAX_BROADCAST_BYTES,
+  sendFailure,
+  utf8Length,
+  type HostChannels,
+  type HostPlayerLink,
+  type PresenceEntry,
+  type SendResult,
+  type Unsubscribe,
+} from "../transport"
 import {
   HELLO_RATE,
   hostEpochOfWire,
@@ -141,8 +151,9 @@ class PlayerConn {
   /** The view the client holds (as far as the host knows). */
   lastSent: PlayerView | null = null
   /**
-   * The map changed and this client has not been sent a view of the new one yet: requests tied to places
-   * (moves, jumps, doors, templates) are refused, since `lastSent` still describes the old map.
+   * The map changed and this client has not been sent a view of the new one yet (a stored one counts once
+   * snapshot_ready pointed it there): requests tied to places (moves, jumps, doors, templates) are refused.
+   * The fallback for requests that do not say which map they were made on (ClientToHost `map`).
    */
   staleMap = false
   seq = 0
@@ -215,11 +226,10 @@ function jsonBytes(value: unknown): number {
 
 /**
  * What HostRunnerImpl.changeMap did: the map changed (`carried`: old token id → id on the new map; `saved`:
- * the swap reached storage), or why not.
+ * resolves once the game's save after the swap is done, true when the swap reached storage), or why not.
  */
 export type HostChangeMapResult =
-  | { ok: true; carried: Record<Id, Id>; saved: boolean }
-  | { ok: false; error: CarryError | "same-map" | "not-hosting"; unplaced: Id[] }
+  { ok: true; carried: Record<Id, Id>; saved: Promise<boolean> } | { ok: false; error: CarryError | "same-map" | "not-hosting"; unplaced: Id[] }
 
 /** DM commands after which the saved state must not lag (it would re-reveal things after a crash). */
 function reducesVisibility(cmd: DmCommand): boolean {
@@ -556,7 +566,8 @@ export class HostRunnerImpl implements HostRunner {
     await this.teardown()
     this.setStatus("ended", null)
     // Players' tile chunks are unreadable once the session ended; delete them (best effort).
-    if (this.o.assets.mode === "supabase") void this.o.assets.removeSessionTiles(this.o.sessionId).catch((err) => this.log("removing session tiles failed", err))
+    if (this.o.assets.mode === "supabase")
+      void this.o.assets.removeSessionTiles(this.o.sessionId).catch((err) => this.log("removing session tiles failed", err))
   }
 
   async save(): Promise<void> {
@@ -575,11 +586,12 @@ export class HostRunnerImpl implements HostRunner {
     const scenes = this.o.scenes
     if (!scenes) throw new Error("No scene library is available here.")
     const state = this.state
+    // Read with the state it counts the edits of (an edit made while the save is on its way is not in it).
+    const edits = this.sceneEdits
     const origin = state?.origin
     if (!state || !origin?.sceneId) throw new NetError("not_found", "The library scene this map comes from no longer exists.")
     const summary = await scenes.get(origin.sceneId)
     if (!summary) throw new NetError("not_found", "The library scene this map comes from no longer exists.")
-    const edits = this.sceneEdits
     const doc = { ...state.scene, updatedAt: new Date().toISOString() }
     const base = opts.force || origin.version === null ? {} : { baseVersion: origin.version }
     // Keep the library entry's own name (it may have been renamed since the session started).
@@ -603,7 +615,10 @@ export class HostRunnerImpl implements HostRunner {
 
   /** Flush the state save and every player's view upsert (bounded wait). */
   private async persistAll(timeoutMs: number): Promise<void> {
-    const work = Promise.allSettled([this.stateSaver?.flush() ?? Promise.resolve(), ...[...this.conns.values()].map((c) => c.viewSaver?.flush() ?? Promise.resolve())])
+    const work = Promise.allSettled([
+      this.stateSaver?.flush() ?? Promise.resolve(),
+      ...[...this.conns.values()].map((c) => c.viewSaver?.flush() ?? Promise.resolve()),
+    ])
     await Promise.race([work, new Promise((r) => setTimeout(r, timeoutMs))])
   }
 
@@ -815,7 +830,9 @@ export class HostRunnerImpl implements HostRunner {
       this.worldLevels.set(world, scene.levels)
     }
     this.sceneTag = tag
-    void this.vision.update(scene, { objects: delta.objects, tokens: delta.tokens, terrain: delta.terrain, structure: delta.structure }, tag).catch((err) => this.log("vision update failed", err))
+    void this.vision
+      .update(scene, { objects: delta.objects, tokens: delta.tokens, terrain: delta.terrain, structure: delta.structure }, tag)
+      .catch((err) => this.log("vision update failed", err))
     if (delta.structure) this.tiler?.setScene(scene)
   }
 
@@ -1056,10 +1073,11 @@ export class HostRunnerImpl implements HostRunner {
    * Move the game to another map, bringing `tokenIds` of the current one along (ARCHITECTURE §6.7). The
    * command is built from the live state and applied in the same step (a change a player made a moment ago
    * travels too); the target's occlusion world is built once, for the arrival placement and the host's
-   * rebuild. Resolves once the swap is saved (a reload right after must not bring the old map back); a
-   * failed save leaves the swap in place and is reported as `saved: false`.
+   * rebuild. Returns once the swap is dispatched; the game is saved right away (a reload right after must not
+   * bring the old map back), and `saved` resolves false when that failed or hosting stopped meanwhile (the
+   * swap stays in place).
    */
-  async changeMap(target: Scene, opts: { tokenIds: Id[]; arrival: Arrival; origin: SceneOrigin | null }): Promise<HostChangeMapResult> {
+  changeMap(target: Scene, opts: { tokenIds: Id[]; arrival: Arrival; origin: SceneOrigin | null }): HostChangeMapResult {
     const state = this.state
     if (!state || this.status !== "hosting") return { ok: false, error: "not-hosting", unplaced: [] }
     if (target.id === state.scene.id) return { ok: false, error: "same-map", unplaced: [] }
@@ -1070,13 +1088,15 @@ export class HostRunnerImpl implements HostRunner {
     const r = this.dispatch(built.cmd)
     this.prebuiltWorld = null
     if (!r || r.error) return { ok: false, error: "not-hosting", unplaced: [] }
-    let saved = true
-    try {
-      await this.save()
-    } catch (err) {
-      saved = false
-      this.log("saving the game after the map change failed", err)
-    }
+    const gen = this.gen
+    const saved = this.save().then(
+      // A save cut short by a stand-down (another tab took over, the session ended) never stored the swap.
+      () => this.hosting(gen),
+      (err: unknown) => {
+        this.log("saving the game after the map change failed", err)
+        return false
+      }
+    )
     return { ok: true, carried: built.carried, saved }
   }
 
@@ -1204,8 +1224,12 @@ export class HostRunnerImpl implements HostRunner {
         return
       }
     }
-    // The client still plays on the old map (no view of the new one sent yet): nothing tied to a place applies.
-    if (conn.staleMap && (moves || msg.t === "door" || msg.t === "template" || msg.t === "template-remove")) {
+    // A request made on another map (sent before the new view reached the client) or, when it does not say, from a
+    // client not yet sent a view of this one: nothing tied to a place applies. A request's map is trusted: a client
+    // cannot name a map before it holds its view, and a false one only gets its own requests refused.
+    const placed = moves || msg.t === "door" || msg.t === "template" || msg.t === "template-remove"
+    const otherMap = "map" in msg && msg.map !== undefined ? msg.map !== (state.mapSerial ?? 0) : conn.staleMap
+    if (placed && otherMap) {
       this.pushResult(conn, { reqId: msg.reqId, ok: false, reason: "cannot" })
       return
     }
@@ -1423,6 +1447,12 @@ export class HostRunnerImpl implements HostRunner {
           continue
         }
         await this.sendTileNotices(conn, gen)
+        // Acknowledged sends: the state may have moved on meanwhile too (the notices sent stay valid).
+        if (!this.hosting(gen) || conn.closed) return null
+        if (conn.lastVisTag !== this.sceneTag || viewerTokenIds(this.state!, uid).join(",") !== key) {
+          conn.dirty = true
+          continue
+        }
       }
       const t0 = this.now()
       const view = this.buildView(uid, vis)
@@ -1527,15 +1557,16 @@ export class HostRunnerImpl implements HostRunner {
     const enc = encodePayload(msg)
     conn.seq = baseSeq + 1
     conn.lastSent = view
-    conn.staleMap = false
     if (enc.ok) {
+      conn.staleMap = false
       conn.log.push({ baseSeq, seq: conn.seq, ops, bytes: enc.bytes, at: this.now() })
       const res = await this.send(conn, msg, enc.bytes)
       this.resultsSent(conn, results, conn.seq, res)
     } else {
-      // Too large for one broadcast: store the view, then point the client at the database.
+      // Too large for one broadcast: store the view, then point the client at the database (until then it
+      // still shows the view before this one, maybe of the previous map).
       conn.log.clear()
-      await this.snapshotViaDatabase(conn, gen, undefined)
+      if (await this.snapshotViaDatabase(conn, gen, undefined)) this.viewSent(conn)
       await this.sendResults(conn, results)
     }
     conn.viewSaver?.request(viewSaveUrgency(prev, view))
@@ -1566,7 +1597,6 @@ export class HostRunnerImpl implements HostRunner {
     conn.lastFlushAt = this.now()
     if (conn.lastSent === null) {
       conn.lastSent = view
-      conn.staleMap = false
       conn.log.clear()
     } else if (view !== conn.lastSent) {
       const ops = diffViews(conn.lastSent, view)
@@ -1575,7 +1605,6 @@ export class HostRunnerImpl implements HostRunner {
         conn.log.push({ baseSeq: conn.seq, seq: conn.seq + 1, ops, bytes: jsonBytes(ops), at: this.now() })
         conn.seq++
         conn.lastSent = view
-        conn.staleMap = false
       }
     }
     conn.needsSnapshot = false
@@ -1591,10 +1620,11 @@ export class HostRunnerImpl implements HostRunner {
     // The client learns its backdrop chunks first, so it fetches them as soon as the view lands.
     await this.sendTileTable(conn, gen)
     if (enc.ok && enc.bytes <= this.maxSnapshotBytes) {
+      this.viewSent(conn)
       const res = await this.send(conn, msg, enc.bytes)
       this.resultsSent(conn, results, conn.seq, res)
     } else {
-      await this.snapshotViaDatabase(conn, gen, nonce)
+      if (await this.snapshotViaDatabase(conn, gen, nonce)) this.viewSent(conn)
       for (const result of earlier) await this.send(conn, { t: "result", epoch, seq: conn.seq, result })
       await this.sendResults(conn, results)
     }
@@ -1603,8 +1633,11 @@ export class HostRunnerImpl implements HostRunner {
     if (conn.dirty) this.scheduleFlush(conn)
   }
 
-  /** Awaited player_views upsert, then snapshot_ready (the client reloads its row). */
-  private async snapshotViaDatabase(conn: PlayerConn, gen: number, nonce: string | undefined): Promise<void> {
+  /**
+   * Awaited player_views upsert, then snapshot_ready (the client reloads its row). true once snapshot_ready
+   * went out.
+   */
+  private async snapshotViaDatabase(conn: PlayerConn, gen: number, nonce: string | undefined): Promise<boolean> {
     // The row may already hold this (epoch, seq): no second upload of a large view.
     if (conn.savedSeq !== conn.seq) {
       try {
@@ -1613,16 +1646,24 @@ export class HostRunnerImpl implements HostRunner {
         // Reported (and fencing handled) by the saver's onError; savedSeq tells whether it worked.
       }
     }
-    if (!this.hosting(gen) || conn.closed) return
+    if (!this.hosting(gen) || conn.closed) return false
     if (conn.savedSeq !== conn.seq) {
       // The row could not be written: try again shortly (the client keeps waiting for us).
       conn.needsSnapshot = true
       this.scheduleFlush(conn, this.t.flushIntervalMs * 10)
-      return
+      return false
     }
     const msg: Extract<HostToClient, { t: "snapshot_ready" }> = { t: "snapshot_ready", epoch: this.wireEpoch!, seq: conn.seq }
     if (nonce !== undefined) msg.nonce = nonce
-    await this.send(conn, msg)
+    return (await this.send(conn, msg)).ok
+  }
+
+  /**
+   * The client was just sent `conn.lastSent` (or pointed at its stored copy): once that shows the current
+   * map, requests tied to places apply again (PlayerConn.staleMap).
+   */
+  private viewSent(conn: PlayerConn): void {
+    if ((conn.lastSent?.scene.mapSerial ?? 0) === (this.state?.mapSerial ?? 0)) conn.staleMap = false
   }
 
   /** upsert_player_view of the player's current view (throttled via conn.viewSaver). */
@@ -1649,6 +1690,7 @@ export class HostRunnerImpl implements HostRunner {
       if (msg.lastSeq === conn.seq) {
         // Within one wire epoch a seq identifies a view: the client provably holds lastSent.
         conn.needsSnapshot = false
+        this.viewSent(conn)
         await this.send(conn, { t: "sync", epoch, seq: conn.seq })
         return
       }
@@ -1759,7 +1801,8 @@ export class HostRunnerImpl implements HostRunner {
   debugIdle(): boolean {
     if ((this.vision?.pendingProbes ?? 0) > 0) return false
     for (const c of this.conns.values()) {
-      if (c.dirty || c.flushQueued || c.timer !== null || c.pendingResults.length > 0 || c.needsSnapshot || c.needsResume || c.pendingHello !== null) return false
+      if (c.dirty || c.flushQueued || c.timer !== null || c.pendingResults.length > 0 || c.needsSnapshot || c.needsResume || c.pendingHello !== null)
+        return false
     }
     return true
   }

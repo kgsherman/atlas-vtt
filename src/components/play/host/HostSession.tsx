@@ -671,7 +671,8 @@ function HostConsole({
   /**
    * Move the game to another map (ChangeMapDialog), after saving the live map to the library when
    * `req.save`. The host builds the change from its own live state (a player's change a moment ago
-   * travels too). Resolves true once changed; false or an error text keeps the dialog open.
+   * travels too). Resolves true once changed (the game's save goes on in the background); an error
+   * text keeps the dialog open.
    */
   const pendingFocus = React.useRef<{ sceneId: Id; arrival: Arrival } | null>(
     null
@@ -682,14 +683,15 @@ function HostConsole({
     // A save in flight would stamp the old map's library row on the new map (checked at confirm time).
     if (saveMap.saving)
       return "The map is being saved to your library. Try again in a moment."
-    if (req.save && !(await saveMap.save({ confirm: false }))) return false
+    if (req.save && !(await saveMap.save({ confirm: false })))
+      return "The map wasn't saved to your library, so the game stayed here. See the notice for why, or change without saving."
     // The editor's undo history belongs to the old map: dispose of it before the swap.
     if (editor) exitEdit()
     controller.cancel()
-    // The swap is dispatched at once (the call then awaits the game's save): the camera goes to the
-    // arrival as soon as the new map is in the engine.
+    // The swap is dispatched at once (the game's save follows): the camera goes to the arrival as soon
+    // as the new map is in the engine.
     pendingFocus.current = { sceneId: req.scene.id, arrival: req.arrival }
-    const r = await runner.changeMap(req.scene, {
+    const r = runner.changeMap(req.scene, {
       tokenIds: req.tokenIds,
       arrival: req.arrival,
       origin: req.origin,
@@ -717,11 +719,14 @@ function HostConsole({
       description:
         n === 0 ? "No tokens came along." : `${plural(n, "token")} came along.`,
     })
-    if (!r.saved)
+    void r.saved.then((saved) => {
+      // After a stand-down the console says why hosting stopped instead.
+      if (saved || runner.getSnapshot().status !== "hosting") return
       toast.warning("The map change isn't saved yet", {
         description:
           "Atlas keeps trying in the background. If this tab closes before then, the previous map may come back.",
       })
+    })
     return true
   }
   // Once the new map is in the engine (HostViewport's layout effect runs first), look at the arrival.

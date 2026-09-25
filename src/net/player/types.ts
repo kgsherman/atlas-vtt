@@ -54,8 +54,12 @@ export interface PlayerClientOptions {
   transport: Transport
   repo: SessionsRepo
   identity: AtlasIdentity
-  /** Backdrop tiles for explored cells (Supabase storage with RLS, or local). */
-  tiles: BackdropTileSource
+  /**
+   * Backdrop tiles for explored cells (Supabase storage with RLS, or local). A source with `setMap` (local
+   * mode's crops from the stored scene) is told the map of each view (scene.mapSerial ?? 0) before its tiles
+   * are asked for.
+   */
+  tiles: BackdropTileSource & { setMap?(mapSerial: number): void }
 }
 
 export interface PlayerClient {

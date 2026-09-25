@@ -33,7 +33,12 @@ import type { BackdropTileSource } from "./types"
 // ---------------------------------------------------------------------------
 
 /** Source rect (image px, may extend beyond the image) of tile (i, j). */
-export function tileSourceRect(rect: Rect, image: { width: number; height: number }, cellSize: number, cell: Cell): { sx: number; sy: number; sw: number; sh: number } {
+export function tileSourceRect(
+  rect: Rect,
+  image: { width: number; height: number },
+  cellSize: number,
+  cell: Cell
+): { sx: number; sy: number; sw: number; sh: number } {
   const kx = image.width / rect.w
   const kz = image.height / rect.d
   return { sx: (cell.i * cellSize - rect.x) * kx, sy: (cell.j * cellSize - rect.z) * kz, sw: cellSize * kx, sh: cellSize * kz }
@@ -46,7 +51,15 @@ export function tileSourceRect(rect: Rect, image: { width: number; height: numbe
 type Ctx = OffscreenCanvasRenderingContext2D | CanvasRenderingContext2D
 
 /** Paint tile `cell` into a tilePx² context (cleared first). false when the cell misses the image. */
-function drawTile(ctx: Ctx, image: CanvasImageSource, size: { width: number; height: number }, rect: Rect, cellSize: number, tilePx: number, cell: Cell): boolean {
+function drawTile(
+  ctx: Ctx,
+  image: CanvasImageSource,
+  size: { width: number; height: number },
+  rect: Rect,
+  cellSize: number,
+  tilePx: number,
+  cell: Cell
+): boolean {
   ctx.clearRect(0, 0, tilePx, tilePx)
   const { sx, sy, sw, sh } = tileSourceRect(rect, size, cellSize, cell)
   // Clip the source rect to the image, mapping the clipped part to the matching part of the tile.
@@ -127,10 +140,12 @@ export function createSupabaseTileSource(client: AtlasClient, sessionId: string,
       downloading++
       const run = downloadChunk(client, sessionId, userId, levelId, ci, cj, `${v.mask}.${v.rev}`, controller.signal)
       p = run
-      void run.finally(() => {
-        downloading--
-        pump()
-      }).catch(() => {})
+      void run
+        .finally(() => {
+          downloading--
+          pump()
+        })
+        .catch(() => {})
       // A missing object (upload still in flight on another replica) is fetched again next time.
       void run.then((b) => b === null && blobs.get(k) === run && blobs.delete(k)).catch(() => blobs.get(k) === run && blobs.delete(k))
       blobs.set(k, run)
@@ -224,21 +239,42 @@ interface LocalStateRecord {
   state: unknown
 }
 
+/** A stored scene and which map of the game it is (GameState.mapSerial; 0 for the first and for a seed). */
+interface StoredMap {
+  scene: Scene
+  map: number
+}
+
 /** The scene of a local session (seed or saved GameState), read from the local sessions store. */
-async function localSessionScene(store: LocalStore, sessionId: string): Promise<Scene | null> {
+async function localSessionScene(store: LocalStore, sessionId: string): Promise<StoredMap | null> {
   const rec = await store.get<LocalStateRecord>("sessions", `state:${sessionId}`)
-  const state = rec?.state as { scene?: unknown } | undefined
+  const state = rec?.state as { scene?: unknown; mapSerial?: unknown } | undefined
   const scene = state && typeof state === "object" ? (state.scene as Scene | undefined) : undefined
-  return scene && typeof scene === "object" && scene.levels && scene.grid ? scene : null
+  if (!(scene && typeof scene === "object" && scene.levels && scene.grid)) return null
+  return { scene, map: typeof state?.mapSerial === "number" ? state.mapSerial : 0 }
+}
+
+export interface LocalTileSource extends BackdropTileSource {
+  /**
+   * The player's view shows map `mapSerial` (its scene.mapSerial ?? 0; the player client says so before
+   * asking for that view's tiles): tiles are then cut only from a stored scene of that map. Until told,
+   * any stored scene is used.
+   */
+  setMap(mapSerial: number): void
 }
 
 /**
  * Local mode (dev only, NOT secure — like LocalTransport): crops tiles straight from the locally
  * stored image, using the backdrop placement of the session's last saved state. Any tab of this
- * browser could read the whole image from IndexedDB anyway.
+ * browser could read the whole image from IndexedDB anyway. The scene read is cached for 3 s, but never
+ * across a map change: a duplicated map shares level ids with the old one, whose pixels would stay under
+ * the new map (drawn cells are not fetched again). A stored scene of another map than the view's (its save
+ * still in flight) gives null, which the compositor retries.
  */
-export function createLocalTileSource(store: LocalStore, sessionId: string): BackdropTileSource {
-  let sceneCache: { at: number; scene: Promise<Scene | null> } | null = null
+export function createLocalTileSource(store: LocalStore, sessionId: string): LocalTileSource {
+  let sceneCache: { at: number; scene: Promise<StoredMap | null> } | null = null
+  /** The map the view shows (null: not told). */
+  let map: number | null = null
   const images = new Map<string, Promise<ImageBitmap | null>>()
   let disposed = false
   const scene = () => {
@@ -260,8 +296,17 @@ export function createLocalTileSource(store: LocalStore, sessionId: string): Bac
   return {
     async getTile(levelId, cell) {
       if (disposed) return null
-      const sc = await scene()
-      if (!sc || !Object.hasOwn(sc.levels, levelId)) return null
+      const want = map
+      const read = scene()
+      const stored = await read
+      if (!stored) return null
+      if (want !== null && stored.map !== want) {
+        // Read again next time rather than keep another map's scene for 3 s.
+        if (sceneCache?.scene === read) sceneCache = null
+        return null
+      }
+      const sc = stored.scene
+      if (!Object.hasOwn(sc.levels, levelId)) return null
       const assetId = sc.levels[levelId].backdrop?.assetId
       // The placement and tile size the player was sent (the same rule as the filter's).
       const pb = playerBackdrop(sc, levelId)
@@ -273,6 +318,12 @@ export function createLocalTileSource(store: LocalStore, sessionId: string): Bac
       ctx.imageSmoothingQuality = "high"
       if (!drawTile(ctx, bmp, bmp, pb.rect, sc.grid.cellSize, pb.tilePx, cell)) return null
       return createImageBitmap(canvas)
+    },
+    setMap(mapSerial) {
+      if (mapSerial === map) return
+      map = mapSerial
+      // What was read belongs to the map the view showed before.
+      sceneCache = null
     },
     dispose() {
       disposed = true

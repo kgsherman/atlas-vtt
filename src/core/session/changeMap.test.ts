@@ -172,6 +172,17 @@ describe("changing the map in a game", () => {
     expect(travelNotice("", 0)).toBe("The game moves to a new map")
   })
 
+  it("the public notice does not count hidden arrivals (players must not learn one came along)", () => {
+    const { t, host } = game()
+    const d = dungeon()
+    const hidden = addToken(host.state.scene, t.ground, 32.5, 32.5, { name: "Villain", kind: "monster", hidden: true })
+    const alone = change(host.state, d.scene, [hidden.id], { levelId: d.ground, x: 12.5, z: 12.5 })
+    expect(alone.carried).toEqual({ [hidden.id]: hidden.id })
+    expect(alone.scene.tokens[hidden.id].hidden).toBe(true)
+    expect(alone.notice).toBe("The game moves to Dungeon")
+    expect(change(host.state, d.scene, [hidden.id, t.pc.id], { levelId: d.ground, x: 12.5, z: 12.5 }).notice).toBe("The party travels to Dungeon")
+  })
+
   it("keeps only the carried tokens' owners, the log (with the notice), and counts the map", () => {
     const { t, host } = game()
     const copy: Scene = structuredClone(t.scene)

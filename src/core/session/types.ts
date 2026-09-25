@@ -402,6 +402,10 @@ export interface RequestResult {
 /**
  * player → host on topic `session:{sid}:req:{uid}`. The sender is the {uid} of the topic
  * (RLS guarantees only that user can write there) — never a payload field.
+ *
+ * `map` on requests tied to a place (moves, jumps, doors, templates): the map they were made on (the view's
+ * PlayerSceneInfo.mapSerial, 0 for the first). The host refuses them ("cannot") once the game is on another
+ * map; absent, it relies on whether it sent the client a view of the current map yet.
  */
 export type ClientToHost =
   | { t: "hello"; nonce: string; epoch: string | null; lastSeq: number | null }
@@ -409,10 +413,10 @@ export type ClientToHost =
    * Walk `path` (grid steps from the token's anchor). `end` (gridless moves, GameState.freeMovement):
    * the exact final position, in the last step's anchor cell, reached from its centre.
    */
-  | { t: "move"; reqId: string; tokenId: Id; path: PathStep[]; end?: Vec2 }
+  | { t: "move"; reqId: string; tokenId: Id; path: PathStep[]; end?: Vec2; map?: number }
   /** Put a token at a point without walking there (no path could be found). */
-  | { t: "jump"; reqId: string; tokenId: Id; levelId: Id; x: number; z: number }
-  | { t: "door"; reqId: string; doorId: Id; action: "open" | "close" }
+  | { t: "jump"; reqId: string; tokenId: Id; levelId: Id; x: number; z: number; map?: number }
+  | { t: "door"; reqId: string; doorId: Id; action: "open" | "close"; map?: number }
   /** Chat: to everyone, or a whisper to the DM. */
   | { t: "say"; reqId: string; text: string; to: "all" | "dm" }
   /** Roll dice ("1d20+5 to hit": formula, then an optional label); the host rolls. */
@@ -441,9 +445,9 @@ export type ClientToHost =
    * Place an area of effect (spell template), or with `id` move / change one of the player's own. Carried
    * by `template.tokenId` (a token the player controls) or on a level the player knows.
    */
-  | { t: "template"; reqId: string; id?: Id; template: AreaTemplateInput }
+  | { t: "template"; reqId: string; id?: Id; template: AreaTemplateInput; map?: number }
   /** Remove one of the player's own templates. */
-  | { t: "template-remove"; reqId: string; id: Id }
+  | { t: "template-remove"; reqId: string; id: Id; map?: number }
 
 /**
  * host → player on topic `session:{sid}:view:{uid}`. `epoch` changes on every host start;

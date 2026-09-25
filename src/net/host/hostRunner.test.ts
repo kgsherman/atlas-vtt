@@ -17,11 +17,12 @@ import type { Id, Scene } from "@/core/scene/types"
 import { dmSayCommand, playerViewSchema } from "@/core/session"
 import { parseGameStateDetailed } from "@/core/session/persist"
 import { add, addToken, flatScene } from "@/core/session/test-utils"
-import type { PlayerDoor, PlayerView } from "@/core/session/types"
+import type { HostToClient, PlayerDoor, PlayerView } from "@/core/session/types"
 import { deepEqual } from "@/core/session/util"
 import { cellTouched, decodeMask } from "@/core/vision/mask"
 
 import { createLocalScenesRepo } from "../scenesRepo"
+import { sendFailure, type SendResult } from "../transport"
 import { NetError } from "../supabase"
 import { sameVisionLevels, type HostRunnerImpl } from "./hostRunner"
 import {
@@ -816,6 +817,30 @@ describe("host runner — saving the map to the library", () => {
     void fx
   })
 
+  it("an edit made while the library entry is read is not in the saved version: the map stays dirty", async () => {
+    const k = keep()
+    const fx = await fixture(k.scene, [P1])
+    const inner = createLocalScenesRepo(fx.store)
+    const scenes = {
+      ...inner,
+      get: async (id: string) => {
+        await sleep(50)
+        return inner.get(id)
+      },
+    }
+    const sceneId = (await fx.dmRepo.listMySessions()).find((s) => s.id === fx.sessionId)!.sceneId!
+    const { host: h } = host(fx, { scenes })
+    await h.start()
+    const saving = h.saveMapToLibrary()
+    await sleep(10)
+    // The DM keeps editing in "Edit map" meanwhile.
+    h.applyScenePatches([{ op: "replace", path: ["objects", k.door.id, "state"], value: "open" }])
+    expect(await saving).toBe(2)
+    const saved = await inner.load(sceneId)
+    expect(saved.parsed.ok && saved.parsed.scene.objects[k.door.id]).toMatchObject({ state: "closed" })
+    expect(h.getSnapshot().library).toEqual({ sceneId, version: 2, dirty: true })
+  })
+
   it("a map change landing while a save is on its way keeps the new map's origin", async () => {
     const { k, h, scenes, sceneId } = await librarySession()
     const t = meadow()
@@ -824,7 +849,8 @@ describe("host runner — saving the map to the library", () => {
     const saving = h.saveMapToLibrary()
     const changed = h.changeMap(t.scene, { tokenIds: [], arrival: { levelId: t.ground, x: 7.5, z: 7.5 }, origin })
     expect(await saving).toBe(2)
-    expect(await changed).toMatchObject({ ok: true, saved: true })
+    expect(changed).toMatchObject({ ok: true })
+    expect(changed.ok && (await changed.saved)).toBe(true)
     // The save wrote the keep to its own library scene, and did not stamp that scene on the meadow.
     expect(h.getSnapshot().library).toEqual(origin)
     const kept = await scenes.load(sceneId)
@@ -1269,7 +1295,7 @@ describe("host runner — backdrop tiles", () => {
     const lookups = assets.images.length
     const mark = m.messages.length
     const origin = { sceneId: rowB, version: 1, dirty: false }
-    expect(await h.changeMap(t.scene, { tokenIds: [k.ada.id], arrival: { levelId: t.ground, x: 7.5, z: 12.5 }, origin })).toMatchObject({ ok: true })
+    expect(h.changeMap(t.scene, { tokenIds: [k.ada.id], arrival: { levelId: t.ground, x: 7.5, z: 12.5 }, origin })).toMatchObject({ ok: true })
     await settle(h, [[P1, m]])
     await waitFor(() => (m.tiles.get(t.ground)?.size ?? 0) > 0 && unannounced(m, m.view!, t.ground, 12, 6).length === 0, "the meadow's chunks")
     // The keep's chunks were withdrawn; the meadow's were announced before the views revealing them.
@@ -1304,6 +1330,48 @@ describe("host runner — backdrop tiles", () => {
     expect(assets.images.some((f) => f.startsWith(`${rowA}/`))).toBe(false)
   })
 
+  it("a map change while a view's tile notices go out: that view is built with the new map's vision", async () => {
+    const k = withBackdrop()
+    // The duplicate: Bo, in Ada's sight on the keep, waits in the east room beyond the wall.
+    const dup = structuredClone(k.scene)
+    dup.id = newId()
+    dup.name = "The Keep (ambush)"
+    dup.tokens[k.bo.id].position = { x: 62.5, z: 32.5 }
+    const fx = await fixture(k.scene, [P1])
+    const assets = recordingAssets("supabase", { delayMs: 5 })
+    const { host: h } = host(fx, { assets: assets.store, tileCodec: codec })
+    await h.start()
+    h.dispatch({ t: "assign-token", tokenId: k.ada.id, userId: P1, assigned: true })
+    const views: PlayerView[] = []
+    const m = mirror(fx, P1, { onView: (view) => views.push(json(view)) })
+    await settle(h, [[P1, m]])
+    expect(m.view!.tokens[k.bo.id]).toBeDefined()
+    // The DM's change lands while refreshView's (acknowledged) tile notices are on their way.
+    const hr = h as unknown as Record<string, (...a: unknown[]) => unknown>
+    let inRefresh = false
+    let changing: ReturnType<HostRunnerImpl["changeMap"]> | null = null
+    const within = hr.within.bind(h)
+    hr.within = (...a: unknown[]) => {
+      inRefresh = true
+      return within(...a)
+    }
+    const sendTileNotices = hr.sendTileNotices.bind(h)
+    hr.sendTileNotices = (...a: unknown[]) => {
+      if (inRefresh && !changing) changing = h.changeMap(dup, { tokenIds: [k.ada.id], arrival: { levelId: k.ground, x: 27.5, z: 17.5 }, origin: null })
+      inRefresh = false
+      return sendTileNotices(...a)
+    }
+    // Ada steps a cell west: the flush runs refreshView with tiles publishing.
+    h.dispatch({ t: "move-token", tokenId: k.ada.id, levelId: k.ground, x: 22.5, z: 17.5 })
+    await waitFor(() => changing !== null, "the change")
+    expect(changing).toMatchObject({ ok: true })
+    await settle(h, [[P1, m]])
+    const onCopy = views.filter((v) => v.scene.mapSerial === 1)
+    expect(onCopy.length).toBeGreaterThan(0)
+    expect(onCopy.filter((v) => v.tokens[k.bo.id] !== undefined)).toEqual([])
+    expect(m.view!.tokens[k.bo.id]).toBeUndefined()
+  })
+
   it("a switch to a duplicated map (same level id, image and placement) re-cuts every chunk from the copy under new revs", async () => {
     const k = withBackdrop()
     const dup = structuredClone(k.scene)
@@ -1321,7 +1389,7 @@ describe("host runner — backdrop tiles", () => {
     expect(revs.size).toBeGreaterThan(0)
     const mark = m.messages.length
     const at = k.scene.tokens[k.ada.id].position
-    expect(await h.changeMap(dup, { tokenIds: [k.ada.id], arrival: { levelId: k.ground, ...at }, origin: null })).toMatchObject({ ok: true })
+    expect(h.changeMap(dup, { tokenIds: [k.ada.id], arrival: { levelId: k.ground, ...at }, origin: null })).toMatchObject({ ok: true })
     await settle(h, [[P1, m]])
     await waitFor(() => (m.tiles.get(k.ground)?.size ?? 0) > 0 && unannounced(m, m.view!, k.ground).length === 0, "the copy's chunks")
     const after = announced(m, k.ground, mark)
@@ -1603,8 +1671,9 @@ describe("host runner — changing the map", () => {
     await waitFor(() => texts(m2).includes("Off we go"), "chat")
     expect(m1.view!.scene.mapSerial).toBeUndefined()
     const t = meadow()
-    const r = await h.changeMap(t.scene, { tokenIds: [k.ada.id, k.bo.id], arrival: { levelId: t.ground, x: 7.5, z: 12.5 }, origin: null })
-    expect(r).toEqual({ ok: true, carried: { [k.ada.id]: k.ada.id, [k.bo.id]: k.bo.id }, saved: true })
+    const r = h.changeMap(t.scene, { tokenIds: [k.ada.id, k.bo.id], arrival: { levelId: t.ground, x: 7.5, z: 12.5 }, origin: null })
+    expect(r).toEqual({ ok: true, carried: { [k.ada.id]: k.ada.id, [k.bo.id]: k.bo.id }, saved: expect.any(Promise) })
+    expect(r.ok && (await r.saved)).toBe(true)
     await settle(h, both)
     const state = h.getSnapshot().state!
     // Nobody re-assigned anything: the carried tokens keep their owners, and only they have any.
@@ -1648,7 +1717,7 @@ describe("host runner — changing the map", () => {
     const dup = structuredClone(k.scene)
     dup.id = newId()
     dup.name = "The Keep (copy)"
-    const r = await h.changeMap(dup, { tokenIds: [k.ada.id], arrival: { levelId: k.ground, x: 12.5, z: 12.5 }, origin: null })
+    const r = h.changeMap(dup, { tokenIds: [k.ada.id], arrival: { levelId: k.ground, x: 12.5, z: 12.5 }, origin: null })
     expect(r).toMatchObject({ ok: true, carried: { [k.ada.id]: k.ada.id } })
     await settle(h, both)
     const state = h.getSnapshot().state!
@@ -1670,7 +1739,7 @@ describe("host runner — changing the map", () => {
     expect(m2.result(mv)).toEqual({ reqId: mv, ok: false, reason: "not-owner" })
   })
 
-  it("the swap is saved before it resolves: a restarted host resumes the new map with the carried owners", async () => {
+  it("the swap is saved right away: a restarted host resumes the new map with the carried owners", async () => {
     const k = keep()
     const t = meadow()
     const fx = await fixture(k.scene, [P1])
@@ -1682,8 +1751,11 @@ describe("host runner — changing the map", () => {
     const m = mirror(fx, P1)
     await settle(a, [[P1, m]])
     const origin = { sceneId: row.id, version: 1, dirty: false }
-    const r = await a.changeMap(t.scene, { tokenIds: [k.ada.id], arrival: { levelId: t.ground, x: 7.5, z: 12.5 }, origin })
-    expect(r).toEqual({ ok: true, carried: { [k.ada.id]: k.ada.id }, saved: true })
+    const r = a.changeMap(t.scene, { tokenIds: [k.ada.id], arrival: { levelId: t.ground, x: 7.5, z: 12.5 }, origin })
+    expect(r).toEqual({ ok: true, carried: { [k.ada.id]: k.ada.id }, saved: expect.any(Promise) })
+    // Returned at once: the players' views are on their way while the game is saved.
+    expect(a.getSnapshot().state!.scene.id).toBe(t.scene.id)
+    expect(r.ok && (await r.saved)).toBe(true)
     expect(a.getSnapshot().library).toEqual(origin)
     const stored = await fx.dmRepo.loadSessionState(fx.sessionId)
     if (stored?.content.kind !== "game") throw new Error("the game was not saved")
@@ -1710,6 +1782,39 @@ describe("host runner — changing the map", () => {
     expect(m.view!.controlledTokenIds).toEqual([k.ada.id])
     expect(Object.keys(m.view!.scene.levels)).toEqual([t.ground])
     expect(m.applyErrors).toEqual([])
+  })
+
+  it("a save cut short by a stand-down reports the swap as not saved", async () => {
+    const k = keep()
+    const t = meadow()
+    const fx = await fixture(k.scene, [P1])
+    let failNext = false
+    let inFlight = false
+    const repo = {
+      ...fx.dmRepo,
+      saveSessionState: async (...a: Parameters<typeof fx.dmRepo.saveSessionState>) => {
+        if (!failNext) return fx.dmRepo.saveSessionState(...a)
+        failNext = false
+        inFlight = true
+        await sleep(80)
+        // Another tab or device claimed the session meanwhile.
+        throw new NetError("stale_epoch", "newer host")
+      },
+    }
+    const h = host(fx, { repo }).host
+    await h.start()
+    await h.save()
+    failNext = true
+    // A token move asks for a save soon: it is still on its way when the DM changes the map.
+    h.dispatch({ t: "move-token", tokenId: k.ada.id, levelId: k.ground, x: 22.5, z: 17.5 })
+    await waitFor(() => inFlight, "save in flight")
+    const r = h.changeMap(t.scene, { tokenIds: [k.ada.id], arrival: { levelId: t.ground, x: 7.5, z: 12.5 }, origin: null })
+    expect(r).toMatchObject({ ok: true })
+    expect(r.ok && (await r.saved)).toBe(false)
+    expect(h.getSnapshot().status).toBe("standby")
+    const stored = await fx.dmRepo.loadSessionState(fx.sessionId)
+    const parsed = stored?.content.kind === "game" ? parseGameStateDetailed(stored.content.state) : null
+    expect(parsed?.ok && parsed.state.scene.id).toBe(k.scene.id)
   })
 
   it("until a client has the new map's view, its moves are refused and its pings dropped", async () => {
@@ -1754,18 +1859,127 @@ describe("host runner — changing the map", () => {
     expect(seen[0]).toMatchObject({ ping: { levelId: t.ground }, from: P1 })
   })
 
+  it("requests made on the previous map are refused even once the new view went out; ones made on this map apply", async () => {
+    const { k, h, m1, both } = await party()
+    // A duplicate shares the keep's level and door ids, and Ada arrives by the door.
+    const dup = structuredClone(k.scene)
+    dup.id = newId()
+    dup.name = "The Keep (copy)"
+    const r = h.changeMap(dup, { tokenIds: [k.ada.id], arrival: { levelId: k.ground, x: 27.5, z: 17.5 }, origin: null })
+    expect(r).toMatchObject({ ok: true })
+    await settle(h, both)
+    expect(m1.view!.scene.mapSerial).toBe(1)
+    const [i, j] = cellOf(h, k.ada.id)
+    const path = walk(k.ground, [
+      [i, j],
+      [i - 1, j],
+    ])
+    // Sent on the keep just before the copy's view arrived (the client says so): they would all apply here.
+    await m1.send({ t: "move", reqId: "old-move", tokenId: k.ada.id, path, map: 0 })
+    await m1.send({ t: "jump", reqId: "old-jump", tokenId: k.ada.id, levelId: k.ground, x: 12.5, z: 12.5, map: 0 })
+    await m1.send({ t: "door", reqId: "old-door", doorId: k.door.id, action: "open", map: 0 })
+    const old = ["old-move", "old-jump", "old-door"]
+    await waitFor(() => old.every((id) => m1.result(id) !== undefined), "refusals")
+    for (const id of old) expect(m1.result(id)).toEqual({ reqId: id, ok: false, reason: "cannot" })
+    await settle(h, both)
+    expect(cellOf(h, k.ada.id)).toEqual([i, j])
+    expect(h.getSnapshot().state!.scene.objects[k.door.id]).toMatchObject({ state: "closed" })
+    // Made on this map, or not saying (the client holds this map's view): they apply.
+    await m1.send({ t: "door", reqId: "new-door", doorId: k.door.id, action: "open", map: 1 })
+    const mv = m1.move(k.ada.id, path)
+    await waitFor(() => m1.result("new-door") !== undefined && m1.result(mv) !== undefined, "results")
+    expect(m1.result("new-door")).toEqual({ reqId: "new-door", ok: true })
+    expect(m1.result(mv)).toEqual({ reqId: mv, ok: true, applied: 1 })
+    await settle(h, both)
+    expect(cellOf(h, k.ada.id)).toEqual([i - 1, j])
+  })
+
+  it("a new map's view too big for a broadcast: requests are refused until snapshot_ready points the client at it", async () => {
+    const k = keep()
+    const t = meadow()
+    // A view of the meadow is over the broadcast limit: it goes through the database.
+    t.scene.levels[t.ground].name = "M".repeat(210_000)
+    const fx = await fixture(k.scene, [P1])
+    let uploading = false
+    const repo = {
+      ...fx.dmRepo,
+      upsertPlayerView: async (row: Parameters<typeof fx.dmRepo.upsertPlayerView>[0]) => {
+        if (row.view.scene.mapSerial === 1) {
+          uploading = true
+          await sleep(150)
+          uploading = false
+        }
+        return fx.dmRepo.upsertPlayerView(row)
+      },
+    }
+    const h = host(fx, { repo }).host
+    await h.start()
+    h.dispatch({ t: "assign-token", tokenId: k.ada.id, userId: P1, assigned: true })
+    const m = mirror(fx, P1)
+    await settle(h, [[P1, m]])
+    const r = h.changeMap(t.scene, { tokenIds: [k.ada.id], arrival: { levelId: t.ground, x: 7.5, z: 12.5 }, origin: null })
+    expect(r).toMatchObject({ ok: true })
+    await waitFor(() => uploading, "the new view's upload")
+    // The client still shows the keep: a move on the meadow's level (valid there) does not apply yet.
+    const [i, j] = cellOf(h, k.ada.id)
+    const path = walk(t.ground, [
+      [i, j],
+      [i, j + 1],
+    ])
+    const early = m.move(k.ada.id, path)
+    await waitFor(() => m.result(early) !== undefined, "early result")
+    expect(m.result(early)).toEqual({ reqId: early, ok: false, reason: "cannot" })
+    await settle(h, [[P1, m]])
+    expect(m.messages.some((x) => x.t === "snapshot_ready")).toBe(true)
+    expect(m.view!.scene.mapSerial).toBe(1)
+    expect(cellOf(h, k.ada.id)).toEqual([i, j])
+    const late = m.move(k.ada.id, path)
+    await waitFor(() => m.result(late) !== undefined, "late result")
+    expect(m.result(late)).toEqual({ reqId: late, ok: true, applied: 1 })
+  })
+
+  it("a snapshot_ready that got through but whose ack timed out: moves made on the new map still apply", async () => {
+    const k = keep()
+    const t = meadow()
+    t.scene.levels[t.ground].name = "M".repeat(210_000)
+    const fx = await fixture(k.scene, [P1])
+    const h = host(fx).host
+    await h.start()
+    h.dispatch({ t: "assign-token", tokenId: k.ada.id, userId: P1, assigned: true })
+    const m = mirror(fx, P1)
+    await settle(h, [[P1, m]])
+    // The Realtime ack of snapshot_ready times out although the message was delivered: the host can't tell.
+    const hr = h as unknown as { send(conn: unknown, msg: HostToClient): Promise<SendResult> }
+    const send = hr.send.bind(h)
+    hr.send = async (conn, msg) => {
+      const res = await send(conn, msg)
+      return msg.t === "snapshot_ready" ? sendFailure("timed-out") : res
+    }
+    expect(h.changeMap(t.scene, { tokenIds: [k.ada.id], arrival: { levelId: t.ground, x: 7.5, z: 12.5 }, origin: null })).toMatchObject({ ok: true })
+    await waitFor(() => m.view?.scene.mapSerial === 1, "the new map")
+    await settle(h, [[P1, m]])
+    const [i, j] = cellOf(h, k.ada.id)
+    const path = walk(t.ground, [
+      [i, j],
+      [i, j + 1],
+    ])
+    await m.send({ t: "move", reqId: "tagged", tokenId: k.ada.id, path, map: 1 })
+    await waitFor(() => m.result("tagged") !== undefined, "result")
+    expect(m.result("tagged")).toEqual({ reqId: "tagged", ok: true, applied: 1 })
+  })
+
   it("refusals leave the game as it was", async () => {
     const { k, h, m1, both } = await party()
     const before = h.getSnapshot().state!
     const t = meadow()
-    const same = await h.changeMap(structuredClone(before.scene), { tokenIds: [k.ada.id], arrival: { levelId: k.ground, x: 7.5, z: 7.5 }, origin: null })
+    const same = h.changeMap(structuredClone(before.scene), { tokenIds: [k.ada.id], arrival: { levelId: k.ground, x: 7.5, z: 7.5 }, origin: null })
     expect(same).toEqual({ ok: false, error: "same-map", unplaced: [] })
     // One square, two travellers.
     const tiny = flatScene(1, 1, "bright")
-    const full = await h.changeMap(tiny.scene, { tokenIds: [k.ada.id, k.bo.id], arrival: { levelId: tiny.ground, x: 2.5, z: 2.5 }, origin: null })
+    const full = h.changeMap(tiny.scene, { tokenIds: [k.ada.id, k.bo.id], arrival: { levelId: tiny.ground, x: 2.5, z: 2.5 }, origin: null })
     expect(full).toMatchObject({ ok: false, error: "no-room" })
     expect(!full.ok && full.unplaced.length).toBe(1)
-    const lost = await h.changeMap(t.scene, { tokenIds: [k.ada.id], arrival: { levelId: "nowhere", x: 7.5, z: 7.5 }, origin: null })
+    const lost = h.changeMap(t.scene, { tokenIds: [k.ada.id], arrival: { levelId: "nowhere", x: 7.5, z: 7.5 }, origin: null })
     expect(lost).toEqual({ ok: false, error: "unknown-level", unplaced: [] })
     await sleep(50)
     await settle(h, both)

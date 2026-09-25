@@ -147,25 +147,34 @@ async function mount(
   const { state, ids } = liveGame()
   const target = createScene({ name: "The Sunken Crypt" })
   const onOpenChange = vi.fn()
+  const services = fakeServices(target)
+  const view = (live: GameState) => (
+    <ServicesContext.Provider value={services}>
+      <ChangeMapDialog
+        open
+        onOpenChange={onOpenChange}
+        state={live}
+        currentSceneId="row-1"
+        saveMap={{ library: linked, dirty: false, saving: false }}
+        {...props}
+      />
+    </ServicesContext.Provider>
+  )
   host = document.createElement("div")
   document.body.appendChild(host)
   root = createRoot(host)
   await act(async () => {
-    root!.render(
-      <ServicesContext.Provider value={fakeServices(target)}>
-        <ChangeMapDialog
-          open
-          onOpenChange={onOpenChange}
-          state={state}
-          currentSceneId="row-1"
-          saveMap={{ library: linked, dirty: false, saving: false }}
-          {...props}
-        />
-      </ServicesContext.Provider>
-    )
+    root!.render(view(state))
   })
   await flush()
-  return { state, ids, target, onOpenChange }
+  /** The live game changed (the host console re-renders the dialog with it). */
+  const rerender = async (live: GameState) => {
+    await act(async () => {
+      root!.render(view(live))
+    })
+    await flush()
+  }
+  return { state, ids, target, onOpenChange, rerender }
 }
 
 /** Pick "The Sunken Crypt", then review. */
@@ -264,6 +273,37 @@ describe("ChangeMapDialog", () => {
       expect.objectContaining({ save: false })
     )
     expect(onOpenChange).toHaveBeenCalledWith(false)
+  })
+
+  it("keeps the confirmed summary while the change goes through and the dialog closes", async () => {
+    let finish: (outcome: ChangeMapOutcome) => void = () => {}
+    const onChange = vi.fn(
+      (_req: ChangeMapRequest) =>
+        new Promise<ChangeMapOutcome>((resolve) => (finish = resolve))
+    )
+    const { state, ids, target, rerender } = await mount({ onChange })
+    await toConfirm()
+    const said =
+      "The other 1 token of “The Crooked Lantern” stay behind: they are not on the new map."
+    expect(document.body.textContent).toContain(said)
+    await click(button("Change map"))
+    // The swap is dispatched: the live game is the crypt, with Mira, the pony and the crypt's own guard.
+    const levelId = sortedLevels(target)[0].id
+    const crypt = { ...state, scene: structuredClone(target) }
+    for (const [id, name] of [
+      [ids.mira, "Mira"],
+      [ids.pony, "Pony"],
+      ["guard", "Guard"],
+    ]) {
+      const t = createToken(levelId, { x: 2.5, z: 2.5 }, { name })
+      crypt.scene.tokens[id] = { ...t, id }
+    }
+    await rerender(crypt)
+    expect(document.body.textContent).toContain(said)
+    expect(document.body.textContent).not.toContain("of “The Sunken Crypt”")
+    await act(async () => finish(true))
+    await flush()
+    expect(document.body.textContent).toContain(said)
   })
 
   it("holds the save choice while the library scene is looked up, and refuses to change while saving", async () => {

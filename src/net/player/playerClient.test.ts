@@ -5,13 +5,15 @@ import { createHeightmap, sampleCounts, writeHeights } from "@/core/scene/height
 import type { Scene } from "@/core/scene/types"
 import { diffViews } from "@/core/session/diff"
 import { add, addToken, flatScene, TestHost } from "@/core/session/test-utils"
-import type { ClientToHost, HostToClient, PlayerView, PlayerWall } from "@/core/session/types"
+import { parseClientMessage } from "@/core/session/protocol"
+import type { ClientToHost, HostToClient, PlayerView, PlayerWall, RequestResult } from "@/core/session/types"
 
 import type { AtlasIdentity } from "../auth"
+import { HELLO_RATE, RequestLimiter } from "../host/flush"
 import { createMemoryStore } from "../localStore"
 import { LocalTransport, type BroadcastChannelLike } from "../localTransport"
 import { createLocalScenesRepo } from "../scenesRepo"
-import { createLocalSessionsRepo, type SessionsRepo } from "../sessionsRepo"
+import { createLocalSessionsRepo, type PlayerViewRow, type SessionsRepo } from "../sessionsRepo"
 import type { BackdropCanvas } from "./backdropCanvas"
 import { FakeHost } from "./fakeHost"
 import { createPlayerClient } from "./index"
@@ -435,6 +437,133 @@ describe("PlayerClient: stored views", () => {
     await link.send({ t: "snapshot_ready", epoch: "e9", seq: 0 })
     await waitFor(() => hellos.length === 3, "hello after a foreign-epoch row")
     expect(client.getSnapshot().epoch).toBe("e1")
+  })
+
+  it("gets onto a new map sent through the database even when row loads are slow and the host limits hellos", async () => {
+    const newTab = tabs()
+    const w = world()
+    const host = rawHost(newTab())
+    // Like HostRunner: hellos over HELLO_RATE are dropped; an answer after the map change goes through the
+    // database (snapshot_ready), followed by the remembered results as `result` messages at the new seq.
+    const limiter = new RequestLimiter(HELLO_RATE, () => Date.now())
+    const remembered: RequestResult[] = []
+    const first = w.sim.refresh(P1).view
+    let hostSeq = 1
+    let viaDatabase = false
+    host.link.onRequest((raw) => {
+      const r = raw as ClientToHost
+      if (r.t === "say") remembered.push({ reqId: r.reqId, ok: true })
+      if (r.t !== "hello" || !limiter.tryTake()) return
+      void (async () => {
+        await sleep(100)
+        if (!viaDatabase) {
+          await host.send({ t: "snapshot", epoch: "e1", seq: hostSeq, view: first, nonce: r.nonce })
+          return
+        }
+        await host.send({ t: "snapshot_ready", epoch: "e1", seq: hostSeq, nonce: r.nonce })
+        for (const result of remembered) await host.send({ t: "result", epoch: "e1", seq: hostSeq, result })
+      })()
+    })
+    let row: PlayerViewRow | null = null
+    let loads = 0
+    const client = makeClient(newTab(), {
+      // A large row over a slow link: longer than the hello retry (2.5 s).
+      repo: stubRepo({
+        loadPlayerView: async () => {
+          loads++
+          await sleep(3000)
+          return row
+        },
+      }),
+      timings: { hostPresenceGraceMs: 120 },
+    })
+    await client.start()
+    await waitFor(() => client.getSnapshot().status === "live", "live")
+    const hellos = host.hellos().length
+
+    const said = client.say("Coming!", "all")
+    await waitFor(() => remembered.length === 1, "chat line at the host")
+    const crypt = structuredClone(w.scene)
+    crypt.id = "crypt"
+    w.sim.dm({ t: "load-scene", scene: crypt, carried: { [w.token.id]: w.token.id } })
+    row = { sessionId: SID, userId: P1, hostEpoch: 1, epoch: "e1", seq: 2, view: w.sim.refresh(P1).view, updatedAt: "" }
+    hostSeq = 2
+    viaDatabase = true
+    await host.send({ t: "snapshot_ready", epoch: "e1", seq: 2 })
+    await host.send({ t: "result", epoch: "e1", seq: 2, result: { reqId: said, ok: true } })
+
+    await waitFor(() => client.getSnapshot().mapChanges === 1, "on the new map", 7000)
+    expect(client.getSnapshot()).toMatchObject({ status: "live", epoch: "e1", seq: 2, viewSource: "row" })
+    expect(client.getSnapshot().results).toEqual([{ reqId: said, ok: true, kind: "say" }])
+    // The verdict at the new seq was the row's to bring: no hello, one row load.
+    expect(host.hellos()).toHaveLength(hellos)
+    expect(loads).toBe(1)
+  }, 15_000)
+
+  /** A player live on the keep whose host answers hellos with snapshot_ready once the map changed (as HostRunner does for large views). */
+  async function viaDatabase(loadMs: (n: number) => number, timings: Partial<PlayerClientTimings>) {
+    const newTab = tabs()
+    const w = world()
+    const host = rawHost(newTab())
+    const first = w.sim.refresh(P1).view
+    const st = { hostSeq: 1, ready: false, row: null as PlayerViewRow | null, loads: 0 }
+    host.link.onRequest((raw) => {
+      const r = raw as ClientToHost
+      if (r.t !== "hello") return
+      void (async () => {
+        await sleep(30)
+        if (st.ready) await host.send({ t: "snapshot_ready", epoch: "e1", seq: st.hostSeq, nonce: r.nonce })
+        else await host.send({ t: "snapshot", epoch: "e1", seq: st.hostSeq, view: first, nonce: r.nonce })
+      })()
+    })
+    const client = makeClient(newTab(), {
+      repo: stubRepo({
+        loadPlayerView: async () => {
+          const ms = loadMs(st.loads++)
+          if (ms === Infinity) return new Promise<never>(() => {})
+          await sleep(ms)
+          return st.row
+        },
+      }),
+      timings: { hostPresenceGraceMs: 120, ...timings },
+    })
+    await client.start()
+    await waitFor(() => client.getSnapshot().status === "live", "live")
+    const changeMap = async () => {
+      const crypt = structuredClone(w.scene)
+      crypt.id = "crypt"
+      w.sim.dm({ t: "load-scene", scene: crypt, carried: { [w.token.id]: w.token.id } })
+      st.row = { sessionId: SID, userId: P1, hostEpoch: 1, epoch: "e1", seq: 2, view: w.sim.refresh(P1).view, updatedAt: "" }
+      st.hostSeq = 2
+      st.ready = true
+      await host.send({ t: "snapshot_ready", epoch: "e1", seq: 2 })
+    }
+    return { client, host, st, changeMap }
+  }
+
+  it("a stored view load that never settles does not keep the player on the old map: the host's syncs lead to a hello", async () => {
+    const { client, host, st, changeMap } = await viaDatabase((n) => (n === 0 ? Infinity : 50), { helloRetryMs: 150, helloRetryMaxMs: 400 })
+    const hellos = host.hellos().length
+    await changeMap()
+    // The host's idle syncs at the new seq: covered by the load at first, then no longer.
+    for (let k = 0; k < 8 && client.getSnapshot().mapChanges === 0; k++) {
+      await sleep(150)
+      await host.send({ t: "sync", epoch: "e1", seq: 2 })
+    }
+    await waitFor(() => client.getSnapshot().mapChanges === 1, "on the new map")
+    expect(client.getSnapshot()).toMatchObject({ status: "live", seq: 2, viewSource: "row" })
+    expect(host.hellos().length).toBeGreaterThan(hellos)
+    expect(st.loads).toBe(2)
+  })
+
+  it("a chat verdict ahead of the view is reported at once, not held behind a slow stored view", async () => {
+    const { client, host, changeMap } = await viaDatabase(() => 800, { pendingTimeoutMs: 500 })
+    const said = client.say("Coming!", "all")
+    await changeMap()
+    await host.send({ t: "result", epoch: "e1", seq: 2, result: { reqId: said, ok: true } })
+    await waitFor(() => client.getSnapshot().results.length > 0, "the verdict")
+    await waitFor(() => client.getSnapshot().mapChanges === 1, "on the new map")
+    expect(client.getSnapshot().results).toEqual([{ reqId: said, ok: true, kind: "say" }])
   })
 
   it("shows the stored view while the DM is away, disables input, and resyncs when the DM returns", async () => {
@@ -913,6 +1042,174 @@ describe("PlayerClient: requests", () => {
     expect(client.getSnapshot().results).toEqual([{ reqId: said, ok: false, reason: "rate-limited" }])
   })
 
+  it("says which map a request about the map's places was made on", async () => {
+    const newTab = tabs()
+    const w = world()
+    const host = rawHost(newTab())
+    const client = makeClient(newTab(), { timings: { ...FAST, pendingTimeoutMs: 5000, requestRate: { max: 100, windowMs: 1000 } } })
+    await client.start()
+    await waitFor(() => host.hellos().length === 1, "hello")
+    await host.send({ t: "snapshot", epoch: "e1", seq: 1, view: w.sim.refresh(P1).view, nonce: host.hellos()[0].nonce })
+    await waitFor(() => client.getSnapshot().status === "live", "live")
+    const fireball = {
+      shape: "sphere" as const,
+      levelId: w.ground,
+      x: 20,
+      z: 20,
+      elevation: 0,
+      angle: 0,
+      size: 20,
+      width: 5,
+      height: 40,
+      label: "Fireball",
+      color: "#F97316",
+      tokenId: null,
+    }
+    const ask = () => {
+      client.requestMove(w.token.id, [{ cell: { i: 2, j: 2 }, levelId: w.ground }], { x: 12, z: 13 })
+      client.requestJump(w.token.id, w.ground, { x: 32.5, z: 32.5 })
+      client.requestDoor("door-1", "open")
+      client.placeTemplate(fireball)
+      client.removeTemplate("tpl-1")
+      client.say("On my way", "all")
+    }
+    const sent = () => host.requests.filter((r) => r.t !== "hello")
+    const maps = () => sent().map((r) => [r.t, (r as { map?: number }).map])
+    ask()
+    await waitFor(() => sent().length === 6, "requests on the first map")
+    expect(maps()).toEqual([
+      ["move", 0],
+      ["jump", 0],
+      ["door", 0],
+      ["template", 0],
+      ["template-remove", 0],
+      ["say", undefined],
+    ])
+
+    // The DM moves the game to a copy of the map (same level, token and door ids): requests made there say so.
+    const copy = structuredClone(w.scene)
+    copy.id = "copy-of-the-keep"
+    w.sim.dm({ t: "load-scene", scene: copy, carried: { [w.token.id]: w.token.id } })
+    await host.send({ t: "snapshot", epoch: "e1", seq: 2, view: w.sim.refresh(P1).view })
+    await waitFor(() => client.getSnapshot().mapChanges === 1, "on the copy")
+    ask()
+    await waitFor(() => sent().length === 12, "requests on the copy")
+    expect(maps().slice(6)).toEqual([
+      ["move", 1],
+      ["jump", 1],
+      ["door", 1],
+      ["template", 1],
+      ["template-remove", 1],
+      ["say", undefined],
+    ])
+    // The host's protocol takes them.
+    expect(sent().every((r) => parseClientMessage(r) !== null)).toBe(true)
+  })
+
+  it("holds verdicts about the map's places that arrive before the new map lands, then skips those about the old map", async () => {
+    const newTab = tabs()
+    const w = world()
+    const host = rawHost(newTab())
+    let row: PlayerViewRow | null = null
+    let land: () => void = () => {}
+    const landed = new Promise<void>((resolve) => (land = resolve))
+    const client = makeClient(newTab(), {
+      repo: stubRepo({
+        loadPlayerView: async () => {
+          await landed
+          return row
+        },
+      }),
+      timings: { ...FAST, pendingTimeoutMs: 5000 },
+    })
+    await client.start()
+    await waitFor(() => host.hellos().length === 1, "hello")
+    await host.send({ t: "snapshot", epoch: "e1", seq: 1, view: w.sim.refresh(P1).view, nonce: host.hellos()[0].nonce })
+    await waitFor(() => client.getSnapshot().status === "live", "live")
+    const hellos = host.hellos().length
+
+    const move = client.requestMove(w.token.id, [
+      { cell: { i: 2, j: 2 }, levelId: w.ground },
+      { cell: { i: 3, j: 2 }, levelId: w.ground },
+    ])
+    const said = client.say("Coming!", "all")
+    // The new map is too big for one broadcast: snapshot_ready, then the host's queued verdicts at the new seq.
+    const crypt = structuredClone(w.scene)
+    crypt.id = "crypt"
+    w.sim.dm({ t: "load-scene", scene: crypt, carried: { [w.token.id]: w.token.id } })
+    row = { sessionId: SID, userId: P1, hostEpoch: 1, epoch: "e1", seq: 2, view: w.sim.refresh(P1).view, updatedAt: "" }
+    await host.send({ t: "snapshot_ready", epoch: "e1", seq: 2 })
+    await host.send({ t: "result", epoch: "e1", seq: 2, result: { reqId: move, ok: false, reason: "cannot" } })
+    await host.send({ t: "result", epoch: "e1", seq: 2, result: { reqId: said, ok: false, reason: "rate-limited" } })
+    await sleep(60)
+    // Still on the old map: the move's verdict waits (its "cannot" would read "You can't reach that door"),
+    // the chat's is reported at once, and nothing is asked again (the row being loaded brings that seq).
+    const chat = [{ reqId: said, ok: false, reason: "rate-limited", kind: "say" }]
+    expect(client.getSnapshot().results).toEqual(chat)
+    expect(client.getSnapshot().pending.map((p) => p.reqId)).toEqual([move])
+    expect(host.hellos()).toHaveLength(hellos)
+
+    land()
+    await waitFor(() => client.getSnapshot().mapChanges === 1, "on the new map")
+    expect(client.getSnapshot()).toMatchObject({ epoch: "e1", seq: 2, status: "live", viewSource: "row", pending: [] })
+    expect(client.getSnapshot().results).toEqual(chat)
+  })
+
+  it("holds a verdict that is ahead of its view until the missed update arrives, and asks for it", async () => {
+    const newTab = tabs()
+    const w = world()
+    const host = rawHost(newTab())
+    const client = makeClient(newTab(), { timings: { ...FAST, pendingTimeoutMs: 5000 } })
+    await client.start()
+    await waitFor(() => host.hellos().length === 1, "hello")
+    await host.send({ t: "snapshot", epoch: "e1", seq: 1, view: w.sim.refresh(P1).view, nonce: host.hellos()[0].nonce })
+    await waitFor(() => client.getSnapshot().status === "live", "live")
+    const lvl = w.ground
+    const h = host.hellos().length
+
+    // The patch that moved the token (seq 2, carrying the move's verdict) is lost; the door's verdict follows alone.
+    const move = client.requestMove(w.token.id, [
+      { cell: { i: 2, j: 2 }, levelId: lvl },
+      { cell: { i: 3, j: 2 }, levelId: lvl },
+    ])
+    const door = client.requestDoor("door-1", "open")
+    w.sim.dm({ t: "move-token", tokenId: w.token.id, levelId: lvl, x: 17.5, z: 12.5 })
+    const v2 = w.sim.refresh(P1)
+    await host.send({ t: "result", epoch: "e1", seq: 2, result: { reqId: door, ok: false, reason: "cannot" } })
+    await waitFor(() => host.hellos().length === h + 1, "hello: the verdict shows a missed update")
+    expect(host.hellos()[h]).toMatchObject({ epoch: "e1", lastSeq: 1 })
+    expect(client.getSnapshot().results).toEqual([])
+    expect(client.getSnapshot().pending.map((p) => p.reqId)).toEqual([move, door])
+    // The catch-up (with the results sent since) settles both, each reported once.
+    const since = [
+      { reqId: move, ok: true },
+      { reqId: door, ok: false, reason: "cannot" as const },
+    ]
+    await host.send({ t: "patch", epoch: "e1", baseSeq: 1, seq: 2, ops: v2.ops, nonce: host.hellos()[h].nonce, results: since })
+    await waitFor(() => client.getSnapshot().pending.length === 0, "settled")
+    expect(client.getSnapshot().results).toEqual([
+      { reqId: door, ok: false, reason: "cannot", kind: "door" },
+      { reqId: move, ok: true, kind: "move" },
+    ])
+    expect(client.getSnapshot().scene?.tokens[w.token.id].position).toEqual({ x: 17.5, z: 12.5 })
+
+    // A patch that cannot be applied (the one before it was lost) holds its verdicts the same way.
+    const jump = client.requestJump(w.token.id, lvl, { x: 32.5, z: 32.5 })
+    w.sim.dm({ t: "move-token", tokenId: w.token.id, levelId: lvl, x: 22.5, z: 12.5 })
+    w.sim.refresh(P1)
+    w.sim.dm({ t: "move-token", tokenId: w.token.id, levelId: lvl, x: 32.5, z: 32.5 })
+    const v4 = w.sim.refresh(P1)
+    await host.send({ t: "patch", epoch: "e1", baseSeq: 3, seq: 4, ops: v4.ops, results: [{ reqId: jump, ok: true }] })
+    await waitFor(() => host.hellos().length === h + 2, "hello after an unusable patch")
+    expect(host.hellos()[h + 1]).toMatchObject({ epoch: "e1", lastSeq: 2 })
+    expect(client.getSnapshot().results).toHaveLength(2)
+    expect(client.getSnapshot().pending.map((p) => p.reqId)).toEqual([jump])
+    await host.send({ t: "patch", epoch: "e1", baseSeq: 2, seq: 4, ops: diffViews(v2.view, v4.view), nonce: host.hellos()[h + 1].nonce })
+    await waitFor(() => client.getSnapshot().pending.length === 0, "jump settled")
+    expect(client.getSnapshot().results.at(-1)).toEqual({ reqId: jump, ok: true, kind: "jump" })
+    expect(client.getSnapshot().seq).toBe(4)
+  })
+
   it("is closed for good after being kicked", async () => {
     const { client, token, host } = await live()
     await host.send(P1, { t: "kicked", reason: "Removed by the DM" })
@@ -1070,6 +1367,41 @@ describe("PlayerClient: backdrops", () => {
     expect(events.at(-1)).toBe(`remove ${ground}`)
     expect(client.backdropLayers()).toEqual([])
     expect(calls.at(-1)).toBe(`set ${ground} null`)
+  })
+
+  it("tells the tile source which map the view shows before asking for that map's tiles", async () => {
+    const newTab = tabs()
+    const { scene, ground } = flatScene(6, 6, "bright")
+    scene.levels[ground].backdrop = { assetId: "map", rect: { x: 0, z: 0, w: 30, d: 30 }, opacity: 1, tintWalls: false }
+    const token = addToken(scene, ground, 12.5, 12.5)
+    const sim = new TestHost(scene, [P1])
+    sim.assign(token.id, P1)
+    const host = fakeHost(newTab(), sim, { tilePx: 64 })
+    // A source that crops from the stored scene (local mode) must not cut the new map's cells from the old one.
+    const calls: string[] = []
+    const tiles = {
+      getTile: vi.fn(async () => {
+        calls.push("tile")
+        return { width: 64, height: 64, close() {} } as unknown as ImageBitmap
+      }),
+      setMap: vi.fn((map: number) => {
+        calls.push(`map ${map}`)
+      }),
+      dispose: vi.fn(),
+    }
+    const client = makeClient(newTab(), { tiles })
+    await client.start()
+    await waitFor(() => calls.filter((c) => c === "tile").length === 36, "first map drawn")
+    expect(calls[0]).toBe("map 0")
+
+    const night = structuredClone(scene)
+    night.id = "night-keep"
+    sim.dm({ t: "load-scene", scene: night, carried: { [token.id]: token.id } })
+    const before = calls.length
+    await host.flush(P1)
+    await waitFor(() => calls.filter((c) => c === "tile").length === 72, "night map drawn")
+    expect(calls[before]).toBe("map 1")
+    expect(calls.filter((c) => c !== "tile")).toEqual(["map 0", "map 1"])
   })
 
   it("bindBackdropsToEngine maps set / update / remove events", () => {

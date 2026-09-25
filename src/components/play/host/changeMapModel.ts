@@ -30,7 +30,7 @@ export interface ChangeMapRequest {
 
 /**
  * The console's answer: true = the map changed (the dialog closes); false = stay open, the reason was
- * already shown (e.g. the save failed, with its own toast); a string = stay open and show it.
+ * already shown; a string = stay open and show it (e.g. the map wasn't saved to the library first).
  */
 export type ChangeMapOutcome = boolean | string
 

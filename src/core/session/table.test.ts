@@ -268,7 +268,8 @@ describe("combat", () => {
       ],
     })
     const json = JSON.stringify(filterForPlayer(state, ALICE, sees(goblin)))
-    for (const secret of ["Spy", spy, "Ogre", ogre, "Goblin Boss", "c4", "c5"]) expect(json).not.toContain(secret)
+    // Entry ids as JSON strings: a random token id may contain "c5".
+    for (const secret of ["Spy", spy, "Ogre", ogre, "Goblin Boss", '"c4"', '"c5"']) expect(json).not.toContain(secret)
   })
 
   it("posts notices for start, new rounds and end", () => {

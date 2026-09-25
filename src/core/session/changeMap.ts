@@ -141,7 +141,8 @@ export function changeMapCommand(
     scene: r.scene,
     carried: r.carried,
     stamp: tableStamp(ctx),
-    notice: travelNotice(target.name, Object.keys(r.carried).length),
+    // Public: hidden arrivals do not count (players must not learn one came along).
+    notice: travelNotice(target.name, Object.values(r.carried).filter((to) => !r.scene.tokens[to]?.hidden).length),
   }
   if (opts.origin !== undefined) cmd.origin = opts.origin
   return { ok: true, cmd, carried: r.carried }
