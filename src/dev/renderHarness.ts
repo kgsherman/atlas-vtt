@@ -5,6 +5,8 @@
  * Parameters (all optional):
  *   sample    crooked-lantern | stress-test | empty | vineyard-test (crooked-lantern). vineyard-test: the
  *             Forgotten Adventures maps in test_maps/ as a 27×47, 3-level scene with backdrops (dev/vineyard.ts)
+ *   scene     URL of an exported `.atlas.json` (e.g. /test_maps/lodge.atlas.json) instead of `sample`: the
+ *             document is migrated and parsed like an import, and its embedded images become the backdrops
  *   mode      editor | dm-play | player                              (editor)
  *   vision    off | fog | preview                                    (player → fog, otherwise off)
  *   level     active level index in elevation order (0 = lowest)    (the first viewer's level, else the
@@ -53,6 +55,7 @@ import { orInto, createCellMask, createGradeMask, encodeGrades, encodeMask, perc
 import type { CellMask, VisibilityResult } from "@/core/vision"
 import { effectiveFloorRects, sortedLevels, tokenGroundY } from "@/core/scene/queries"
 import { sampleById, SAMPLE_SCENES } from "@/core/scene/samples"
+import { parseScene } from "@/core/scene/schema"
 import { MATERIAL_COLORS } from "@/core/scene/defaults"
 import type { Id, MaterialId, Scene, SceneLike, Token, Vec2, Vec3 } from "@/core/scene/types"
 import { createGameState, filterForPlayer, reduceDm, updateKnowledge, viewerTokenIds, viewToScene, type GameState } from "@/core/session"
@@ -301,9 +304,11 @@ async function main(): Promise<void> {
     statsEl.hidden = !statsEl.hidden
   })
 
+  const sceneUrl = params.get("scene")
   const sampleId = param("sample", [...SAMPLE_SCENES.map((s) => s.id), "vineyard-test"], "crooked-lantern")
-  const vineyard = sampleId === "vineyard-test" ? await buildVineyardScene() : null
-  const scene = vineyard ? vineyard.scene : sampleById(sampleId)!.build()
+  const file = sceneUrl ? await loadSceneFile(sceneUrl) : null
+  const vineyard = !file && sampleId === "vineyard-test" ? await buildVineyardScene() : null
+  const scene = file ? file.scene : vineyard ? vineyard.scene : sampleById(sampleId)!.build()
   const mode = param<RenderMode>("mode", ["editor", "dm-play", "player"], "editor")
   const vision = param<VisionMode>("vision", ["off", "fog", "preview"], mode === "player" ? "fog" : "off")
   const qualityParam = param<Quality | "auto">("quality", ["low", "medium", "high", "ultra", "auto"], "high")
@@ -455,6 +460,21 @@ async function main(): Promise<void> {
   const tint = params.get("tint")
   const imageOpts = { opacity: opacity ?? undefined, tintWalls: tint === null ? undefined : tint !== "0" }
   if (vineyard) for (const [levelId, img] of vineyard.images) engine.setLevelImage(levelId, img, vineyard.rect, imageOpts)
+  // A scene file's embedded images, placed as its levels' backdrops say.
+  if (file) {
+    for (const level of Object.values(scene.levels)) {
+      const b = level.backdrop
+      const url = b && Object.hasOwn(file.assetsData, b.assetId) ? file.assetsData[b.assetId] : undefined
+      if (!b || !url) continue
+      handle.pending++
+      fetch(url)
+        .then((r) => r.blob())
+        .then((blob) => createImageBitmap(blob, { premultiplyAlpha: "premultiply" }))
+        .then((bitmap) => engine.setLevelImage(level.id, bitmap, b.rect, { opacity: opacity ?? b.opacity, tintWalls: tint === null ? b.tintWalls : tint !== "0" }))
+        .catch((err: unknown) => console.error("backdrop failed", level.name, err))
+        .finally(() => handle.pending--)
+    }
+  }
   for (const spec of params.getAll("backdrop")) {
     const m = /^(\d+):(.+)$/.exec(spec)
     const level = m ? levels[Number(m[1])] : undefined
@@ -480,6 +500,22 @@ async function main(): Promise<void> {
       statsEl.textContent = formatStats(s, info)
     }
   })
+}
+
+/**
+ * An exported `.atlas.json`, read like an import (net/scenesRepo readSceneFile, without pulling the network
+ * layer into this page): embedded images are split off, the document is migrated and parsed.
+ */
+async function loadSceneFile(url: string): Promise<{ scene: Scene; assetsData: Record<Id, string> }> {
+  const json: unknown = await (await fetch(url)).json()
+  const { assetsData, ...doc } = (typeof json === "object" && json !== null ? json : {}) as Record<string, unknown>
+  const parsed = parseScene(doc)
+  if (!parsed.ok) throw new Error(`${url}: ${parsed.issues.slice(0, 5).join("; ")}`)
+  const images: Record<Id, string> = {}
+  if (typeof assetsData === "object" && assetsData !== null) {
+    for (const [id, v] of Object.entries(assetsData)) if (typeof v === "string" && v.startsWith("data:image/")) images[id] = v
+  }
+  return { scene: parsed.scene, assetsData: images }
 }
 
 /** A generated portrait (initials on a gradient) as an SVG data URL, for testing token images. */
