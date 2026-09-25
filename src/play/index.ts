@@ -28,6 +28,7 @@ export {
 } from "./planner"
 export { MeasureTool } from "./measure"
 export {
+  damageInput,
   DRAFT_ID,
   hostTemplateItems,
   inputOf,

@@ -33,7 +33,7 @@ describe("normalizeArea", () => {
     const g = normalizeArea({ shape: "cone", levelId: "L", x: 1, z: 2, elevation: -5, angle: 3 * Math.PI, size: 9999, width: 0, height: 0 })
     expect(g.size).toBe(AREA_LIMITS.maxSize)
     expect(g.elevation).toBe(0)
-    expect(g.angle).toBeCloseTo(Math.PI, 3)
+    expect(Math.cos(g.angle)).toBeCloseTo(-1, 5)
     expect(g.width).toBe(5)
     const s = normalizeArea({ shape: "sphere", levelId: "L", x: 0, z: 0, elevation: 0, angle: 1.2, size: 0, width: 30, height: 3 })
     expect(s.angle).toBe(0)
@@ -43,6 +43,14 @@ describe("normalizeArea", () => {
     expect(normalizeArea({ ...s, shape: "cylinder", height: 1000 }).height).toBe(AREA_LIMITS.maxHeight)
     expect(normalizeArea({ ...s, shape: "nope" as AreaShape }).shape).toBe("sphere")
     expect(normalizeArea({ ...s, x: Number.NaN }).x).toBe(0)
+  })
+
+  it("keeps rounded angles within [−π, π] (a westward aim is stored as a loadable value)", () => {
+    for (const a of [Math.PI, -Math.PI, Math.PI - 1e-5, -Math.PI + 1e-5, 3 * Math.PI]) {
+      const g = normalizeArea({ shape: "line", levelId: "L", x: 0, z: 0, elevation: 0, angle: a, size: 10, width: 5, height: 40 })
+      expect(Math.abs(g.angle)).toBeLessThanOrEqual(Math.PI)
+      expect(Math.abs(Math.abs(g.angle) - Math.PI)).toBeLessThan(0.002)
+    }
   })
 
   it("describes areas", () => {

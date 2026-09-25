@@ -24,8 +24,9 @@ src/
     movement/           Move validation (walls/doors/windows/props, connectors), ruler measurement
     history/            Undo/redo over immer patches with transactions
     dice/               Dice notation, unbiased rolls, roll result schema (§6.5)
+    area/               Areas of effect (spell templates): 3D volumes, line of effect, covered squares, creatures caught (§6.6)
     session/            GameState reducer, request validation, memory, filter, diff/apply, viewToScene, table and
-                        token status (§6.5)
+                        token status (§6.5), templates (§6.6)
     tokenMaker/         Token Maker designs: layers, transforms, masks, validation, frame opening detection (§11)
   render/               three.js (WebGL2). Knows nothing about React or the network.
     engine/             Renderer, frame loop, resize, adaptive quality, stats
@@ -38,10 +39,12 @@ src/
     fog/                Host-mask textures (perception / explored / sunlit) as DataArrayTexture layers
     post/               Medium / high / ultra post (MSAA scene target; high/ultra: HDR, AO, bloom, tone mapping, grain)
     cameras/            Editor orbit camera, player 2.5D camera
-    overlays/           Grid, selection, tool previews, ruler, pending paths, ghost levels, gizmos, terrainOverlay (§4.6)
+    overlays/           Grid, selection, tool previews, ruler, pending paths, ghost levels, gizmos, terrainOverlay (§4.6),
+                        areas of effect (templates.ts, §6.6)
     picking/            Ground/object/token picking
   editor/               DM editor state (zustand) + tools (the terrain mode: tools/terrain.ts + tools/terrain/, terrainMath)
-  play/                 Play-mode controllers (token selection, drag-to-move, ruler, level switching)
+  play/                 Play-mode controllers (token selection, drag-to-move, ruler, level switching, the Template tool
+                        and the templates' computed areas, §6.6)
   tokenMaker/           Token Maker (§11): Canvas 2D compositor, image import, editor store, draft, flows
   net/                  Supabase client, auth, repositories, transports, host runner (+ vision worker), player client,
                         free asset catalog (freeAssets.ts), token images, image tools, Token Maker link (§11)
@@ -51,7 +54,7 @@ src/
   app/                  Service wiring (Supabase or local mode), router + lazy routes, library, scene digests
   lib/                  keymap (pure: remappable command tables, overrides), hotkeys (TanStack Hotkeys wrapper, key labels), utils
   components/           React + shadcn UI (app shell, editor panels, play HUD, host console, lobby; play/table: chat,
-                        dice, turn order, map markers)
+                        dice, turn order, map markers, areas of effect)
   routes/               Page-level components (home, editor, host, play, join, shared scene, token maker)
   dev/                  Dev-only render harness (`dev/render.html`) and the Vineyard build helpers
   integration/          Cross-module consistency tests (render ↔ occlusion, vision ↔ movement, host → player, editor → session)
@@ -1265,6 +1268,97 @@ authoritative, and a player receives only what filter.ts lets through.
   for `LONG_PRESS_MS` (450 ms) on the map, not on a token you can drag (`PlayController`); the DM's Shift +
   hold is a "look here" ping.
 
+### 6.6 Areas of effect (spell templates: `core/area`, `core/session/templates.ts`, `play/template*.ts`)
+
+The DM and players place spheres, cylinders, cones, lines and cubes on the map and everyone sees who they
+catch. What an area reaches comes from the same 3D geometry as vision, so walls, closed doors and floors
+stop it: a fireball in the courtyard reaches the edge of the balcony above it, never the room behind the
+balcony's wall or the cellar under the paving.
+
+- **Geometry** (`core/area/types.ts`, `shape.ts`): `AreaGeometry {shape, levelId, x, z, elevation, angle,
+  size, width, height}`. The point of origin is `(x, ground + elevation, z)` on the level (ground: floors,
+  terrain, stairs). Volumes: sphere (radius `size`); cylinder (a disc of radius `size`, up `height` from the
+  origin); cone (along `angle`, `size` long, at distance d along its axis d wide, the 5e rule, round about
+  its axis); line (`size` × `width`, `width` high, centred on the origin's height); cube (edge `size`, the
+  origin at the middle of its near side's bottom edge). Ground-hugging shapes (cylinder, cube) reach down to
+  the ground wherever it is below their base (a slope's downhill side). `angle` is radians in XZ: the
+  direction `(cos, sin)` in `(x, z)`; round shapes store 0. `normalizeArea` clamps to `AREA_LIMITS` (sizes
+  1–120 ft, width ≤ 60, height ≤ 200, elevation ≤ 100) and rounds to 1/1000 ft (angles stay within [−π, π]). `areaOutline` is the
+  top-down outline the renderer draws (a cone seen from above is a triangle).
+- **Reach** (`core/area/effect.ts` `computeAreaEffect(scene, world, geometry, {tokens, noCells})`): a point
+  is in the area when it lies in the volume and the segment from the origin to it is not blocked on the
+  **light** channel (what casts shadows: walls, closed doors whose style blocks light, window sills and
+  lintels but not the glass, pillars, slabs and terrain, stairs, solid props: the obstructions that give
+  total cover). Segments start at the origin pushed out of any light blocker it lies in
+  (`resolveLightOrigin`, so an origin on a floor or inside a wall behaves like a light there).
+  - **Cells**: on every level, each cell with ground there (`hasGroundAt`) is sampled along its standing
+    column, 0.25–5 ft above its ground and 0.25 ft below the ceiling: the column's point nearest the
+    origin's height, then its foot, middle and top. Covered when one of them is in the area (the 5e grid
+    rule, "a square is affected when the area covers its centre", in 3D).
+  - **Tokens**: the columns at the centres of the squares a token occupies (its own centre when it stands
+    off the grid and covers none), up to its height. Caught when a point of one is in the area: a halfling
+    behind a low wall is spared where a giant is not. `areaAroundToken` centres a carried area on its token
+    (round shapes measured from the edge of its space); the play layer leaves the carrier out of what its
+    aura catches (the 5e emanation rule).
+  - Cost: a 20 ft sphere on the Crooked Lantern ≈ 3 ms, a 150 ft one ≈ 14 ms; on a 120 × 120 grid with three
+    full levels a 150 ft sphere took ≈ 115 ms (most rays to the other levels are blocked, so every sample of
+    their columns is tried), hence the 120 ft limit and the cache below. A column's heights are tried once
+    each, nearest the origin first.
+- **State** (`GameState.templates?: AreaTemplate[]`, oldest first): `AreaGeometry & {id, owner (user id |
+  null = the DM), label, color, tokenId (carried by that token: position and level follow it), hidden (the
+  DM's alone)}`. Each player keeps `TEMPLATE_LIMITS.perPlayer` (6): another one replaces their oldest; the
+  game keeps `max` (64). A map edit drops templates on deleted levels or carried by deleted tokens
+  (`pruneTemplates`), `load-scene` drops them all, `remove-player` drops the player's, `rebind-player` moves
+  them. Saved with the game (`persist.ts`: each template parsed strictly on its own; one that does not parse,
+  or of a player who left, or on a missing level, is dropped on load, never the game).
+- **Requests**: `template {template: AreaTemplateInput, id?}` places one, or with `id` moves / changes one of
+  the sender's own; `template-remove {id}` removes one of theirs (anything else, and a template the DM hid,
+  even their own: `cannot`, so a hidden template can be neither brought back nor probed for). A carried
+  template needs a token the sender owns (checked before any lookup: `not-owner`) that players can see; a
+  standing one a level the sender's last view shows as **known** (like pings, so templates cannot probe for
+  levels) and a point within the scene ± `coordMargin` (else `invalid`). The host normalises the geometry,
+  cleans the label, keeps a valid colour (else the player's colour) and ignores the payload's position for
+  carried ones. `template` shares the table's rate (`TABLE_RATE`) on top of the request rate. **DM commands**:
+  `template-set {template}` (add or replace by id, `cleanTemplate`: bounded like a stored one) and
+  `template-delete {ids | null}`. Template changes mark every player dirty, never the vision (empty delta).
+- **Filter** (`playerTemplates`): a template is sent when the DM has not hidden it and it stands on a level
+  the view shows as known, or its carrier is one of the view's tokens (then at that token's position and
+  level). Built field by field: `PlayerTemplate = AreaGeometry & {id, label, color, name (the placer's
+  display name, "DM"), mine, dm, tokenId}`, never a user id. Diff granularity `templates/{id}`;
+  `sceneChangeFromOps` treats them as "no scene change". What an area reaches is **never sent**: each
+  viewer computes it from the scene it has (the DM on the whole scene with the host runner's occlusion
+  world, `HostRunnerImpl.occlusion()`; a player on the scene built from their view with the planner's
+  world), so a player's result uses only geometry they have seen, names only creatures in their view, and
+  the host sends nothing more than the template itself.
+- **Play** (`play/templateTool.ts` `TemplateTool`, the controller's `"template"` tool, key T): the picker
+  (`TemplatePicker`: spell presets from `AREA_PRESETS` (SRD), shape, size, width / height, origin height
+  ("auto": aimed shapes 2.5 ft, or half the height of the token they leave from; round ones 0), colour,
+  label, "carried by a token") sets the `TemplateSpec`. Hovering shows the area at the pointer. Round
+  shapes: press, drag to adjust, release; the centre snaps to grid intersections (Alt: free), a press on a
+  token centres it there. Aimed shapes: press at the origin (half-cell lattice; on a token: the edge of its
+  space facing the pointer), drag to aim (Shift: 15° steps), release. Auras: a click on a token the user may
+  select (or anywhere, for the selected one). Placing returns to the Move tool; Esc leaves the tool.
+  `editTemplate(id, spec, angle)` moves an existing one (the draft replaces it until placed).
+  `play/templateAreas.ts` `TemplateAreas` lists the templates (`hostTemplateItems` / `playerTemplateItems`)
+  with what they reach, memoised: cells per geometry, world and levels, kept when the objects that changed
+  (their old and new XZ bounds, `objectBounds`; lights never block) all lie outside the area's bounds, so a
+  door toggled across the map recomputes nothing; creatures also per token revision. It builds the engine
+  overlays with stable identities. The page computes after layout effects (the planner's world has taken
+  the scene by then), and a draft following the pointer at most once per frame.
+- **Render** (`OverlayState.templates: TemplateOverlay[]`, `render/overlays/templates.ts`): per template the
+  covered squares of every level the plan draws solid, as a translucent fill with a line around the covered
+  region (depth-tested with a polygon offset, so tokens, walls and props stand over them), the shape's
+  outline draped over its level's ground and a dot at its origin (both drawn through geometry, so the shape
+  always reads). Only templates whose overlay object changed are rebuilt; materials are shared per colour.
+- **UI** (`components/play/table/TemplateLayer.tsx`, `TemplatePanels.tsx`): chips at each origin (title and
+  number of creatures caught; carried ones follow their token as it walks; chips that would overlap stack
+  upwards) select a template; rings mark the creatures the selected template, or the one being placed,
+  catches. The card lists them (a player's list only ever names creatures in their view) and offers Move and
+  Remove to the owner and the DM, and to the DM "Hide from players" and **Roll damage**: one public roll
+  ("8d6 Fireball", the host's dice) dealt as `change-token-status` damage to every creature caught whose hit
+  points are tracked, halved (rounded down) for those marked as having saved. The template's label is the
+  roll's label after a `#` (`damageInput`), so a player's label never extends the formula.
+
 ---
 
 ## 7. Editor
@@ -1540,6 +1634,9 @@ authoritative, and a player receives only what filter.ts lets through.
   the grid's diagonal rule over the whole route (`pathDistance`), or the euclidean length in free mode.
 - The table (§6.5): Enter opens the chat & dice dock; holding the left button still on the map (move tool,
   not on a token you can drag) pings the spot, and the DM's Shift + hold makes every player look there.
+- Areas of effect (§6.6): the Area tool (T; players and DM) places spell templates from a picker of presets
+  and shapes; chips on the map open a template's card (the creatures it catches, Move / Remove; the DM also
+  hides it and rolls its damage).
 - Play keys: `usePlayKeys` registers `PLAY_COMMANDS` (host-only commands, level switching and vision preview,
   only for the DM). WASD / arrow panning is the top-down camera's own held-key input and is not remappable, so
   the dialog refuses those keys for play commands.
@@ -1942,6 +2039,25 @@ hit points from the token card, the player takes damage and goes prone from the 
 only a creature's band (and none once wounds are hidden), and the leak scan also looks for that creature's
 hit points in every frame and stored view.
 
+**Areas of effect (2026-09-25)** (§6.6). Spell templates for the whole table: five shapes and SRD spell
+presets, what each area reaches computed in 3D by every viewer from the geometry it has (walls, closed doors
+and floors stop it), covered squares on every level, the creatures caught, auras carried by tokens, and
+the DM's damage roll from a template's card. Unit tests: the shapes' volumes and outlines, covered squares
+(the 52-square 20 ft sphere, walls, low walls against small and tall creatures, closed and open doors,
+cones and lines, the cellar under a fireball, a balcony over a courtyard, a sphere in the air), large
+creatures by the squares they occupy; the requests (known levels only, carried by one's own tokens, one's
+own templates only, the per-player limit), the DM commands, pruning after map edits and player changes,
+the filter (known levels, carriers in view, never a hidden template or a user id, strict view schema),
+diffs, persistence and the wire; the renderer's overlay (cells on shown levels, region boundary,
+rebuilding only what changed); the Template tool (snapping, aiming from a token's edge, auras, moving,
+Escape) and the area cache (recomputed only when something within reach changes). A review found that an
+aim due west was rounded past π and made the saved game unloadable, that a player could move a template
+the DM had hidden back into view, that a template's label could extend the DM's damage formula, and that
+a large area was recomputed on every door toggle anywhere; each is fixed with a regression test (angles
+stay within [−π, π] and a template that does not parse is dropped rather than failing the load; hidden
+templates are `cannot` for their owner; the label follows a `#`; cells are kept while objects change out
+of reach, and the largest area is 120 ft). `templates-local` 29/29 on SwiftShader.
+
 **Terrain review fixes (2026-09-23)**, each with a regression test that fails on the previous code:
 - Document: "Apply to terrain" bakes the downward closure, so the terrain no longer changes (§3, §7);
   footprints with a vertex on an ear's diagonal are triangulated whole (§3); follow walls no longer sink
@@ -2032,6 +2148,20 @@ Known gaps and deliberate limits:
   the editor's undo history.
 - The log and combat belong to the game (`session_state`), not the map: "Save map to library" does not
   keep them, and a new game starts with neither.
+
+**Areas of effect**
+
+- What an area reaches is computed by each viewer from the scene it has. A player's result uses only the
+  geometry they have seen, so an area reaching into unexplored parts is drawn there as if nothing stood in
+  its way (over black fog), and a creature the player cannot see is never listed. The DM's result, on the
+  whole scene, is the one damage is dealt by.
+- Lines of effect are straight: effects that spread around corners (5e Fireball's rules text) are not
+  modelled; the DM can place a second template. Squares are judged by their centre column (the 5e grid rule);
+  an area covering only part of a square does not cover it.
+- "Roll damage" deals one roll to creatures whose hit points are tracked; saving throws are the DM's to
+  mark (no rolled saves, resistances or immunities). Templates are game state: "Save map to library" does
+  not keep them, and they are not part of the editor's undo history.
+- Chips stack when they would overlap each other, not other HUD elements.
 
 **Terrain editing and walls on terrain**
 

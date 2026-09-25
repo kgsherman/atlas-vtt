@@ -87,6 +87,20 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
 - Pings: hold the left button on the map to point at a spot. The DM's Shift + hold also centres every
   player's view on it.
 
+**Areas of effect**
+- Spell templates for everyone at the table: spheres, cylinders, cones, lines and cubes, with presets for
+  common spells (Fireball, Burning Hands, Lightning Bolt, Spirit Guardians…). Pick the **Area** tool (T),
+  hover to preview, click (or press and drag to aim) to place. Cones and lines started on a token leave
+  from the edge of its space; auras such as Spirit Guardians ride on a token and follow it.
+- What an area catches is computed in 3D from the map: walls, closed doors and floors stop it, so a
+  fireball in the courtyard reaches the balcony's edge but not the room behind it or the cellar below.
+  Covered squares are shaded on every level, and the creatures caught are ringed and listed on the
+  template's card.
+- Each player computes the area from what they know, so it never reveals a wall or a creature they have
+  not seen. Templates carry the placer's name, never an account id, and the DM can hide one from players.
+- The DM's card rolls the damage once for everyone caught ("8d6 Fireball" in the log) and deals it to their
+  tracked hit points, halved for those marked as having saved.
+
 **Token maker**
 - A tab of its own (**Token maker** in the header, `/tokens`) for round, modern tokens: stack a background,
   character art and a frame, move / scale / rotate / flip each layer, and mask it to the token disc. Let the
@@ -312,6 +326,7 @@ ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-supabase.mjs # the same aga
 ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-latency.mjs  # move results on a 120×120 daylit field arrive well under the 5 s timeout
 ATLAS_URL=http://127.0.0.1:5173 node e2e/host-save-map.mjs        # "Save map to library" from a live session, including the conflict path
 ATLAS_URL=http://127.0.0.1:5173 node e2e/table-local.mjs         # DM + 2 players in local mode: chat, whispers, host-rolled dice, combat (hidden and unseen combatants never sent), initiative and turns, hit points and conditions (bands only for others), pings, reload, leak scan
+ATLAS_URL=http://127.0.0.1:5173 node e2e/templates-local.mjs     # DM + 2 players in local mode: the Area tool and presets, a Fireball's catch in 3D, a player's cone from their token, oracle-equal views, damage from the card (halved on a save), hiding, an aura that follows its token, removing, reload, leak scan
 ATLAS_URL=http://127.0.0.1:5173 node e2e/free-assets.mjs          # start a game with token models, put one on a token, a player downloads and draws it (ATLAS_FREE_ASSETS_DIR serves a local build)
 ATLAS_URL=http://127.0.0.1:5173 node e2e/engine-leak.mjs          # editor ↔ library round trips release every WebGL context
 ATLAS_URL=http://127.0.0.1:5173 node e2e/perf.mjs                 # frame times per GPU / tier / scene

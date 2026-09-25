@@ -12,7 +12,10 @@ import {
   type PlayControllerHost,
   type PlayPointerEvent,
 } from "./controller"
+import { parseRoll } from "@/core/dice/dice"
+
 import {
+  damageInput,
   DRAFT_ID,
   hostTemplateItems,
   playerTemplateItems,
@@ -179,13 +182,27 @@ describe("PlayController: Template tool", () => {
     expect(f.placed[1].tokenId).toBe(t.id)
   })
 
-  it("moving a template replaces it; Escape leaves the tool without placing", () => {
+  it("a lost pointer mid-press drops the press but keeps the tool", () => {
+    const f = fixture()
+    f.c.setTool("template")
+    f.c.pointerDown(ev(pick({ x: 20, z: 20 })))
+    expect(f.c.dragging).toBe(true)
+    expect(f.camera).toHaveBeenLastCalledWith(false)
+    f.c.cancel()
+    expect(f.c.dragging).toBe(false)
+    expect(f.camera).toHaveBeenLastCalledWith(true)
+    expect(f.c.getTool()).toBe("template")
+    f.c.pointerUp(ev(pick({ x: 20, z: 20 })))
+    expect(f.placed).toHaveLength(0)
+  })
+
+  it("moving a template replaces it; Escape drops a press, then leaves the tool", () => {
     const f = fixture()
     f.c.editTemplate("t1", spec({ shape: "line", size: 30 }), Math.PI)
     expect(f.c.getTool()).toBe("template")
     expect(f.c.templateEditing()).toBe("t1")
     f.c.pointerMove(ev(pick({ x: 40, z: 40 })))
-    expect(f.c.templateDraft()?.geometry.angle).toBeCloseTo(Math.PI)
+    expect(Math.cos(f.c.templateDraft()!.geometry.angle)).toBeCloseTo(-1, 5)
     f.c.pointerDown(ev(pick({ x: 40, z: 40 })))
     f.c.pointerUp(ev(pick({ x: 40, z: 40 })))
     expect(f.placed[0].editing).toBe("t1")
@@ -193,9 +210,12 @@ describe("PlayController: Template tool", () => {
     expect(f.c.templateEditing()).toBeNull()
     f.c.pointerMove(ev(pick({ x: 10, z: 10 })))
     f.c.pointerDown(ev(pick({ x: 10, z: 10 })))
+    // Escape drops the press first, then leaves the tool.
+    f.c.cancel()
+    expect(f.c.getTool()).toBe("template")
+    expect(f.c.templateDraft()).toBeNull()
     f.c.cancel()
     expect(f.c.getTool()).toBe("move")
-    expect(f.c.templateDraft()).toBeNull()
     expect(f.placed).toHaveLength(1)
   })
 })
@@ -258,6 +278,51 @@ describe("template areas", () => {
     const [d] = areas.compute(walled, buildOcclusionWorld(walled), list, null)
     expect(d.cells).not.toBe(a.cells)
     expect(d.cells[levelId].length).toBeLessThan(a.cells[levelId].length)
+  })
+
+  it("keeps the cells while objects change out of reach, recomputes them when one changes within", () => {
+    const { scene, levelId } = flatScene(40, 20)
+    const world = buildOcclusionWorld(scene)
+    const areas = new TemplateAreas()
+    const list = items(levelId)
+    const [a] = areas.compute(scene, world, list, null)
+    // A wall far across the map: the same world object, updated in place.
+    const far = createWall(levelId, { x: 180, z: 0 }, { x: 180, z: 50 })
+    const s1: Scene = { ...scene, objects: { ...scene.objects, [far.id]: far } }
+    world.update(s1, [far.id])
+    const [b] = areas.compute(s1, world, list, null)
+    expect(b.cells).toBe(a.cells)
+    // A wall through the area.
+    const near = createWall(levelId, { x: 52.6, z: 0 }, { x: 52.6, z: 100 })
+    const s2: Scene = { ...s1, objects: { ...s1.objects, [near.id]: near } }
+    world.update(s2, [near.id])
+    const [c] = areas.compute(s2, world, list, null)
+    expect(c.cells).not.toBe(a.cells)
+    expect(c.cells[levelId].length).toBeLessThan(a.cells[levelId].length)
+  })
+
+  it("puts a template's label after the formula, never into it", () => {
+    const input = damageInput(" 8d6 ", "+99 Fireball")
+    const p = parseRoll(input)
+    expect(p.ok && p.formula.terms.length).toBe(1)
+    expect(p.ok && p.label).toBe("+99 Fireball")
+    expect(damageInput("2d6", "")).toBe("2d6")
+  })
+
+  it("an aura does not catch the creature carrying it", () => {
+    const { scene, levelId } = flatScene(20, 20)
+    const cleric = tokenAt(scene, levelId, { i: 10, j: 10 })
+    const ally = tokenAt(scene, levelId, { i: 11, j: 10 })
+    const world = buildOcclusionWorld(scene)
+    const [item] = items(levelId)
+    const [v] = new TemplateAreas().compute(
+      scene,
+      world,
+      [{ ...item, source: { ...item.source, tokenId: cleric.id } }],
+      null
+    )
+    expect(v.tokenIds).toEqual([ally.id])
+    expect(v.geometry.x).toBe(cleric.position.x)
   })
 
   it("adds the draft, and a moved template's draft replaces it", () => {

@@ -7,7 +7,7 @@
  * column of fire on a slope burns the downhill side too); floors between the origin and a lower storey
  * still stop them, because every covered point also needs a line of effect.
  */
-import type { Vec2, Vec3 } from "../scene/types"
+import type { Rect, Vec2, Vec3 } from "../scene/types"
 import { AREA_LIMITS, AREA_SHAPES, DEFAULT_CYLINDER_HEIGHT, DEFAULT_LINE_WIDTH, type AreaGeometry, type AreaShape } from "./types"
 
 /** Containment tolerance (feet): points this close outside the boundary still count. */
@@ -48,6 +48,14 @@ export function normalizeAngle(a: number): number {
 /** Round to 1/1000 ft (keeps stored templates and wire values short and diff-stable). */
 const q = (v: number) => Math.round(v * 1000) / 1000
 
+/** An angle normalised and rounded, still within [−π, π] (rounding π itself would step past it). */
+function roundedAngle(a: number): number {
+  const r = q(normalizeAngle(a))
+  if (r > Math.PI) return q(r - 2 * Math.PI)
+  if (r < -Math.PI) return q(r + 2 * Math.PI)
+  return r
+}
+
 /**
  * A geometry with every field in range: sizes clamped to AREA_LIMITS, the angle normalised, round
  * shapes' angle zeroed, and the fields a shape does not use reset to their defaults.
@@ -60,7 +68,7 @@ export function normalizeArea(g: AreaGeometry): AreaGeometry {
     x: q(finiteOr(g.x, 0)),
     z: q(finiteOr(g.z, 0)),
     elevation: q(clamp(finiteOr(g.elevation, 0), 0, AREA_LIMITS.maxElevation)),
-    angle: shape === "sphere" || shape === "cylinder" ? 0 : q(normalizeAngle(finiteOr(g.angle, 0))),
+    angle: shape === "sphere" || shape === "cylinder" ? 0 : roundedAngle(finiteOr(g.angle, 0)),
     size: q(clamp(finiteOr(g.size, 20), AREA_LIMITS.minSize, AREA_LIMITS.maxSize)),
     width: shape === "line" ? q(clamp(finiteOr(g.width, DEFAULT_LINE_WIDTH), AREA_LIMITS.minWidth, AREA_LIMITS.maxWidth)) : DEFAULT_LINE_WIDTH,
     height:
@@ -219,6 +227,13 @@ export function areaOutline(g: AreaGeometry, segments = 64): Vec2[] {
     case "cube":
       return boxOutline(o, d, g.size, g.size / 2)
   }
+}
+
+/** XZ bounding rect of the area (its top-down outline; round shapes exactly). */
+export function areaBoundsXZ(g: AreaGeometry): Rect {
+  if (g.shape === "sphere" || g.shape === "cylinder") return { x: g.x - g.size, z: g.z - g.size, w: 2 * g.size, d: 2 * g.size }
+  const b = boundsOf(areaOutline(g), 0, 0)
+  return { x: b.minX, z: b.minZ, w: b.maxX - b.minX, d: b.maxZ - b.minZ }
 }
 
 /** Short description, e.g. "20 ft sphere", "60 × 5 ft line", "10 ft cylinder, 40 ft high". */

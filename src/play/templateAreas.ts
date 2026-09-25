@@ -4,18 +4,22 @@
  * scene this page has (core/area computeAreaEffect, tested against the page's occlusion world), and the
  * engine overlays that draw them.
  *
- * Framework-free and memoised: covered cells are recomputed only when a template's area or the
- * geometry changes (world version, levels, objects), affected tokens also when tokens move; overlays
- * keep their identity while unchanged (the renderer rebuilds only templates whose overlay changed).
+ * Framework-free and memoised: covered cells are recomputed only when a template's area changes, the
+ * levels change, or an object changes within its reach (a door toggled across the map leaves it alone);
+ * affected tokens also when tokens move; overlays keep their identity while unchanged (the renderer
+ * rebuilds only templates whose overlay changed).
  */
 import {
+  areaBoundsXZ,
   areaOutline,
   computeAreaEffect,
   describeArea,
   type AreaGeometry,
 } from "@/core/area"
 import type { OcclusionWorld } from "@/core/occlusion/types"
-import type { Id, SceneLike } from "@/core/scene/types"
+import { objectBounds } from "@/core/scene/integrity"
+import { rectsOverlap } from "@/core/scene/queries"
+import type { Id, Rect, Scene, SceneLike } from "@/core/scene/types"
 import { DM_NAME } from "@/core/session/table"
 import { templateArea } from "@/core/session/templates"
 import type {
@@ -147,6 +151,15 @@ export function specOf(item: TemplateItem): TemplateSpec {
   }
 }
 
+/**
+ * What the DM's "Roll damage" rolls: their formula, then the template's label as the roll's label. The
+ * label comes after "#", so a label (a player's text) can never extend the formula ("+99 Fireball").
+ */
+export function damageInput(formula: string, label: string): string {
+  const f = formula.trim()
+  return label ? `${f} # ${label}` : f
+}
+
 /** The title of a template: its label, or its shape ("20 ft sphere"). */
 export function templateTitle(
   item: Pick<TemplateItem, "label" | "source">
@@ -160,15 +173,48 @@ const geometryKey = (g: AreaGeometry): string =>
 interface CellEntry {
   key: string
   world: OcclusionWorld
-  version: number
   levels: unknown
-  objects: unknown
+  /** The scene the cells were computed (or last confirmed) in. */
+  scene: SceneLike
+  /** XZ bounds of the area (objects changing outside them do not matter). */
+  bounds: Rect
   cells: Record<Id, number[]>
 }
 
-interface TokenEntry extends Omit<CellEntry, "cells"> {
+interface TokenEntry {
+  key: string
+  world: OcclusionWorld
+  version: number
+  levels: unknown
+  objects: unknown
   tokens: unknown
   tokenIds: Id[]
+}
+
+/** XZ bounds (old and new) of the objects that differ between two revisions; lights never block. */
+const changes = new WeakMap<object, { next: object; rects: Rect[] }>()
+
+function changedRects(prev: SceneLike, next: SceneLike): Rect[] {
+  const hit = changes.get(prev.objects)
+  if (hit?.next === next.objects) return hit.rects
+  const rects: Rect[] = []
+  const add = (scene: SceneLike, id: Id) => {
+    if (!Object.hasOwn(scene.objects, id)) return
+    const o = scene.objects[id]
+    if (o.type === "light") return
+    const r = objectBounds(scene as Scene, o)
+    // Unresolvable (a door whose wall is gone): everywhere.
+    rects.push(r ?? { x: -Infinity, z: -Infinity, w: Infinity, d: Infinity })
+  }
+  for (const id of Object.keys(prev.objects))
+    if (prev.objects[id] !== next.objects[id]) {
+      add(prev, id)
+      add(next, id)
+    }
+  for (const id of Object.keys(next.objects))
+    if (!Object.hasOwn(prev.objects, id)) add(next, id)
+  changes.set(prev.objects, { next: next.objects, rects })
+  return rects
 }
 
 export class TemplateAreas {
@@ -220,20 +266,29 @@ export class TemplateAreas {
       const key = geometryKey(geometry)
       let c = this.cells.get(item.id)
       if (
+        c &&
+        c.key === key &&
+        c.world === world &&
+        c.levels === scene.levels &&
+        c.scene.objects !== scene.objects &&
+        !changedRects(c.scene, scene).some((r) => rectsOverlap(r, c!.bounds))
+      )
+        c.scene = scene
+      if (
         !c ||
         c.key !== key ||
         c.world !== world ||
-        c.version !== world.version ||
         c.levels !== scene.levels ||
-        c.objects !== scene.objects
+        c.scene.objects !== scene.objects
       ) {
         const r = computeAreaEffect(scene, world, geometry, { tokens: [] })
+        const b = areaBoundsXZ(geometry)
         c = {
           key,
           world,
-          version: world.version,
           levels: scene.levels,
-          objects: scene.objects,
+          scene,
+          bounds: { x: b.x - 1, z: b.z - 1, w: b.w + 2, d: b.d + 2 },
           cells: r.cells,
         }
         this.cells.set(item.id, c)
@@ -260,11 +315,15 @@ export class TemplateAreas {
         }
         this.tokens.set(item.id, t)
       }
+      // An aura does not catch the creature carrying it (a 5e emanation).
+      const carrier = item.source.tokenId
       out.push({
         ...item,
         geometry,
         cells: c.cells,
-        tokenIds: t.tokenIds,
+        tokenIds: carrier
+          ? t.tokenIds.filter((id) => id !== carrier)
+          : t.tokenIds,
         draft: isDraft,
       })
     }

@@ -622,6 +622,7 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
             sidePanel={
               templateView ? (
                 <TemplateCard
+                  key={templateView.id}
                   view={templateView}
                   scene={scene}
                   role="player"

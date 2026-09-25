@@ -24,6 +24,8 @@ import {
   type TemplateView,
 } from "@/play"
 
+import { CHIP_GAP, stackChip, type ChipRect } from "./templateChips"
+
 export interface TemplateLayerProps {
   controller: PlayController
   scene: SceneLike | null
@@ -72,14 +74,23 @@ export function TemplateLayer({
     selectedRef.current.onSelectedView = onSelectedView
   })
 
-  // After layout effects: the page's planner / runner world matches `scene` by then.
+  // After layout effects: the page's planner / runner world matches `scene` by then. A draft that follows
+  // the pointer is computed once per frame at most (the latest one wins).
   React.useEffect(() => {
-    const w = worldRef.current()
-    if (!enabled || !scene || !w) {
-      setViews([])
+    const run = () => {
+      const w = worldRef.current()
+      if (!enabled || !scene || !w) {
+        setViews([])
+        return
+      }
+      setViews(areas.compute(scene, w, items, draft ? { draft, spec } : null))
+    }
+    if (!draft) {
+      run()
       return
     }
-    setViews(areas.compute(scene, w, items, draft ? { draft, spec } : null))
+    const frame = requestAnimationFrame(run)
+    return () => cancelAnimationFrame(frame)
   }, [areas, enabled, scene, items, draft, spec])
 
   React.useEffect(() => {
@@ -124,6 +135,16 @@ export function TemplateLayer({
     const place = () => {
       const w = canvas.clientWidth
       const h = canvas.clientHeight
+      // Chips: projected, measured, then stacked upwards where they would overlap (lowest first). All
+      // reads come before the writes (no forced style recalculation per chip).
+      const hidden: HTMLElement[] = []
+      const shown: {
+        el: HTMLElement
+        x: number
+        y: number
+        w: number
+        h: number
+      }[] = []
       for (const [id, el] of chips.current) {
         const a = anchors.get(id)
         if (!a) continue
@@ -133,12 +154,32 @@ export function TemplateLayer({
         const s = engine.project(drawn?.position ?? a.at)
         const inside = s.visible && s.x >= 0 && s.y >= 0 && s.x <= w && s.y <= h
         if (!inside || !showRef.current(levelId)) {
-          el.style.visibility = "hidden"
+          hidden.push(el)
           continue
         }
-        el.style.transform = `translate(${Math.round(s.x)}px, ${Math.round(s.y)}px)`
-        el.style.visibility = "visible"
+        const chip = el.firstElementChild as HTMLElement | null
+        shown.push({
+          el,
+          x: Math.round(s.x),
+          y: Math.round(s.y),
+          w: chip?.offsetWidth ?? 0,
+          h: chip?.offsetHeight ?? 0,
+        })
       }
+      shown.sort((a, b) => b.y - a.y)
+      const placed: ChipRect[] = []
+      for (const c of shown) {
+        const r = stackChip(placed, {
+          x: c.x - c.w / 2,
+          y: c.y - CHIP_GAP - c.h,
+          w: c.w,
+          h: c.h,
+        })
+        placed.push(r)
+        c.el.style.transform = `translate(${c.x}px, ${Math.round(r.y + c.h + CHIP_GAP)}px)`
+        c.el.style.visibility = "visible"
+      }
+      for (const el of hidden) el.style.visibility = "hidden"
       for (const [id, el] of rings.current) {
         const at = engine.tokenDrawnAt(id)
         const t = Object.hasOwn(scene.tokens, id) ? scene.tokens[id] : null

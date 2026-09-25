@@ -54,6 +54,7 @@ import {
 import type { Id, SceneLike } from "@/core/scene/types"
 import { cn } from "@/lib/utils"
 import {
+  damageInput,
   templateTitle,
   tokenDisplayName,
   type TemplateSpec,
@@ -376,7 +377,7 @@ export function TemplateCard({
   const roll = () => {
     if (!onDamage) return
     const e = onDamage(
-      formula.trim() + (view.label ? ` ${view.label}` : ""),
+      damageInput(formula, view.label),
       targets.map((t) => ({ tokenId: t.id, half: saved.has(t.id) }))
     )
     setError(e)

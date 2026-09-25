@@ -161,7 +161,7 @@ const templateSchema = z.strictObject({
   x: coord,
   z: coord,
   elevation: z.number().min(0).max(AREA_LIMITS.maxElevation),
-  angle: z.number().min(-Math.PI - 1e-6).max(Math.PI + 1e-6),
+  angle: z.number().min(-3.2).max(3.2),
   size: z.number().min(AREA_LIMITS.minSize).max(AREA_LIMITS.maxSize),
   width: z.number().min(AREA_LIMITS.minWidth).max(AREA_LIMITS.maxWidth),
   height: z.number().min(AREA_LIMITS.minHeight).max(AREA_LIMITS.maxHeight),
@@ -200,8 +200,9 @@ const gameStateShape = z.strictObject({
   table: tableSchema.optional(),
   // Optional too (absent: players see other creatures' health bands).
   hideWounds: z.boolean().optional(),
-  // Optional too (absent: no areas of effect on the map).
-  templates: z.array(templateSchema).max(TEMPLATE_LIMITS.max).optional(),
+  // Optional too (absent: no areas of effect on the map). Entries are validated one by one below: a
+  // template that does not parse is dropped, never the game.
+  templates: z.array(z.unknown()).max(TEMPLATE_LIMITS.max).optional(),
 })
 
 export type ParseGameStateResult = { ok: true; state: GameState } | { ok: false; issues: string[] }
@@ -295,9 +296,13 @@ export function parseGameStateDetailed(json: unknown): ParseGameStateResult {
   }
 
   // ---- templates: those of players who left, on levels or carried by tokens that are gone, are dropped ----
-  const templates: AreaTemplate[] = (raw.templates ?? [])
-    .filter((t) => (t.owner === null || isPlayer(t.owner)) && (t.tokenId === null ? hasLevel(t.levelId) : Object.hasOwn(scene.tokens, t.tokenId)))
-    .map((t) => ({ ...t }))
+  const templates: AreaTemplate[] = []
+  for (const entry of raw.templates ?? []) {
+    const r = templateSchema.safeParse(entry)
+    if (!r.success) continue
+    const t = r.data
+    if ((t.owner === null || isPlayer(t.owner)) && (t.tokenId === null ? hasLevel(t.levelId) : Object.hasOwn(scene.tokens, t.tokenId))) templates.push({ ...t })
+  }
 
   // ---- revealed: players only, sorted and unique --------------------------------------------
   const revealed = {} as Record<string, Id[]>

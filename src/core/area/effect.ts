@@ -129,7 +129,9 @@ function coveredCells(scene: SceneLike, ground: GroundIndex, vol: AreaVolume, re
 function columnReached(x: number, z: number, lo: number, hi: number, vol: AreaVolume, reaches: (p: Vec3) => boolean): boolean {
   if (hi < vol.bounds.minY || lo > vol.bounds.maxY) return false
   const nearest = Math.min(hi, Math.max(lo, vol.origin.y))
-  for (const y of [nearest, lo, (lo + hi) / 2, hi]) if (reaches({ x, y, z })) return true
+  if (reaches({ x, y: nearest, z })) return true
+  // The rest of the column, skipping heights already tried (each is a ray through the world).
+  for (const y of [lo, (lo + hi) / 2, hi]) if (Math.abs(y - nearest) > 1e-6 && reaches({ x, y, z })) return true
   return false
 }
 

@@ -302,7 +302,7 @@ export class PlayController {
 
   /** A drag or move command is in progress (the page suppresses camera follow / shortcuts meanwhile). */
   get dragging(): boolean {
-    return this.drag?.started ?? false
+    return (this.drag?.started ?? false) || this.template.pressed
   }
 
   /** A right-button move command is being held. */
@@ -645,7 +645,14 @@ export class PlayController {
 
   /** Escape / lost pointer: abandon the gesture (and clear the ruler and a stranded move). */
   cancel(): void {
-    // Escape leaves the Template tool (dropping the area being placed).
+    // Escape (or a lost pointer) during a press drops that press; otherwise it leaves the Template tool.
+    if (this.tool === "template" && this.template.pressed) {
+      this.template.clear()
+      this.pressed = false
+      this.host.setCameraControls(true)
+      this.emit()
+      return
+    }
     if (this.tool === "template") {
       this.template.clear()
       this.template.setEditing(null)

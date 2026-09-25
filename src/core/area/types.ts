@@ -13,7 +13,8 @@ export const AIMED_SHAPES: ReadonlySet<AreaShape> = new Set(["cone", "line", "cu
 export const AREA_LIMITS = {
   /** Radius (sphere, cylinder), length (cone, line) or edge (cube), feet. */
   minSize: 1,
-  maxSize: 150,
+  /** Covers every area in the 5e SRD but Storm of Vengeance; the cost grows with its square (§6.6). */
+  maxSize: 120,
   /** Line width, feet. */
   minWidth: 1,
   maxWidth: 60,

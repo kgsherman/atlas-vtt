@@ -3,7 +3,8 @@
  *
  *  - Players place, move and remove their own templates (`template`, `template-remove` requests); the DM
  *    places, changes and removes anyone's (`template-set`, `template-delete` commands) and can keep one
- *    hidden from players.
+ *    hidden from players, its owner included: a hidden template is not theirs to move or remove (`cannot`,
+ *    like one that does not exist).
  *  - A template stands on a level, or is carried by a token (an aura: it follows the token). A player may
  *    place one only on a level their view shows as explored (like pings, so templates cannot probe for
  *    levels), or carried by a token they control.
@@ -140,8 +141,9 @@ export function reduceTemplateRequest(state: GameState, userId: string, msg: Tem
   switch (msg.t) {
     case "template": {
       if (msg.id !== undefined) {
+        // A template the DM hid is gone for its owner too (no un-hiding it, no probing for it).
         const cur = list.find((t) => t.id === msg.id)
-        if (!cur || cur.owner !== userId) return rejected(state, msg.reqId, "cannot")
+        if (!cur || cur.owner !== userId || cur.hidden) return rejected(state, msg.reqId, "cannot")
         const t = playerTemplate(state, userId, msg.template, cur.id, ctx.currentView)
         if (typeof t === "string") return rejected(state, msg.reqId, t)
         return accepted(
@@ -161,7 +163,7 @@ export function reduceTemplateRequest(state: GameState, userId: string, msg: Tem
     }
     case "template-remove": {
       const cur = list.find((t) => t.id === msg.id)
-      if (!cur || cur.owner !== userId) return rejected(state, msg.reqId, "cannot")
+      if (!cur || cur.owner !== userId || cur.hidden) return rejected(state, msg.reqId, "cannot")
       return accepted(
         withTemplates(
           state,

@@ -358,7 +358,10 @@ function HostConsole({
           return g ? { x: g.x, z: g.z } : null
         },
         planner: null,
-        onSelect: (id) => setSelected(id),
+        onSelect: (id) => {
+          setSelected(id)
+          if (id) setTemplateId(null)
+        },
         onMove: (m) => {
           if (m.kind !== "place") return
           // Commit on the next frame: the engine must draw one frame without the drag ruler before the
@@ -586,7 +589,7 @@ function HostConsole({
             controller.getTool() === "template"
           )
             controller.cancel()
-          else if (templateId) setTemplateId(null)
+          else if (shownTemplateId) setTemplateId(null)
           else if (preview) setPreview(null)
           else if (selectedId) setSelected(null)
           else return false
@@ -750,6 +753,7 @@ function HostConsole({
                   {templateView && !selectedId ? (
                     <div className="absolute bottom-3 left-3">
                       <TemplateCard
+                        key={templateView.id}
                         view={templateView}
                         scene={scene}
                         role="dm"

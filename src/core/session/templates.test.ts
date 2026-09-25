@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest"
 
 import { normalizeArea } from "../area/shape"
+import { AREA_LIMITS } from "../area/types"
 import type { Id } from "../scene/types"
 import { createCellMask, encodeMask, setCell } from "../vision/mask"
 import type { VisibilityResult } from "../vision/types"
@@ -142,6 +143,18 @@ describe("template requests", () => {
     expect(removed.state.templates).toBeUndefined()
   })
 
+  it("a template the DM hid is not its owner's to move, un-hide or remove", () => {
+    const g = game()
+    const view = filterForPlayer(g.state, ALICE, sees(g.pip))
+    let state = request(g.state, ALICE, { t: "template", reqId: "r1", template: input(g.ground) }, view).state
+    const t = state.templates![0]
+    state = dm(state, { t: "template-set", template: { ...t, hidden: true } })
+    const moved = request(state, ALICE, { t: "template", reqId: "r2", id: t.id, template: input(g.ground, { x: 20 }) }, view)
+    expect(moved.result.reason).toBe("cannot")
+    expect(moved.state.templates![0].hidden).toBe(true)
+    expect(request(state, ALICE, { t: "template-remove", reqId: "r3", id: t.id }, view).result.reason).toBe("cannot")
+  })
+
   it("a player keeps at most perPlayer templates: another one replaces their oldest", () => {
     const g = game()
     const view = filterForPlayer(g.state, ALICE, sees(g.pip))
@@ -180,7 +193,7 @@ describe("DM template commands", () => {
     expect(cleanTemplate(g.state, dmTemplate(g.ground, { id: "__bad id__" }))).toBeNull()
     expect(cleanTemplate(g.state, dmTemplate(g.ground, { owner: "stranger" }))).toBeNull()
     expect(cleanTemplate(g.state, dmTemplate(g.ground, { tokenId: "gone" }))).toBeNull()
-    expect(cleanTemplate(g.state, dmTemplate(g.ground, { color: "red", size: 1e9 }))).toMatchObject({ color: "#f97316", size: 150 })
+    expect(cleanTemplate(g.state, dmTemplate(g.ground, { color: "red", size: 1e9 }))).toMatchObject({ color: "#f97316", size: AREA_LIMITS.maxSize })
     expect(reduceDm(g.state, { t: "template-set", template: dmTemplate("nope") }).error).toBe("invalid template")
   })
 
@@ -276,6 +289,13 @@ describe("templates on the wire and in storage", () => {
     expect(parseClientMessage({ ...msg, id: "__proto__" })).toBeNull()
   })
 
+  it("a template aimed due west saves and loads", () => {
+    const g = game()
+    const view = filterForPlayer(g.state, ALICE, sees(g.pip))
+    const state = request(g.state, ALICE, { t: "template", reqId: "r", template: input(g.ground, { shape: "cone", angle: Math.PI }) }, view).state
+    expect(parseGameState(JSON.parse(serializeGameState(state)))?.templates).toEqual(state.templates)
+  })
+
   it("saves and loads templates, dropping those of players who left or on missing levels", () => {
     const g = game()
     let state = dm(g.state, { t: "template-set", template: dmTemplate(g.ground) })
@@ -285,7 +305,8 @@ describe("templates on the wire and in storage", () => {
     const raw = JSON.parse(serializeGameState(state))
     raw.templates.push({ ...raw.templates[0], id: "orphan", owner: "someone-else" }, { ...raw.templates[0], id: "lost", levelId: "gone" })
     expect(parseGameState(raw)?.templates?.map((t) => t.id)).toEqual(["dm1", "alices"])
+    // A template that does not parse is dropped; the game still loads.
     raw.templates[0].size = 1e6
-    expect(parseGameState(raw)).toBeNull()
+    expect(parseGameState(raw)?.templates?.map((t) => t.id)).toEqual(["alices"])
   })
 })
