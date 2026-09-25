@@ -90,7 +90,7 @@ export function SceneCard({ scene, busy, disabled: otherBusy = false, onAction, 
         </span>
       </button>
 
-      <div className="flex flex-col gap-1 px-3 pt-2.5 pb-2">
+      <div className="flex flex-col gap-1 px-4 pt-3 pb-2">
         <div className="flex items-start gap-2">
           <h3 className="min-w-0 flex-1 truncate font-heading text-sm font-medium" title={scene.name}>
             {scene.name}
@@ -118,7 +118,7 @@ export function SceneCard({ scene, busy, disabled: otherBusy = false, onAction, 
         </div>
       </div>
 
-      <div className="flex gap-2 px-3 pb-3">
+      <div className="flex gap-2 px-4 pb-4">
         <Button variant="outline" className="flex-1" onClick={act("open")} onPointerEnter={() => onIntent?.("open")} disabled={disabled}>
           {busy === "open" ? <Spinner className="size-3.5" data-icon="inline-start" /> : <MapIcon data-icon="inline-start" />}
           Edit
