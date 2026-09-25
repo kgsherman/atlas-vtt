@@ -2178,7 +2178,10 @@ made on the old map applied to a duplicated new one, and the travel notice count
 of those fixes found three regressions (a stuck row load, chat verdicts held behind it, a request on the
 new map refused after a lost acknowledgement), each fixed with a test. Final verification (2026-09-25):
 `tsc -b` 0 errors, `eslint .` clean, `npx vitest run` 2163 tests pass (4 live Supabase files skipped); on
-SwiftShader: the end-to-end runs are recorded with the merge.
+SwiftShader (a 4-CPU container): `change-map-local` 39/39 (new), `table-local` 35/35, `host-save-map` 12/12,
+`keybindings` 33/33, `templates-local` 30/30 (twice, after its wait for a background player was lengthened;
+see Tooling), `multiplayer-local` 54/54 (its other runs timed out in starved background tabs, as it does on
+`master` in the same container: 1 of 3 runs passed there).
 
 **Terrain review fixes (2026-09-23)**, each with a regression test that fails on the previous code:
 - Document: "Apply to terrain" bakes the downward closure, so the terrain no longer changes (§3, §7);
@@ -2416,6 +2419,13 @@ Known gaps and deliberate limits:
   `src/components/play`, `src/play`, `e2e`, `scripts`) matches about two thirds of the source files, and
   `npm run format:check` lists ~170 files under `src` whose widths vary within the file, so formatting is
   not part of `lint`. A one-time `npm run format` would make it enforceable.
+- The multiplayer e2e scripts run the DM and players as tabs of one headless browser. On a small machine
+  with software WebGL (SwiftShader, 4 CPUs) a player tab in the background next to the DM's tab can go
+  unscheduled for ~20 s: timestamped wire captures showed the host's messages reaching it all at once when
+  it ran again, with the right view. Waits on background tabs there time out now and then
+  (`multiplayer-local` passed 1 of 3 runs on `master` in such a container).
+  `templates-local` waits up to 60 s for its background player, and `multiplayer-local` reloads its player
+  in the front tab.
 - `tsconfig.node.json` (which covers `vite.config.ts`, `dev/imageToolsApi.ts` and the shared image model
   module they import) does not set `strict`, unlike `tsconfig.app.json`. The Edge Functions themselves
   (Deno) are not type-checked by `tsc -b`; `supabase/functions/_shared/imageModels.ts` is covered through
