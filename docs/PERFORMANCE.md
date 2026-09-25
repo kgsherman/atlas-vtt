@@ -121,8 +121,9 @@ The host's visibility runs in a **Web Worker** with two caches: a viewer-indepen
 per sample; a moving torch recomputes only its old/new sphere) and per-viewer **line-of-sight bitsets** keyed by
 eye position and occlusion version (only the token that moved recasts rays; LOS is only tested where perception
 could succeed). Ray queries use a 5 ft uniform grid with DDA traversal and mailboxing.
-Players' GPUs only refine line-of-sight edges inside host-perceived cells using the viewer atlas (≤ 8 viewers),
-updated only when a viewer moves.
+Players' GPUs only refine line-of-sight edges inside host-perceived cells using the viewer atlas (≤ 8 viewers,
+one tile per eye: 5 per viewer with "square" sight, ≤ 40 in all), updated only when a viewer moves; a move
+recaptures its viewer's 5 tiles (the primary viewer's are forced over the per-frame budget).
 A move's result waits only for the vision compute of its final position; the intermediate steps (which OR
 into explored, so walked-past corridors are explored) run afterwards as low-priority probes whose exploration
 follows in the next patch (ARCHITECTURE §5.2). Before, every step queued a full compute ahead of the result:

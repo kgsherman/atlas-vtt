@@ -30,9 +30,9 @@
 import * as THREE from "three"
 
 import type { BlockChannel, DirtyRegion, OcclusionWorld } from "@/core/occlusion/types"
-import { groundIndex, levelCeilingY, nominalTokenEye, sortedLevels, tokenRect } from "@/core/scene/queries"
+import { groundHeightAt, groundIndex, levelCeilingY, nominalTokenEye, sortedLevels, tokenRect } from "@/core/scene/queries"
 import type { Id, Rect, SceneLike, Token, Vec3, VisionSettings } from "@/core/scene/types"
-import { eyeAtGround, resolveViewerEye } from "@/core/vision"
+import { viewerEyesAtGround } from "@/core/vision"
 import type { GroundSampler } from "../builders/ground"
 import type { Quality, SceneChange, ViewState } from "../contracts"
 import { HostMaskTextures } from "../fog/hostMaskTextures"
@@ -59,10 +59,12 @@ import {
   ENV_FLAG_SUN_MAP,
   LIGHT_LEVEL_NUMBER,
   LIGHT_VEC4S,
+  MAX_EYE_SLOTS,
   MAX_LIGHTS,
   MAX_VIEWERS,
+  packEye,
   packLight,
-  packViewer,
+  packTouch,
   VISION_MODE,
   type SharedUniforms,
 } from "./uniforms"
@@ -94,9 +96,11 @@ export const QUALITY_CONFIG: Record<Quality, QualityConfig> = {
     hiLights: 0,
     softShadows: false,
   },
+  // Viewer atlases hold one line-of-sight tile per eye (up to 5 per viewer, MAX_EYE_SLOTS = 40 in all):
+  // medium 40 × 512² (40 MB), high / ultra 64 × 512² (64 MB, spare tiles keep recent viewers cached).
   medium: {
     lightAtlas: { width: 4096, height: 2048, tileSize: 512, cubeSize: 256 },
-    viewerAtlas: { width: 4096, height: 2048, tileSize: 1024, cubeSize: 512 },
+    viewerAtlas: { width: 4096, height: 2560, tileSize: 512, cubeSize: 256 },
     widePcfLights: 8,
     hiAtlas: null,
     hiLights: 0,
@@ -104,7 +108,7 @@ export const QUALITY_CONFIG: Record<Quality, QualityConfig> = {
   },
   high: {
     lightAtlas: { width: 4096, height: 2048, tileSize: 512, cubeSize: 256 },
-    viewerAtlas: { width: 4096, height: 2048, tileSize: 1024, cubeSize: 512 },
+    viewerAtlas: { width: 4096, height: 4096, tileSize: 512, cubeSize: 512 },
     widePcfLights: 32,
     hiAtlas: null,
     hiLights: 0,
@@ -113,7 +117,7 @@ export const QUALITY_CONFIG: Record<Quality, QualityConfig> = {
   // 16 × 1024² tiles (cube faces 512²) for the highest-priority lights + the 512² atlas for the rest.
   ultra: {
     lightAtlas: { width: 4096, height: 2048, tileSize: 512, cubeSize: 256 },
-    viewerAtlas: { width: 4096, height: 2048, tileSize: 1024, cubeSize: 512 },
+    viewerAtlas: { width: 4096, height: 4096, tileSize: 512, cubeSize: 512 },
     widePcfLights: 32,
     hiAtlas: { width: 4096, height: 4096, tileSize: 1024, cubeSize: 512 },
     hiLights: 16,
@@ -159,12 +163,17 @@ export interface ResolvedViewer {
   tokenId: Id
   levelId: Id
   eye: Vec3
+  /** Every eye it sees from (core/vision viewerEyesAtGround, `eye` first), one atlas tile each. */
+  eyes: Vec3[]
   vision: VisionSettings
   /** Capture range of its LOS tile (feet). */
   range: number
   /** Half-extent (ft) of the square around the eye covering the token's own footprint cells (viewerTouch). */
   touch: number
 }
+
+/** Atlas tile key of a viewer's k-th refinement eye. */
+export const viewerTileKey = (tokenId: Id, k: number): string => `viewer:${tokenId}:${k}`
 
 /**
  * Half-extent (ft, Chebyshev around `eye`) of the cells a viewer perceives by touch whatever its senses:
@@ -182,15 +191,16 @@ export function viewerTouch(scene: SceneLike, token: Token, eye: Vec3): number {
 }
 
 /**
- * Eye through core/vision (so CPU and GPU agree), with a nominal-eye fallback if it fails. `ground`: the
- * world Y the token stands on when it is not the document's (a terrain preview of its level).
+ * Eyes through core/vision (so CPU and GPU agree): the eye first, then with "square" vision the footprint's
+ * corners (viewerEyesAtGround), with a nominal-eye fallback if that fails. `ground`: the world Y the token
+ * stands on when it is not the document's (a terrain preview of its level).
  */
-export function viewerEye(world: OcclusionWorld, scene: SceneLike, token: Token, ground?: number): Vec3 {
+export function viewerEyes(world: OcclusionWorld, scene: SceneLike, token: Token, ground?: number): Vec3[] {
   try {
-    return ground === undefined ? resolveViewerEye(world, scene, token) : eyeAtGround(world, ground, token)
+    return viewerEyesAtGround(world, scene.grid.cellSize, ground ?? groundHeightAt(scene, token.levelId, token.position), token, scene.grid.visionOrigin)
   } catch {
     const eye = ground === undefined ? nominalTokenEye(scene, token) : { ...token.position, y: ground + token.eyeHeight }
-    return { x: eye.x, y: Math.min(eye.y, levelCeilingY(scene, token.levelId) - 0.25), z: eye.z }
+    return [{ x: eye.x, y: Math.min(eye.y, levelCeilingY(scene, token.levelId) - 0.25), z: eye.z }]
   }
 }
 
@@ -285,7 +295,7 @@ export class AtlasLightingSystem implements LightingSystem {
   private lightMask: THREE.DataTexture | null = null
   private readonly lightMaskKey = new Float32Array(1 + MAX_LIGHTS * 3).fill(Number.NaN)
   private viewers: ResolvedViewer[] | null = null
-  /** More viewers than MAX_VIEWERS uniform slots (set with `viewers`): no per-pixel perception removal. */
+  /** More viewers / eyes than the uniform slots (set with `viewers`): no per-pixel perception removal. */
   private viewersTruncated = false
   private readonly bounds = new THREE.Box3()
   private sceneDiagonal = 100
@@ -631,18 +641,20 @@ export class AtlasLightingSystem implements LightingSystem {
     const viewerAtlas = refine ? this.viewerAtlas : null
     if (viewerAtlas) {
       viewers.forEach((v, index) => {
-        const key = `viewer:${v.tokenId}`
-        const tile = viewerAtlas.tiles.acquire(key, frame)
-        if (!tile) return
-        const st = tile.state
-        const moved = st !== null && DistanceAtlas.moved(st, v.eye, v.range)
-        if (st === null || moved || st.dirty) {
-          // The first viewer is the locally controlled / selected token: always updated, even over budget.
-          requests.push({ key, kind: "viewer", forced: index === 0, moved, uncaptured: st === null, dirty: st?.dirty ?? false, coverage: 1 })
-          jobs.set(key, () =>
-            viewerAtlas.capture(renderer, tile, v.eye, v.range, SIGHT_LAYER_MASK, this.proxies.scene, this.distanceMaterial, this.excludeKeys(world, v.eye, "sight"))
-          )
-        }
+        v.eyes.forEach((eye, k) => {
+          const key = viewerTileKey(v.tokenId, k)
+          const tile = viewerAtlas.tiles.acquire(key, frame)
+          if (!tile) return
+          const st = tile.state
+          const moved = st !== null && DistanceAtlas.moved(st, eye, v.range)
+          if (st === null || moved || st.dirty) {
+            // The first viewer is the locally controlled / selected token: always updated, even over budget.
+            requests.push({ key, kind: "viewer", forced: index === 0, moved, uncaptured: st === null, dirty: st?.dirty ?? false, coverage: 1 })
+            jobs.set(key, () =>
+              viewerAtlas.capture(renderer, tile, eye, v.range, SIGHT_LAYER_MASK, this.proxies.scene, this.distanceMaterial, this.excludeKeys(world, eye, "sight"))
+            )
+          }
+        })
       })
     }
 
@@ -665,7 +677,7 @@ export class AtlasLightingSystem implements LightingSystem {
       try {
         if (needSun) this.renderSun(renderer, scene)
         if (needSky) this.renderSky(renderer)
-        const budget = burst ? { maxTiles: MAX_LIGHTS + MAX_VIEWERS, maxMs: TIER_SWITCH_CAPTURE_MS } : { maxTiles: SHADOW_UPDATES_PER_FRAME, maxMs: SHADOW_UPDATE_MS }
+        const budget = burst ? { maxTiles: MAX_LIGHTS + MAX_EYE_SLOTS, maxMs: TIER_SWITCH_CAPTURE_MS } : { maxTiles: SHADOW_UPDATES_PER_FRAME, maxMs: SHADOW_UPDATE_MS }
         const run = runTileUpdates(ordered, budget, (r) => jobs.get(r.key)?.(), this.now)
         tilesUpdated = run.updated.length
         // The tier being prepared fills its atlases under a budget of its own (unbound until committed).
@@ -726,19 +738,23 @@ export class AtlasLightingSystem implements LightingSystem {
     s.uLightCount.value = count
     this.updateLightMask(packed, count)
 
-    let viewerCount = 0
+    let eyeCount = 0
+    let touchCount = 0
     for (const v of viewers) {
-      const t = viewerAtlas?.tiles.get(`viewer:${v.tokenId}`)
-      packViewer(s.uViewers.value, viewerCount++, {
-        eye: v.eye,
-        darkvision: v.vision.blind ? 0 : v.vision.darkvision,
-        blindsight: v.vision.blindsight,
-        tile: t?.state ? t : null,
-        capture: t?.state?.origin ?? null,
-        touch: v.touch,
+      v.eyes.forEach((eye, k) => {
+        const t = viewerAtlas?.tiles.get(viewerTileKey(v.tokenId, k))
+        packEye(s.uViewers.value, eyeCount++, {
+          eye,
+          darkvision: v.vision.blind ? 0 : v.vision.darkvision,
+          blindsight: v.vision.blindsight,
+          tile: t?.state ? t : null,
+          capture: t?.state?.origin ?? null,
+        })
       })
+      packTouch(s.uTouch.value, touchCount++, v.eye.x, v.eye.z, v.touch)
     }
-    s.uViewerCount.value = viewerCount
+    s.uViewerCount.value = eyeCount
+    s.uTouchCount.value = touchCount
     s.uViewersAll.value = allViewers ? 1 : 0
     s.uGpuRefine.value = viewerAtlas ? 1 : 0
     // Atlases are allocated on their first capture; until then the samplers read a real placeholder.
@@ -783,7 +799,7 @@ export class AtlasLightingSystem implements LightingSystem {
     return this.viewerAtlas?.texture ?? null
   }
 
-  /** Current tile of a light / viewer ("light:<id>" / "viewer:<id>"; "hi:light:<id>" = hi-res atlas), if captured. */
+  /** Current tile of a light / viewer eye ("light:<id>" / viewerTileKey; "hi:light:<id>" = hi-res atlas), if captured. */
   tileOf(key: string): { x: number; y: number; size: number; origin: Vec3; dirty: boolean } | null {
     const atlas = key.startsWith("viewer:") ? this.viewerAtlas : key.startsWith("hi:") ? this.hiAtlas : this.lightAtlas
     if (key.startsWith("hi:")) key = key.slice(3)
@@ -836,16 +852,18 @@ export class AtlasLightingSystem implements LightingSystem {
     const refine = viewerAtlas !== null && viewerAtlas !== this.viewerAtlas && allViewers && this.view.vision !== "off" && this.view.gpuVisionRefine
     if (refine) {
       for (const v of viewers) {
-        const key = `viewer:${v.tokenId}`
-        const tile = viewerAtlas.tiles.acquire(key, frame)
-        if (!tile) continue
-        needed.push({ atlas: viewerAtlas, key })
-        const st = tile.state
-        const moved = st !== null && DistanceAtlas.moved(st, v.eye, v.range)
-        if (st !== null && !moved && !st.dirty) continue
-        const job = `prep:${viewerAtlas.options.name}:${key}`
-        requests.push({ key: job, kind: "viewer", forced: false, moved, uncaptured: st === null, dirty: st?.dirty ?? false, coverage: 1 })
-        jobs.set(job, () => viewerAtlas.capture(renderer, tile, v.eye, v.range, SIGHT_LAYER_MASK, this.proxies.scene, this.distanceMaterial, this.excludeKeys(world, v.eye, "sight")))
+        v.eyes.forEach((eye, k) => {
+          const key = viewerTileKey(v.tokenId, k)
+          const tile = viewerAtlas.tiles.acquire(key, frame)
+          if (!tile) return
+          needed.push({ atlas: viewerAtlas, key })
+          const st = tile.state
+          const moved = st !== null && DistanceAtlas.moved(st, eye, v.range)
+          if (st !== null && !moved && !st.dirty) return
+          const job = `prep:${viewerAtlas.options.name}:${key}`
+          requests.push({ key: job, kind: "viewer", forced: false, moved, uncaptured: st === null, dirty: st?.dirty ?? false, coverage: 1 })
+          jobs.set(job, () => viewerAtlas.capture(renderer, tile, eye, v.range, SIGHT_LAYER_MASK, this.proxies.scene, this.distanceMaterial, this.excludeKeys(world, eye, "sight")))
+        })
       }
     }
     return {
@@ -867,6 +885,7 @@ export class AtlasLightingSystem implements LightingSystem {
     if (this.viewers) return this.viewers
     const out: ResolvedViewer[] = []
     let truncated = false
+    let slots = 0
     for (const id of this.view.viewerTokenIds) {
       if (!Object.hasOwn(scene.tokens, id)) continue
       const token = scene.tokens[id]
@@ -874,13 +893,16 @@ export class AtlasLightingSystem implements LightingSystem {
       // On a previewed level, off stairs / ramp runs (whose ground is the connector's), the eye stands on the preview.
       const previewed = this.previewGround.get(token.levelId)
       const ground = previewed && !groundIndex(scene).runAt(token.levelId, token.position) ? previewed.heightAt(token.position.x, token.position.z) : undefined
-      const eye = viewerEye(world, scene, token, ground)
+      const all = viewerEyes(world, scene, token, ground)
+      const eye = all[0]
       if (!Number.isFinite(eye.x + eye.y + eye.z + range)) continue
-      if (out.length >= MAX_VIEWERS) {
+      const eyes = all.filter((e) => Number.isFinite(e.x + e.y + e.z))
+      if (out.length >= MAX_VIEWERS || slots + eyes.length > MAX_EYE_SLOTS) {
         truncated = true
         break
       }
-      out.push({ tokenId: id, levelId: token.levelId, eye, vision: token.vision, range, touch: viewerTouch(scene, token, eye) })
+      slots += eyes.length
+      out.push({ tokenId: id, levelId: token.levelId, eye, eyes, vision: token.vision, range, touch: viewerTouch(scene, token, eye) })
     }
     this.viewers = out
     this.viewersTruncated = truncated

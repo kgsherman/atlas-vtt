@@ -104,8 +104,9 @@ function fakeWorld(primitives: OccluderPrimitive[], containing: (p: Vec3) => Occ
 /** Frozen clock: the 2 ms CPU cap never triggers, so tile counts are deterministic. */
 const fakeClock = () => 0
 
-function setup(lightCount = 7) {
+function setup(lightCount = 7, visionOrigin: Scene["grid"]["visionOrigin"] = "eye") {
   const scene: Scene = createScene({ width: 40, depth: 40 })
+  scene.grid.visionOrigin = visionOrigin
   const ground = Object.keys(scene.levels)[0]
   const lights: LightObject[] = []
   for (let k = 0; k < lightCount; k++) {
@@ -299,11 +300,11 @@ describe("AtlasLightingSystem", () => {
     const s = sys.beforeRender(renderer, camera, 0)
     // Forced primary viewer first, then new sources by coverage (viewer b, 2 torches): 4 tiles.
     expect(s.tilesUpdated).toBe(4)
-    expect(sys.tileOf("viewer:b")).not.toBeNull()
+    expect(sys.tileOf("viewer:b:0")).not.toBeNull()
     const sight = calls.filter((c) => c.target === "atlas-viewers-cube")
     expect(sight.length).toBeGreaterThanOrEqual(6)
     expect(sight.every((c) => c.layers === 1 << LAYER.SIGHT)).toBe(true)
-    expect(sys.tileOf("viewer:a")).not.toBeNull()
+    expect(sys.tileOf("viewer:a:0")).not.toBeNull()
     expect(sys.shared.uViewerCount.value).toBe(2)
     expect(sys.shared.uGpuRefine.value).toBe(1)
     const v = sys.shared.uViewers.value
@@ -357,9 +358,12 @@ describe("AtlasLightingSystem", () => {
     sys.applyChange(scene, world, { tokens: ["small", "large"] }, [])
     sys.setView({ ...DEFAULT_VIEW_STATE, mode: "player", vision: "fog", viewerTokenIds: ["small", "large"], gpuVisionRefine: true })
     sys.beforeRender(renderer, camera, 0)
-    const v = sys.shared.uViewers.value
-    expect(v[11]).toBeCloseTo(2.5) // centred medium token: its own cell
-    expect(v[VIEWER_VEC4S * 4 + 11]).toBeCloseTo(9) // cells x ∈ [45, 60), z ∈ [95, 110) around (51, 101)
+    const t = sys.shared.uTouch.value
+    expect(sys.shared.uTouchCount.value).toBe(2)
+    expect(Array.from(t.subarray(0, 3))).toEqual([102.5, 102.5, 2.5]) // centred medium token: its own cell
+    expect(t[4]).toBe(51)
+    expect(t[5]).toBe(101)
+    expect(t[6]).toBeCloseTo(9) // cells x ∈ [45, 60), z ∈ [95, 110) around (51, 101)
     expect(viewerTouch(scene, large, { x: 51, y: 5, z: 101 })).toBeCloseTo(9)
     expect(sys.shared.uViewersAll.value).toBe(1)
     expect(sys.shared.uGpuRefine.value).toBe(1)
@@ -382,6 +386,47 @@ describe("AtlasLightingSystem", () => {
     sys.beforeRender(renderer, camera, 2)
     expect(sys.shared.uViewersAll.value).toBe(1)
     expect(sys.shared.uGpuRefine.value).toBe(1)
+  })
+
+  it("sight from the square: one slot and tile per eye (the eye, then the footprint's corners)", () => {
+    const { sys, renderer, camera, scene, ground, world } = setup(0, "square")
+    const a = createToken(ground, { x: 102.5, z: 102.5 }, { id: "a", vision: { darkvision: 60, blindsight: 0, blind: false } })
+    const b = createToken(ground, { x: 52.5, z: 42.5 }, { id: "b" })
+    scene.tokens = { a, b }
+    sys.applyChange(scene, world, { tokens: ["a", "b"] }, [])
+    sys.setView({ ...DEFAULT_VIEW_STATE, mode: "player", vision: "fog", viewerTokenIds: ["a", "b"], gpuVisionRefine: true })
+    for (let k = 0; k < 4; k++) sys.beforeRender(renderer, camera, k)
+    expect(sys.shared.uViewerCount.value).toBe(10)
+    expect(sys.shared.uTouchCount.value).toBe(2)
+    expect(sys.shared.uViewersAll.value).toBe(1)
+    const v = sys.shared.uViewers.value
+    const eyes = Array.from({ length: 10 }, (_, k) => [v[k * 12], v[k * 12 + 2], v[k * 12 + 3]])
+    expect(eyes.slice(0, 5)).toEqual([
+      [102.5, 102.5, 60],
+      [100.5, 100.5, 60],
+      [104.5, 100.5, 60],
+      [100.5, 104.5, 60],
+      [104.5, 104.5, 60],
+    ])
+    expect(eyes[5]).toEqual([52.5, 42.5, 0])
+    for (let k = 0; k < 5; k++) {
+      expect(sys.tileOf(`viewer:a:${k}`)?.origin).toMatchObject({ x: eyes[k][0], z: eyes[k][1] })
+      expect(v[k * 12 + 6]).toBe(QUALITY_CONFIG.medium.viewerAtlas!.tileSize)
+    }
+    // Nine square viewers need 45 eye slots: the ninth is left out and refinement stops.
+    const ids: string[] = []
+    const tokens: Scene["tokens"] = {}
+    for (let k = 0; k < 9; k++) {
+      const t = createToken(ground, { x: 12.5 + k * 20, z: 12.5 }, { id: `v${k}` })
+      tokens[t.id] = t
+      ids.push(t.id)
+    }
+    scene.tokens = tokens
+    sys.applyChange(scene, world, { tokens: ids }, [])
+    sys.setView({ ...DEFAULT_VIEW_STATE, mode: "player", vision: "fog", viewerTokenIds: ids, gpuVisionRefine: true })
+    sys.beforeRender(renderer, camera, 9)
+    expect(sys.shared.uViewerCount.value).toBe(40)
+    expect(sys.shared.uViewersAll.value).toBe(0)
   })
 
   it("switches atlas resolution and wide PCF with the quality tier", () => {
@@ -631,7 +676,7 @@ describe("AtlasLightingSystem", () => {
     expect(torch(20)).toEqual({ y: 12.5, capture: 12.5 })
     expect(torch(40).y).toBe(5)
     expect(eyeY()).toBeCloseTo(7.5 + viewer.eyeHeight, 6)
-    expect(sys.tileOf("viewer:v")?.origin.y).toBeCloseTo(7.5 + viewer.eyeHeight, 6)
+    expect(sys.tileOf("viewer:v:0")?.origin.y).toBeCloseTo(7.5 + viewer.eyeHeight, 6)
     // Cancelled: back on the document's ground.
     sys.previewTerrain(ground, null, null)
     expect(torch(20)).toEqual({ y: 5, capture: 5 })

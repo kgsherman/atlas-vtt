@@ -391,6 +391,9 @@ Per fragment, in one forward pass:
 3. **Perception** (`vision != "off"`): the cell's host grade from the perception texture (§4.4) decides
    colour / greyscale (darkvision) / blindsight tint / unperceived. If `gpuVisionRefine`, per-pixel line of
    sight against the **viewer atlas** can only *remove* perception inside host-perceived cells (never add).
+   Every eye of every viewer (§5.2 "Viewer eyes": 1, or 5 with "square" sight) has its own tile and uniform
+   slot (`uViewers`, `MAX_EYE_SLOTS` = 40, each with its viewer's senses); a pixel passes if some eye sees it,
+   and sense ranges are measured from each eye. Touch squares are per viewer (`uTouch`, `MAX_VIEWERS` = 8).
    Receiver rules for the GPU LOS test (surface class baked per vertex by builders, `aSurf`):
    - walkable (floors, terrain, connector tops): test point `p + (0, 0.25, 0)` (matches CPU samples);
    - vertical faces: require `dot(n, eye − p) > 0`; test point `p − n·0.05`;
@@ -402,9 +405,9 @@ Per fragment, in one forward pass:
    Darkvision (grade 2) and blindsight (grade 1) also end at their range per pixel (3D distance from the
    eye, over the last `AT_SENSE_EDGE` = 0.5 ft), where the host's cells and sub-cells draw the range as a
    staircase; this too only removes perception, needs every viewer in the uniform slots, and never removes
-   a viewer's own footprint cells (perceived by touch). With more than `MAX_VIEWERS` viewers (a large party
-   with shared vision) both the GPU refinement and this range cut are off (`uViewersAll`), because a viewer
-   without a slot may perceive what the slotted ones do not. The darkvision colour lift fades over the last
+   a viewer's own footprint cells (perceived by touch). With more than `MAX_VIEWERS` viewers or
+   `MAX_EYE_SLOTS` eyes (a large party with shared vision) both the GPU refinement and this range cut are off
+   (`uViewersAll`), because an eye without a slot may perceive what the slotted ones do not. The darkvision colour lift fades over the last
    `AT_DV_FEATHER` = 1.5 ft of its range (a look, not a rule), and scales a dark colour up (hue kept, at
    most 3×) before adding any grey, so painted night battlemaps keep their colours; grade 2 stays grey.
 4. **Fog**: perceived → lit colour (grey/tinted per grade); else explored (host explored mask) → memory
@@ -444,7 +447,9 @@ A point light's shadow and a token's line of sight are the same query ("nearest 
 direction D"), stored as octahedral linear-distance maps:
 
 - **Light atlas**: R32F 4096×2048, 512² tiles → 32 shadowed lights (low tier 2048×1024 / 256²).
-- **Viewer atlas**: R32F 4096×2048, 1024² tiles → `MAX_VIEWERS = 8` (low tier: GPU refinement off).
+- **Viewer atlas**: R32F, 512² tiles, one per eye: medium 4096×2560 (40 tiles = `MAX_EYE_SLOTS`, 40 MB, cube
+  faces 256²), high / ultra 4096×4096 (64 tiles, 64 MB, cube faces 512²; the spare tiles keep recently used
+  viewers cached). Low tier: no atlas, GPU refinement off. Keys `viewer:<tokenId>:<eye index>`.
 - Render targets: `FloatType, RedFormat, depthBuffer:false, Nearest, no mipmaps`; each tile write sets
   viewport + scissor (`scissorTest`), autoClear off. Cube pass: R32F faces with depth, cleared to 1e6
   (256² for lights, 512² for viewers).

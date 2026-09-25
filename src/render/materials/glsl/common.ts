@@ -13,6 +13,7 @@
 export const SHARED_UNIFORMS_GLSL = /* glsl */ `
 #define AT_MAX_LIGHTS 32
 #define AT_MAX_VIEWERS 8
+#define AT_MAX_EYES 40
 #define AT_SQRT_4PI 3.5449077018110318
 #define AT_DIST_EPS 0.05
 
@@ -47,12 +48,14 @@ uniform vec4 uSunParams; // texel, depth bias, reversed depth (0/1), normal offs
 // Rules light levels (0 dark, 1 dim, 2 bright): ambient, sky, sun grants, flags (+1 sky map, +2 sun map).
 uniform vec4 uEnvLevels;
 
-// Viewers (line-of-sight refinement), 3 vec4 per slot:
-//   [0] eye.xyz, darkvision  [1] tile.xy, tile size (0 = no tile), blindsight
-//   [2] capture origin.xyz, touch half-extent (the square around the eye over its own footprint cells)
-uniform vec4 uViewers[AT_MAX_VIEWERS * 3];
+// Eye slots (line-of-sight refinement; a viewer has one per eye, each with its senses), 3 vec4 per slot:
+//   [0] eye.xyz, darkvision  [1] tile.xy, tile size (0 = no tile), blindsight  [2] capture origin.xyz, unused
+uniform vec4 uViewers[AT_MAX_EYES * 3];
 uniform int uViewerCount;
-// 1 when uViewers holds every viewer; per-pixel tests that remove perception need all of them.
+// Per viewer: centre (x, z) and half-extent of the square over its own footprint cells (perceived by touch).
+uniform vec4 uTouch[AT_MAX_VIEWERS];
+uniform int uTouchCount;
+// 1 when uViewers holds every eye; per-pixel tests that remove perception need all of them.
 uniform float uViewersAll;
 uniform sampler2D uViewerAtlas;
 
@@ -539,7 +542,7 @@ vec4 atMaskSample(vec2 xz, int layer, out float grade) {
 int atNearestViewer(vec3 p) {
   int best = -1;
   float bestD = 1e30;
-  for (int v = 0; v < min(uViewerCount, AT_MAX_VIEWERS); v++) {
+  for (int v = 0; v < min(uViewerCount, AT_MAX_EYES); v++) {
     vec3 dv = uViewers[v * 3].xyz - p;
     float d2 = dot(dv, dv);
     if (d2 < bestD) {
@@ -573,7 +576,7 @@ float atEnvLit(vec3 p, float sunGate) {
 
 // Some viewer with blindsight has p within range.
 bool atBlindsightAt(vec3 p) {
-  for (int v = 0; v < min(uViewerCount, AT_MAX_VIEWERS); v++) {
+  for (int v = 0; v < min(uViewerCount, AT_MAX_EYES); v++) {
     float r = uViewers[v * 3 + 1].w;
     if (r > 0.0 && distance(uViewers[v * 3].xyz, p) <= r) return true;
   }
@@ -582,7 +585,7 @@ bool atBlindsightAt(vec3 p) {
 
 // Some viewer with darkvision has p within range ("dim is treated as bright").
 bool atDarkvisionAt(vec3 p) {
-  for (int v = 0; v < min(uViewerCount, AT_MAX_VIEWERS); v++) {
+  for (int v = 0; v < min(uViewerCount, AT_MAX_EYES); v++) {
     vec4 v0 = uViewers[v * 3];
     if (v0.w > 0.0 && distance(v0.xyz, p) <= v0.w) return true;
   }
@@ -593,7 +596,7 @@ bool atDarkvisionAt(vec3 p) {
 // the eye, like the host's samples). slot 0 = darkvision, 1 = blindsight.
 float atSenseWeight(vec3 p, int slot, float edge) {
   float best = 0.0;
-  for (int v = 0; v < min(uViewerCount, AT_MAX_VIEWERS); v++) {
+  for (int v = 0; v < min(uViewerCount, AT_MAX_EYES); v++) {
     float r = uViewers[v * 3 + slot].w;
     if (r > 0.0) best = max(best, 1.0 - atSmoothstepSafe(r - edge, r, distance(uViewers[v * 3].xyz, p)));
   }
@@ -601,11 +604,11 @@ float atSenseWeight(vec3 p, int slot, float edge) {
 }
 
 // p lies over some viewer's own footprint cells, which it perceives by touch (grade >= 1) whatever its
-// senses (uViewers[3v + 2].w: half-extent of the square around the eye that covers them).
+// senses (uTouch[t]: the square over them).
 bool atTouched(vec3 p) {
-  for (int v = 0; v < min(uViewerCount, AT_MAX_VIEWERS); v++) {
-    vec2 d = abs(p.xz - uViewers[v * 3].xz);
-    if (max(d.x, d.y) <= uViewers[v * 3 + 2].w) return true;
+  for (int t = 0; t < min(uTouchCount, AT_MAX_VIEWERS); t++) {
+    vec2 d = abs(p.xz - uTouch[t].xy);
+    if (max(d.x, d.y) <= uTouch[t].z) return true;
   }
   return false;
 }
@@ -613,7 +616,7 @@ bool atTouched(vec3 p) {
 // GPU line of sight can veto perception right now: refinement on and every viewer has a captured tile.
 bool atLosReady() {
   if (uGpuRefine < 0.5 || uViewerCount <= 0) return false;
-  for (int v = 0; v < min(uViewerCount, AT_MAX_VIEWERS); v++) {
+  for (int v = 0; v < min(uViewerCount, AT_MAX_EYES); v++) {
     if (uViewers[v * 3 + 1].z < 0.5) return false;
   }
   return true;
@@ -653,11 +656,11 @@ vec4 atSurfaceMask(vec3 p, vec3 n, float surf, int layer, out float grade) {
 }
 
 // Per-pixel line of sight against the viewer atlas (only ever REMOVES host perception). Returns the
-// best visible fraction over viewers; 1 when refinement is off or a viewer has no tile yet.
+// best visible fraction over eyes; 1 when refinement is off or an eye has no tile yet.
 float atViewerLos(vec3 p, vec3 n, float surf) {
   if (uGpuRefine < 0.5 || uViewerCount <= 0) return 1.0;
   float best = 0.0;
-  for (int v = 0; v < min(uViewerCount, AT_MAX_VIEWERS); v++) {
+  for (int v = 0; v < min(uViewerCount, AT_MAX_EYES); v++) {
     vec4 v1 = uViewers[v * 3 + 1];
     if (v1.z < 0.5) return 1.0;
     vec3 eye = uViewers[v * 3 + 2].xyz;

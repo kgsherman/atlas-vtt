@@ -30,6 +30,7 @@
  *   zoom      top-down view height / orbit distance, feet
  *   orbit     "azimuthDeg,elevationDeg" orbit camera direction (azimuth 0 = from +Z, 90 = from +X)
  *   refine    0 | 1 GPU line-of-sight refinement                     (1)
+ *   sight     eye | square: where tokens see from (grid.visionOrigin) (the scene's)
  *   explored  perceived | all                                        (perceived: explored = perceived ∪ trail)
  *   trail     "x,z;x,z" earlier positions of the first viewer; what it perceived there is explored
  *   ghost     1 = editor ghosts of the adjacent levels
@@ -311,6 +312,8 @@ async function main(): Promise<void> {
   const levels = sortedLevels(scene)
   placeTokens(scene, params.get("place"))
   overrideEnvironment(scene)
+  const sight = params.get("sight")
+  if (sight === "eye" || sight === "square") scene.grid.visionOrigin = sight
   const floorMaterial = params.get("floor")
   if (floorMaterial && floorMaterial in MATERIAL_COLORS) {
     for (const o of Object.values(scene.objects)) if (o.type === "floor") scene.objects[o.id] = { ...o, material: floorMaterial as MaterialId }

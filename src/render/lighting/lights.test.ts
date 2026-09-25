@@ -8,7 +8,7 @@ import type { LightObject, Scene } from "@/core/scene/types"
 import { resolveLightWorldOrigin } from "@/core/vision"
 
 import { cullAndRankLights, cutawayPlaneY, linearColor, resolveLights, screenCoverage } from "./lights"
-import { LIGHT_FLAG_HI_ATLAS, LIGHT_FLAG_SOFT, LIGHT_FLAG_WIDE_PCF, LIGHT_VEC4S, packLight, packViewer, VIEWER_VEC4S } from "./uniforms"
+import { LIGHT_FLAG_HI_ATLAS, LIGHT_FLAG_SOFT, LIGHT_FLAG_WIDE_PCF, LIGHT_VEC4S, packEye, packLight, packTouch, VIEWER_VEC4S } from "./uniforms"
 
 function twoLevelScene(): { scene: Scene; ground: string; upper: string } {
   const scene = createScene({ width: 40, depth: 40 })
@@ -240,7 +240,10 @@ describe("uniform packing", () => {
     expect(lights[16 + 15]).toBe(0.5)
 
     const viewers = new Float32Array(8 * VIEWER_VEC4S * 4)
-    packViewer(viewers, 1, { eye: { x: 7, y: 8, z: 9 }, darkvision: 60, blindsight: 10, tile: { x: 1024, y: 0, size: 1024 }, capture: null, touch: 2.5 })
-    expect(Array.from(viewers.subarray(12, 24))).toEqual([7, 8, 9, 60, 1024, 0, 1024, 10, 7, 8, 9, 2.5])
+    packEye(viewers, 1, { eye: { x: 7, y: 8, z: 9 }, darkvision: 60, blindsight: 10, tile: { x: 1024, y: 0, size: 1024 }, capture: null })
+    expect(Array.from(viewers.subarray(12, 24))).toEqual([7, 8, 9, 60, 1024, 0, 1024, 10, 7, 8, 9, 0])
+    const touch = new Float32Array(8 * 4)
+    packTouch(touch, 2, 7, 9, 2.5)
+    expect(Array.from(touch.subarray(8, 12))).toEqual([7, 9, 2.5, 0])
   })
 })

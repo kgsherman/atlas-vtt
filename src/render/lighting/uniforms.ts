@@ -8,11 +8,13 @@
  *   [2] xy = atlas texel of the tile (guard included), z = tile size (0 = unshadowed), w = flags
  *       (LIGHT_FLAG_*: wide PCF, tile in the hi-res atlas, soft shadows)
  *   [3] xyz = capture origin of the tile (shadows are measured from it), w = source radius (ft)
- * Viewer slot v occupies uViewers[3v .. 3v+2]:
+ * Eye slot v occupies uViewers[3v .. 3v+2] (a viewer has one slot per eye, core/vision viewerEyesAtGround;
+ * every slot carries its viewer's senses, perception is the union over slots):
  *   [0] xyz = current resolved eye, w = darkvision range
  *   [1] xy = atlas texel of the LOS tile, z = tile size (0 = no tile: cannot refine), w = blindsight range
- *   [2] xyz = capture origin of the LOS tile, w = touch half-extent: the viewer perceives its own footprint
- *       cells by touch whatever its senses (core/vision), inside the square max(|dx|, |dz|) ≤ w around the eye
+ *   [2] xyz = capture origin of the LOS tile, w = unused
+ * Viewer t occupies uTouch[t]: xy = its footprint cells' centre (x, z), z = half-extent. The viewer perceives
+ * those cells by touch whatever its senses (core/vision), inside the square max(|dx|, |dz|) ≤ z around it.
  */
 import * as THREE from "three"
 
@@ -20,7 +22,10 @@ import type { Vec3 } from "@/core/scene/types"
 import { placeholderFloatTexture, placeholderLightMaskTexture, placeholderMaskTexture, placeholderShadowTexture } from "../materials/placeholders"
 
 export const MAX_LIGHTS = 32
+/** Viewers (tokens) the shaders know about: touch squares, and at most MAX_EYE_SLOTS eyes between them. */
 export const MAX_VIEWERS = 8
+/** Line-of-sight eye slots: one per eye, up to 5 per viewer ("square" vision). */
+export const MAX_EYE_SLOTS = 40
 export const LIGHT_VEC4S = 4
 export const VIEWER_VEC4S = 3
 
@@ -88,17 +93,15 @@ export function packLight(out: Float32Array, slot: number, l: PackedLight): void
   out[o + 15] = soft ? (l.softRadius ?? 0) : 0
 }
 
-export interface PackedViewer {
+export interface PackedEye {
   eye: Vec3
   darkvision: number
   blindsight: number
   tile: PackedTile | null
   capture: Vec3 | null
-  /** Half-extent (ft) of the square around the eye that covers the viewer's own footprint cells. */
-  touch: number
 }
 
-export function packViewer(out: Float32Array, slot: number, v: PackedViewer): void {
+export function packEye(out: Float32Array, slot: number, v: PackedEye): void {
   const o = slot * VIEWER_VEC4S * 4
   out[o] = v.eye.x
   out[o + 1] = v.eye.y
@@ -112,7 +115,16 @@ export function packViewer(out: Float32Array, slot: number, v: PackedViewer): vo
   out[o + 8] = c.x
   out[o + 9] = c.y
   out[o + 10] = c.z
-  out[o + 11] = v.touch
+  out[o + 11] = 0
+}
+
+/** A viewer's touch square: centre (x, z) and half-extent (ft). */
+export function packTouch(out: Float32Array, slot: number, x: number, z: number, half: number): void {
+  const o = slot * 4
+  out[o] = x
+  out[o + 1] = z
+  out[o + 2] = half
+  out[o + 3] = 0
 }
 
 export interface SharedUniforms {
@@ -151,11 +163,16 @@ export interface SharedUniforms {
    * +2 sun map rendered (without a map the shader assumes the level is reached).
    */
   uEnvLevels: THREE.IUniform<THREE.Vector4>
+  /** Eye slots (MAX_EYE_SLOTS × 3 vec4) and how many are set. */
   uViewers: THREE.IUniform<Float32Array>
   uViewerCount: THREE.IUniform<number>
+  /** Touch squares, one per viewer (MAX_VIEWERS vec4), and how many are set. */
+  uTouch: THREE.IUniform<Float32Array>
+  uTouchCount: THREE.IUniform<number>
   /**
-   * 1 when uViewers holds every viewer (at most MAX_VIEWERS). Per-pixel tests that remove perception
-   * (GPU line of sight, the senses' ranges) need all of them: with more viewers they are skipped.
+   * 1 when uViewers holds every eye of every viewer (at most MAX_VIEWERS viewers, MAX_EYE_SLOTS eyes).
+   * Per-pixel tests that remove perception (GPU line of sight, the senses' ranges) need all of them: with
+   * more they are skipped.
    */
   uViewersAll: THREE.IUniform<number>
   uViewerAtlas: THREE.IUniform<THREE.Texture | null>
@@ -195,8 +212,10 @@ export function createSharedUniforms(): SharedUniforms {
     uSunShadow: { value: placeholderShadowTexture() },
     uSunParams: { value: new THREE.Vector4(0, 0, 0, 0) },
     uEnvLevels: { value: new THREE.Vector4(0, 0, 0, 0) },
-    uViewers: { value: new Float32Array(MAX_VIEWERS * VIEWER_VEC4S * 4) },
+    uViewers: { value: new Float32Array(MAX_EYE_SLOTS * VIEWER_VEC4S * 4) },
     uViewerCount: { value: 0 },
+    uTouch: { value: new Float32Array(MAX_VIEWERS * 4) },
+    uTouchCount: { value: 0 },
     uViewersAll: { value: 1 },
     uViewerAtlas: { value: placeholderFloatTexture() },
     uVisionMode: { value: VISION_MODE.off },

@@ -192,7 +192,8 @@ describe("perception edges and darkvision (per pixel)", () => {
     expect(cut).toMatch(/atSenseWeight\(p, 1, AT_SENSE_EDGE\)/)
     // Sense weights read darkvision from slot 0 (.w of [0]) and blindsight from slot 1 (.w of [1]).
     expect(COMMON_FUNCTIONS_GLSL).toMatch(/float r = uViewers\[v \* 3 \+ slot\]\.w;/)
-    expect(COMMON_FUNCTIONS_GLSL).toMatch(/uViewers\[v \* 3 \+ 2\]\.w\) return true;/)
+    // Touch squares are per viewer, not per eye.
+    expect(COMMON_FUNCTIONS_GLSL).toMatch(/if \(max\(d\.x, d\.y\) <= uTouch\[t\]\.z\) return true;/)
   })
 
   it("skips light slots the per-cell mask clears, before fetching their uniforms (all bits without a mask)", () => {
