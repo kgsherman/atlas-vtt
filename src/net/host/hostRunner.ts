@@ -354,6 +354,12 @@ export class HostRunnerImpl implements HostRunner {
   private probedSteps: { vision: VisionClient; rev: number; size: number; byContext: Map<string, Set<string>> } | null = null
   /** Changes of the map so far, edits and play actions (tells a library save whether the map changed while it ran). */
   private sceneEdits = 0
+  /**
+   * The live map was renamed here since its last restore point: the library entry takes that name (its
+   * own rename may still be on its way). Otherwise a restore point keeps the entry's name, which may have
+   * been changed in the library meanwhile.
+   */
+  private renamedHere: { sceneId: string; name: string } | null = null
 
   private readonly conns = new Map<string, PlayerConn>()
   private members: SessionMember[] = []
@@ -675,8 +681,10 @@ export class HostRunnerImpl implements HostRunner {
     if (!summary) throw new NetError("not_found", "The library scene this map comes from no longer exists.")
     const doc = { ...state.scene, updatedAt: new Date().toISOString() }
     const base = opts.force || origin.version === null ? {} : { baseVersion: origin.version }
-    // Keep the library entry's own name (it may have been renamed since the session started).
-    const version = await scenes.saveVersion(origin.sceneId, doc, { ...base, name: summary.name })
+    const renamed = this.renamedHere
+    const name = renamed?.sceneId === origin.sceneId && renamed.name === doc.name ? doc.name : summary.name
+    const version = await scenes.saveVersion(origin.sceneId, doc, { ...base, name })
+    if (this.renamedHere === renamed) this.renamedHere = null
     const cur = this.state
     // The map may have changed while the save was on its way: its origin is another library scene's.
     if (cur && cur.scene.id === state.scene.id && cur.origin?.sceneId === origin.sceneId) {
@@ -1256,6 +1264,7 @@ export class HostRunnerImpl implements HostRunner {
   private mapChanged(prev: GameState, next: GameState): GameState {
     if (next.scene === prev.scene) return next
     this.sceneEdits++
+    if (next.scene.name !== prev.scene.name && next.origin?.sceneId) this.renamedHere = { sceneId: next.origin.sceneId, name: next.scene.name }
     return next.origin && !next.origin.dirty ? { ...next, origin: { ...next.origin, dirty: true } } : next
   }
 

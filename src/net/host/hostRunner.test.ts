@@ -932,6 +932,20 @@ describe("host runner — saving the map to the library", () => {
     expect(h.getSnapshot().library).toEqual({ sceneId, version: 2, dirty: true })
   })
 
+  it("names the version after a rename made here, and otherwise keeps the library entry's name", async () => {
+    const { h, scenes, sceneId } = await librarySession()
+    // Renamed on the map screen after the entry read its (older) name: the map screen's name wins.
+    await scenes.rename(sceneId, "Library name")
+    h.applyScenePatches([{ op: "replace", path: ["name"], value: "Map name" }])
+    await h.saveMapToLibrary()
+    expect((await scenes.get(sceneId))?.name).toBe("Map name")
+    // Renamed in the library, not here: the entry keeps its name.
+    await scenes.rename(sceneId, "Library again")
+    h.applyScenePatches([{ op: "replace", path: ["objects"], value: h.getSnapshot().state!.scene.objects }])
+    await h.saveMapToLibrary()
+    expect((await scenes.get(sceneId))?.name).toBe("Library again")
+  })
+
   it("a map change landing while a save is on its way keeps the new map's origin", async () => {
     const { k, h, scenes, sceneId } = await librarySession()
     const t = meadow()
