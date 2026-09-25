@@ -380,7 +380,7 @@ function BrushOptions() {
           min={BRUSH_STRENGTH.min}
           max={s.mode === "raise" || s.mode === "lower" ? BRUSH_STRENGTH.maxRaise : BRUSH_STRENGTH.maxBlend}
           step={BRUSH_STRENGTH.step}
-          format={(v) => trimNumber(v, 3)}
+          format={(v) => trimNumber(v * 100, 1)}
           onChange={(strength) => set({ strength })}
         />
       </Opt>
