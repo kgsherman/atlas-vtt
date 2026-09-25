@@ -28,7 +28,6 @@ import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/u
 import { Button } from "@/components/ui/button"
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from "@/components/ui/input-group"
-import { Kbd } from "@/components/ui/kbd"
 import { Spinner } from "@/components/ui/spinner"
 import { SAMPLE_SCENES } from "@/core/scene/samples"
 import type { SceneSummary } from "@/net/scenesRepo"
@@ -37,13 +36,6 @@ import { formatRoomCode } from "@/net/sessionsRepo"
 const SHOWN_SAMPLES = SAMPLE_SCENES.filter((s) => s.id === "crooked-lantern" || s.id === "stress-test")
 
 type DialogState = { kind: "rename" | "share" | "delete" | "start"; scene: SceneSummary } | null
-
-function isEditable(target: EventTarget | null): boolean {
-  return (
-    target instanceof HTMLElement &&
-    (target.isContentEditable || !!target.closest("input, textarea, select, [contenteditable='true'], [role='dialog'], [role='alertdialog'], [role='menu']"))
-  )
-}
 
 export default function HomePage() {
   const services = useServices()
@@ -66,8 +58,6 @@ export default function HomePage() {
   const [joining, setJoining] = React.useState(false)
   const [dragging, setDragging] = React.useState(false)
   const fileRef = React.useRef<HTMLInputElement>(null)
-  const searchRef = React.useRef<HTMLInputElement>(null)
-  const joinRef = React.useRef<HTMLInputElement>(null)
 
   const scenes = React.useMemo(() => scenesQ.data ?? [], [scenesQ.data])
   const sceneNames = React.useMemo(() => new Map(scenes.map((s) => [s.id, s.name])), [scenes])
@@ -207,23 +197,7 @@ export default function HomePage() {
     setJoinHint(bad.length > 0 ? `“${bad[0]}” never appears in room codes — they use digits and letters except I, L, O and U.` : null)
   }
 
-  // ---- keyboard shortcuts & drag-and-drop ----------------------------------------------------
-
-  React.useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.repeat || e.ctrlKey || e.metaKey || e.altKey || isEditable(e.target) || document.querySelector("[role='dialog'], [role='alertdialog']")) return
-      const k = e.key.toLowerCase()
-      if (k === "n") navigate(paths.newScene())
-      else if (k === "m") navigate(paths.newFromImages())
-      else if (k === "i") fileRef.current?.click()
-      else if (k === "j") joinRef.current?.focus()
-      else if (e.key === "/") searchRef.current?.focus()
-      else return
-      e.preventDefault()
-    }
-    window.addEventListener("keydown", onKey)
-    return () => window.removeEventListener("keydown", onKey)
-  }, [navigate])
+  // ---- drag-and-drop -------------------------------------------------------------------------
 
   React.useEffect(() => {
     let depth = 0
@@ -277,7 +251,6 @@ export default function HomePage() {
           onJoinCodeChange={onJoinCodeChange}
           onJoin={() => void join()}
           joining={joining}
-          joinInputRef={joinRef}
           joinHint={joinHint}
         />
 
@@ -310,22 +283,19 @@ export default function HomePage() {
                         <SearchIcon />
                       </InputGroupAddon>
                       <InputGroupInput
-                        ref={searchRef}
                         value={query}
                         onChange={(e) => setQuery(e.target.value)}
                         placeholder="Search scenes"
                         aria-label="Search scenes"
                         onKeyDown={(e) => e.key === "Escape" && (setQuery(""), e.currentTarget.blur())}
                       />
-                      <InputGroupAddon align="inline-end">
-                        {query ? (
+                      {query && (
+                        <InputGroupAddon align="inline-end">
                           <InputGroupButton size="icon-xs" aria-label="Clear search" onClick={() => setQuery("")}>
                             <XIcon />
                           </InputGroupButton>
-                        ) : (
-                          <Kbd>/</Kbd>
-                        )}
-                      </InputGroupAddon>
+                        </InputGroupAddon>
+                      )}
                     </InputGroup>
                   )}
                   {scenes.length > 0 && (
@@ -442,9 +412,6 @@ export default function HomePage() {
       <footer className="border-t border-border/60">
         <div className="mx-auto flex w-full max-w-7xl flex-wrap items-center justify-between gap-2 px-4 py-4 text-[0.7rem] text-muted-foreground sm:px-6">
           <span>Atlas VTT · DM-authoritative play: players only ever receive what their tokens can see.</span>
-          <span className="hidden items-center gap-1.5 sm:flex">
-            <Kbd>N</Kbd> new <Kbd>M</Kbd> from images <Kbd>I</Kbd> import <Kbd>J</Kbd> join <Kbd>/</Kbd> search
-          </span>
         </div>
       </footer>
 

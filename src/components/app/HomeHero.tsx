@@ -3,8 +3,7 @@ import { ArrowRightIcon, EyeIcon, FileUpIcon, ImagePlusIcon, LayersIcon, PlusIco
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { Item, ItemActions, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item"
-import { Kbd } from "@/components/ui/kbd"
+import { Item, ItemContent, ItemDescription, ItemMedia, ItemTitle } from "@/components/ui/item"
 import { Spinner } from "@/components/ui/spinner"
 import { cn } from "@/lib/utils"
 
@@ -20,7 +19,6 @@ export interface HomeHeroProps {
   onJoinCodeChange(code: string, info: { rejected: string[] }): void
   onJoin(): void
   joining: boolean
-  joinInputRef: React.Ref<HTMLInputElement>
   joinHint: string | null
 }
 
@@ -67,7 +65,6 @@ export function HomeHero(props: HomeHeroProps) {
                 icon={<PlusIcon />}
                 title="New scene"
                 description="Start from an empty grid"
-                kbd="N"
                 onClick={props.onNewScene}
                 onIntent={props.onIntent}
               />
@@ -75,11 +72,10 @@ export function HomeHero(props: HomeHeroProps) {
                 icon={<ImagePlusIcon />}
                 title="From map images"
                 description="One battlemap per level"
-                kbd="M"
                 onClick={props.onNewFromImages}
                 onIntent={props.onIntent}
               />
-              <ActionTile icon={<FileUpIcon />} title="Import scene file" description="Open an .atlas.json" kbd="I" onClick={props.onImportFile} />
+              <ActionTile icon={<FileUpIcon />} title="Import scene file" description="Open an .atlas.json" onClick={props.onImportFile} />
             </div>
             <QuickJoin {...props} />
           </div>
@@ -99,7 +95,6 @@ function ActionTile({
   icon,
   title,
   description,
-  kbd,
   onClick,
   onIntent,
   primary,
@@ -107,7 +102,6 @@ function ActionTile({
   icon: React.ReactNode
   title: string
   description: string
-  kbd?: string
   onClick(): void
   onIntent?(): void
   primary?: boolean
@@ -133,16 +127,11 @@ function ActionTile({
         <ItemTitle className="text-sm">{title}</ItemTitle>
         <ItemDescription>{description}</ItemDescription>
       </ItemContent>
-      {kbd && (
-        <ItemActions className="hidden sm:absolute sm:top-3 sm:right-3 sm:flex">
-          <Kbd>{kbd}</Kbd>
-        </ItemActions>
-      )}
     </Item>
   )
 }
 
-function QuickJoin({ joinCode, onJoinCodeChange, onJoin, joining, joinInputRef, joinHint }: HomeHeroProps) {
+function QuickJoin({ joinCode, onJoinCodeChange, onJoin, joining, joinHint }: HomeHeroProps) {
   const complete = joinCode.length === 8
   return (
     <Item variant="outline" className="flex-col items-stretch gap-3 bg-card/70 backdrop-blur-sm sm:p-3.5">
@@ -163,7 +152,7 @@ function QuickJoin({ joinCode, onJoinCodeChange, onJoin, joining, joinInputRef, 
             onJoin()
           }}
         >
-          <RoomCodeInput value={joinCode} onChange={onJoinCodeChange} inputRef={joinInputRef} className="h-8 flex-1" />
+          <RoomCodeInput value={joinCode} onChange={onJoinCodeChange} className="h-8 flex-1" />
           <Button type="submit" size="lg" disabled={!complete || joining} className="px-3">
             Join
             {joining ? <Spinner className="size-3.5" data-icon="inline-end" /> : <ArrowRightIcon data-icon="inline-end" />}
