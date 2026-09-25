@@ -9,81 +9,118 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* "Gilded" theme: deep slate-blue and verdigris panels, parchment ink, and gold used only as an accent (frames,
+   filigree, section headings, the primary action). Teal (--primary) marks selection and "live" state. */
 :root {
-    --background: oklch(1 0 0);
-    --foreground: oklch(0.141 0.005 285.823);
-    --card: oklch(1 0 0);
-    --card-foreground: oklch(0.141 0.005 285.823);
-    --popover: oklch(1 0 0);
-    --popover-foreground: oklch(0.141 0.005 285.823);
-    --primary: oklch(0.508 0.118 165.612);
-    --primary-foreground: oklch(0.979 0.021 166.113);
-    --secondary: oklch(0.967 0.001 286.375);
-    --secondary-foreground: oklch(0.21 0.006 285.885);
-    --muted: oklch(0.967 0.001 286.375);
-    --muted-foreground: oklch(0.552 0.016 285.938);
-    --accent: oklch(0.967 0.001 286.375);
-    --accent-foreground: oklch(0.21 0.006 285.885);
-    --destructive: oklch(0.577 0.245 27.325);
+    --background: oklch(0.955 0.008 225);
+    --foreground: oklch(0.24 0.03 240);
+    --card: oklch(0.985 0.012 88);
+    --card-foreground: oklch(0.24 0.03 240);
+    --popover: oklch(0.985 0.012 88);
+    --popover-foreground: oklch(0.24 0.03 240);
+    --primary: oklch(0.5 0.085 190);
+    --primary-foreground: oklch(0.98 0.015 88);
+    --secondary: oklch(0.93 0.012 220);
+    --secondary-foreground: oklch(0.26 0.03 240);
+    --muted: oklch(0.93 0.01 220);
+    --muted-foreground: oklch(0.5 0.025 235);
+    --accent: oklch(0.91 0.02 205);
+    --accent-foreground: oklch(0.24 0.03 240);
+    --destructive: oklch(0.52 0.18 27);
     /* Caution (e.g. a wounded creature's health bar): amber. */
-    --warning: oklch(0.666 0.179 58.318);
-    --border: oklch(0.92 0.004 286.32);
-    --input: oklch(0.92 0.004 286.32);
-    --ring: oklch(0.705 0.015 286.067);
-    --chart-1: oklch(0.871 0.006 286.286);
-    --chart-2: oklch(0.552 0.016 285.938);
-    --chart-3: oklch(0.442 0.017 285.786);
-    --chart-4: oklch(0.37 0.013 285.805);
-    --chart-5: oklch(0.274 0.006 286.033);
-    --radius: 0.625rem;
-    --sidebar: oklch(0.985 0 0);
-    --sidebar-foreground: oklch(0.141 0.005 285.823);
-    --sidebar-primary: oklch(0.596 0.145 163.225);
-    --sidebar-primary-foreground: oklch(0.979 0.021 166.113);
-    --sidebar-accent: oklch(0.967 0.001 286.375);
-    --sidebar-accent-foreground: oklch(0.21 0.006 285.885);
-    --sidebar-border: oklch(0.92 0.004 286.32);
-    --sidebar-ring: oklch(0.705 0.015 286.067);
+    --warning: oklch(0.62 0.16 55);
+    --border: oklch(0.45 0.04 235 / 18%);
+    --input: oklch(0.45 0.04 235 / 24%);
+    --ring: oklch(0.62 0.11 75);
+    --chart-1: oklch(0.8 0.07 195);
+    --chart-2: oklch(0.65 0.08 200);
+    --chart-3: oklch(0.52 0.07 210);
+    --chart-4: oklch(0.42 0.06 225);
+    --chart-5: oklch(0.32 0.04 240);
+    --radius: 0.4rem;
+    --sidebar: oklch(0.94 0.01 222);
+    --sidebar-foreground: oklch(0.24 0.03 240);
+    --sidebar-primary: oklch(0.55 0.12 65);
+    --sidebar-primary-foreground: oklch(0.98 0.015 88);
+    --sidebar-accent: oklch(0.91 0.02 205);
+    --sidebar-accent-foreground: oklch(0.24 0.03 240);
+    --sidebar-border: oklch(0.45 0.04 235 / 18%);
+    --sidebar-ring: oklch(0.62 0.11 75);
+    --filigree-tl: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none' stroke='black' stroke-width='1.1' stroke-linecap='round'%3E%3Cpath d='M1.5 24V7Q1.5 1.5 7 1.5H24'/%3E%3Cpath d='M5 16C5 9 9 5 16 5'/%3E%3Cpath d='M24 1.5c3 0 4 2.6 2.4 3.6c-1 .6-2.2-.2-1.6-1.2'/%3E%3Cpath d='M1.5 24c0 3 2.6 4 3.6 2.4c.6-1-.2-2.2-1.2-1.6'/%3E%3Cpath d='M16 5c2 0 3 1.4 2.2 2.4'/%3E%3Cpath d='M5 16c0 2 1.4 3 2.4 2.2'/%3E%3Cpath d='M4.6 2.9L6.3 4.6L4.6 6.3L2.9 4.6Z' fill='black' stroke='none'/%3E%3C/svg%3E");
+    --filigree-tr: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none' stroke='black' stroke-width='1.1' stroke-linecap='round'%3E%3Cg transform='matrix(-1 0 0 1 32 0)'%3E%3Cpath d='M1.5 24V7Q1.5 1.5 7 1.5H24'/%3E%3Cpath d='M5 16C5 9 9 5 16 5'/%3E%3Cpath d='M24 1.5c3 0 4 2.6 2.4 3.6c-1 .6-2.2-.2-1.6-1.2'/%3E%3Cpath d='M1.5 24c0 3 2.6 4 3.6 2.4c.6-1-.2-2.2-1.2-1.6'/%3E%3Cpath d='M16 5c2 0 3 1.4 2.2 2.4'/%3E%3Cpath d='M5 16c0 2 1.4 3 2.4 2.2'/%3E%3Cpath d='M4.6 2.9L6.3 4.6L4.6 6.3L2.9 4.6Z' fill='black' stroke='none'/%3E%3C/g%3E%3C/svg%3E");
+    --filigree-bl: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none' stroke='black' stroke-width='1.1' stroke-linecap='round'%3E%3Cg transform='matrix(1 0 0 -1 0 32)'%3E%3Cpath d='M1.5 24V7Q1.5 1.5 7 1.5H24'/%3E%3Cpath d='M5 16C5 9 9 5 16 5'/%3E%3Cpath d='M24 1.5c3 0 4 2.6 2.4 3.6c-1 .6-2.2-.2-1.6-1.2'/%3E%3Cpath d='M1.5 24c0 3 2.6 4 3.6 2.4c.6-1-.2-2.2-1.2-1.6'/%3E%3Cpath d='M16 5c2 0 3 1.4 2.2 2.4'/%3E%3Cpath d='M5 16c0 2 1.4 3 2.4 2.2'/%3E%3Cpath d='M4.6 2.9L6.3 4.6L4.6 6.3L2.9 4.6Z' fill='black' stroke='none'/%3E%3C/g%3E%3C/svg%3E");
+    --filigree-br: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none' stroke='black' stroke-width='1.1' stroke-linecap='round'%3E%3Cg transform='matrix(-1 0 0 -1 32 32)'%3E%3Cpath d='M1.5 24V7Q1.5 1.5 7 1.5H24'/%3E%3Cpath d='M5 16C5 9 9 5 16 5'/%3E%3Cpath d='M24 1.5c3 0 4 2.6 2.4 3.6c-1 .6-2.2-.2-1.6-1.2'/%3E%3Cpath d='M1.5 24c0 3 2.6 4 3.6 2.4c.6-1-.2-2.2-1.2-1.6'/%3E%3Cpath d='M16 5c2 0 3 1.4 2.2 2.4'/%3E%3Cpath d='M5 16c0 2 1.4 3 2.4 2.2'/%3E%3Cpath d='M4.6 2.9L6.3 4.6L4.6 6.3L2.9 4.6Z' fill='black' stroke='none'/%3E%3C/g%3E%3C/svg%3E");
+    /* Gold leaf: highlight, body, shadow and the dark bevel edge. */
+    --gilt-hi: oklch(0.88 0.1 90);
+    --gilt: oklch(0.66 0.12 75);
+    --gilt-lo: oklch(0.52 0.11 62);
+    --gilt-edge: oklch(0.4 0.08 55);
+    /* Lacquer: the raised plate of secondary buttons and active tabs. */
+    --lacquer: oklch(0.97 0.008 220);
+    --lacquer-lo: oklch(0.91 0.014 222);
+    /* Bronze plate of the primary button. */
+    --bronze-plate: oklch(0.9 0.05 85);
+    --bronze-plate-lo: oklch(0.84 0.065 78);
+    --bevel-shadow: oklch(0.25 0.04 240 / 18%);
+    /* The dark band behind an event-style decision. */
+    --decision-band: oklch(0.3 0.04 240 / 8%);
+    /* Faint woven crosshatch on framed buttons. */
+    --weave:
+      repeating-linear-gradient(45deg, color-mix(in oklch, var(--foreground) 3%, transparent) 0 1px, transparent 1px 4px),
+      repeating-linear-gradient(-45deg, color-mix(in oklch, var(--foreground) 3%, transparent) 0 1px, transparent 1px 4px);
 }
 
 .dark {
-    --background: oklch(0.141 0.005 285.823);
-    --foreground: oklch(0.985 0 0);
-    --card: oklch(0.21 0.006 285.885);
-    --card-foreground: oklch(0.985 0 0);
-    --popover: oklch(0.21 0.006 285.885);
-    --popover-foreground: oklch(0.985 0 0);
-    --primary: oklch(0.432 0.095 166.913);
-    --primary-foreground: oklch(0.979 0.021 166.113);
-    --secondary: oklch(0.274 0.006 286.033);
-    --secondary-foreground: oklch(0.985 0 0);
-    --muted: oklch(0.274 0.006 286.033);
-    --muted-foreground: oklch(0.705 0.015 286.067);
-    --accent: oklch(0.274 0.006 286.033);
-    --accent-foreground: oklch(0.985 0 0);
-    --destructive: oklch(0.704 0.191 22.216);
-    --warning: oklch(0.828 0.189 84.429);
-    --border: oklch(1 0 0 / 10%);
-    --input: oklch(1 0 0 / 15%);
-    --ring: oklch(0.552 0.016 285.938);
-    --chart-1: oklch(0.871 0.006 286.286);
-    --chart-2: oklch(0.552 0.016 285.938);
-    --chart-3: oklch(0.442 0.017 285.786);
-    --chart-4: oklch(0.37 0.013 285.805);
-    --chart-5: oklch(0.274 0.006 286.033);
-    --sidebar: oklch(0.21 0.006 285.885);
-    --sidebar-foreground: oklch(0.985 0 0);
-    --sidebar-primary: oklch(0.696 0.17 162.48);
-    --sidebar-primary-foreground: oklch(0.262 0.051 172.552);
-    --sidebar-accent: oklch(0.274 0.006 286.033);
-    --sidebar-accent-foreground: oklch(0.985 0 0);
-    --sidebar-border: oklch(1 0 0 / 10%);
-    --sidebar-ring: oklch(0.552 0.016 285.938);
+    --background: oklch(0.155 0.02 238);
+    --foreground: oklch(0.93 0.022 88);
+    --card: oklch(0.198 0.026 232);
+    --card-foreground: oklch(0.93 0.022 88);
+    --popover: oklch(0.212 0.028 230);
+    --popover-foreground: oklch(0.93 0.022 88);
+    --primary: oklch(0.56 0.09 185);
+    --primary-foreground: oklch(0.97 0.02 88);
+    --secondary: oklch(0.265 0.032 226);
+    --secondary-foreground: oklch(0.93 0.022 88);
+    --muted: oklch(0.245 0.028 230);
+    --muted-foreground: oklch(0.72 0.025 225);
+    --accent: oklch(0.3 0.04 212);
+    --accent-foreground: oklch(0.95 0.025 88);
+    --destructive: oklch(0.66 0.17 28);
+    --warning: oklch(0.78 0.15 65);
+    --border: oklch(0.78 0.04 220 / 13%);
+    --input: oklch(0.78 0.04 220 / 17%);
+    --ring: oklch(0.74 0.1 78);
+    --chart-1: oklch(0.82 0.07 190);
+    --chart-2: oklch(0.68 0.08 195);
+    --chart-3: oklch(0.55 0.07 205);
+    --chart-4: oklch(0.43 0.06 220);
+    --chart-5: oklch(0.32 0.04 235);
+    --sidebar: oklch(0.185 0.024 234);
+    --sidebar-foreground: oklch(0.93 0.022 88);
+    --sidebar-primary: oklch(0.84 0.12 86);
+    --sidebar-primary-foreground: oklch(0.22 0.04 55);
+    --sidebar-accent: oklch(0.3 0.04 212);
+    --sidebar-accent-foreground: oklch(0.95 0.025 88);
+    --sidebar-border: oklch(0.78 0.04 220 / 13%);
+    --sidebar-ring: oklch(0.74 0.1 78);
+    --gilt-hi: oklch(0.9 0.09 92);
+    --gilt: oklch(0.76 0.11 80);
+    --gilt-lo: oklch(0.58 0.1 66);
+    --gilt-edge: oklch(0.4 0.07 55);
+    --lacquer: oklch(0.29 0.035 224);
+    --lacquer-lo: oklch(0.215 0.03 230);
+    /* Mixed in oklab: an oklch mix would swing the hue from slate through green on its way to bronze. */
+    --bronze-plate: color-mix(in oklab, var(--lacquer), var(--gilt-edge) 62%);
+    --bronze-plate-lo: color-mix(in oklab, var(--lacquer-lo), var(--gilt-edge) 45%);
+    --bevel-shadow: oklch(0.05 0.02 240 / 55%);
+    --decision-band: oklch(0.05 0.02 240 / 38%);
 }
 
 @theme inline {
     --font-sans: 'Outfit Variable', sans-serif;
     --font-heading: 'Roboto Slab Variable', serif;
+    --color-gilt: var(--gilt);
+    --color-gilt-hi: var(--gilt-hi);
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -161,4 +198,145 @@
     0 10px,
     10px -10px,
     -10px 0;
+}
+
+/* ---- Gilded theme utilities ------------------------------------------------------------------- */
+
+/* A gilded picture-frame edge: thin gold rule, a fainter inner rule and a soft cast shadow. */
+@utility atlas-gilt-frame {
+  border: 1px solid color-mix(in oklch, var(--gilt) 32%, transparent);
+  outline: 1px solid color-mix(in oklch, var(--gilt) 9%, transparent);
+  outline-offset: -4px;
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, var(--gilt-hi) 10%, transparent),
+    0 12px 32px -14px var(--bevel-shadow),
+    0 2px 6px -2px var(--bevel-shadow);
+}
+
+/* Gold filigree in the four corners (needs a positioned element). */
+@utility atlas-filigree {
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 2px;
+    z-index: 1;
+    pointer-events: none;
+    background-color: var(--gilt);
+    opacity: 0.55;
+    mask-image: var(--filigree-tl), var(--filigree-tr), var(--filigree-bl), var(--filigree-br);
+    mask-position: top left, top right, bottom left, bottom right;
+    mask-size: 26px 26px;
+    mask-repeat: no-repeat;
+  }
+}
+
+/* Lamplight falling on a panel from above. */
+@utility atlas-sheen {
+  background-image: linear-gradient(to bottom, color-mix(in oklch, var(--gilt-hi) 5%, transparent), transparent 140px);
+}
+
+/* Framed button (CK3 "Guest List"): square dark lacquer with a faint weave, a bronze frame and a dark keyline
+   inside it. The frame turns gold and the plate glows on hover. Tints come from the --framed-* properties so
+   a modifier such as atlas-framed-warm can change them without competing for the same declarations. */
+@utility atlas-framed {
+  border-color: var(--framed-edge, color-mix(in oklch, var(--gilt) 42%, transparent));
+  color: var(--framed-text, color-mix(in oklch, var(--foreground) 85%, var(--gilt)));
+  background-image:
+    var(--weave),
+    linear-gradient(to bottom, var(--framed-top, var(--lacquer)), var(--framed-bottom, var(--lacquer-lo)));
+  box-shadow:
+    inset 0 0 0 1px var(--bevel-shadow),
+    inset 0 2px 0 -1px color-mix(in oklch, var(--gilt-hi) 10%, transparent),
+    0 1px 2px var(--bevel-shadow);
+  &:hover,
+  &[aria-expanded="true"] {
+    color: var(--framed-text-hover, var(--foreground));
+    border-color: var(--framed-edge-hover, color-mix(in oklch, var(--gilt) 85%, transparent));
+    box-shadow:
+      inset 0 0 0 1px var(--bevel-shadow),
+      inset 0 0 14px color-mix(in oklch, var(--gilt) 16%, transparent),
+      0 0 10px -3px color-mix(in oklch, var(--gilt) 40%, transparent);
+  }
+}
+
+/* With atlas-framed, the primary button (CK3 "Send Proposal"): a brighter gold frame on a bronze-warmed plate. */
+@utility atlas-framed-warm {
+  --framed-edge: color-mix(in oklch, var(--gilt) 75%, transparent);
+  --framed-edge-hover: var(--gilt-hi);
+  --framed-text: var(--foreground);
+  --framed-text-hover: var(--gilt-hi);
+  --framed-top: var(--bronze-plate);
+  --framed-bottom: var(--bronze-plate-lo);
+}
+
+/* Event decision (CK3 event options): a full-width dark band between two gold hairlines that fade out at both ends.
+   Hovering lights the band from the centre. */
+@utility atlas-decision {
+  position: relative;
+  color: var(--foreground);
+  background-image: linear-gradient(to right, transparent, var(--decision-band) 10%, var(--decision-band) 90%, transparent);
+  &::before,
+  &::after {
+    content: "";
+    position: absolute;
+    left: 3%;
+    right: 3%;
+    height: 1px;
+    background-image: linear-gradient(to right, transparent, color-mix(in oklch, var(--gilt) 50%, transparent) 14%, color-mix(in oklch, var(--gilt) 50%, transparent) 86%, transparent);
+    box-shadow: 0 1px 0 var(--bevel-shadow);
+    transition: opacity 150ms;
+  }
+  &::before {
+    top: 0;
+  }
+  &::after {
+    bottom: 0;
+  }
+  &:hover,
+  &:focus-visible {
+    color: var(--gilt-hi);
+    background-image:
+      radial-gradient(ellipse 60% 120% at 50% 50%, color-mix(in oklch, var(--gilt) 16%, transparent), transparent),
+      linear-gradient(to right, transparent, var(--decision-band) 10%, var(--decision-band) 90%, transparent);
+    &::before,
+    &::after {
+      background-image: linear-gradient(to right, transparent, var(--gilt) 14%, var(--gilt) 86%, transparent);
+    }
+  }
+}
+
+/* Raised lacquered plate with a gold edge that warms on hover (secondary actions, active tabs). */
+@utility atlas-lacquer {
+  border-color: color-mix(in oklch, var(--gilt) 26%, transparent);
+  background-image: linear-gradient(to bottom, var(--lacquer), var(--lacquer-lo));
+  box-shadow:
+    inset 0 1px 0 color-mix(in oklch, var(--foreground) 8%, transparent),
+    0 1px 2px var(--bevel-shadow);
+  &:hover,
+  &[aria-expanded="true"] {
+    color: var(--foreground);
+    border-color: color-mix(in oklch, var(--gilt) 60%, transparent);
+    box-shadow:
+      inset 0 1px 0 color-mix(in oklch, var(--foreground) 10%, transparent),
+      inset 0 0 10px color-mix(in oklch, var(--gilt) 14%, transparent),
+      0 1px 2px var(--bevel-shadow);
+  }
+}
+
+/* Recessed field (inputs, selects): carved into the panel. */
+@utility atlas-inset {
+  box-shadow: inset 0 1px 2px var(--bevel-shadow);
+}
+
+/* Horizontal rule of gold that fades out at both ends. */
+@utility atlas-gilt-rule {
+  background-color: transparent;
+  background-image: linear-gradient(to right, transparent, color-mix(in oklch, var(--gilt) 32%, transparent) 20%, color-mix(in oklch, var(--gilt) 32%, transparent) 80%, transparent);
+}
+
+/* Gold small-caps section heading. */
+@utility atlas-rubric {
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  color: color-mix(in oklch, var(--gilt) 70%, var(--muted-foreground));
 }

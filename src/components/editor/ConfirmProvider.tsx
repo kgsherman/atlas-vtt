@@ -6,10 +6,11 @@ import {
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
-  AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
+
+import { cn } from "@/lib/utils"
 
 import { ConfirmContext, type ConfirmFn, type ConfirmOptions } from "./context"
 
@@ -51,17 +52,23 @@ export function ConfirmProvider({ children }: { children: React.ReactNode }) {
           if (!next) setPending(null)
         }}
       >
-        <AlertDialogContent size="sm">
+        <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>{pending?.title}</AlertDialogTitle>
             {pending?.description ? <AlertDialogDescription>{pending.description}</AlertDialogDescription> : null}
           </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>{pending?.cancelLabel ?? "Cancel"}</AlertDialogCancel>
-            <AlertDialogAction variant={pending?.destructive ? "destructive" : "default"} onClick={() => settle(true)} autoFocus>
+          {/* The choices read like an event's options: the decision first, then backing out. */}
+          <div className="mt-1 flex flex-col gap-1.5">
+            <AlertDialogAction
+              variant="decision"
+              className={cn(pending?.destructive && "text-destructive hover:text-destructive")}
+              onClick={() => settle(true)}
+              autoFocus
+            >
               {pending?.confirmLabel ?? "Continue"}
             </AlertDialogAction>
-          </AlertDialogFooter>
+            <AlertDialogCancel variant="decision">{pending?.cancelLabel ?? "Cancel"}</AlertDialogCancel>
+          </div>
         </AlertDialogContent>
       </AlertDialog>
     </ConfirmContext.Provider>

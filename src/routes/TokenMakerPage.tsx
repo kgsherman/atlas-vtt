@@ -203,7 +203,7 @@ export default function TokenMakerPage() {
             if (files.length) void addFiles(files, "subject")
           }}
         >
-          <aside className="order-2 min-h-0 overflow-y-auto rounded-xl border bg-card lg:order-1">
+          <aside className="atlas-filigree relative order-2 min-h-0 overflow-y-auto rounded-lg bg-card atlas-sheen atlas-gilt-frame lg:order-1">
             <LayersPanel />
           </aside>
 
@@ -233,7 +233,7 @@ export default function TokenMakerPage() {
             </p>
           </section>
 
-          <aside className="order-3 min-h-0 overflow-y-auto rounded-xl border bg-card">
+          <aside className="atlas-filigree relative order-3 min-h-0 overflow-y-auto rounded-lg bg-card atlas-sheen atlas-gilt-frame">
             <LayerInspector />
             <DiscSection />
             <DownloadSection />

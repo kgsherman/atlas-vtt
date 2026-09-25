@@ -50,7 +50,7 @@ export function StageToolbar({ className }: { className?: string }) {
       <Separator orientation="vertical" className="mx-1 h-5 self-center" />
 
       <div role="group" aria-labelledby="token-maker-mask-label" className="flex items-center gap-1">
-        <span id="token-maker-mask-label" className="px-1 text-[0.625rem] font-semibold tracking-wider text-muted-foreground uppercase">
+        <span id="token-maker-mask-label" className="px-1 atlas-rubric text-[0.625rem] uppercase">
           Mask
         </span>
         <ToggleGroup size="sm" spacing={0} value={tool === "move" ? [] : [tool]} onValueChange={(v) => setTool((v[0] as MakerTool | undefined) ?? "move")}>

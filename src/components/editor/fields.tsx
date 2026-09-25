@@ -36,7 +36,7 @@ export function PanelSection({
     <section className={cn("flex flex-col gap-2 border-b border-border/60 px-3 py-3 last:border-b-0", className)}>
       {title || action ? (
         <div className="flex min-h-6 items-center justify-between gap-2">
-          {title ? <h3 className="text-[0.6875rem] font-semibold tracking-wider text-muted-foreground uppercase">{title}</h3> : <span />}
+          {title ? <h3 className="atlas-rubric text-[0.6875rem] uppercase">{title}</h3> : <span />}
           {action ? <div className="flex items-center gap-1">{action}</div> : null}
         </div>
       ) : null}
