@@ -34,23 +34,41 @@ function Item({ icon, children, tooltip, className }: { icon?: React.ReactNode; 
   )
 }
 
+const AXIS_LABEL = { x: "text-axis-x/70", z: "text-axis-z/70", y: "text-axis-y/70" } as const
+
+function Axis({ axis, value }: { axis: keyof typeof AXIS_LABEL; value: number }) {
+  return (
+    <span className="flex min-w-12 items-baseline gap-1">
+      <span className={cn("font-medium", AXIS_LABEL[axis])}>{axis.toUpperCase()}</span>
+      <span className="text-foreground/80">{trimNumber(value, 1)}</span>
+    </span>
+  )
+}
+
 function CursorReadout({ info }: { info: ViewportInfoStore }) {
   const cursor = useStore(info, (s) => s.cursor)
   return (
-    <Item icon={<Crosshair className="size-3" />} tooltip="Cell (column, row) and position (x, y, z) under the cursor; y is the height above the level's ground" className="w-56 tabular-nums">
-      {cursor ? (
-        <>
+    <>
+      <Item icon={<Crosshair className="size-3" />} tooltip="Cell (column, row) under the cursor" className="w-16 tabular-nums">
+        {cursor ? (
           <span className={cn(!cursor.inside && "text-destructive")}>
             {cursor.i}, {cursor.j}
           </span>
-          <span className="text-muted-foreground">
-            ({trimNumber(cursor.x, 1)}, {trimNumber(cursor.y, 1)}, {trimNumber(cursor.z, 1)} ft)
-          </span>
-        </>
-      ) : (
-        <span className="text-muted-foreground">—</span>
-      )}
-    </Item>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        )}
+      </Item>
+      <Item tooltip="Position under the cursor in feet (Y: height above the level's ground)" className="w-52 gap-2 tabular-nums">
+        {cursor ? (
+          <>
+            <Axis axis="x" value={cursor.x} />
+            <Axis axis="z" value={cursor.z} />
+            <Axis axis="y" value={cursor.y} />
+            <span className="text-muted-foreground">ft</span>
+          </>
+        ) : null}
+      </Item>
+    </>
   )
 }
 

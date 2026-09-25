@@ -29,6 +29,10 @@
     --destructive: oklch(0.52 0.18 27);
     /* Caution (e.g. a wounded creature's health bar): amber. */
     --warning: oklch(0.62 0.16 55);
+    /* World axes, as the transform gizmo draws them (render/overlays/terrainOverlay TERRAIN_OVERLAY_COLORS.gizmo). */
+    --axis-x: #f87171;
+    --axis-y: #34d399;
+    --axis-z: #60a5fa;
     --border: oklch(0.45 0.04 235 / 18%);
     --input: oklch(0.45 0.04 235 / 24%);
     --ring: oklch(0.62 0.11 75);
@@ -139,6 +143,9 @@
     --color-border: var(--border);
     --color-destructive: var(--destructive);
     --color-warning: var(--warning);
+    --color-axis-x: var(--axis-x);
+    --color-axis-y: var(--axis-y);
+    --color-axis-z: var(--axis-z);
     --color-accent-foreground: var(--accent-foreground);
     --color-accent: var(--accent);
     --color-muted-foreground: var(--muted-foreground);
