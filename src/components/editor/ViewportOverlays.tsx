@@ -201,7 +201,7 @@ function LevelAxis() {
               <TooltipTrigger
                 render={
                   <Button
-                    variant={active ? "default" : "outline"}
+                    variant={active ? "selected" : "outline"}
                     size="sm"
                     aria-pressed={active}
                     className="max-w-32 justify-start"

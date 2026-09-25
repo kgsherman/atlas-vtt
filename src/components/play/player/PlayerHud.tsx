@@ -390,7 +390,7 @@ function PartyPanel({
   return (
     <HudPanel className="flex flex-col p-1.5">
       <div className="flex items-center justify-between px-1.5 pt-0.5 pb-1.5">
-        <span className="text-[0.6875rem] font-medium tracking-wide text-muted-foreground uppercase">
+        <span className="atlas-rubric text-[0.6875rem] uppercase">
           Your characters
         </span>
         <span className="flex items-center gap-1 text-[0.6875rem] text-muted-foreground">

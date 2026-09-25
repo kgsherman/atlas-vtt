@@ -227,7 +227,7 @@ function RoomCodeCard({ roomCode }: { roomCode: string }) {
   return (
     <div className="flex flex-col gap-2 border-b p-3">
       <div className="flex items-center justify-between">
-        <span className="text-[0.6875rem] font-medium tracking-wide text-muted-foreground uppercase">
+        <span className="atlas-rubric text-[0.6875rem] uppercase">
           Room code
         </span>
         {local ? (
@@ -628,7 +628,7 @@ function TokensTab({
         if (list.length === 0) return null
         return (
           <section key={level.id} className="flex flex-col gap-0.5">
-            <h3 className="flex items-center gap-1.5 px-1.5 pb-1 text-[0.6875rem] font-medium tracking-wide text-muted-foreground uppercase">
+            <h3 className="atlas-rubric flex items-center gap-1.5 px-1.5 pb-1 text-[0.6875rem] uppercase">
               <Layers className="size-3" /> {level.name}
               <span className="ml-auto normal-case tabular-nums">
                 {list.length}

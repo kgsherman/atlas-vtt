@@ -66,7 +66,7 @@ export function LevelRail({
   return (
     <HudPanel className="flex w-48 flex-col gap-0.5 p-1">
       <div className="flex items-center justify-between px-2 pt-1 pb-0.5">
-        <span className="flex items-center gap-1.5 text-[0.6875rem] font-medium tracking-wide text-muted-foreground uppercase">
+        <span className="atlas-rubric flex items-center gap-1.5 text-[0.6875rem] uppercase">
           <Layers className="size-3" /> Levels
         </span>
         <span className="flex gap-0.5">

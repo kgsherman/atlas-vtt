@@ -46,9 +46,8 @@ import { keysOf } from "@/lib/keymap"
 import { PLAY_COMMANDS, PLAY_POINTER_HELP, type PlayTool } from "@/play"
 import type { Quality } from "@/render/contracts"
 
-/** Frosted panel look for everything floating over the map. */
-export const glass =
-  "border bg-card/85 shadow-lg shadow-black/25 backdrop-blur-md"
+/** Gilt-framed, frosted panel look for everything floating over the map. */
+export const glass = "atlas-gilt-frame atlas-sheen bg-card/88 backdrop-blur-md"
 
 export function HudPanel({ className, ...props }: React.ComponentProps<"div">) {
   return (
