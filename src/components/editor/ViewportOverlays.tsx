@@ -111,7 +111,7 @@ export function LevelSwitcher() {
 }
 
 /** Pixel layout of the level axis: label pitch, top/bottom padding, least height, axis and label x. */
-const AXIS = { row: 26, pad: 14, minHeight: 200, x: 30, labelX: 54, width: 208 }
+const AXIS = { row: 30, pad: 16, minHeight: 200, x: 30, labelX: 54, width: 212 }
 
 /**
  * Every level as a point on a vertical elevation axis, with a label (visibility eye + name) leading off
@@ -186,7 +186,7 @@ function LevelAxis() {
                 render={
                   <Button
                     variant="outline"
-                    size="icon-sm"
+                    size="icon"
                     aria-label={visible ? `Hide ${level.name}` : `Show ${level.name}`}
                     className={cn("text-muted-foreground", !visible && "text-muted-foreground/50")}
                     onClick={() => store.getState().toggleLevelVisibility(level.id)}
@@ -204,7 +204,7 @@ function LevelAxis() {
                     variant={active ? "selected" : "outline"}
                     size="sm"
                     aria-pressed={active}
-                    className="max-w-32 justify-start"
+                    className="h-7 max-w-32 justify-start"
                     onClick={() => store.getState().setActiveLevel(level.id)}
                   />
                 }
