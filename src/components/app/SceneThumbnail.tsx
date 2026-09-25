@@ -17,13 +17,15 @@ export interface SceneThumbnailProps {
   className?: string
   /** Darker veil + stronger light pools (hero), or the card default. */
   mood?: "card" | "night"
+  /** Fit the whole level in the box (letterboxed), or fill the box and crop the overflow. */
+  fit?: "contain" | "cover"
 }
 
 function svgId(raw: string): string {
   return raw.replace(/[^A-Za-z0-9_-]/g, "")
 }
 
-export const SceneThumbnail = React.memo(function SceneThumbnail({ level, palette, cellSize, image, className, mood = "card" }: SceneThumbnailProps) {
+export const SceneThumbnail = React.memo(function SceneThumbnail({ level, palette, cellSize, image, className, mood = "card", fit = "contain" }: SceneThumbnailProps) {
   const uid = svgId(React.useId())
   const [bx, bz, bw, bd] = level.bounds
   const color = (i: number) => palette[i] ?? "#888888"
@@ -35,7 +37,7 @@ export const SceneThumbnail = React.memo(function SceneThumbnail({ level, palett
   return (
     <svg
       viewBox={`${bx} ${bz} ${bw} ${bd}`}
-      preserveAspectRatio="xMidYMid meet"
+      preserveAspectRatio={fit === "cover" ? "xMidYMid slice" : "xMidYMid meet"}
       className={cn("block size-full", className)}
       role="img"
       aria-label={`Top-down view of ${level.name || "the scene"}`}

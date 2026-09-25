@@ -133,26 +133,21 @@ export function SceneCard({ scene, busy, disabled: otherBusy = false, onAction, 
 }
 
 /**
- * A library scene's thumbnail from the digest cache (useSceneDigest): its primary level over the same
- * map image blurred, a placeholder while it loads, or a notice when it can't be read. Fills its box.
+ * A library scene's thumbnail from the digest cache (useSceneDigest): its primary level, a placeholder
+ * while it loads, or a notice when it can't be read. Fills its box, cropping whatever overflows it.
  */
 export function SceneCardPreview({ entry, status, thumbnailClassName }: { entry: DigestEntry | null; status: DigestStatus; thumbnailClassName?: string }) {
   const digest = entry?.digest
   if (digest)
     return (
-      <>
-        {entry?.image && (
-          // Letterbox fill for maps whose shape differs from the card: the same map, blurred.
-          <img src={entry.image} alt="" aria-hidden className="absolute inset-0 size-full scale-125 object-cover opacity-45 blur-2xl" />
-        )}
-        <SceneThumbnail
-          level={digest.primary}
-          palette={digest.palette}
-          cellSize={digest.grid.cellSize}
-          image={entry?.image}
-          className={cn("relative", thumbnailClassName)}
-        />
-      </>
+      <SceneThumbnail
+        level={digest.primary}
+        palette={digest.palette}
+        cellSize={digest.grid.cellSize}
+        image={entry?.image}
+        fit="cover"
+        className={cn("relative", thumbnailClassName)}
+      />
     )
   if (status === "error")
     return (
