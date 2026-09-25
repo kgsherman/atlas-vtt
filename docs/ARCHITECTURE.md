@@ -72,9 +72,9 @@ renderer load only in the first three; the home, join, shared-scene and token ma
 UI rule: compose from shadcn components in `src/components/ui` (preset `b5UKukPFuS` → style `base-mira`,
 Base UI primitives, Outfit + Roboto Slab, lucide). Dark theme first.
 
-Theme ("gilded", `src/index.css`): cool slate-blue surfaces and parchment text; teal (`--primary`) marks the
-current selection and live state; gold (`--gilt-*`) is an accent only, for frames, corner filigree, section
-headings and the primary action. The semi-skeuomorphic pieces are `atlas-*` utilities (`atlas-gilt-frame`,
+Theme ("gilded", `src/index.css`): cool slate-blue surfaces, neutral white text and grey section
+headings; teal (`--primary`) marks the current selection and live state; gold (`--gilt-*`) is an accent only,
+for frames, corner filigree and the primary action. The semi-skeuomorphic pieces are `atlas-*` utilities (`atlas-gilt-frame`,
 `atlas-filigree`, `atlas-framed`, `atlas-decision`, `atlas-rubric`, …) used by the ui components, so screens
 pick the look up through the components rather than styling it themselves. Button roles follow Crusader
 Kings III: `default` is the primary action (a bronze plate in a gold frame), `outline` a secondary one

@@ -9,23 +9,25 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* "Gilded" theme: deep slate-blue and verdigris panels, parchment ink, and gold used only as an accent (frames,
-   filigree, section headings, the primary action). Teal (--primary) marks selection and "live" state. */
+/* "Gilded" theme: deep slate-blue and verdigris panels, neutral white ink, grey section headings, and gold used
+   only as an accent (frames, filigree, the primary action). Teal (--primary) marks selection and "live" state. */
 :root {
     --background: oklch(0.955 0.008 225);
-    --foreground: oklch(0.24 0.03 240);
+    --foreground: oklch(0.141 0.005 285.823);
     --card: oklch(0.985 0.012 88);
-    --card-foreground: oklch(0.24 0.03 240);
+    --card-foreground: oklch(0.141 0.005 285.823);
     --popover: oklch(0.985 0.012 88);
-    --popover-foreground: oklch(0.24 0.03 240);
+    --popover-foreground: oklch(0.141 0.005 285.823);
     --primary: oklch(0.5 0.085 190);
     --primary-foreground: oklch(0.98 0.015 88);
     --secondary: oklch(0.93 0.012 220);
-    --secondary-foreground: oklch(0.26 0.03 240);
+    --secondary-foreground: oklch(0.21 0.006 285.885);
     --muted: oklch(0.93 0.01 220);
     --muted-foreground: oklch(0.5 0.025 235);
+    /* Section headings (atlas-rubric). */
+    --rubric: oklch(0.552 0.016 285.938);
     --accent: oklch(0.91 0.02 205);
-    --accent-foreground: oklch(0.24 0.03 240);
+    --accent-foreground: oklch(0.21 0.006 285.885);
     --destructive: oklch(0.52 0.18 27);
     /* Caution (e.g. a wounded creature's health bar): amber. */
     --warning: oklch(0.62 0.16 55);
@@ -43,11 +45,11 @@
     --chart-5: oklch(0.32 0.04 240);
     --radius: 0.4rem;
     --sidebar: oklch(0.94 0.01 222);
-    --sidebar-foreground: oklch(0.24 0.03 240);
+    --sidebar-foreground: oklch(0.141 0.005 285.823);
     --sidebar-primary: oklch(0.55 0.12 65);
     --sidebar-primary-foreground: oklch(0.98 0.015 88);
     --sidebar-accent: oklch(0.91 0.02 205);
-    --sidebar-accent-foreground: oklch(0.24 0.03 240);
+    --sidebar-accent-foreground: oklch(0.21 0.006 285.885);
     --sidebar-border: oklch(0.45 0.04 235 / 18%);
     --sidebar-ring: oklch(0.62 0.11 75);
     --filigree-tl: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none' stroke='black' stroke-width='1.1' stroke-linecap='round'%3E%3Cpath d='M1.5 24V7Q1.5 1.5 7 1.5H24'/%3E%3Cpath d='M5 16C5 9 9 5 16 5'/%3E%3Cpath d='M24 1.5c3 0 4 2.6 2.4 3.6c-1 .6-2.2-.2-1.6-1.2'/%3E%3Cpath d='M1.5 24c0 3 2.6 4 3.6 2.4c.6-1-.2-2.2-1.2-1.6'/%3E%3Cpath d='M16 5c2 0 3 1.4 2.2 2.4'/%3E%3Cpath d='M5 16c0 2 1.4 3 2.4 2.2'/%3E%3Cpath d='M4.6 2.9L6.3 4.6L4.6 6.3L2.9 4.6Z' fill='black' stroke='none'/%3E%3C/svg%3E");
@@ -76,19 +78,20 @@
 
 .dark {
     --background: oklch(0.155 0.02 238);
-    --foreground: oklch(0.93 0.022 88);
+    --foreground: oklch(0.985 0 0);
     --card: oklch(0.198 0.026 232);
-    --card-foreground: oklch(0.93 0.022 88);
+    --card-foreground: oklch(0.985 0 0);
     --popover: oklch(0.212 0.028 230);
-    --popover-foreground: oklch(0.93 0.022 88);
+    --popover-foreground: oklch(0.985 0 0);
     --primary: oklch(0.56 0.09 185);
     --primary-foreground: oklch(0.97 0.02 88);
     --secondary: oklch(0.265 0.032 226);
-    --secondary-foreground: oklch(0.93 0.022 88);
+    --secondary-foreground: oklch(0.985 0 0);
     --muted: oklch(0.245 0.028 230);
     --muted-foreground: oklch(0.72 0.025 225);
+    --rubric: oklch(0.705 0.015 286.067);
     --accent: oklch(0.3 0.04 212);
-    --accent-foreground: oklch(0.95 0.025 88);
+    --accent-foreground: oklch(0.985 0 0);
     --destructive: oklch(0.66 0.17 28);
     --warning: oklch(0.78 0.15 65);
     --border: oklch(0.78 0.04 220 / 13%);
@@ -100,11 +103,11 @@
     --chart-4: oklch(0.43 0.06 220);
     --chart-5: oklch(0.32 0.04 235);
     --sidebar: oklch(0.185 0.024 234);
-    --sidebar-foreground: oklch(0.93 0.022 88);
+    --sidebar-foreground: oklch(0.985 0 0);
     --sidebar-primary: oklch(0.84 0.12 86);
     --sidebar-primary-foreground: oklch(0.22 0.04 55);
     --sidebar-accent: oklch(0.3 0.04 212);
-    --sidebar-accent-foreground: oklch(0.95 0.025 88);
+    --sidebar-accent-foreground: oklch(0.985 0 0);
     --sidebar-border: oklch(0.78 0.04 220 / 13%);
     --sidebar-ring: oklch(0.74 0.1 78);
     --gilt-hi: oklch(0.9 0.09 92);
@@ -345,5 +348,5 @@
 @utility atlas-rubric {
   font-weight: 600;
   letter-spacing: 0.1em;
-  color: var(--foreground);
+  color: var(--rubric);
 }
