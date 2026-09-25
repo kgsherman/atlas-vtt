@@ -5,6 +5,7 @@
  */
 import { z } from "zod"
 
+import { AREA_LIMITS, AREA_SHAPES } from "../area/types"
 import { MAX_PATH_STEPS } from "../movement"
 import { HP_LIMITS, TOKEN_CONDITIONS } from "../scene/tokenStatus"
 import { TABLE_LIMITS } from "./table"
@@ -123,6 +124,25 @@ const tokenImageSchema = z.strictObject({
   imageUrl: z.string().min(1).max(MAX_TOKEN_IMAGE_URL).nullable(),
 })
 
+/** An area of effect as a player places it (the host normalises it; core/session/templates.ts). */
+const templateInputSchema = z.strictObject({
+  shape: z.enum(AREA_SHAPES),
+  levelId: idSchema,
+  x: worldCoord,
+  z: worldCoord,
+  elevation: z.number().min(0).max(AREA_LIMITS.maxElevation),
+  angle: z.number().min(-10).max(10),
+  size: z.number().min(AREA_LIMITS.minSize).max(AREA_LIMITS.maxSize),
+  width: z.number().min(AREA_LIMITS.minWidth).max(AREA_LIMITS.maxWidth),
+  height: z.number().min(AREA_LIMITS.minHeight).max(AREA_LIMITS.maxHeight),
+  label: z.string().max(AREA_LIMITS.maxLabel * 2),
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  tokenId: idSchema.nullable(),
+})
+
+const templateSchema = z.strictObject({ t: z.literal("template"), reqId: tokenSchema, id: idSchema.optional(), template: templateInputSchema })
+const templateRemoveSchema = z.strictObject({ t: z.literal("template-remove"), reqId: tokenSchema, id: idSchema })
+
 export const clientMessageSchema = z.discriminatedUnion("t", [
   helloSchema,
   moveSchema,
@@ -135,6 +155,8 @@ export const clientMessageSchema = z.discriminatedUnion("t", [
   pingSchema,
   tokenStatusSchema,
   tokenImageSchema,
+  templateSchema,
+  templateRemoveSchema,
 ])
 
 /** Strict zod parse of an untrusted player message (limits enforced). null = drop silently. */

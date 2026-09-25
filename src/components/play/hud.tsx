@@ -1,7 +1,7 @@
 /**
  * Floating HUD building blocks shared by the player view and the DM's live view: glass panels, icon
  * buttons with tooltips + shortcuts, the camera dock (rotate, zoom, grid, recentre, render quality), the tool
- * switch (move / measure) and the keyboard help popover.
+ * switch (move / measure / area of effect) and the keyboard help popover.
  */
 import * as React from "react"
 import {
@@ -12,6 +12,7 @@ import {
   Minus,
   MousePointer2,
   Plus,
+  Radius,
   RotateCcw,
   RotateCw,
   Ruler,
@@ -234,7 +235,7 @@ export function CameraDock({
   )
 }
 
-/** Move / Measure switch. */
+/** Move / Measure / Area switch. */
 export function ToolSwitch({
   tool,
   onTool,
@@ -288,6 +289,23 @@ export function ToolSwitch({
         <TooltipContent side={side}>
           Drag to measure; Shift-drag adds a leg{" "}
           <CommandKbd scope="play" command="measure" />
+        </TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <ToggleGroupItem
+              value="template"
+              aria-label="Area of effect"
+              className="h-7 gap-1.5 px-2 text-xs aria-pressed:bg-primary aria-pressed:text-primary-foreground data-[pressed]:bg-primary data-[pressed]:text-primary-foreground"
+            />
+          }
+        >
+          <Radius className="size-3.5" /> Area
+        </TooltipTrigger>
+        <TooltipContent side={side}>
+          Place a spell's area of effect: see who it catches{" "}
+          <CommandKbd scope="play" command="template" />
         </TooltipContent>
       </Tooltip>
     </ToggleGroup>

@@ -20,6 +20,8 @@
  * Table requests (say, roll, initiative, end-turn) go to core/session/table.ts, token-status (a player's
  * own hit points and conditions) to core/session/tokenStatus.ts.
  *
+ * Templates (areas of effect: place, move or remove one's own) go to core/session/templates.ts.
+ *
  * Token images (Token Maker): ownership first (as for moves), then the image must be in the player's
  * own folder of the token image store (`tokenImageBase`), else "invalid". Movement locks do not apply:
  * it changes how the token looks, not where it is.
@@ -43,6 +45,7 @@ import {
   type RequestOutcome,
 } from "./state"
 import { defaultTableContext, reduceTableRequest, type TableContext } from "./table"
+import { reduceTemplateRequest } from "./templates"
 import { reduceTokenStatus } from "./tokenStatus"
 import { playerTokenImageAllowed } from "./tokenImages"
 import type { ClientToHost, GameState, PlayerView, RejectReason, RequestResult } from "./types"
@@ -264,5 +267,8 @@ export function reduceRequest(state: GameState, userId: string, msg: StateReques
       return reduceTokenStatus(state, userId, msg)
     case "token-image":
       return reduceTokenImage(state, userId, msg, ctx)
+    case "template":
+    case "template-remove":
+      return reduceTemplateRequest(state, userId, msg, { currentView: ctx.currentView, table: ctx.table ?? defaultTableContext() })
   }
 }

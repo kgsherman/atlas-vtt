@@ -13,6 +13,7 @@ export type PlayKeyAction =
   | { type: "cycle-token"; dir: 1 | -1 }
   | { type: "tool"; tool: "move" | "measure" }
   | { type: "toggle-measure" }
+  | { type: "toggle-template" }
   | { type: "focus-selected" }
   | { type: "toggle-grid" }
   | { type: "level"; delta: 1 | -1 }
@@ -86,6 +87,12 @@ export const PLAY_COMMANDS: PlayCommand[] = [
     label: "Measure tool",
     keys: ["M"],
     action: { type: "toggle-measure" },
+  },
+  {
+    id: "template",
+    label: "Area of effect tool",
+    keys: ["T"],
+    action: { type: "toggle-template" },
   },
   {
     id: "toggle-grid",

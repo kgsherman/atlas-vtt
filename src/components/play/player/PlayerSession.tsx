@@ -13,7 +13,10 @@
  *    for moves this client did not make (tokenRouter);
  *  - results → toasts with friendly reasons;
  *  - the table: chat and dice (ChatDock; the host rolls), the initiative order (TurnStrip, turn ring
- *    on the acting token), and pings (a long press; others' pings arrive from the host).
+ *    on the acting token), and pings (a long press; others' pings arrive from the host);
+ *  - areas of effect (TemplateLayer): the view's templates and the one being placed, with what they
+ *    reach computed against the planner's occlusion world (only what this player knows); placing,
+ *    moving and removing one's own go to the host as requests.
  */
 import * as React from "react"
 import { toast } from "sonner"
@@ -50,8 +53,12 @@ import {
   tokensInReach,
   unexploredIn,
   cycleToken,
+  playerTemplateItems,
+  specOf,
+  templateInput,
   type ClimbOption,
   type PlayTool,
+  type TemplateView,
 } from "@/play"
 import { backdropTexelBudget } from "@/render"
 import type { Engine, Quality } from "@/render/contracts"
@@ -74,6 +81,8 @@ import { entriesFromView } from "../table/chatModel"
 import { levelShown, playerTurnOrder } from "../table/combatModel"
 import { playerBadgeTokens, useStableBadges } from "../table/healthModel"
 import { PingLayer, TokenBadges, TurnMarker } from "../table/MapMarkers"
+import { TemplateLayer } from "../table/TemplateLayer"
+import { TemplateCard, TemplatePicker } from "../table/TemplatePanels"
 import {
   linkTokens,
   requestTokenImage,
@@ -254,6 +263,14 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
           if (hint) toast.info(hint, { id: "ping-offline" })
           else client.ping(levelId, { x: point.x, z: point.z })
         },
+        onTemplate: (d, spec) => {
+          const hint = offlineHint(live.get().snap)
+          if (hint) {
+            toast.info(hint, { id: "template-offline" })
+            return
+          }
+          client.placeTemplate(templateInput(d, spec), d.editing ?? undefined)
+        },
       })
   )
   React.useEffect(
@@ -263,6 +280,20 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
   React.useEffect(
     () => controller.subscribe(() => setTool(controller.getTool())),
     [controller]
+  )
+
+  // ---- areas of effect ---------------------------------------------------------------------------------
+  const templateItems = React.useMemo(
+    () => playerTemplateItems(view),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [view?.templates]
+  )
+  const [templateId, setTemplateId] = React.useState<Id | null>(null)
+  const [templateView, setTemplateView] = React.useState<TemplateView | null>(
+    null
+  )
+  const templateSpec = React.useSyncExternalStore(controller.subscribe, () =>
+    controller.getTemplateSpec()
   )
 
   // ---- Token Maker link: a Token Maker tab re-skins this player's tokens through this table ---------
@@ -385,6 +416,11 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
       case "toggle-measure":
         controller.setTool(
           controller.getTool() === "measure" ? "move" : "measure"
+        )
+        return
+      case "toggle-template":
+        controller.setTool(
+          controller.getTool() === "template" ? "move" : "template"
         )
         return
       case "tool":
@@ -515,6 +551,18 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
           scene={scene}
           onFocus={(p) => engine?.focus(p)}
         />
+        <TemplateLayer
+          controller={controller}
+          scene={scene}
+          items={templateItems}
+          world={() => planner.occlusion()}
+          selectedId={templateId}
+          onSelect={setTemplateId}
+          onSelectedView={setTemplateView}
+          showOn={(levelId) =>
+            scene ? levelShown(scene, activeLevelId, levelId) : false
+          }
+        />
         {turn?.activeTokenId &&
         scene &&
         Object.hasOwn(scene.tokens, turn.activeTokenId) ? (
@@ -561,6 +609,38 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
             onFocusToken={(id) => focusToken(id)}
             onTokenStatus={(tokenId, change) =>
               client.changeTokenStatus(tokenId, change)
+            }
+            toolPanel={
+              tool === "template" ? (
+                <TemplatePicker
+                  spec={templateSpec}
+                  onSpec={(s) => controller.setTemplateSpec(s)}
+                  onClose={() => controller.setTool("move")}
+                />
+              ) : null
+            }
+            sidePanel={
+              templateView ? (
+                <TemplateCard
+                  view={templateView}
+                  scene={scene}
+                  role="player"
+                  onClose={() => setTemplateId(null)}
+                  onMove={() =>
+                    controller.editTemplate(
+                      templateView.id,
+                      specOf(templateView),
+                      templateView.source.angle
+                    )
+                  }
+                  onRemove={() => {
+                    client.removeTemplate(templateView.id)
+                    setTemplateId(null)
+                  }}
+                  onFocusToken={(id) => focusToken(id)}
+                  disabled={offlineHint(snap) !== null}
+                />
+              ) : null
             }
             camera={{
               onRotate: (q) => engine?.rotateCamera(q),

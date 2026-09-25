@@ -11,7 +11,7 @@ import { PortraitAtlas, slotUv } from "./portraits"
 import { chooseLod, TokenModelLibrary, type TokenModel } from "./tokenModels"
 import { TOKEN_FADE_MS, TokenLayer } from "./tokens"
 
-const overlays = (o: Partial<OverlayState> = {}): OverlayState => ({ selectedIds: [], hoveredId: null, preview: null, ruler: null, pendingMoves: {}, dragGhosts: {}, ...o })
+const overlays = (o: Partial<OverlayState> = {}): OverlayState => ({ selectedIds: [], hoveredId: null, preview: null, ruler: null, pendingMoves: {}, dragGhosts: {}, templates: [], ...o })
 
 function setup() {
   const scene: Scene = createScene({ width: 10, depth: 10 })

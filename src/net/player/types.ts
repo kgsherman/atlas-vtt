@@ -23,7 +23,7 @@ export type PlayerStatus =
 
 export interface PendingRequest {
   reqId: string
-  kind: "move" | "jump" | "door" | "say" | "roll" | "initiative" | "end-turn" | "token-status" | "token-image"
+  kind: "move" | "jump" | "door" | "say" | "roll" | "initiative" | "end-turn" | "token-status" | "token-image" | "template" | "template-remove"
   tokenId?: Id
   path?: PathStep[]
   doorId?: Id

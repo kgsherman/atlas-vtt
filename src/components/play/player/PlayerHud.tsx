@@ -100,6 +100,10 @@ export interface PlayerHudProps {
   onFocusToken(tokenId: Id): void
   /** Change one of our characters' hit points (damage, healing, temporary) or conditions. */
   onTokenStatus(tokenId: Id, change: TokenStatusChange): void
+  /** Shown above the tool dock (the Template tool's picker). */
+  toolPanel?: React.ReactNode
+  /** Shown under the character card (the selected area of effect). */
+  sidePanel?: React.ReactNode
 }
 
 export function PlayerHud({
@@ -118,6 +122,8 @@ export function PlayerHud({
   onRollInitiative,
   onFocusToken,
   onTokenStatus,
+  toolPanel,
+  sidePanel,
 }: PlayerHudProps) {
   const view = snap.view!
   const mine = presentTokens(scene, view.controlledTokenIds)
@@ -155,6 +161,7 @@ export function PlayerHud({
             statusDisabled={chat.disabledReason !== null}
           />
         ) : null}
+        {sidePanel}
       </div>
 
       {/* top-centre: the initiative order, then status banners (clear of the left column) */}
@@ -196,6 +203,11 @@ export function PlayerHud({
 
       {/* bottom-centre: tools (the switch stays put; contextual actions dock to its right) */}
       <div className="absolute bottom-3 left-1/2 -translate-x-1/2">
+        {toolPanel ? (
+          <div className="absolute bottom-full left-1/2 mb-2 -translate-x-1/2">
+            {toolPanel}
+          </div>
+        ) : null}
         <HudPanel className="flex items-center p-1">
           <ToolSwitch tool={tool} onTool={onTool} />
         </HudPanel>
@@ -455,6 +467,8 @@ function climbLabel(c: ClimbOption): string {
 }
 
 function cardHint(tool: PlayTool, climbs: ClimbOption[]): string {
+  if (tool === "template")
+    return "Area of effect: choose it below, then place it on the map. The creatures it reaches are ringed."
   if (tool === "measure")
     return "Measuring: press and drag from a point to measure. Hold Shift when you press to add another leg. Esc clears it."
   if (climbs.length > 0) {

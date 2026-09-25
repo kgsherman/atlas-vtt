@@ -5,6 +5,7 @@
  */
 import { z } from "zod"
 
+import { AREA_LIMITS, AREA_SHAPES } from "../area/types"
 import { rollResultSchema } from "../dice/schema"
 import { tokenConditionsSchema, tokenHpSchema } from "../scene/tokenStatus"
 import { TOKEN_MODEL_REF_RE } from "../scene/tokenModel"
@@ -292,6 +293,26 @@ export const playerTableSchema = z.strictObject({
     .nullable(),
 })
 
+/** An area of effect as one player sees it (filter.ts playerTemplates): the placer by name only. */
+export const playerTemplateSchema = z.strictObject({
+  id,
+  shape: z.enum(AREA_SHAPES),
+  levelId: id,
+  x: num,
+  z: num,
+  elevation: z.number().min(0).max(AREA_LIMITS.maxElevation),
+  angle: num,
+  size: z.number().min(AREA_LIMITS.minSize).max(AREA_LIMITS.maxSize),
+  width: z.number().min(AREA_LIMITS.minWidth).max(AREA_LIMITS.maxWidth),
+  height: z.number().min(AREA_LIMITS.minHeight).max(AREA_LIMITS.maxHeight),
+  label: z.string().max(AREA_LIMITS.maxLabel * 2),
+  color,
+  name: z.string().max(TABLE_LIMITS.maxName * 2),
+  mine: z.boolean(),
+  dm: z.boolean(),
+  tokenId: id.nullable(),
+})
+
 export const playerPingSchema = z.strictObject({ levelId: id, x: num, z: num, name: z.string().max(TABLE_LIMITS.maxName * 2), color, focus: z.boolean() })
 
 export const playerViewSchema = z.strictObject({
@@ -313,6 +334,7 @@ export const playerViewSchema = z.strictObject({
   visionTokenIds: z.array(id),
   flags: z.strictObject({ movementLocked: z.boolean(), sharedVision: z.boolean(), enforceSpeed: z.boolean(), freeMovement: z.boolean().optional() }),
   table: playerTableSchema.optional(),
+  templates: keyedRecord(id, playerTemplateSchema).optional(),
 })
 
 /** Validate an untrusted PlayerView (e.g. a player_views row). null when it does not match exactly. */

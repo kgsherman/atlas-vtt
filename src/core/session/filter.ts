@@ -21,6 +21,8 @@
  *  - table (`playerTable`): the messages this player may read (public ones, their own, whispers to them)
  *    without any user id; the combat entries not hidden by the DM whose token is in this view (or custom
  *    entries), named like the view's tokens, and the acting entry only when it is one of them.
+ *  - templates (`playerTemplates`, areas of effect): those the DM has not hidden, on levels the player knows
+ *    or carried by a token in this view (at that token's position); the placer by name, never by id.
  * Pings (`pingForPlayer`, sent outside the view) reach a player only on levels they know.
  * Masked floors are clipped by their covered rects (floorRects) and sent as plain rect pieces: a floor
  * mask never reaches a player.
@@ -42,7 +44,7 @@ import { connectorsOnly, rememberedFootprint } from "./memory"
 import { MAX_TERRAIN_PROFILE } from "./playerViewSchema"
 import { sanitizeLight, type MemoryFloor } from "./sanitize"
 import { controlledTokenIds, movementLockedFor, own, tokenExistsForPlayers, viewerTokenIds } from "./state"
-import { canRead, TABLE_LIMITS } from "./table"
+import { canRead, DM_NAME, TABLE_LIMITS } from "./table"
 import {
   PLAYER_VIEW_VERSION,
   type GameState,
@@ -58,6 +60,7 @@ import {
   type PlayerPing,
   type PlayerTable,
   type PlayerTableMessage,
+  type PlayerTemplate,
   type PlayerToken,
   type PlayerView,
   type PlayerWall,
@@ -577,6 +580,8 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
   if (Object.keys(backdrops).length > 0) view.backdrops = backdrops
   const table = playerTable(state, userId, tokens, full)
   if (table) view.table = table
+  const templates = playerTemplates(state, userId, tokens, levels)
+  if (templates) view.templates = templates
   return view
 }
 
@@ -667,6 +672,51 @@ function playerTable(state: GameState, userId: string, tokens: Record<Id, Player
   }
   if (n === 0 && combat === null) return null
   return { log, combat }
+}
+
+/**
+ * Areas of effect a player may see (§6.6): not hidden by the DM, and carried by a token in this view (at
+ * its position) or standing on a level the view shows as explored. Built field by field: the placer
+ * appears by name only (never a user id). null when there is none.
+ */
+function playerTemplates(state: GameState, userId: string, tokens: Record<Id, PlayerToken>, levels: Record<Id, PlayerLevel>): Record<Id, PlayerTemplate> | null {
+  const list = state.templates
+  if (!list || list.length === 0) return null
+  const out: Record<Id, PlayerTemplate> = {}
+  let any = false
+  for (const t of list) {
+    if (t.hidden) continue
+    let levelId = t.levelId
+    let x = t.x
+    let z = t.z
+    if (t.tokenId !== null) {
+      const carrier = own(tokens, t.tokenId)
+      if (!carrier) continue
+      levelId = carrier.levelId
+      x = carrier.position.x
+      z = carrier.position.z
+    } else if (own(levels, t.levelId)?.known !== true) continue
+    out[t.id] = {
+      id: t.id,
+      shape: t.shape,
+      levelId,
+      x,
+      z,
+      elevation: t.elevation,
+      angle: t.angle,
+      size: t.size,
+      width: t.width,
+      height: t.height,
+      label: t.label,
+      color: t.color,
+      name: t.owner === null ? DM_NAME : (own(state.players, t.owner)?.displayName ?? ""),
+      mine: t.owner === userId,
+      dm: t.owner === null,
+      tokenId: t.tokenId,
+    }
+    any = true
+  }
+  return any ? out : null
 }
 
 /** Whether a view shows a level as explored (not a stub): the levels a player may ping on and be pinged on. */

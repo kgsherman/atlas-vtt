@@ -165,6 +165,26 @@ export interface RulerOverlay {
  */
 export type TokenRouter = (tokenId: Id, from: MotionPoint, to: MotionPoint) => MotionPoint[] | null
 
+/**
+ * An area of effect (spell template, ARCHITECTURE §6.6) drawn on the map: the squares it covers on each
+ * level (from core/area computeAreaEffect, drawn on levels that are shown), and its shape's top-down outline
+ * and point of origin on its own level. Arrays keep their identity while unchanged.
+ */
+export interface TemplateOverlay {
+  id: Id
+  /** The level of its point of origin (outline and origin dot). */
+  levelId: Id
+  /** Closed top-down outline (XZ, world feet), draped over the level's ground. */
+  outline: readonly Vec2[]
+  origin: Vec2
+  /** #rrggbb. */
+  color: string
+  /** Covered cells per level id: cell indices j · grid.width + i. */
+  cells: Readonly<Record<Id, readonly number[]>>
+  /** "draft": being placed; "selected": emphasised. Default "normal". */
+  state?: "normal" | "draft" | "selected"
+}
+
 export interface OverlayState {
   selectedIds: Id[]
   hoveredId: Id | null
@@ -174,6 +194,8 @@ export interface OverlayState {
   pendingMoves: Record<Id, PathStep[]>
   /** Token drag previews (token drawn at these positions translucently). */
   dragGhosts: Record<Id, { levelId: Id; position: Vec2 }>
+  /** Areas of effect on the map (drawn under rulers and move paths). */
+  templates: readonly TemplateOverlay[]
 }
 
 // ---------------------------------------------------------------------------

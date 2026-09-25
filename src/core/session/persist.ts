@@ -15,6 +15,7 @@
  */
 import { z } from "zod"
 
+import { AREA_LIMITS, AREA_SHAPES } from "../area/types"
 import { rollResultSchema } from "../dice/schema"
 import { base64ToBytes } from "../scene/heightmap"
 import { idSchema, parseScene } from "../scene/schema"
@@ -23,7 +24,8 @@ import type { EncodedMask } from "../vision/types"
 import { normalizeFreeAssetCategories } from "./freeAssets"
 import { memoryObjectSchema } from "./playerViewSchema"
 import { TABLE_LIMITS } from "./table"
-import { GAME_STATE_VERSION, type GameState, type PlayerObject, type SessionPlayer, type TableState } from "./types"
+import { TEMPLATE_LIMITS } from "./templates"
+import { GAME_STATE_VERSION, type AreaTemplate, type GameState, type PlayerObject, type SessionPlayer, type TableState } from "./types"
 
 export const GAME_STATE_LIMITS = {
   maxPlayers: 256,
@@ -150,6 +152,26 @@ const tableSchema = z.strictObject({
     .nullable(),
 })
 
+const coord = z.number().min(-100_000).max(100_000)
+
+const templateSchema = z.strictObject({
+  id: idSchema,
+  shape: z.enum(AREA_SHAPES),
+  levelId: idSchema,
+  x: coord,
+  z: coord,
+  elevation: z.number().min(0).max(AREA_LIMITS.maxElevation),
+  angle: z.number().min(-Math.PI - 1e-6).max(Math.PI + 1e-6),
+  size: z.number().min(AREA_LIMITS.minSize).max(AREA_LIMITS.maxSize),
+  width: z.number().min(AREA_LIMITS.minWidth).max(AREA_LIMITS.maxWidth),
+  height: z.number().min(AREA_LIMITS.minHeight).max(AREA_LIMITS.maxHeight),
+  owner: userIdSchema.nullable(),
+  label: z.string().max(AREA_LIMITS.maxLabel * 2),
+  color: colorSchema,
+  tokenId: idSchema.nullable(),
+  hidden: z.boolean(),
+})
+
 const gameStateShape = z.strictObject({
   stateVersion: z.literal(GAME_STATE_VERSION),
   sessionId: z.string().min(1).max(GAME_STATE_LIMITS.maxSessionIdLength),
@@ -178,6 +200,8 @@ const gameStateShape = z.strictObject({
   table: tableSchema.optional(),
   // Optional too (absent: players see other creatures' health bands).
   hideWounds: z.boolean().optional(),
+  // Optional too (absent: no areas of effect on the map).
+  templates: z.array(templateSchema).max(TEMPLATE_LIMITS.max).optional(),
 })
 
 export type ParseGameStateResult = { ok: true; state: GameState } | { ok: false; issues: string[] }
@@ -270,6 +294,11 @@ export function parseGameStateDetailed(json: unknown): ParseGameStateResult {
     }
   }
 
+  // ---- templates: those of players who left, on levels or carried by tokens that are gone, are dropped ----
+  const templates: AreaTemplate[] = (raw.templates ?? [])
+    .filter((t) => (t.owner === null || isPlayer(t.owner)) && (t.tokenId === null ? hasLevel(t.levelId) : Object.hasOwn(scene.tokens, t.tokenId)))
+    .map((t) => ({ ...t }))
+
   // ---- revealed: players only, sorted and unique --------------------------------------------
   const revealed = {} as Record<string, Id[]>
   for (const [uid, ids] of Object.entries(raw.revealed)) {
@@ -298,6 +327,7 @@ export function parseGameStateDetailed(json: unknown): ParseGameStateResult {
       ...(raw.freeMovement !== undefined ? { freeMovement: raw.freeMovement } : {}),
       ...(table !== undefined ? { table } : {}),
       ...(raw.hideWounds !== undefined ? { hideWounds: raw.hideWounds } : {}),
+      ...(templates.length > 0 ? { templates } : {}),
     },
   }
 }
@@ -344,5 +374,6 @@ export function serializeGameState(state: GameState): string {
   if (state.freeMovement !== undefined) ordered.freeMovement = state.freeMovement
   if (state.table !== undefined) ordered.table = state.table
   if (state.hideWounds !== undefined) ordered.hideWounds = state.hideWounds
+  if (state.templates !== undefined) ordered.templates = state.templates
   return JSON.stringify(ordered)
 }

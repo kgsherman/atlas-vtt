@@ -1026,6 +1026,14 @@ export class HostRunnerImpl implements HostRunner {
     this.dispatch({ t: "apply-scene-patches", patches })
   }
 
+  /**
+   * The occlusion world of the live scene (null while not hosting). The DM's UI tests areas of effect
+   * against it (core/area); callers must not change it.
+   */
+  occlusion(): OcclusionWorld | null {
+    return this.world
+  }
+
   async previewVisibility(tokenIds: Id[]): Promise<VisibilityResult> {
     const vision = this.vision
     if (!vision) throw new Error("not hosting")
@@ -1060,8 +1068,9 @@ export class HostRunnerImpl implements HostRunner {
       if (conn.pingLimiter.tryTake()) this.handlePing(conn, msg)
       return
     }
-    const chat = msg.t === "say" || msg.t === "roll"
-    if (!conn.limiter.tryTake() || (chat && !conn.tableLimiter.tryTake())) {
+    // Chat, rolls and templates share the table's own rate on top of the request rate.
+    const table = msg.t === "say" || msg.t === "roll" || msg.t === "template"
+    if (!conn.limiter.tryTake() || (table && !conn.tableLimiter.tryTake())) {
       // Replies to a flood are rate-limited too; the rest is dropped without a word.
       if (conn.rejectLimiter.tryTake()) this.pushResult(conn, { reqId: msg.reqId, ok: false, reason: "rate-limited" })
       return

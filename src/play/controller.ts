@@ -16,6 +16,8 @@
  *  - No path (players): the line turns the error colour; released there, the move is STRANDED — its
  *    line and ghost stay and the page offers a jump there (jumpStranded) until it is dismissed.
  *  - Measure tool: press-drag measures from cell centre to cell centre; Shift-press adds a leg.
+ *  - Template tool (areas of effect, ./templateTool): hover shows the area, press places its origin,
+ *    drag aims or moves it, release places it (onTemplate) and returns to the Move tool.
  */
 import {
   anchorPosition,
@@ -39,9 +41,27 @@ import {
 } from "./geometry"
 import { MeasureTool } from "./measure"
 import type { MovePlanner, PlannedMove } from "./planner"
+import {
+  TemplateTool,
+  type TemplateDraft,
+  type TemplatePointer,
+  type TemplateSpec,
+} from "./templateTool"
 
 export type PlayRole = "player" | "dm"
-export type PlayTool = "move" | "measure"
+export type PlayTool = "move" | "measure" | "template"
+
+/** The Template tool's first spec (a 20 ft sphere). */
+export const DEFAULT_TEMPLATE_SPEC: TemplateSpec = {
+  shape: "sphere",
+  size: 20,
+  width: 5,
+  height: 40,
+  color: "#f97316",
+  label: "",
+  elevation: null,
+  aura: false,
+}
 
 /** Pixels the pointer must travel before a press on a token becomes a drag. */
 export const DRAG_THRESHOLD_PX = 5
@@ -121,6 +141,11 @@ export interface PlayControllerHost {
    * "everyone look here"). Absent: long presses do nothing.
    */
   onPing?(levelId: Id, point: Vec3, shift: boolean): void
+  /**
+   * The Template tool placed an area (a new one, or `editing` moved) with the spec it was placed with.
+   * Absent: the tool does nothing.
+   */
+  onTemplate?(draft: TemplateDraft, spec: TemplateSpec): void
   /** Timer for long presses (default setTimeout); returns a cancel function. */
   setTimer?(fn: () => void, ms: number): () => void
 }
@@ -165,6 +190,7 @@ export class PlayController {
   private hovered: Id | null = null
   private drag: DragState | null = null
   private readonly measure = new MeasureTool()
+  private readonly template = new TemplateTool(DEFAULT_TEMPLATE_SPEC)
   private pressed = false
   private listeners = new Set<() => void>()
   private cache: { key: unknown[]; value: PlayOverlays } | null = null
@@ -184,7 +210,8 @@ export class PlayController {
 
   // ---- state --------------------------------------------------------------------------------------
 
-  subscribe(listener: () => void): () => void {
+  /** Listen to state changes (a bound function: pass it to useSyncExternalStore as is). */
+  readonly subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener)
     return () => {
       this.listeners.delete(listener)
@@ -204,8 +231,57 @@ export class PlayController {
     if (tool === this.tool) return
     this.cancel()
     if (tool !== "measure") this.measure.clear()
+    if (tool !== "template") {
+      this.template.clear()
+      this.template.setEditing(null)
+    }
     this.tool = tool
     this.emit()
+  }
+
+  // ---- templates ----------------------------------------------------------------------------------
+
+  getTemplateSpec(): TemplateSpec {
+    return this.template.getSpec()
+  }
+
+  /** What the Template tool places next (the draft on screen follows). */
+  setTemplateSpec(spec: TemplateSpec): void {
+    this.template.setSpec(spec)
+    this.emit()
+  }
+
+  /** The area being placed (hover or drag), for the page to draw; null when there is none. */
+  templateDraft(): TemplateDraft | null {
+    return this.tool === "template" ? this.template.getDraft() : null
+  }
+
+  /** The template being moved (Template tool), or null. */
+  templateEditing(): Id | null {
+    return this.tool === "template" ? this.template.getEditing() : null
+  }
+
+  /** Move an existing template: the Template tool with its spec; the next placement replaces it. */
+  editTemplate(id: Id, spec: TemplateSpec, angle: number): void {
+    this.setTool("template")
+    this.template.setSpec(spec)
+    this.template.setEditing(id, angle)
+    this.emit()
+  }
+
+  private templatePointer(e: PlayPointerEvent): TemplatePointer {
+    const g = e.pick.ground
+    return {
+      ground: g ? { x: g.x, z: g.z } : null,
+      tokenId: e.pick.tokenId,
+      shift: e.shift,
+      alt: e.alt ?? false,
+    }
+  }
+
+  private placeTemplate(draft: TemplateDraft | null): void {
+    if (draft) this.host.onTemplate?.(draft, this.template.getSpec())
+    this.setTool("move")
   }
 
   /** The page owns selection; the controller mirrors it for overlays. */
@@ -346,6 +422,25 @@ export class PlayController {
       this.emit()
       return true
     }
+    if (this.tool === "template") {
+      const placed = this.template.down(
+        scene,
+        levelId,
+        this.templatePointer(e),
+        (id) => this.host.canSelect(id),
+        this.selected
+      )
+      if (placed) {
+        this.pressed = false
+        this.placeTemplate(placed)
+        return true
+      }
+      if (this.template.pressed) this.host.setCameraControls(false)
+      else if (this.template.getSpec().aura)
+        this.host.onHint("Click one of your tokens to give it the aura")
+      this.emit()
+      return true
+    }
     const tokenId = e.pick.tokenId
     if (
       tokenId &&
@@ -435,6 +530,15 @@ export class PlayController {
         this.emit()
       return
     }
+    if (this.tool === "template") {
+      const levelId = this.host.activeLevelId()
+      const p = this.templatePointer(e)
+      const changed = this.template.pressed
+        ? this.template.drag(scene, p)
+        : levelId !== null && this.template.hover(scene, levelId, p)
+      if (changed) this.emit()
+      return
+    }
     const d = this.drag
     if (d) {
       if (!d.started) {
@@ -506,6 +610,11 @@ export class PlayController {
       this.emit()
       return true
     }
+    if (this.tool === "template") {
+      this.host.setCameraControls(true)
+      if (this.template.pressed) this.placeTemplate(this.template.up())
+      return true
+    }
     const d = this.drag
     this.drag = null
     this.host.setCameraControls(true)
@@ -536,6 +645,16 @@ export class PlayController {
 
   /** Escape / lost pointer: abandon the gesture (and clear the ruler and a stranded move). */
   cancel(): void {
+    // Escape leaves the Template tool (dropping the area being placed).
+    if (this.tool === "template") {
+      this.template.clear()
+      this.template.setEditing(null)
+      this.tool = "move"
+      this.pressed = false
+      this.host.setCameraControls(true)
+      this.emit()
+      return
+    }
     const had =
       this.drag !== null ||
       this.pressed ||

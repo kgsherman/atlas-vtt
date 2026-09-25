@@ -29,7 +29,18 @@ import { HP_LIMITS, isTokenCondition, type TokenStatusChange } from "@/core/scen
 import type { Cell, Id, Level, SceneLike, Vec2 } from "@/core/scene/types"
 import { applyPatchOps } from "@/core/session/diff"
 import { parsePlayerView, playerPingSchema } from "@/core/session/playerViewSchema"
-import type { ClientToHost, HostBroadcast, HostToClient, PatchOp, PlayerBackdrop, PlayerPing, PlayerView, RejectReason, RequestResult } from "@/core/session/types"
+import type {
+  AreaTemplateInput,
+  ClientToHost,
+  HostBroadcast,
+  HostToClient,
+  PatchOp,
+  PlayerBackdrop,
+  PlayerPing,
+  PlayerView,
+  RejectReason,
+  RequestResult,
+} from "@/core/session/types"
 import { PROTOCOL_LIMITS } from "@/core/session/protocol"
 import { TABLE_LIMITS } from "@/core/session/table"
 import { viewToScene } from "@/core/session/viewToScene"
@@ -167,6 +178,13 @@ export interface AtlasPlayerClient extends PlayerClient {
   ping(levelId: Id, point: Vec2): boolean
   /** Pings to draw (others' from the host, and our own). */
   onPing(cb: (ev: PingEvent) => void): Unsubscribe
+  /**
+   * Place an area of effect (on a level we know, or carried by one of our tokens), or with `id` move /
+   * change one of our own. Returns the reqId.
+   */
+  placeTemplate(template: AreaTemplateInput, id?: Id): string
+  /** Remove one of our templates. Returns the reqId. */
+  removeTemplate(id: Id): string
   /**
    * Pixel budget of a level's full backdrop canvas (default 32 MP). Pass the engine's texel budget
    * (`backdropTexelBudget(engine.getQualityCeiling())`) so each canvas is uploaded as is; layers whose
@@ -307,7 +325,7 @@ export function sceneChangeFromOps(ops: readonly PatchOp[], prev: PlayerView, ne
         for (const id of [...(prev[head] ?? []), ...(next[head] ?? [])]) tokens.add(id)
         break
       default:
-        // masks, flags, ids: not part of the scene
+        // masks, flags, ids, the table, templates: not part of the scene
         break
     }
   }
@@ -377,6 +395,18 @@ export function describeRequestResult(r: ClientRequestResult): string | null {
         return "Slow down: too many messages"
       default:
         return r.kind === "say" ? "Your message wasn't sent" : "The DM rejected that request"
+    }
+  }
+  if (r.kind === "template" || r.kind === "template-remove") {
+    switch (r.reason) {
+      case "not-owner":
+        return "You don't control that character"
+      case "cannot":
+        return "That template isn't yours"
+      case "rate-limited":
+        return "Slow down: too many requests"
+      default:
+        return r.kind === "template" ? "The DM rejected that template" : "The DM rejected that request"
     }
   }
   if (r.kind === "token-status") {
@@ -1228,6 +1258,23 @@ class PlayerClientImpl implements AtlasPlayerClient {
     }
     if (!msg.hp && !msg.conditions) this.pushResult({ reqId, ok: false, reason: "invalid" }, "invalid", "token-status")
     else this.submit({ reqId, kind: "token-status", tokenId, sentAt: 0 }, msg)
+    this.changed()
+    return reqId
+  }
+
+  /** Place an area of effect, or with `id` move / change one of this player's own (host: core/session/templates). */
+  placeTemplate(template: AreaTemplateInput, id?: Id): string {
+    const reqId = this.newRequestId()
+    const msg: Extract<ClientToHost, { t: "template" }> = { t: "template", reqId, template: { ...template } }
+    if (id !== undefined) msg.id = id
+    this.submit({ reqId, kind: "template", sentAt: 0 }, msg)
+    this.changed()
+    return reqId
+  }
+
+  removeTemplate(id: Id): string {
+    const reqId = this.newRequestId()
+    this.submit({ reqId, kind: "template-remove", sentAt: 0 }, { t: "template-remove", reqId, id })
     this.changed()
     return reqId
   }

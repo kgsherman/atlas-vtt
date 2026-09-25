@@ -5,6 +5,7 @@
  */
 export {
   PlayController,
+  DEFAULT_TEMPLATE_SPEC,
   DRAG_THRESHOLD_PX,
   LONG_PRESS_MS,
   type CommittedMove,
@@ -26,6 +27,27 @@ export {
   type RunBelowTop,
 } from "./planner"
 export { MeasureTool } from "./measure"
+export {
+  DRAFT_ID,
+  hostTemplateItems,
+  inputOf,
+  playerTemplateItems,
+  specOf,
+  TemplateAreas,
+  templateInput,
+  templateTitle,
+  type TemplateItem,
+  type TemplateView,
+} from "./templateAreas"
+export {
+  AIMED_ELEVATION,
+  snapAngle,
+  TemplateTool,
+  tokenEdgePoint,
+  type TemplateDraft,
+  type TemplatePointer,
+  type TemplateSpec,
+} from "./templateTool"
 export { climbOptions, type ClimbOption } from "./connectors"
 export {
   doorAt,

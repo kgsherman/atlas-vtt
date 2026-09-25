@@ -25,6 +25,8 @@ import {
   type TableContext,
 } from "@/core/session/table"
 import type {
+  AreaTemplate,
+  AreaTemplateInput,
   CombatEntry,
   DmCommand,
   GameState,
@@ -100,6 +102,27 @@ export interface HostActions {
   changeTokenStatus(tokenId: Id, change: TokenStatusChange): void
   /** Hide (or show) other creatures' health bands from players. */
   setHideWounds(hidden: boolean): void
+
+  // ---- areas of effect -------------------------------------------------------------------------------
+  /**
+   * Place an area of effect (the DM's), or with `id` change any template (its owner stays). `hidden`:
+   * kept from players (default: unchanged, or shown for a new one). Returns its id, or null when refused.
+   */
+  placeTemplate(
+    template: AreaTemplateInput,
+    opts?: { id?: Id; hidden?: boolean }
+  ): Id | null
+  /** Remove templates (null: every template). */
+  removeTemplates(ids: Id[] | null): void
+  /**
+   * Roll damage for an area ("8d6 Fireball", a public roll in the log) and deal it to the targets whose
+   * hit points are tracked, halved (rounded down) for those that saved. Returns the total, or why the
+   * dice can't be read.
+   */
+  rollAreaDamage(
+    input: string,
+    targets: { tokenId: Id; half: boolean }[]
+  ): { ok: true; total: number; hit: number } | { ok: false; error: string }
 }
 
 export function createHostActions(
@@ -375,6 +398,47 @@ export function createHostActions(
         { t: "set-hide-wounds", hidden },
         "Couldn't change what players see of wounds"
       )
+    },
+    placeTemplate(template, opts = {}) {
+      const cur =
+        opts.id === undefined
+          ? undefined
+          : getState()?.templates?.find((t) => t.id === opts.id)
+      const t: AreaTemplate = {
+        ...template,
+        id: cur?.id ?? newId(),
+        owner: cur ? cur.owner : null,
+        hidden: opts.hidden ?? cur?.hidden ?? false,
+      }
+      return dispatch(
+        { t: "template-set", template: t },
+        "Couldn't place the template"
+      )
+        ? t.id
+        : null
+    },
+    rollAreaDamage(input, targets) {
+      const r = dmRollCommand(input, "all", ctx())
+      if (!r.ok) return r
+      if (!dispatch(r.cmd, "Couldn't roll"))
+        return { ok: false, error: "Couldn't roll" }
+      const tokens = scene()?.tokens ?? {}
+      let hit = 0
+      for (const { tokenId, half } of targets) {
+        const t = Object.hasOwn(tokens, tokenId) ? tokens[tokenId] : null
+        if (!t?.hp) continue
+        const amount = Math.max(0, half ? Math.floor(r.total / 2) : r.total)
+        if (amount < 1) continue
+        dispatch(
+          { t: "change-token-status", tokenId, hp: { kind: "damage", amount } },
+          "Couldn't change the token"
+        )
+        hit++
+      }
+      return { ok: true, total: r.total, hit }
+    },
+    removeTemplates(ids) {
+      dispatch({ t: "template-delete", ids }, "Couldn't remove the template")
     },
     resetFog(userId) {
       if (

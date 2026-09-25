@@ -15,7 +15,7 @@ import { connectorForward, connectorGround, lightLevelId, lightWorldPosition } f
 import type { Id, SceneLike, Vec3 } from "@/core/scene/types"
 
 import type { GroundSampler } from "../builders/ground"
-import type { OverlayState, RulerOverlay, ToolPreview, ViewState } from "../contracts"
+import type { OverlayState, RulerOverlay, TemplateOverlay, ToolPreview, ViewState } from "../contracts"
 import type { LevelPlanEntry } from "../engine/levelPlan"
 import { LAYER } from "../internal"
 import { GridOverlay } from "./grid"
@@ -23,6 +23,7 @@ import { buildOutlines, disposeOutlines, type ObjectMeshRef, type OutlineMesh } 
 import { TextLabel } from "./label"
 import { buildToolPreview, disposePreview } from "./previews"
 import { TerrainOverlayResources } from "./terrainOverlay"
+import { buildTemplate, disposeTemplate, TemplateMaterials } from "./templates"
 import { aaLineGeometry, createAALineMaterial, polylinePairs } from "../materials/aaLineMaterial"
 import { createEdgeAAMaterial, edgeGeometry } from "../materials/edgeAAMaterial"
 import {
@@ -99,7 +100,7 @@ export class OverlayManager {
   readonly gridRoot = new THREE.Group()
   readonly grid = new GridOverlay()
   private readonly host: OverlayHost
-  private state: OverlayState = { selectedIds: [], hoveredId: null, preview: null, ruler: null, pendingMoves: {}, dragGhosts: {} }
+  private state: OverlayState = { selectedIds: [], hoveredId: null, preview: null, ruler: null, pendingMoves: {}, dragGhosts: {}, templates: [] }
 
   // Outlines and rings are anti-aliased screen-space lines, ribbons, dots and end rings fade their own
   // edges (the canvas has no MSAA; materials/aaLineMaterial, materials/edgeAAMaterial).
@@ -131,6 +132,13 @@ export class OverlayManager {
   private rulerDirty = false
   private pending: THREE.Object3D | null = null
   private pendingDirty = false
+  /** Built templates by id, with the overlay they were built from (rebuilt when it changes). */
+  private templates = new Map<Id, { source: TemplateOverlay; root: THREE.Object3D }>()
+  private templatesDirty = false
+  /** Templates must be rebuilt even when unchanged (levels shown, scene or zoom changed). */
+  private templatesStale = false
+  private templateWpp = 0
+  private readonly templateMaterials = new TemplateMaterials()
   /** The terrain overlay's caches, gizmo and label (created with the first terrain preview). */
   private terrain: TerrainOverlayResources | null = null
   private readonly project: Projector = (p) => this.host.project?.(p) ?? null
@@ -161,6 +169,7 @@ export class OverlayManager {
     if (partial.preview !== undefined && partial.preview !== prev.preview) this.updatePreview(partial.preview)
     if (partial.ruler !== undefined && partial.ruler !== prev.ruler) this.rulerDirty = true
     if (partial.pendingMoves !== undefined && partial.pendingMoves !== prev.pendingMoves) this.pendingDirty = true
+    if (partial.templates !== undefined && partial.templates !== prev.templates) this.templatesDirty = true
   }
 
   /** Level meshes were rebuilt or the scene changed. */
@@ -168,6 +177,8 @@ export class OverlayManager {
     this.outlinesDirty = true
     this.helpersDirty = true
     this.pendingDirty = true
+    this.templatesDirty = true
+    this.templatesStale = true
     // (Never clears a pending rebuild: a ruler removed just before a scene change must still go.)
     if (this.state.ruler !== null) this.rulerDirty = true
   }
@@ -176,6 +187,9 @@ export class OverlayManager {
   viewChanged(): void {
     this.helpersDirty = true
     this.outlinesDirty = true
+    // Cells are drawn only on levels that are shown.
+    this.templatesDirty = true
+    this.templatesStale = true
   }
 
   /**
@@ -211,11 +225,20 @@ export class OverlayManager {
       const f = this.host.fade()
       this.grid.setFade(f.x, f.z, f.radius)
     }
-    if (this.outlinesDirty || this.helpersDirty || this.rulerDirty || this.pendingDirty) this.layersDirty = true
+    // Origin dots keep their pixel size: rebuild after the zoom changed by more than a quarter.
+    if (this.templates.size > 0) {
+      const wpp = this.host.worldPerPixel()
+      if (!(wpp > this.templateWpp * 0.75 && wpp < this.templateWpp * 1.33)) {
+        this.templatesDirty = true
+        this.templatesStale = true
+      }
+    }
+    if (this.outlinesDirty || this.helpersDirty || this.rulerDirty || this.pendingDirty || this.templatesDirty) this.layersDirty = true
     if (this.outlinesDirty) this.rebuildOutlines()
     if (this.helpersDirty) this.rebuildHelpers()
     if (this.rulerDirty) this.rebuildRuler()
     if (this.pendingDirty) this.rebuildPending()
+    if (this.templatesDirty) this.rebuildTemplates()
     if (this.layersDirty) this.markLayers()
     // Keep the ruler label at a constant pixel size.
     if (this.rulerLabel?.sprite.visible) this.rulerLabel.updateScale(this.host.worldPerPixelAt(this.rulerLabel.sprite.position))
@@ -405,6 +428,34 @@ export class OverlayManager {
     this.root.add(root)
   }
 
+  /** Rebuild the templates that changed (all of them when stale), drop the ones that went. */
+  private rebuildTemplates(): void {
+    this.templatesDirty = false
+    const stale = this.templatesStale
+    this.templatesStale = false
+    const scene = this.host.scene()
+    const list = scene ? this.state.templates : []
+    const keep = new Set(list.map((t) => t.id))
+    for (const [id, built] of this.templates) {
+      if (!keep.has(id) || stale) {
+        disposeTemplate(built.root)
+        this.templates.delete(id)
+      }
+    }
+    if (!scene || list.length === 0) return
+    const plan = this.host.plan()
+    this.templateWpp = this.host.worldPerPixel()
+    const ctx = { scene, drawn: (levelId: Id) => plan.get(levelId)?.mode === "solid", worldPerPixel: this.templateWpp }
+    for (const t of list) {
+      const built = this.templates.get(t.id)
+      if (built?.source === t) continue
+      if (built) disposeTemplate(built.root)
+      const root = buildTemplate(t, ctx, this.templateMaterials)
+      this.root.add(root)
+      this.templates.set(t.id, { source: t, root })
+    }
+  }
+
   private rebuildHelpers(): void {
     this.helpersDirty = false
     if (this.helpers) {
@@ -516,6 +567,9 @@ export class OverlayManager {
     if (this.preview) disposePreview(this.preview)
     if (this.ruler) disposeTree(this.ruler)
     if (this.pending) disposeTree(this.pending)
+    for (const built of this.templates.values()) disposeTemplate(built.root)
+    this.templates.clear()
+    this.templateMaterials.dispose()
     this.terrain?.dispose()
     this.terrain = null
     if (this.rulerLabel) {

@@ -1,5 +1,6 @@
 import type { Patch } from "immer"
 
+import type { AreaGeometry } from "../area/types"
 import type { RollResult } from "../dice/dice"
 import type { ConditionChange, HealthBand, HpAmountChange, HpChange, TokenCondition, TokenHp } from "../scene/tokenStatus"
 import type { MoveRejectReason, PathStep } from "../movement/types"
@@ -173,6 +174,25 @@ export interface PlayerPing {
   focus: boolean
 }
 
+/**
+ * An area of effect (spell template, ARCHITECTURE §6.6) as one player receives it (filter.ts
+ * `playerTemplates`): never its placer's user id. A template carried by a token is sent only while that
+ * token is in the view, at the token's position.
+ */
+export interface PlayerTemplate extends AreaGeometry {
+  id: Id
+  label: string
+  color: string
+  /** The placer's name ("DM" for the DM). */
+  name: string
+  /** Placed by this player (they may move or remove it). */
+  mine: boolean
+  /** Placed by the DM. */
+  dm: boolean
+  /** The token carrying it (always one in PlayerView.tokens), or null. */
+  tokenId: Id | null
+}
+
 export const PLAYER_VIEW_VERSION = 1 as const
 
 export interface PlayerView {
@@ -205,6 +225,8 @@ export interface PlayerView {
   }
   /** Chat, dice and the initiative order as this player may see them (absent: nothing to show). */
   table?: PlayerTable
+  /** Areas of effect this player may see, keyed by id (absent: none). */
+  templates?: Record<Id, PlayerTemplate>
 }
 
 // ===========================================================================
@@ -270,6 +292,27 @@ export interface TableState {
   combat: Combat | null
 }
 
+/**
+ * An area of effect on the map (a spell template, ARCHITECTURE §6.6): where it is, who placed it and how
+ * it looks. What it reaches is computed by each viewer from the geometry they know (core/area).
+ */
+export interface AreaTemplate extends AreaGeometry {
+  id: Id
+  /** The player who placed it (user id), or null for the DM. */
+  owner: string | null
+  /** Shown next to it ("Fireball"); may be empty. */
+  label: string
+  /** #rrggbb. */
+  color: string
+  /** Carried by this token: levelId, x and z follow it (ignored while carried). */
+  tokenId: Id | null
+  /** The DM's alone: never sent to players. */
+  hidden: boolean
+}
+
+/** What a player sends to place a template (the host fills in the id, owner and visibility). */
+export type AreaTemplateInput = AreaGeometry & Pick<AreaTemplate, "label" | "color" | "tokenId">
+
 export const GAME_STATE_VERSION = 1 as const
 
 /**
@@ -322,6 +365,8 @@ export interface GameState {
   table?: TableState
   /** Players get no health band of creatures they do not control (absent / false: they do). */
   hideWounds?: boolean
+  /** Areas of effect on the map, oldest first (absent: none). */
+  templates?: AreaTemplate[]
 }
 
 // ===========================================================================
@@ -332,7 +377,10 @@ export interface GameState {
 export type PatchOp = { op: "set"; path: string[]; value: unknown } | { op: "del"; path: string[] }
 
 export type DoorRejectReason = "cannot" | "locked"
-/** Table requests: "bad-formula" (the host could not read the dice); "cannot" (not your turn, not in combat…). */
+/**
+ * Table requests: "bad-formula" (the host could not read the dice); "cannot" (not your turn, not in combat,
+ * not your template…).
+ */
 export type TableRejectReason = "bad-formula" | "cannot"
 export type RejectReason = MoveRejectReason | DoorRejectReason | TableRejectReason | "rate-limited" | "invalid"
 
@@ -382,6 +430,13 @@ export type ClientToHost =
    * image must be in the player's own folder of the token image store (core/session/tokenImages.ts).
    */
   | { t: "token-image"; reqId: string; tokenId: Id; imageUrl: string | null }
+  /**
+   * Place an area of effect (spell template), or with `id` move / change one of the player's own. Carried
+   * by `template.tokenId` (a token the player controls) or on a level the player knows.
+   */
+  | { t: "template"; reqId: string; id?: Id; template: AreaTemplateInput }
+  /** Remove one of the player's own templates. */
+  | { t: "template-remove"; reqId: string; id: Id }
 
 /**
  * host → player on topic `session:{sid}:view:{uid}`. `epoch` changes on every host start;
@@ -467,6 +522,10 @@ export type DmCommand =
   | { t: "combat-turn"; delta: 1 | -1; stamp: TableStamp }
   /** Make an entry the acting one (null: nobody). */
   | { t: "combat-set-active"; entryId: Id | null }
+  /** Add an area of effect, or replace the one with its id (the DM may change anyone's). */
+  | { t: "template-set"; template: AreaTemplate }
+  /** Remove templates (ids), or every template (null). */
+  | { t: "template-delete"; ids: Id[] | null }
 
 /** Id and host time for a message a command may post (reducers stay pure). */
 export interface TableStamp {

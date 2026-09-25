@@ -3,8 +3,9 @@
  * the live map in "dm-play" (everything visible, optional vision preview of any token), direct
  * manipulation (select, drag to move, door clicks, right-click menus), the session panel (room code,
  * players, tokens, combat, table rules), the table (chat & dice dock, initiative order, turn ring,
- * pings: a long press, Shift for "everyone look here") and "Edit map" — the full editor tools against
- * the live scene.
+ * pings: a long press, Shift for "everyone look here"), areas of effect (TemplateLayer: everyone's
+ * templates, tested against the host runner's occlusion world; the DM moves, hides, removes and rolls
+ * damage for any of them) and "Edit map" — the full editor tools against the live scene.
  */
 import * as React from "react"
 import { toast } from "sonner"
@@ -36,7 +37,16 @@ import type { Id } from "@/core/scene/types"
 import { playerTokenImageAllowed } from "@/core/session/tokenImages"
 import type { GameState, TableAudience } from "@/core/session/types"
 import { createHostRunner, type HostRunnerImpl } from "@/net/host"
-import { cycleToken, PlayController, type PlayTool } from "@/play"
+import {
+  cycleToken,
+  hostTemplateItems,
+  inputOf,
+  PlayController,
+  specOf,
+  templateInput,
+  type PlayTool,
+  type TemplateView,
+} from "@/play"
 import type { CameraKind, Engine, FrameStats } from "@/render/contracts"
 
 import { CameraDock, HudPanel, ShortcutsButton, ToolSwitch } from "../hud"
@@ -55,6 +65,8 @@ import {
   TurnMarker,
   type MapPing,
 } from "../table/MapMarkers"
+import { TemplateLayer } from "../table/TemplateLayer"
+import { TemplateCard, TemplatePicker } from "../table/TemplatePanels"
 import { TurnStrip } from "../table/TurnStrip"
 import { linkTokens, useGameLink } from "../useTokenMakerLink"
 import {
@@ -230,6 +242,8 @@ function HostConsole({
   const [editor, setEditor] = React.useState<HostEditor | null>(null)
   const [levelChoice, setLevelChoice] = React.useState<Id | null>(null)
   const [selected, setSelected] = React.useState<Id | null>(null)
+  /** The selected area of effect (its card replaces the token card). */
+  const [templateId, setTemplateId] = React.useState<Id | null>(null)
   const [preview, setPreview] = React.useState<Id[] | null>(null)
   const [keysOpen, setKeysOpen] = React.useState(false)
   const [previewInfo, setPreviewInfo] = React.useState<PreviewInfo | null>(null)
@@ -374,6 +388,16 @@ function HostConsole({
           if (live.get().hosting)
             actions.ping(levelId, { x: point.x, z: point.z }, shift)
         },
+        onTemplate: (d, spec) => {
+          const id = actions.placeTemplate(
+            templateInput(d, spec),
+            d.editing ? { id: d.editing } : {}
+          )
+          if (id) {
+            setTemplateId(id)
+            setSelected(null)
+          }
+        },
       })
   )
   React.useEffect(
@@ -384,6 +408,26 @@ function HostConsole({
     () => controller.subscribe(() => setTool(controller.getTool())),
     [controller]
   )
+
+  // ---- areas of effect ---------------------------------------------------------------------------------
+  const templateItems = React.useMemo(
+    () => hostTemplateItems(state),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.templates, state.players]
+  )
+  const [templateView, setTemplateView] = React.useState<TemplateView | null>(
+    null
+  )
+  const templateSpec = React.useSyncExternalStore(controller.subscribe, () =>
+    controller.getTemplateSpec()
+  )
+  // One card at a time at the bottom left: a token or an area.
+  const selectTemplate = React.useCallback((id: Id | null) => {
+    setTemplateId(id)
+    if (id) setSelected(null)
+  }, [])
+  // A selected token takes the card's place.
+  const shownTemplateId = selectedId ? null : templateId
 
   // ---- frame stats -----------------------------------------------------------------------------------
   React.useEffect(() => {
@@ -504,6 +548,11 @@ function HostConsole({
             controller.getTool() === "measure" ? "move" : "measure"
           )
           return
+        case "toggle-template":
+          controller.setTool(
+            controller.getTool() === "template" ? "move" : "template"
+          )
+          return
         case "tool":
           controller.setTool(action.tool)
           return
@@ -531,8 +580,13 @@ function HostConsole({
           return
         }
         case "cancel":
-          if (controller.dragging || controller.getTool() === "measure")
+          if (
+            controller.dragging ||
+            controller.getTool() === "measure" ||
+            controller.getTool() === "template"
+          )
             controller.cancel()
+          else if (templateId) setTemplateId(null)
           else if (preview) setPreview(null)
           else if (selectedId) setSelected(null)
           else return false
@@ -693,6 +747,50 @@ function HostConsole({
                       {state.movementLocked ? <LockedPill /> : null}
                     </div>
                   </div>
+                  {templateView && !selectedId ? (
+                    <div className="absolute bottom-3 left-3">
+                      <TemplateCard
+                        view={templateView}
+                        scene={scene}
+                        role="dm"
+                        onClose={() => setTemplateId(null)}
+                        onMove={() =>
+                          controller.editTemplate(
+                            templateView.id,
+                            specOf(templateView),
+                            templateView.source.angle
+                          )
+                        }
+                        onRemove={() => {
+                          actions.removeTemplates([templateView.id])
+                          setTemplateId(null)
+                        }}
+                        onHidden={(hidden) =>
+                          actions.placeTemplate(inputOf(templateView), {
+                            id: templateView.id,
+                            hidden,
+                          })
+                        }
+                        onDamage={(formula, targets) => {
+                          const r = actions.rollAreaDamage(formula, targets)
+                          if (!r.ok) return r.error
+                          toast.success(
+                            `Rolled ${r.total} damage`,
+                            {
+                              id: "area-damage",
+                              description:
+                                r.hit === 0
+                                  ? "No creature caught has tracked hit points."
+                                  : `Dealt to ${r.hit} ${r.hit === 1 ? "creature" : "creatures"}.`,
+                            }
+                          )
+                          return null
+                        }}
+                        onFocusToken={focusToken}
+                        disabled={!hosting}
+                      />
+                    </div>
+                  ) : null}
                   {selectedId ? (
                     <div className="absolute bottom-3 left-3">
                       <SelectedTokenCard
@@ -704,7 +802,14 @@ function HostConsole({
                       />
                     </div>
                   ) : null}
-                  <div className="absolute inset-x-0 bottom-3 flex justify-center">
+                  <div className="absolute inset-x-0 bottom-3 flex flex-col items-center gap-2">
+                    {tool === "template" ? (
+                      <TemplatePicker
+                        spec={templateSpec}
+                        onSpec={(sp) => controller.setTemplateSpec(sp)}
+                        onClose={() => controller.setTool("move")}
+                      />
+                    ) : null}
                     <HudPanel className="flex items-center gap-1 p-1">
                       <ToolSwitch
                         tool={tool}
@@ -779,6 +884,17 @@ function HostConsole({
                 subscribe={subscribePings}
                 scene={scene}
                 onFocus={(p) => engine?.focus(p)}
+              />
+              <TemplateLayer
+                controller={controller}
+                scene={scene}
+                items={templateItems}
+                world={() => runner.occlusion()}
+                selectedId={shownTemplateId}
+                onSelect={selectTemplate}
+                onSelectedView={setTemplateView}
+                showOn={(levelId) => levelShown(scene, activeLevelId, levelId)}
+                enabled={!editor}
               />
             </HostViewport>
             {snap.status === "ended" ? (
