@@ -139,6 +139,8 @@ begin
   perform pg_temp.eq('create_session without categories seeds none',
     (select state->>'freeAssets' from public.session_state where session_id = v_sid), '[]');
 
+  -- A map has one table: end it, so the next call seeds a new one.
+  perform public.end_session(v_sid);
   select s.session_id into v_sid from public.create_session(v_scene, array['token-models', 'token-models']) s;
   perform pg_temp.eq('create_session seeds the categories, each once',
     (select state->>'freeAssets' from public.session_state where session_id = v_sid), '["token-models"]');

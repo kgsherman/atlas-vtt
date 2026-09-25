@@ -1,8 +1,8 @@
-// Free assets end to end against the real Supabase backend: the DM starts a game with the "Token
-// models" category ticked in the "Start a game" dialog, the host console's Assets tab lists the free
-// token models, a click puts one on the selected token, a player who sees the token downloads the
-// model from the public free-assets bucket and draws it, and unloading the category keeps the token's
-// model. Cleans up: ends the session and deletes the scene copy.
+// Free assets end to end against the real Supabase backend: the DM opens the table with the "Token
+// models" category on in the Assets tab, which lists the free token models; a click puts one on the
+// selected token, a player who sees the token downloads the model from the public free-assets bucket
+// and draws it, and unloading the category keeps the token's model. Cleans up: ends the table and
+// deletes the scene copy.
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/free-assets.mjs
 //
@@ -84,23 +84,6 @@ try {
   watchPage(dm, "dm", logs)
   const sceneId = await openSceneInEditor(dm, { mode: "supabase" })
   cleanup = { sceneId, sessionId: null }
-  await dm.getByRole("button", { name: "Start session" }).click()
-  const dialog = dm.getByRole("dialog", { name: "Start a game" })
-  await dialog.getByRole("checkbox", { name: "Token models" }).waitFor()
-  await waitFor(
-    dm,
-    () =>
-      [...document.querySelectorAll("[role=dialog] img")].filter(
-        (img) => img.complete && img.naturalWidth > 0
-      ).length >= 4,
-    null,
-    {
-      timeout: 20000,
-      label: "model thumbnails in the dialog",
-    }
-  )
-  await shot(dm, OUT, "01-start-dialog")
-  await dm.keyboard.press("Escape")
   const h0 = await startSession(dm, { freeAssets: ["Token models"] })
   cleanup.sessionId = h0.sessionId
   checks.eq(
@@ -145,11 +128,11 @@ try {
   )
   checks.ok(
     dmDownloads.some((p) => p.endsWith("/token-models/elf-archer.glb")),
-    "the host console downloaded the model from the free-assets bucket"
+    "the map screen downloaded the model from the free-assets bucket"
   )
   checks.ok(
     (await hostState(dm)).state.origin?.dirty === true,
-    "a model change is a map edit (unsaved-edits dot)"
+    "a model change changes the map (since its last restore point)"
   )
   await sleep(1500)
   await shot(dm, OUT, "02-host-assets-tab")

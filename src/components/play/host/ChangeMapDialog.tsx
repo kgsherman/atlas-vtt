@@ -1,13 +1,14 @@
 /**
- * "Change map" (ARCHITECTURE §6.7): the DM moves the live game to another map of the library and
- * brings the party along. Three steps: pick the map (a library scene, or a library copy of a sample
- * made on the spot), choose who comes along and where they arrive (a level, and a point clicked on
- * its thumbnail), then confirm — with what stays behind and the live map's unsaved-edits guard (save
- * it to its library scene first, change without saving, or keep playing). The host console makes the
- * change (onChange → HostRunner.changeMap); a refusal is shown here and the dialog stays open.
+ * "Change map" (ARCHITECTURE §6.7, §6.8): the DM moves the table to another map of the library and
+ * brings the party along. Three steps: pick the map (a library scene as it is now — its own table's
+ * live copy when it has one —, or a library copy of a sample made on the spot), choose who comes along
+ * and where they arrive (a level, and a point clicked on its thumbnail), then confirm — with what stays
+ * behind; the map left keeps a restore point first (without one only when the library can't be
+ * reached). The map screen makes the change (onChange → HostRunner.changeMap); a refusal is shown here
+ * and the dialog stays open.
  *
- * The library is listed only while the dialog is open (its steps unmount when it closes). The guard
- * follows `saveMap` as it is when the DM confirms: the map may be saved while the dialog is open.
+ * The library is listed only while the dialog is open (its steps unmount when it closes). The restore
+ * point follows `saveMap` as it is when the DM confirms: the map may be saved while the dialog is open.
  */
 import * as React from "react"
 import {
@@ -31,7 +32,7 @@ import { useSceneDigest, useSeenOnce } from "@/app/digestCache"
 import { plural } from "@/app/format"
 import {
   createFromSample,
-  loadLibraryScene,
+  loadLiveMap,
   userMessage,
   type PlayableScene,
 } from "@/app/library"
@@ -122,7 +123,7 @@ import {
 } from "./changeMapModel"
 import type { SaveMap } from "./useSaveMap"
 
-/** The samples Home offers (a library copy is made first, so "Save map to library" works). */
+/** The samples Home offers (a library copy is made first, so the map keeps restore points). */
 const SAMPLES = SAMPLE_SCENES.filter(
   (s) => s.id === "crooked-lantern" || s.id === "stress-test"
 )
@@ -351,16 +352,18 @@ function ChangeMapSteps({
         arrival={arrival}
         {...summary}
       />
-      {guard ? (
+      {guard && choice.kind === "unavailable" ? (
         <Alert>
           <TriangleAlert />
-          <AlertTitle>Unsaved map edits</AlertTitle>
+          <AlertTitle>No restore point</AlertTitle>
           <AlertDescription>{guard}</AlertDescription>
         </Alert>
+      ) : guard ? (
+        <p className="text-muted-foreground">{guard}</p>
       ) : null}
       {saveMap.saving ? (
         <p className="flex items-center gap-1.5 text-muted-foreground">
-          <Spinner className="size-3" /> Saving the map to your library…
+          <Spinner className="size-3" /> Saving a restore point…
         </p>
       ) : null}
       {error ? (
@@ -370,47 +373,31 @@ function ChangeMapSteps({
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       ) : null}
-      {/* Event-style options (as the End session dialog): the decision first, backing out last. */}
+      {/* Event-style options (as the table dialogs): the decision first, backing out last. */}
       <div className="mt-1 flex flex-col gap-1.5">
-        {choice.kind === "clean" ? (
+        {choice.kind === "unavailable" ? (
           <Button
             variant="decision"
+            className="text-destructive hover:text-destructive"
             disabled={blocked}
             onClick={() => void confirm(false)}
           >
-            {busy === "change" ? (
+            {busy === "change" ? <Spinner data-icon="inline-start" /> : null}
+            Change without saving
+          </Button>
+        ) : (
+          <Button
+            variant="decision"
+            disabled={blocked || choice.kind === "looking-up"}
+            onClick={() => void confirm(choice.kind === "offer")}
+          >
+            {busy !== null || choice.kind === "looking-up" ? (
               <Spinner data-icon="inline-start" />
             ) : (
               <MapIcon data-icon="inline-start" />
             )}
             Change map
           </Button>
-        ) : (
-          <>
-            {choice.kind === "offer" || choice.kind === "looking-up" ? (
-              <Button
-                variant="decision"
-                disabled={blocked || choice.kind !== "offer"}
-                onClick={() => void confirm(true)}
-              >
-                {busy === "save" || choice.kind === "looking-up" ? (
-                  <Spinner data-icon="inline-start" />
-                ) : (
-                  <LibraryBig data-icon="inline-start" />
-                )}
-                Save map & change
-              </Button>
-            ) : null}
-            <Button
-              variant="decision"
-              className="text-destructive hover:text-destructive"
-              disabled={blocked}
-              onClick={() => void confirm(false)}
-            >
-              {busy === "change" ? <Spinner data-icon="inline-start" /> : null}
-              Change without saving
-            </Button>
-          </>
         )}
         <Button
           variant="decision"
@@ -424,7 +411,7 @@ function ChangeMapSteps({
           disabled={busy !== null}
           onClick={() => onOpenChange(false)}
         >
-          Keep playing here
+          Stay on this map
         </Button>
       </div>
     </>
@@ -479,13 +466,13 @@ function MapStep({
     }
   }
   const pickRow = (s: SceneSummary) =>
-    void load(s.id, () => loadLibraryScene(services, s.id))
+    void load(s.id, () => loadLiveMap(services, s.id))
   const pickSample = (id: string) =>
     void load(`sample:${id}`, async () => {
       // A library copy first, so the new map can be saved back like any other.
       const { summary } = await createFromSample(services, id)
       q.reload()
-      return loadLibraryScene(services, summary.id)
+      return loadLiveMap(services, summary.id)
     })
 
   return (

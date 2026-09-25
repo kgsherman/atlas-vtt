@@ -18,6 +18,8 @@ export type PlayerStatus =
   /** No DM presence: showing the persisted player_views row, input disabled. */
   | "host-offline"
   | "kicked"
+  /** The DM closed the table: disconnected until it opens again (the page starts a new client then). */
+  | "closed"
   | "ended"
   | "error"
 

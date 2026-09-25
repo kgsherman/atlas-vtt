@@ -94,7 +94,7 @@ export function createShapeActions(ctx: TerrainToolContext): ShapeActions {
       }
       const mode = s.toolSettings.terrain.element
       if (mode === "face") {
-        ctx.notify("Tab to object mode to delete shapes")
+        ctx.notify("Esc to object mode to delete shapes")
         return
       }
       const upsert: TerrainShape[] = []

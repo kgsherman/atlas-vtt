@@ -225,11 +225,11 @@ begin
   perform pg_temp.eq('catalog: authenticated can execute exactly the RPCs',
     (select string_agg(p.proname, ',' order by p.proname) from pg_proc p
       where p.pronamespace = 'public'::regnamespace and has_function_privilege('authenticated', p.oid, 'execute')),
-    'claim_host,create_scene,create_session,end_session,get_shared_scene,image_folders_to_free,join_session,list_session_members,save_scene_version,save_session_state,session_info,set_display_name,set_member_status,set_scene_visibility,unreferenced_scene_assets,upsert_player_view');
+    'claim_host,create_merge_ticket,create_scene,create_session,end_session,get_shared_scene,image_folders_to_free,join_session,list_session_members,open_map,save_scene_version,save_session_state,session_info,set_display_name,set_member_status,set_scene_visibility,set_session_scene,set_table_open,unreferenced_scene_assets,upsert_player_view');
   perform pg_temp.eq('catalog: authenticated can execute only the policy helpers in private',
     (select string_agg(p.proname, ',' order by p.proname) from pg_proc p
       where p.pronamespace = 'private'::regnamespace and has_function_privilege('authenticated', p.oid, 'execute')),
-    'can_delete_session_tile,can_insert_scene_asset,can_read_session_tile,can_write_session_tile,is_active_member,is_session_dm,normalize_display_name,topic_kind,topic_sid,topic_uid');
+    'can_delete_session_tile,can_insert_scene_asset,can_insert_token_image,can_read_session_tile,can_write_session_tile,is_active_member,is_session_dm,normalize_display_name,topic_kind,topic_sid,topic_uid');
   perform pg_temp.eq('catalog: every public/private function pins an empty search_path',
     (select coalesce(string_agg(p.proname, ','), '') from pg_proc p
       where p.pronamespace in ('public'::regnamespace, 'private'::regnamespace)
@@ -569,6 +569,21 @@ begin
   end loop;
 
   -- ======================= end session =======================
+  -- A closed table (ARCHITECTURE §6.8): members can neither receive, send nor be present; the DM can.
+  perform pg_temp.login(d);
+  perform pg_temp.eq('closed: set_table_open', pg_temp.val(format('select public.set_table_open(%L, false)', v_sid)), 'closed');
+  perform pg_temp.rt('player (table closed)', p1, format('session:%s:host', v_sid), 'select', 'broadcast', false);
+  perform pg_temp.rt('player (table closed)', p1, format('session:%s:view:%s', v_sid, p1), 'select', 'broadcast', false);
+  perform pg_temp.rt('player (table closed)', p1, format('session:%s:req:%s', v_sid, p1), 'insert', 'broadcast', false);
+  perform pg_temp.rt('player (table closed)', p1, format('session:%s:req:%s', v_sid, p1), 'select', 'broadcast', false);
+  perform pg_temp.rt('player (table closed)', p1, format('session:%s:lobby', v_sid), 'insert', 'presence', false);
+  perform pg_temp.rt('dm (table closed)', d, format('session:%s:host', v_sid), 'insert', 'broadcast', true);
+  perform pg_temp.login(p1);
+  perform pg_temp.eq('closed: the player reads no stored view', pg_temp.val('select count(*) from public.player_views'), '0');
+  perform pg_temp.login(d);
+  perform pg_temp.eq('closed: set_table_open again', pg_temp.val(format('select public.set_table_open(%L, true)', v_sid)), 'active');
+  perform pg_temp.rt('player (table open again)', p1, format('session:%s:host', v_sid), 'select', 'broadcast', true);
+
   perform pg_temp.login(d);
   perform pg_temp.eq('end: end_session', pg_temp.val(format('select public.end_session(%L)', v_sid)), 'true');
   perform pg_temp.eq('end: ending twice returns false', pg_temp.val(format('select public.end_session(%L)', v_sid)), 'false');

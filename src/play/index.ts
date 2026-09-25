@@ -83,6 +83,7 @@ export {
   PLAY_COMMANDS,
   PLAY_POINTER_HELP,
   playBindings,
+  playCommandsFor,
   type PlayBinding,
   type PlayCommand,
   type PlayKeyAction,

@@ -1,6 +1,7 @@
 // Builds "The Vineyard" from the three Forgotten Adventures battlemaps in test_maps/ (local mode):
 //
-//  1. Library → "From map images" → the import dialog: basement (−12 ft) and second floor (+10 ft) get a
+//  1. Library → "From map images" (a new map, its screen in Edit) → the import dialog: basement (−12 ft)
+//     and second floor (+10 ft) get a
 //     floor traced from the image alpha and walls traced from its outline; the ground floor is opaque.
 //  2. The rest goes through the editor store (dev hook window.__atlasEditor) in ONE undoable edit, from
 //     e2e/vineyard-plan.mjs (read off the art): walls, doors and windows of the three houses, the manor
@@ -8,7 +9,8 @@
 //     (a halfling and a dwarf with darkvision, a human) on the plaza and a hidden troll in the caves.
 //  3. Checks: levels / backdrops / traced geometry, the document parses, every storey is reachable on
 //     foot (A* through the stairs and trapdoors), undo removes the layout in one step.
-//  4. Save → reload → unchanged; export → test_maps/vineyard.atlas.json (gitignored: third-party art).
+//  4. A restore point (Ctrl+S) → reload → unchanged; export → test_maps/vineyard.atlas.json (gitignored:
+//     third-party art).
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/vineyard-build.mjs
 import fs from "node:fs"
@@ -200,11 +202,19 @@ try {
     "Houses, stairs, roofs, lights and tokens through the editor store"
   )
   const plan = { GROUND_WALLS, ROOFS, CONNECTORS, LIGHTS, TOKENS }
+  // The modules first, then one synchronous evaluate for the edit: an async evaluate whose edit goes
+  // through the map screen's host fails in Playwright with "Resulting promise was garbage collected".
+  await page.evaluate(async () => {
+    window.__vineyardModules = {
+      f: await import("/src/core/scene/factory.ts"),
+      heightmap: await import("/src/core/scene/heightmap.ts"),
+      snap: await import("/src/editor/snapping.ts"),
+    }
+  })
   const built = await page.evaluate(
-    async ({ plan, L }) => {
-      const f = await import("/src/core/scene/factory.ts")
-      const { bytesToBase64 } = await import("/src/core/scene/heightmap.ts")
-      const snap = await import("/src/editor/snapping.ts")
+    ({ plan, L }) => {
+      const { f, snap } = window.__vineyardModules
+      const { bytesToBase64 } = window.__vineyardModules.heightmap
       const store = window.__atlasEditor.store
       const st = store.getState()
 
@@ -526,16 +536,21 @@ try {
   await page.keyboard.press("Control+s")
   await waitFor(
     page,
-    () =>
-      location.pathname !== "/editor/new" &&
-      !window.__atlasEditor.store.getState().dirty,
+    () => {
+      const lib = window.__atlasHost.runner.getSnapshot().library
+      return lib !== null && lib.version >= 2 && !lib.dirty
+    },
     null,
-    { timeout: 60000, label: "saved" }
+    { timeout: 60000, label: "restore point saved" }
   )
   const saved = await page.evaluate(() =>
     JSON.parse(JSON.stringify(window.__atlasEditor.store.getState().scene))
   )
   await page.reload({ waitUntil: "domcontentloaded" })
+  await waitFor(page, () => window.__atlasHost?.mode === "edit", null, {
+    timeout: 60000,
+    label: "the map screen again, in Edit",
+  })
   await waitEditor(page, 60000)
   const reloaded = await page.evaluate(() =>
     JSON.parse(JSON.stringify(window.__atlasEditor.store.getState().scene))

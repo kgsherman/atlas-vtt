@@ -66,7 +66,7 @@ async function contexts(page) {
   })
 }
 
-/** Library → "Open a copy" of the sample → editor with a live engine → back to the library. */
+/** Library → "Open a copy" of the sample → the map screen with a live engine → back to the library. */
 async function roundTrip(page, trip) {
   await page.evaluate((t) => (window.__atlasTrip = t), trip)
   await page
@@ -76,7 +76,7 @@ async function roundTrip(page, trip) {
   await waitFor(
     page,
     () =>
-      /^\/editor\/(?!new)/.test(location.pathname) &&
+      location.pathname.startsWith("/host/") &&
       window.__atlasEditor?.engine != null,
     null,
     { timeout: 60000, label: `editor (trip ${trip})` }

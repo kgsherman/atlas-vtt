@@ -90,6 +90,7 @@ import {
   requestTokenImage,
   useGameLink,
 } from "../useTokenMakerLink"
+import { ClosedTableScreen } from "./ClosedTable"
 import { PlayerHud } from "./PlayerHud"
 
 const FOCUS_VIEW_HEIGHT = 70
@@ -123,8 +124,11 @@ declare global {
 
 export function PlayerSession({ sessionId }: { sessionId: string }) {
   const services = useServices()
+  // A new client each time the DM opens the table again after closing it (ClosedTableScreen).
+  const [opening, setOpening] = React.useState(0)
+  const key = `${sessionId}#${opening}`
   const client = useSessionResource(
-    sessionId,
+    key,
     () => {
       const c = createPlayerClient({
         sessionId,
@@ -146,10 +150,22 @@ export function PlayerSession({ sessionId }: { sessionId: string }) {
     (c) => void c.stop()
   )
   if (!client) return <JoiningScreen label="Joining the table…" />
-  return <PlayerTable key={sessionId} client={client} />
+  return (
+    <PlayerTable
+      key={key}
+      client={client}
+      onReopened={() => setOpening((n) => n + 1)}
+    />
+  )
 }
 
-function PlayerTable({ client }: { client: AtlasPlayerClient }) {
+function PlayerTable({
+  client,
+  onReopened,
+}: {
+  client: AtlasPlayerClient
+  onReopened(): void
+}) {
   const snap = React.useSyncExternalStore(client.subscribe, client.getSnapshot)
   const view = snap.view
   const [selected, setSelected] = React.useState<Id | null>(null)
@@ -539,6 +555,8 @@ function PlayerTable({ client }: { client: AtlasPlayerClient }) {
   const blocking =
     snap.status === "kicked" ? (
       <KickedScreen />
+    ) : snap.status === "closed" ? (
+      <ClosedTableScreen sessionId={snap.sessionId} onReopened={onReopened} />
     ) : snap.status === "ended" ? (
       <EndedScreen />
     ) : snap.status === "error" ? (

@@ -17,7 +17,7 @@ import { EDITOR_COMMAND_GROUPS, EDITOR_POINTER_HELP, isEditorCameraKey } from "@
 import { hotkeyLabel, hotkeyParts } from "@/lib/hotkeys"
 import { assignKey, commandUsing, conflictsOf, keysOf, removeKey, resetCommand, type Command } from "@/lib/keymap"
 import { cn } from "@/lib/utils"
-import { PLAY_POINTER_HELP, type PlayCommand } from "@/play"
+import { PLAY_POINTER_HELP, playCommandsFor } from "@/play"
 
 import { KEYMAPS, keymapStore, setKeyOverrides, useKeyOverrides, type KeymapScope } from "./keymapStore"
 
@@ -38,7 +38,7 @@ interface HelpRow {
 }
 
 function commandsFor(scope: KeymapScope, host: boolean): Command[] {
-  return scope === "play" ? KEYMAPS.play.filter((c: PlayCommand) => host || !c.hostOnly) : KEYMAPS.editor
+  return scope === "play" ? playCommandsFor(host) : KEYMAPS.editor
 }
 
 function groupsFor(scope: KeymapScope, host: boolean): { title: string; commands: Command[] }[] {

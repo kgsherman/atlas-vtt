@@ -53,6 +53,8 @@ export type ShortcutAction =
   /** Handled by the page, not the controller. */
   | { type: "save" }
   | { type: "help" }
+  /** Switch the map screen to Play (the page; Tab by default). */
+  | { type: "mode" }
 
 export type EditorCommandGroup = "Tools" | "Editing" | "Terrain" | "View"
 
@@ -164,7 +166,8 @@ export const EDITOR_COMMANDS: EditorCommand[] = [
     id: "terrain.advanced",
     label: "Toggle vertex / edge / face editing",
     group: "Terrain",
-    keys: ["Tab"],
+    // Tab switches between Edit and Play; 1 / 2 / 3 (and the options bar's switch) enter this mode.
+    keys: [],
     repeat: false,
     action: { type: "terrain-advanced" },
   },
@@ -189,7 +192,8 @@ export const EDITOR_COMMANDS: EditorCommand[] = [
   { id: "toggle-dark-vision", label: "Toggle dark vision", group: "View", keys: ["B"], action: { type: "toggle-dark-vision" } },
   { id: "level.up", label: "Level above", group: "View", keys: ["PageUp"], action: { type: "level", delta: 1 } },
   { id: "level.down", label: "Level below", group: "View", keys: ["PageDown"], action: { type: "level", delta: -1 } },
-  { id: "save", label: "Save", group: "View", keys: ["Mod+S"], action: { type: "save" } },
+  { id: "mode.play", label: "Switch to Play", group: "View", keys: ["Tab"], repeat: false, action: { type: "mode" } },
+  { id: "save", label: "Save a restore point", group: "View", keys: ["Mod+S"], action: { type: "save" } },
   { id: "help", label: "Keyboard shortcuts", group: "View", keys: ["?"], action: { type: "help" } },
 ]
 
@@ -330,6 +334,7 @@ export function runShortcut(action: ShortcutAction, ctx: ShortcutContext): boole
     case "axis":
     case "save":
     case "help":
+    case "mode":
       return false
   }
 }

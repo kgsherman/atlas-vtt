@@ -5,11 +5,11 @@ levels (cellar, ground floor, upper floor, roof…). Players explore them in a 2
 lighting, shadows, line of sight and fog of war all come from that 3D geometry. The DM's browser tab is the
 authoritative game server, and each player receives only what their own tokens can perceive.
 
-![The editor: a four-storey tavern in the orbit camera](docs/screenshots/crooked-lantern-editor-orbit-ultra.png)
+![The map screen in Edit: a four-storey tavern in the orbit camera](docs/screenshots/crooked-lantern-editor-orbit-ultra.png)
 
-| DM console (top-down, everything visible) | A player's view (fog of war, darkvision) |
+| The map screen in Play (top-down, everything visible) | A player's view (fog of war, darkvision) |
 |---|---|
-| ![DM console](docs/screenshots/crooked-lantern-dm-topdown-ultra.png) | ![Player view](docs/screenshots/crooked-lantern-player-dwarf-common-room-ultra.png) |
+| ![The DM's map in Play](docs/screenshots/crooked-lantern-dm-topdown-ultra.png) | ![Player view](docs/screenshots/crooked-lantern-player-dwarf-common-room-ultra.png) |
 | **A player on the balcony looking down into the courtyard** | **Same scene on the medium tier (integrated GPUs)** |
 | ![Balcony](docs/screenshots/crooked-lantern-player-fighter-balcony-ultra.png) | ![Medium tier](docs/screenshots/crooked-lantern-dm-topdown-medium.png) |
 
@@ -18,7 +18,18 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
 
 ## Features
 
-**Scene editor (DM)**
+**One screen per map (DM)**
+- The DM opens a map and switches between **Edit** and **Play** with the switch at the top or **Tab**. Both
+  are views of the same live map: undo, the level and the camera carry across.
+- Each map has a **table** with a room code. **Open the table** lets players in; you can keep editing and
+  playing as before, and they see changes as they explore. **Close the table** disconnects them and keeps
+  you on the map; they come back with the same room code, on their own if their page is still open. Leaving
+  with the table open asks whether to close it first.
+- The map remembers everything that happens on it (edits, token moves, doors, lights) and saves itself.
+  **Restore points** go to its version history: Ctrl+S, and on the way when you close the table, leave,
+  change maps or share it. Version history puts the map back as it was at any restore point (undoable).
+
+**Building maps (Edit)**
 - Multi-level scenes: each level has its own elevation, storey height and floor thickness. Levels can be
   shown or hidden one by one, and the levels above and below the active one can be drawn as ghosts.
 - Grid building on 5 ft squares, with snapping to cell centres, vertices, half cells or wall endpoints, and
@@ -33,9 +44,9 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
   image's transparency and walls from its outline.
 - Undo / redo, copy / cut / paste / duplicate, multi-select and box select, move, rotate and nudge.
   Ctrl+V pastes at the pointer, snapped like a drag; Ctrl+Alt+V pastes without snapping.
-- A free 3D orbit camera, a top view, and a player-view preview through any token's eyes.
-- Scenes are saved as versioned JSON with a version history. You can export and import `.atlas.json` files
-  (map images embedded) and share read-only links.
+- A free 3D orbit camera and a top view; in Play, a vision preview through any token's eyes.
+- Maps are versioned JSON with a version history of restore points. You can export and import
+  `.atlas.json` files (map images embedded) and share read-only links.
 
 **Lighting and vision**
 - Real-time shadows from every light, cast by walls, pillars, props, terrain and the floors of other
@@ -55,20 +66,18 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
   To climb stairs or a ramp, drag the token past the top step, or use the **Go up** / **Go down** buttons
   on the top step and the landing; ladders offer climb up / down.
 - Click a door next to your token to open or close it. There is also a standalone measure tool.
-- Free assets: when starting a game, the DM chooses which libraries of free assets it loads (one
-  category so far, **Token models**: 3D miniatures). The host console's **Assets** tab lists them and puts
+- Free assets: libraries of free assets a table loads (one category so far, **Token models**: 3D
+  miniatures; all by default, switched in the **Assets** tab, remembered for the next table). The tab lists them and puts
   a model on the selected token; the token inspector and each token's menu offer them too. A model stands
   on the token's base for everyone who sees the token, at a level of detail that fits its size on screen.
 - DM controls: lock movement (for everyone or per player), shared vision, speed enforcement, door and light
   toggles, hide or reveal tokens, reveal secret doors, assign tokens to players, reset fog, and kick
-  players. The DM can switch to "Edit map" mid-session, and players see the edits live. Those edits stay
-  in the session until the DM chooses **Save map to library**, which saves them (with the current token,
-  door and light state) as a new version of the library scene, after a conflict check.
-- **Change map**: the DM moves the game to another map of the library (or a copy of a sample) without
-  ending the session. They choose who comes along and where the party arrives. The chosen tokens keep
-  their hit points, conditions, portraits and carried lights, and their players keep controlling them.
-  Players stay connected, keep the chat and follow their characters to the new map, starting with fresh
-  fog. If the live map has unsaved edits, the DM can save them first.
+  players.
+- **Change map**: the DM moves the table to another map of the library (or a copy of a sample) without
+  closing it. They choose who comes along and where the party arrives. The chosen tokens keep their hit
+  points, conditions, portraits and carried lights, and their players keep controlling them. Players stay
+  connected, keep the chat and follow their characters to the new map, starting with fresh fog. The map
+  left keeps a restore point.
 
 ![Change map, step 2: the DM ticks who comes along from the tavern (the players' characters by default) and picks where they arrive on the Stress Test](docs/screenshots/crooked-lantern-dm-change-map.png)
 
@@ -118,13 +127,13 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
   are there to start from; upload your own images, paste or drop them.
 - **Remove background**: an image model cuts the character out of their art (model-agnostic; OpenAI's
   `gpt-image-2.5-sunburst` with a transparent background by default, see "Token maker setup").
-- **Download** a PNG (256–2048 px), or **put it on a token in your game**: open the Token Maker from the host
-  console or the player HUD (it opens in a new tab, the game keeps running) and pick a token. DMs can re-skin
+- **Download** a PNG (256–2048 px), or **put it on a token in your game**: open the Token Maker from the map
+  screen or the player HUD (it opens in a new tab, the game keeps running) and pick a token. DMs can re-skin
   any token, players their own characters (the DM's table checks every request). Work in progress is saved in
   the browser.
 
 **Multiplayer**
-- The DM hosts a session and players join with an 8-character room code. No accounts are needed: the app
+- The DM opens a map's table and players join with its 8-character room code. No accounts are needed: the app
   signs everyone in as an anonymous guest. A guest can create a permanent account with Discord (from the
   name chip in the header) to keep their scenes and games across browsers; the display name stays
   Atlas's own and can be changed at any time.
@@ -135,7 +144,7 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
   only the map image chunks of cells they have explored, stored per player behind storage row-level
   security (RLS).
 - Reconnection: a dropped or reloaded player resyncs from a patch log, a snapshot or their stored view. If
-  the DM reloads, the game resumes from the saved state. A second DM device can take over the session, and
+  the DM reloads, the game resumes from the saved state. A second DM device can take over the table, and
   the stale one stands down.
 - Security relies on Supabase Postgres RLS, private Realtime channels with per-topic policies, fenced RPCs
   and private Storage buckets.
@@ -143,8 +152,8 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
 **Rendering quality**
 - Four tiers: low, medium, high and ultra. High and ultra add bloom and a vignette. Ultra adds soft
   shadows from 1024² light tiles, screen-space ambient occlusion, filmic tone mapping and film grain.
-- On "Auto" (the default), a short GPU benchmark picks the tier when the editor, the host console or the
-  player page opens (cached per GPU), and adaptive quality steps down or up at runtime to hold 60 fps.
+- On "Auto" (the default), a short GPU benchmark picks the tier when the map screen or the player page
+  opens (cached per GPU), and adaptive quality steps down or up at runtime to hold 60 fps.
   Each of those pages has a quality selector to pick a tier by hand.
 
 ## Quick start
@@ -319,7 +328,7 @@ delete. `src/net/guestMerge.live.supabase.test.ts` (needs the deployed `merge-gu
 guest into a new email sign-up and prints that permanent user's id for deletion.
 
 **SQL tests** (`supabase/tests/*.sql`: RLS, RPCs, Realtime authorisation, Storage policies, tile chunks,
-per-account quotas, free assets).
+per-account quotas, free assets, map tables).
 Run each file as `postgres`, in the SQL editor or with psql. Each file runs in one transaction that is
 rolled back, and its final row reports `passed` / `failed`.
 
@@ -327,18 +336,18 @@ rolled back, and its final row reports `passed` / `failed`.
 
 ```bash
 npx vite --port 5173 &
-ATLAS_URL=http://127.0.0.1:5173 node e2e/editor-smoke.mjs         # quality probe (tier per GPU), menus, labels, options bar at 1280 px, the tools, undo/redo, shortcuts, save, reload
+ATLAS_URL=http://127.0.0.1:5173 node e2e/editor-smoke.mjs         # a new map in Edit: quality probe (tier per GPU), menus, labels, options bar at 1280 px, the tools, undo/redo, shortcuts, a restore point, reload
 ATLAS_URL=http://127.0.0.1:5173 node e2e/vineyard-build.mjs       # builds test_maps/vineyard.atlas.json from the battlemaps (see below)
 ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-local.mjs    # DM + 2 players in local mode: host menus, oracle-equal views, moves, doors, stairs, lock, reloads, leak scan
 ATLAS_SCENE=$PWD/test_maps/vineyard.atlas.json ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-local.mjs   # the same on the Vineyard
-ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-supabase.mjs # the same against the real backend (+ Realtime / table / Storage RLS checks, no public channels, a kicked member's subscriptions, sub-cell chunk clipping)
+ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-supabase.mjs # the same against the real backend (+ Realtime / table / Storage RLS checks, no public channels, a kicked member's subscriptions, sub-cell chunk clipping, closing the table, deleting the map)
 ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-latency.mjs  # move results on a 120×120 daylit field arrive well under the 5 s timeout
-ATLAS_URL=http://127.0.0.1:5173 node e2e/host-save-map.mjs        # "Save map to library" from a live session, including the conflict path
+ATLAS_URL=http://127.0.0.1:5173 node e2e/map-table-local.mjs      # the map screen: Tab and undo across Edit / Play, restore points, closing and reopening the table with a player, leaving, version restore
 ATLAS_URL=http://127.0.0.1:5173 node e2e/change-map-local.mjs     # "Change map" mid-session: the party carried to a sample copy and back, two players following
 ATLAS_URL=http://127.0.0.1:5173 node e2e/table-local.mjs         # DM + 2 players in local mode: chat, whispers, host-rolled dice, combat (hidden and unseen combatants never sent), initiative and turns, hit points and conditions (bands only for others), pings, reload, leak scan
 ATLAS_URL=http://127.0.0.1:5173 node e2e/templates-local.mjs     # DM + 2 players in local mode: the Area tool and presets, a Fireball's catch in 3D, a player's cone from their token, oracle-equal views, damage from the card (halved on a save), hiding, an aura that follows its token, removing, reload, leak scan, clearing all
-ATLAS_URL=http://127.0.0.1:5173 node e2e/free-assets.mjs          # start a game with token models, put one on a token, a player downloads and draws it (ATLAS_FREE_ASSETS_DIR serves a local build)
-ATLAS_URL=http://127.0.0.1:5173 node e2e/engine-leak.mjs          # editor ↔ library round trips release every WebGL context
+ATLAS_URL=http://127.0.0.1:5173 node e2e/free-assets.mjs          # a table with the token models loaded, put one on a token, a player downloads and draws it (ATLAS_FREE_ASSETS_DIR serves a local build)
+ATLAS_URL=http://127.0.0.1:5173 node e2e/engine-leak.mjs          # map screen ↔ library round trips release every WebGL context
 ATLAS_URL=http://127.0.0.1:5173 node e2e/perf.mjs                 # frame times per GPU / tier / scene
 ATLAS_URL=http://127.0.0.1:5173 node e2e/showcase.mjs             # regenerate docs/screenshots
 ATLAS_URL=http://127.0.0.1:5173 node e2e/firefox-smoke.mjs        # headless Firefox (npx playwright install firefox): library, editor at every tier, a local player view

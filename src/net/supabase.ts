@@ -80,6 +80,8 @@ export const SERVER_ERROR_CODES = [
   "not_member",
   "quota_exceeded",
   "name_taken",
+  "table_closed",
+  "map_in_use",
 ] as const
 
 export type ServerErrorCode = (typeof SERVER_ERROR_CODES)[number]
@@ -200,7 +202,7 @@ export function describeNetError(code: NetErrorCode): string {
     case "session_full":
       return "This session is full."
     case "too_many_sessions":
-      return "You have too many active sessions. End one first."
+      return "You have too many maps open at tables."
     case "room_code_unavailable":
       return "Could not allocate a room code. Try again."
     case "not_member":
@@ -209,6 +211,10 @@ export function describeNetError(code: NetErrorCode): string {
       return "You have reached your storage limit. Delete old scenes, versions or map images first."
     case "name_taken":
       return "That name is taken in this session (by another player or the DM). Pick another one."
+    case "table_closed":
+      return "The DM hasn't opened this table yet."
+    case "map_in_use":
+      return "Players are at another table on this map."
     case "unsupported_offline":
       return "This needs an online connection (Supabase)."
     case "unknown":

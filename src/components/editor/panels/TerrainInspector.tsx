@@ -290,8 +290,14 @@ function SingleShape({ shape, levelId }: { shape: TerrainShape; levelId: Id }) {
         ) : null}
         {elements > 0 ? (
           <Hint>
-            {element === "vertex" ? plural(elements, "vertex", "vertices") : plural(elements, element)} selected: drag {elements === 1 ? "it" : "them"} in the viewport; Delete{" "}
-            {element === "face" ? "works on whole shapes (Tab: object mode)" : element === "edge" ? "collapses edges (removes loop cuts; a side edge removes its corner)" : "dissolves vertices"}.
+            {element === "vertex" ? plural(elements, "vertex", "vertices") : plural(elements, element)} selected: drag {elements === 1 ? "it" : "them"} in the
+            viewport; Delete{" "}
+            {element === "face"
+              ? "works on whole shapes (Esc: object mode)"
+              : element === "edge"
+                ? "collapses edges (removes loop cuts; a side edge removes its corner)"
+                : "dissolves vertices"}
+            .
           </Hint>
         ) : null}
       </PanelSection>

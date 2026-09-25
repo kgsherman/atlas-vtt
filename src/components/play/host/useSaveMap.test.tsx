@@ -179,7 +179,7 @@ describe("useSaveMap", () => {
     expect(ok).toBe(true)
     expect(saveMapToLibrary).toHaveBeenCalledWith({ force: undefined })
     expect(toast.success).toHaveBeenCalledWith(
-      "Saved version 5",
+      "Restore point saved",
       expect.anything()
     )
     await ref.rerender()
@@ -197,18 +197,18 @@ describe("useSaveMap", () => {
     const ref = await mount(fakeServices(), runner, box)
     let ok = true
     await act(async () => {
-      ok = await ref.current.save({ confirm: false })
+      ok = await ref.current.save()
     })
     expect(ok).toBe(false)
     expect(ref.current.dirty).toBe(true)
     expect(toast.error).toHaveBeenCalledWith(
-      "This map was changed in your library since it was loaded",
+      "Another restore point of this map was saved elsewhere",
       expect.objectContaining({
-        action: expect.objectContaining({ label: "Overwrite" }),
+        action: expect.objectContaining({ label: "Save anyway" }),
       })
     )
     await act(async () => {
-      ok = await ref.current.save({ confirm: false, force: true })
+      ok = await ref.current.save({ force: true })
     })
     expect(ok).toBe(true)
     expect(saveMapToLibrary).toHaveBeenLastCalledWith({ force: true })
@@ -259,13 +259,13 @@ describe("useSaveMap", () => {
       box
     )
     await act(async () => {
-      await ref.current.save({ confirm: false })
+      await ref.current.save()
     })
     const call = vi
       .mocked(toast.error)
       .mock.calls.find(
         ([title]) =>
-          title === "This map was changed in your library since it was loaded"
+          title === "Another restore point of this map was saved elsewhere"
       )
     const opts = call?.[1] as {
       id?: string
@@ -302,7 +302,7 @@ describe("useSaveMap", () => {
     )
     const ref = await mount(fakeServices(), runner, box)
     await act(async () => {
-      await ref.current.save({ confirm: false })
+      await ref.current.save()
     })
     const opts = vi.mocked(toast.error).mock.calls[0][1] as {
       action: { onClick(e?: unknown): void }
@@ -313,7 +313,7 @@ describe("useSaveMap", () => {
     })
     expect(saveMapToLibrary).toHaveBeenLastCalledWith({ force: true })
     expect(toast.success).toHaveBeenCalledWith(
-      "Saved version 6",
+      "Restore point saved",
       expect.anything()
     )
   })
@@ -331,16 +331,16 @@ describe("useSaveMap", () => {
     )
     let ok = true
     await act(async () => {
-      ok = await ref.current.save({ confirm: false })
+      ok = await ref.current.save()
     })
     expect(ok).toBe(false)
     expect(saveMapToLibrary).not.toHaveBeenCalled()
     expect(toast.error).toHaveBeenCalledWith(
-      "This map was changed in your library since it was loaded",
+      "Another restore point of this map was saved elsewhere",
       expect.anything()
     )
     await act(async () => {
-      ok = await ref.current.save({ confirm: false, force: true })
+      ok = await ref.current.save({ force: true })
     })
     expect(ok).toBe(true)
     expect(saveMapToLibrary).toHaveBeenCalledWith({ force: true })
@@ -357,7 +357,7 @@ describe("useSaveMap", () => {
     expect(ok).toBe(false)
     expect(none.saveMapToLibrary).not.toHaveBeenCalled()
     expect(toast.error).toHaveBeenCalledWith(
-      "There is no library scene to save to",
+      "There is no library entry to save to",
       { description: LIBRARY_SCENE_DELETED }
     )
     act(() => root?.unmount())
@@ -381,10 +381,10 @@ describe("useSaveMap", () => {
     )
     const ref = await mount(fakeServices(), runner, box)
     await act(async () => {
-      await ref.current.save({ confirm: false })
+      await ref.current.save()
     })
     expect(toast.error).toHaveBeenCalledWith(
-      "The library scene was deleted",
+      "This map was deleted from your library",
       expect.anything()
     )
     expect(ref.current.library).toEqual({ status: "deleted" })

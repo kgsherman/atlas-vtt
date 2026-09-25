@@ -1,10 +1,10 @@
-// Editor smoke test (local mode): new scene → the start-up quality probe ran (Auto) → every menubar
-// menu opens without crashing → every tool's options fit a 1280 px window (each terrain sub-tool too) →
-// floor, walls, door, light, token through the real tools → undo / redo → shortcuts still work after a
-// Select popup was used → a terrain block drawn Blender-style (drag the base, move up, click), invisible
-// and unselectable outside the terrain tool, selectable with its Select sub-tool → a wall's Follow
-// terrain switch in the Inspector → save → reload → the document is unchanged → it is listed in the
-// library.
+// Editor smoke test (local mode): new map (the map screen in Edit, its table closed) → the start-up
+// quality probe ran (Auto) → every menubar menu opens without crashing → every tool's options fit a
+// 1280 px window (each terrain sub-tool too) → floor, walls, door, light, token through the real tools →
+// undo / redo → shortcuts still work after a Select popup was used → a terrain block drawn Blender-style
+// (drag the base, move up, click), invisible and unselectable outside the terrain tool, selectable with
+// its Select sub-tool → a wall's Follow terrain switch in the Inspector → rename, a restore point
+// (Ctrl+S) → reload → the map is unchanged → it is listed in the library under its new name.
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/editor-smoke.mjs
 import {
@@ -135,9 +135,14 @@ try {
     .getByRole("button", { name: /New scene/ })
     .first()
     .click()
-  await waitFor(page, () => location.pathname === "/editor/new", null, {
-    label: "editor route",
-  })
+  await waitFor(
+    page,
+    () =>
+      location.pathname.startsWith("/host/") &&
+      window.__atlasHost?.mode === "edit",
+    null,
+    { label: "the new map's screen in Edit" }
+  )
   await waitEditor(page)
   const initial = await editorSummary(page)
   checks.ok(
@@ -304,7 +309,7 @@ try {
   let s = await editorSummary(page)
   checks.eq(s.objects.floor, 2, "floor tool: drag lays a slab")
 
-  await pressTool(page, "w")
+  await pressTool(page, "c")
   for (const [x, z] of [
     [x0, z0],
     [x1, z0],
@@ -318,7 +323,7 @@ try {
   s = await editorSummary(page)
   checks.eq(s.objects.wall, 4, "wall tool: a closed chain gives four walls")
 
-  await pressTool(page, "d")
+  await pressTool(page, "i")
   await clickWorld(page, x0 + 15, z1)
   s = await editorSummary(page)
   checks.eq(s.objects.door, 1, "door tool: click on a wall places a door")
@@ -357,7 +362,7 @@ try {
   checks.step("Shortcuts still work after a Select popup was used")
   // Base UI keeps a closed Select's listbox mounted (hidden); it must not count as an open overlay that
   // swallows every canvas shortcut for the rest of the page's life.
-  await pressTool(page, "w")
+  await pressTool(page, "c")
   const snap = page.getByRole("combobox", { name: "Snap mode" })
   await snap.click()
   await page.getByRole("option", { name: "Cell centres" }).click()
@@ -491,13 +496,14 @@ try {
     .getByRole("button", { name: "Apply to terrain" })
     .isVisible()
   checks.ok(applyVisible, "the Inspector shows the shape (Apply to terrain)")
-  // Advanced mode: Tab shows the vertex / edge / face picker, which must fit a 1280 px window too.
-  await page.keyboard.press("Tab")
+  // Advanced mode: 1 (vertices) shows the vertex / edge / face picker, which must fit a 1280 px window
+  // too. (Tab switches the map screen to Play.)
+  await page.keyboard.press("1")
   await sleep(150)
   const advanced = await page.evaluate(
     () => window.__atlasEditor.store.getState().toolSettings.terrain.advanced
   )
-  checks.ok(advanced, "Tab turns on the advanced (vertex / edge / face) mode")
+  checks.ok(advanced, "1 turns on the advanced (vertex / edge / face) mode")
   await page.setViewportSize({ width: 1280, height: 900 })
   await sleep(300)
   checks.eq(
@@ -552,7 +558,7 @@ try {
   checks.eq(await wallFollow(), true, "…and back on")
   await page.keyboard.press("Escape")
 
-  checks.step("Save and reload")
+  checks.step("Rename, a restore point, reload")
   const name = `E2E smoke ${new Date().toISOString().slice(11, 19)}`
   await page.getByRole("textbox", { name: "Scene name" }).fill(name)
   await page.keyboard.press("Enter")
@@ -560,20 +566,19 @@ try {
   await page.keyboard.press("Control+s")
   await waitFor(
     page,
-    () =>
-      location.pathname !== "/editor/new" &&
-      !window.__atlasEditor.store.getState().dirty,
+    () => {
+      const lib = window.__atlasHost.runner.getSnapshot().library
+      return lib !== null && lib.version === 2 && !lib.dirty
+    },
     null,
-    { label: "saved" }
+    { label: "restore point saved" }
   )
+  checks.ok(true, "Ctrl+S saves a restore point (version 2)")
   const saved = await docJson(page)
-  const sceneId = (await editorSummary(page)).path.split("/").pop()
-  checks.ok(
-    sceneId && sceneId !== "new",
-    "the route switches to the saved scene id",
-    sceneId
-  )
   await page.reload({ waitUntil: "domcontentloaded" })
+  await waitFor(page, () => window.__atlasHost?.mode === "edit", null, {
+    label: "the map screen again, in Edit",
+  })
   await waitEditor(page)
   const reloaded = await docJson(page)
   checks.eq(

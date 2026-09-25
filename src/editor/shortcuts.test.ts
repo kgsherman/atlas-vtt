@@ -77,7 +77,8 @@ describe("editor keymap", () => {
     expect(resolve("B", { shift: true })).toEqual({ type: "terrain-sub", sub: "brush" })
     expect(resolve("b")).toEqual({ type: "toggle-dark-vision" })
     expect(resolve("E")).toEqual({ type: "terrain-sub", sub: "cycle-create" })
-    expect(resolve("Tab")).toEqual({ type: "terrain-advanced" })
+    // Tab switches the map screen to Play; the advanced mode has no key of its own (1 / 2 / 3 enter it).
+    expect(resolve("Tab")).toEqual({ type: "mode" })
     expect(resolve("1")).toEqual({ type: "terrain-element", element: "vertex" })
     expect(resolve("2")).toEqual({ type: "terrain-element", element: "edge" })
     expect(resolve("3")).toEqual({ type: "terrain-element", element: "face" })
@@ -94,6 +95,7 @@ describe("editor keymap", () => {
       .map((b) => b.hotkey)
       .sort()
     expect(once).toEqual(["1", "2", "3", "E", "Tab", "X", "Y", "Z"])
+    expect(EDITOR_COMMANDS.find((c) => c.id === "terrain.advanced")?.keys).toEqual([])
     // Remapped keys keep the command's repeat rule.
     expect(editorBindings({ "terrain.advanced": ["Shift+A"] }).find((b) => b.hotkey === "Shift+A")?.repeat).toBe(false)
     expect(EDITOR_COMMANDS.find((c) => c.id === "tool.terrain")?.label).toBe("Terrain")

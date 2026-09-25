@@ -1,34 +1,58 @@
 /**
- * The DM's host console (ARCHITECTURE §6.2, §8): one HostRunner per session (the authoritative host),
- * the live map in "dm-play" (everything visible, optional vision preview of any token), direct
- * manipulation (select, drag to move, door clicks, right-click menus), the session panel (room code,
- * players, tokens, combat, table rules), the table (chat & dice dock, initiative order, turn ring,
- * pings: a long press, Shift for "everyone look here"), areas of effect (TemplateLayer: everyone's
- * templates, tested against the host runner's occlusion world; the DM moves, hides, removes and rolls
- * damage for any of them), "Edit map" — the full editor tools against the live scene — and "Change
- * map" (ChangeMapDialog: another library map, the party carried along, HostRunner.changeMap).
+ * The map screen (ARCHITECTURE §6.8, §7, §8): the DM's one place for a map. One HostRunner per table
+ * (the authoritative host) runs whether the table's doors are open or closed; the DM switches between
+ * two views of the same live map with Edit / Play (Tab):
+ *  - Edit: the editor's tools, panels and menus against the live map (a host editor kept for the whole
+ *    visit, so undo survives switching back and forth), map image import, version history, sharing;
+ *  - Play: the map in "dm-play" (everything visible, optional vision preview of any token), direct
+ *    manipulation (select, drag to move, door clicks, right-click menus), the session panel (room code,
+ *    players, tokens, combat, table rules, assets), the table (chat & dice dock, initiative order, turn
+ *    ring, pings: a long press, Shift for "everyone look here"), areas of effect (TemplateLayer) and
+ *    "Change map" (ChangeMapDialog: another library map, the party carried along).
+ * "Open the table" lets players in with the room code; "Close the table" disconnects them and keeps the
+ * DM here. The map saves itself with the game; restore points (library versions) are kept on Ctrl+S,
+ * when the table closes, on a map change and when the DM leaves.
  */
 import * as React from "react"
 import { toast } from "sonner"
 import { createStore } from "zustand/vanilla"
-import { Crown } from "lucide-react"
-import { useLocation } from "wouter"
+import { Crown, DoorClosed, ImagePlus } from "lucide-react"
+import { useLocation, useSearch } from "wouter"
 
-import { paths } from "@/app/routes"
+import { copyText } from "@/app/clipboard"
 import { plural } from "@/app/format"
+import { userMessage } from "@/app/library"
+import { withModeParam } from "@/app/mode"
+import { inviteLink } from "@/app/roomCodeInput"
+import { paths } from "@/app/routes"
 import { useServices } from "@/app/services"
 import { useQualityChoice } from "@/components/canvas/qualityChoice"
 import {
   EditorContext,
   FreeAssetScopeContext,
 } from "@/components/editor/context"
+import {
+  MapImportDialog,
+  type MapImportRequest,
+} from "@/components/editor/dialogs/MapImportDialog"
+import { ShareDialog } from "@/components/editor/dialogs/ShareDialog"
+import { VersionHistorySheet } from "@/components/editor/dialogs/VersionHistorySheet"
+import { describeIssues } from "@/components/editor/lib/format"
+import { isTextEntryTarget } from "@/components/editor/lib/pointer"
+import { inTerrainMode } from "@/components/editor/lib/terrainMode"
+import {
+  readEditorView,
+  writeEditorView,
+} from "@/components/editor/lib/viewPrefs"
 import { useEditorHotkeys } from "@/components/editor/useEditorHotkeys"
 import { KeybindingsDialog } from "@/components/keybindings/KeybindingsDialog"
 import { Sidebar as EditorSidebar } from "@/components/editor/Sidebar"
+import { EditStatusItems } from "@/components/editor/StatusBar"
 import { ToolOptionsBar } from "@/components/editor/ToolOptionsBar"
 import { ToolRail } from "@/components/editor/ToolRail"
 import {
   CameraControls,
+  GettingStarted,
   LevelSwitcher,
 } from "@/components/editor/ViewportOverlays"
 import { useSuppressThemeHotkey } from "@/components/theme-provider"
@@ -39,7 +63,11 @@ import type { Id } from "@/core/scene/types"
 import type { Arrival } from "@/core/session/changeMap"
 import { playerTokenImageAllowed } from "@/core/session/tokenImages"
 import type { GameState, TableAudience } from "@/core/session/types"
+import type { EditorController } from "@/editor/controller"
+import type { EditorStore } from "@/editor/store"
+import { overlayOpen } from "@/lib/hotkeys"
 import { createHostRunner, type HostRunnerImpl } from "@/net/host"
+import { formatRoomCode } from "@/net/sessionsRepo"
 import {
   cycleToken,
   hostTemplateItems,
@@ -75,7 +103,6 @@ import { TurnStrip } from "../table/TurnStrip"
 import { linkTokens, useGameLink } from "../useTokenMakerLink"
 import {
   BlockingScreen,
-  EndedScreen,
   ErrorScreenOverlay,
   HomeButton,
   JoiningScreen,
@@ -98,10 +125,11 @@ import {
   createHostEditor,
   useAdoptHostScene,
   type HostEditor,
-  type HostEditorView,
 } from "./hostEditor"
-import { EndSessionDialog } from "./EndSessionDialog"
-import { HostEditorProviders } from "./HostEditorProviders"
+import {
+  HostEditorProviders,
+  type MapScreenCommands,
+} from "./HostEditorProviders"
 import {
   CameraKindSwitch,
   LevelRail,
@@ -111,16 +139,30 @@ import {
 } from "./HostOverlays"
 import { HostViewport, type PreviewInfo } from "./HostViewport"
 import { SessionPanel, type SessionTab } from "./SessionPanel"
+import {
+  CloseTableDialog,
+  LeaveTableDialog,
+  type LeaveChoice,
+} from "./TableDialogs"
+import { useMapDocument } from "./useMapDocument"
 import { useSaveMap } from "./useSaveMap"
 
 declare global {
   interface Window {
-    /** Dev-only automation handle for the host console. */
+    /** Dev-only automation handle for the map screen. */
     __atlasHost?: {
       runner: HostRunnerImpl
       engine: Engine | null
       controller: PlayController
       editor: HostEditor | null
+      mode: HostMode
+      setMode(mode: HostMode): void
+    }
+    /** Dev-only automation handle for the map screen's editor (while it exists). */
+    __atlasEditor?: {
+      store: EditorStore
+      controller: EditorController
+      engine: Engine | null
     }
   }
 }
@@ -136,7 +178,7 @@ export function HostSession({ sessionId }: { sessionId: string }) {
         repo: services.sessions,
         identity: services.identity,
         assets: services.assets,
-        // "Save map to library" (HostRunner.saveMapToLibrary) writes to the scene library.
+        // Restore points (HostRunner.saveMapToLibrary) go to the scene library.
         scenes: services.scenes,
         tokenImageBase: services.tokenImages.publicBase,
       })
@@ -149,7 +191,7 @@ export function HostSession({ sessionId }: { sessionId: string }) {
     },
     (r) => void r.stop()
   )
-  if (!runner) return <JoiningScreen label="Starting the session…" />
+  if (!runner) return <JoiningScreen label="Opening the table…" />
   return <HostTable key={sessionId} runner={runner} />
 }
 
@@ -172,6 +214,17 @@ function defaultLevel(state: GameState): Id | null {
   return ground?.id ?? null
 }
 
+function TableEnded() {
+  return (
+    <BlockingScreen
+      icon={<DoorClosed />}
+      title="This table has ended"
+      description="Its map was deleted, or it moved to another table. Open the map again from your library."
+      actions={<HomeButton />}
+    />
+  )
+}
+
 function HostTable({ runner }: { runner: HostRunnerImpl }) {
   const subscribe = React.useCallback(
     (l: () => void) => runner.subscribe(l),
@@ -185,15 +238,15 @@ function HostTable({ runner }: { runner: HostRunnerImpl }) {
   const retry = () => void runner.takeOver()
 
   if (!state) {
-    if (snap.status === "ended") return <EndedScreen who="You" />
+    if (snap.status === "ended") return <TableEnded />
     if (snap.status === "error") {
       const notDm = /not the DM/i.test(snap.error ?? "")
       return (
         <ErrorScreenOverlay
-          title={notDm ? "This isn't your table" : "Can't host this session"}
+          title={notDm ? "This isn't your table" : "Can't open this table"}
           message={
             notDm
-              ? "Only the DM who started this session can host it. If you were invited as a player, join with the room code instead."
+              ? "Only the DM whose map this is can run its table. If you were invited as a player, join with the room code instead."
               : snap.error
           }
           onRetry={notDm ? undefined : retry}
@@ -204,15 +257,15 @@ function HostTable({ runner }: { runner: HostRunnerImpl }) {
       return (
         <BlockingScreen
           icon={<Crown />}
-          title="This table is open in another tab"
+          title="This map is open in another tab"
           description={
             snap.error ??
-            "Another tab or device is hosting this session. Take over to run it from here."
+            "Another tab or device is running this table. Take over to run it from here."
           }
           actions={
             <>
               <Button onClick={retry}>
-                <Crown data-icon="inline-start" /> Take over hosting
+                <Crown data-icon="inline-start" /> Take over
               </Button>
               <HomeButton variant="outline" />
             </>
@@ -220,7 +273,7 @@ function HostTable({ runner }: { runner: HostRunnerImpl }) {
         />
       )
     }
-    return <JoiningScreen label="Starting the session…" />
+    return <JoiningScreen label="Opening the table…" />
   }
   return (
     <HostConsole
@@ -232,6 +285,30 @@ function HostTable({ runner }: { runner: HostRunnerImpl }) {
   )
 }
 
+const modeKey = (sessionId: string) => `atlas-table:mode:${sessionId}`
+
+/**
+ * The mode to open in: Edit for ?import=1, else ?mode=, else the one last used at this table on this
+ * device, else Play while the table is open and Edit otherwise.
+ */
+function initialMode(
+  sessionId: string,
+  tableOpen: boolean,
+  search: string
+): HostMode {
+  const q = new URLSearchParams(search)
+  if (q.get("import") === "1") return "edit"
+  const asked = q.get("mode")
+  if (asked === "edit" || asked === "play") return asked
+  try {
+    const saved = localStorage.getItem(modeKey(sessionId))
+    if (saved === "edit" || saved === "play") return saved
+  } catch {
+    // Storage blocked: the default.
+  }
+  return tableOpen ? "play" : "edit"
+}
+
 function HostConsole({
   runner,
   snap,
@@ -241,15 +318,18 @@ function HostConsole({
   runner: HostRunnerImpl
   snap: ReturnType<HostRunnerImpl["getSnapshot"]>
   state: GameState
-  navigate: (to: string) => void
+  navigate: (to: string, opts?: { replace?: boolean }) => void
 }) {
   const scene = state.scene
+  const services = useServices()
+  const search = useSearch()
   const freeAssetScope = React.useMemo(
     () => state.freeAssets ?? [],
     [state.freeAssets]
   )
-  const [mode, setMode] = React.useState<HostMode>("play")
-  const [editor, setEditor] = React.useState<HostEditor | null>(null)
+  const [mode, setModeState] = React.useState<HostMode>(() =>
+    initialMode(snap.sessionId, snap.tableOpen, search)
+  )
   const [levelChoice, setLevelChoice] = React.useState<Id | null>(null)
   const [selected, setSelected] = React.useState<Id | null>(null)
   /** The selected area of effect (its card replaces the token card). */
@@ -294,66 +374,84 @@ function HostConsole({
 
   // ---- commands --------------------------------------------------------------------------------------
   const [live] = React.useState(
-    () => new LiveBox({ state, activeLevelId, engine, hosting })
+    () => new LiveBox({ state, activeLevelId, engine, hosting, camera })
   )
   React.useEffect(() => {
-    live.set({ state, activeLevelId, engine, hosting })
+    live.set({ state, activeLevelId, engine, hosting, camera })
   })
   const actions = React.useMemo(
     () => createHostActions(runner, () => live.get().state),
     [runner, live]
   )
   const saveMap = useSaveMap(runner, snap)
-  const [ending, setEnding] = React.useState(false)
   const [changing, setChanging] = React.useState(false)
+  const [closingTable, setClosingTable] = React.useState(false)
+  const [leaveTo, setLeaveTo] = React.useState<string | null>(null)
+  const [versionsOpen, setVersionsOpen] = React.useState(false)
+  const [shareOpen, setShareOpen] = React.useState(false)
+  // /map/new?import=1: the map image import builds the new map.
+  const [importRequest, setImportRequest] =
+    React.useState<MapImportRequest | null>(() =>
+      new URLSearchParams(search).get("import") === "1" ? { mode: "new" } : null
+    )
+  const fileRef = React.useRef<HTMLInputElement | null>(null)
   // Hosting lost (standby / ended): the dialog closes and stays closed when hosting resumes.
   if (changing && !hosting) setChanging(false)
+  const playersAtTable = snap.members.filter(
+    (m) => m.status === "active" && m.online
+  ).length
 
-  // ---- Token Maker link: a Token Maker tab re-skins any token through this console -------------------
-  const services = useServices()
-  const linkGame = React.useMemo(
-    () => ({
-      sessionId: snap.sessionId,
-      role: "dm" as const,
-      title: scene.name,
-      userId: services.identity.userId,
-      ready: hosting,
-      tokens: linkTokens(Object.values(scene.tokens)),
-    }),
-    [
-      snap.sessionId,
-      scene.name,
-      scene.tokens,
-      services.identity.userId,
-      hosting,
-    ]
-  )
-  useGameLink(linkGame, async (tokenId, imageUrl) => {
-    // Only the DM's own uploads (what the Token Maker produces), never an arbitrary URL.
-    if (
-      !playerTokenImageAllowed(
-        imageUrl,
-        services.tokenImages.publicBase,
-        services.identity.userId
-      )
-    )
-      return { ok: false, error: "That image isn't one of your token images." }
-    const ok = actions.setTokenImage([tokenId], imageUrl)
-    if (ok) toast.success("Token image updated from the Token Maker")
-    return ok
-      ? { ok: true, error: null }
-      : { ok: false, error: "The table refused the image." }
-  })
-  const focusToken = React.useCallback(
-    (id: Id) => {
-      const s = live.get()
-      const p = tokenPoint(s.state.scene, id)
-      if (!p || !s.engine) return
-      const t = s.state.scene.tokens[id]
-      if (t.levelId !== s.activeLevelId) setLevelChoice(t.levelId)
-      s.engine.focus(p, { distance: 60 })
+  // ---- the editor: one per map for the whole visit (undo survives Edit ↔ Play) ------------------------
+  // Disposed while a map change swaps the document (its undo history belongs to the old map).
+  const [swapping, setSwapping] = React.useState(false)
+  const editorKey = hosting && !swapping ? scene.id : null
+  const editor = useSessionResource(
+    editorKey,
+    () => {
+      const at = live.get()
+      const mapId = at.state.scene.id
+      // The DM's view choices for this map on this device (the camera kind is the screen's, shared by both modes).
+      const { camera: _savedCamera, ...saved } = readEditorView(mapId) ?? {}
+      void _savedCamera
+      const e = createHostEditor(runner, at.state.scene, {
+        camera: at.camera,
+        activeLevelId: at.activeLevelId,
+        view: saved,
+      })
+      const off = e.ctx.store.subscribe((st, prev) => {
+        const v = st.view
+        const p = prev.view
+        if (
+          v.showGrid !== p.showGrid ||
+          v.showHelpers !== p.showHelpers ||
+          v.ghostAdjacent !== p.ghostAdjacent ||
+          v.darkVision !== p.darkVision
+        )
+          writeEditorView(mapId, v)
+      })
+      return {
+        ...e,
+        dispose() {
+          off()
+          e.dispose()
+        },
+      }
     },
-    [live]
+    (e) => e.dispose()
+  )
+  useAdoptHostScene(editor, scene)
+  const editing = mode === "edit" && editor !== null
+
+  const setMode = React.useCallback(
+    (next: HostMode) => {
+      setModeState(next)
+      try {
+        localStorage.setItem(modeKey(snap.sessionId), next)
+      } catch {
+        // Storage blocked: not remembered.
+      }
+    },
+    [snap.sessionId]
   )
   const [controller] = React.useState(
     () =>
@@ -425,6 +523,94 @@ function HostConsole({
     [controller]
   )
 
+  /** Edit ↔ Play: the same map, camera and level; gestures under way are cancelled. */
+  const switchMode = React.useCallback(
+    (next: HostMode) => {
+      if (next === mode) return
+      if (next === "edit") {
+        if (!hosting || !editor) {
+          toast.info("This tab isn't running the table", { id: "mode" })
+          return
+        }
+        controller.cancel()
+        setPreview(null)
+        const st = editor.ctx.store.getState()
+        if (st.view.camera !== camera) st.setView({ camera })
+        if (
+          activeLevelId &&
+          st.activeLevelId !== activeLevelId &&
+          Object.hasOwn(st.scene.levels, activeLevelId)
+        )
+          st.setActiveLevel(activeLevelId)
+      } else if (editor) {
+        editor.ctx.controller.cancelGesture()
+        const st = editor.ctx.store.getState()
+        setLevelChoice(st.activeLevelId)
+        setCamera(st.view.camera)
+      }
+      setMode(next)
+    },
+    [
+      mode,
+      hosting,
+      editor,
+      controller,
+      camera,
+      activeLevelId,
+      setMode,
+      setCamera,
+    ]
+  )
+  // Editing needs this tab to run the table.
+  if (mode === "edit" && !hosting && snap.status !== "starting")
+    setModeState("play")
+
+  // ---- Token Maker link: a Token Maker tab re-skins any token through this screen --------------------
+  const linkGame = React.useMemo(
+    () => ({
+      sessionId: snap.sessionId,
+      role: "dm" as const,
+      title: scene.name,
+      userId: services.identity.userId,
+      ready: hosting,
+      tokens: linkTokens(Object.values(scene.tokens)),
+    }),
+    [
+      snap.sessionId,
+      scene.name,
+      scene.tokens,
+      services.identity.userId,
+      hosting,
+    ]
+  )
+  useGameLink(linkGame, async (tokenId, imageUrl) => {
+    // Only the DM's own uploads (what the Token Maker produces), never an arbitrary URL.
+    if (
+      !playerTokenImageAllowed(
+        imageUrl,
+        services.tokenImages.publicBase,
+        services.identity.userId
+      )
+    )
+      return { ok: false, error: "That image isn't one of your token images." }
+    const ok = actions.setTokenImage([tokenId], imageUrl)
+    if (ok) toast.success("Token image updated from the Token Maker")
+    return ok
+      ? { ok: true, error: null }
+      : { ok: false, error: "The table refused the image." }
+  })
+  const focusToken = React.useCallback(
+    (id: Id) => {
+      const s = live.get()
+      const p = tokenPoint(s.state.scene, id)
+      if (!p || !s.engine) return
+      const t = s.state.scene.tokens[id]
+      if (t.levelId !== s.activeLevelId) setLevelChoice(t.levelId)
+      s.engine.focus(p, { distance: 60 })
+    },
+    [live]
+  )
+
   // ---- areas of effect ---------------------------------------------------------------------------------
   const templateItems = React.useMemo(
     () => hostTemplateItems(state),
@@ -481,69 +667,72 @@ function HostConsole({
     [focusToken]
   )
 
-  // ---- edit mode -------------------------------------------------------------------------------------
-  // The DM's editor view choices (ghosted adjacent levels, hidden levels) survive leaving Edit map.
-  const [editView, setEditView] = React.useState<HostEditorView>({})
-  const enterEdit = React.useCallback(() => {
-    if (editor || !hosting) return
-    controller.cancel()
-    setPreview(null)
-    setEditor(
-      createHostEditor(runner, live.get().state.scene, {
-        camera,
-        activeLevelId,
-        view: editView,
-      })
-    )
-    setMode("edit")
-  }, [
-    editor,
-    hosting,
-    controller,
-    runner,
-    live,
-    camera,
-    activeLevelId,
-    editView,
-  ])
-  const exitEdit = React.useCallback(() => {
-    if (!editor) return
-    setLevelChoice(editor.ctx.store.getState().activeLevelId)
-    const view = editor.ctx.store.getState().view
-    setEditView({
-      ghostAdjacent: view.ghostAdjacent,
-      levelVisibility: view.levelVisibility,
-      darkVision: view.darkVision,
+  // ---- the table's doors and leaving -----------------------------------------------------------------
+  const openTable = React.useCallback(async () => {
+    try {
+      await runner.setTableOpen(true)
+    } catch (err) {
+      toast.error("Couldn't open the table", { description: userMessage(err) })
+      return
+    }
+    const code = runner.getSnapshot().roomCode
+    toast.success(`The table is open · ${formatRoomCode(code)}`, {
+      description: "Players join with the room code.",
+      action: {
+        label: "Copy invite link",
+        onClick: () =>
+          void copyText(
+            inviteLink(window.location.origin, code, withModeParam("")),
+            "Invite link"
+          ),
+      },
     })
-    const cam = view.camera
-    setCamera(cam)
-    editor.dispose()
-    setEditor(null)
-    setMode("play")
-  }, [editor, setCamera])
-  React.useEffect(() => () => editor?.dispose(), [editor])
-  // Hosting lost (standby / ended) while editing: leave edit mode.
-  const exitEditRef = React.useRef(exitEdit)
-  React.useEffect(() => {
-    exitEditRef.current = exitEdit
-  })
-  React.useEffect(
-    () =>
-      runner.subscribe(() => {
-        if (runner.getSnapshot().status !== "hosting") exitEditRef.current()
-      }),
-    [runner]
+  }, [runner])
+  const closeTable = React.useCallback(async (): Promise<boolean> => {
+    try {
+      await runner.setTableOpen(false)
+    } catch (err) {
+      toast.error("Couldn't close the table", { description: userMessage(err) })
+      return false
+    }
+    toast.success("The table is closed", {
+      description:
+        "Players were disconnected. They come back with the same room code when you open it again.",
+    })
+    if (saveMap.dirty) void saveMap.save({ quiet: true })
+    return true
+  }, [runner, saveMap])
+  /** Leave for another page: a restore point first when the map changed (the game itself is saved anyway). */
+  const leaveNow = React.useCallback(
+    async (to: string, choice: LeaveChoice = "keep"): Promise<boolean> => {
+      if (choice === "close" && !(await closeTable())) return false
+      if (live.get().hosting && saveMap.dirty)
+        await saveMap.save({ quiet: true })
+      navigate(to)
+      return true
+    },
+    [closeTable, live, saveMap, navigate]
   )
-  useAdoptHostScene(editor, scene)
-  const saveToLibrary = React.useCallback(() => void saveMap.save(), [saveMap])
-  useEditorHotkeys(editor?.ctx.controller ?? null, {
-    enabled: true,
-    save: saveToLibrary,
-    help: () => setKeysOpen(true),
-    escape: exitEdit,
-  })
+  const go = React.useCallback(
+    (to: string) => {
+      if (hosting && snap.tableOpen) setLeaveTo(to)
+      else void leaveNow(to)
+    },
+    [hosting, snap.tableOpen, leaveNow]
+  )
+  const doc = useMapDocument({ snap, editor, saveMap, go })
+  const saveRestorePoint = React.useCallback(
+    () => void saveMap.save(),
+    [saveMap]
+  )
 
-  // ---- keyboard (play mode) --------------------------------------------------------------------------
+  // ---- keyboard ------------------------------------------------------------------------------------------
+  useEditorHotkeys(editor?.ctx.controller ?? null, {
+    enabled: editing,
+    save: saveRestorePoint,
+    help: () => setKeysOpen(true),
+    mode: () => switchMode("play"),
+  })
   /** Bumped by the Enter shortcut: opens the chat dock and focuses its input. */
   const [chatFocus, setChatFocus] = React.useState(0)
   usePlayKeys(
@@ -613,10 +802,45 @@ function HostConsole({
         case "chat":
           setChatFocus((n) => n + 1)
           return
+        case "mode":
+          switchMode("edit")
+          return
       }
     },
-    { enabled: mode === "play", host: true }
+    { enabled: !editing, host: true }
   )
+
+  // ---- Edit: system clipboard pastes of copied Atlas objects ------------------------------------------------
+  React.useEffect(() => {
+    if (!editing || !editor) return
+    const { store, controller: ec } = editor.ctx
+    const onPaste = (e: ClipboardEvent) => {
+      // Terrain mode: shapes are not on the clipboard, and the object selection is hidden (not a paste target).
+      if (
+        isTextEntryTarget(e.target) ||
+        overlayOpen() ||
+        inTerrainMode(store.getState())
+      )
+        return
+      const text = e.clipboardData?.getData("text/plain")
+      if (!text || !text.includes("atlas-clipboard")) return
+      e.preventDefault()
+      const r = store.getState().pasteText(text, ec.pasteTarget())
+      if (!r.ok)
+        toast.error("Could not paste", {
+          description: describeIssues(r.issues),
+        })
+    }
+    window.addEventListener("paste", onPaste)
+    return () => window.removeEventListener("paste", onPaste)
+  }, [editing, editor])
+
+  // ?mode= and ?import=1 were read when the screen opened: the address drops them.
+  React.useEffect(() => {
+    const q = new URLSearchParams(search)
+    if (q.has("mode") || q.has("import"))
+      navigate(paths.host(snap.sessionId), { replace: true })
+  }, [search, navigate, snap.sessionId])
 
   // ---- the table ---------------------------------------------------------------------------------------
   // Rebuilt only when the table (or who plays) changes, not on every token step.
@@ -652,24 +876,9 @@ function HostConsole({
     [runner]
   )
 
-  // ---- session actions -------------------------------------------------------------------------------
-  /** End for everyone (after saving the map to the library when `save`); false = stay on the dialog. */
-  const endSession = async (save: boolean): Promise<boolean> => {
-    if (save && !(await saveMap.save({ confirm: false }))) return false
-    try {
-      await runner.endSession()
-      toast.success("Session ended")
-      return true
-    } catch (err) {
-      toast.error("Couldn't end the session", {
-        description: err instanceof Error ? err.message : String(err),
-      })
-      return false
-    }
-  }
-
+  // ---- changing the map --------------------------------------------------------------------------------
   /**
-   * Move the game to another map (ChangeMapDialog), after saving the live map to the library when
+   * Move the table to another map (ChangeMapDialog), after saving a restore point of this one when
    * `req.save`. The host builds the change from its own live state (a player's change a moment ago
    * travels too). Resolves true once changed (the game's save goes on in the background); an error
    * text keeps the dialog open.
@@ -682,26 +891,31 @@ function HostConsole({
   ): Promise<ChangeMapOutcome> => {
     // A save in flight would stamp the old map's library row on the new map (checked at confirm time).
     if (saveMap.saving)
-      return "The map is being saved to your library. Try again in a moment."
-    if (req.save && !(await saveMap.save({ confirm: false })))
-      return "The map wasn't saved to your library, so the game stayed here. See the notice for why, or change without saving."
-    // The editor's undo history belongs to the old map: dispose of it before the swap.
-    if (editor) exitEdit()
+      return "A restore point of this map is being saved. Try again in a moment."
+    if (req.save && !(await saveMap.save({ quiet: true })))
+      return "This map couldn't be saved to your library, so the table stayed here. See the notice for why."
     controller.cancel()
-    // The swap is dispatched at once (the game's save follows): the camera goes to the arrival as soon
-    // as the new map is in the engine.
+    editor?.ctx.controller.cancelGesture()
+    // The editor's undo history belongs to this map: it goes before the swap (a new one follows).
+    setSwapping(true)
+    // The camera goes to the arrival as soon as the new map is in the engine.
     pendingFocus.current = { sceneId: req.scene.id, arrival: req.arrival }
-    const r = runner.changeMap(req.scene, {
-      tokenIds: req.tokenIds,
-      arrival: req.arrival,
-      origin: req.origin,
-    })
+    let r
+    try {
+      r = await runner.changeMap(req.scene, {
+        tokenIds: req.tokenIds,
+        arrival: req.arrival,
+        origin: req.origin,
+      })
+    } finally {
+      setSwapping(false)
+    }
     if (!r.ok) {
       pendingFocus.current = null
       // Refused: the old map is still live, so its tokens name the ones left without room.
-      const tokens = runner.getSnapshot().state?.scene.tokens ?? {}
+      const current = runner.getSnapshot().state?.scene.tokens ?? {}
       const names = r.unplaced.map((id) =>
-        Object.hasOwn(tokens, id) ? tokenDisplayName(tokens[id]) : "a token"
+        Object.hasOwn(current, id) ? tokenDisplayName(current[id]) : "a token"
       )
       return changeMapErrorText(r.error, names)
     }
@@ -710,17 +924,13 @@ function HostConsole({
     setTemplateId(null)
     setPreview(null)
     setLevelChoice(req.arrival.levelId)
-    setEditView((v) => ({
-      ghostAdjacent: v.ghostAdjacent,
-      darkVision: v.darkVision,
-    }))
     const n = Object.keys(r.carried).length
-    toast.success(`Now playing “${req.name}”`, {
+    toast.success(`Now at “${req.name}”`, {
       description:
         n === 0 ? "No tokens came along." : `${plural(n, "token")} came along.`,
     })
     void r.saved.then((saved) => {
-      // After a stand-down the console says why hosting stopped instead.
+      // After a stand-down the screen says why hosting stopped instead.
       if (saved || runner.getSnapshot().status !== "hosting") return
       toast.warning("The map change isn't saved yet", {
         description:
@@ -742,14 +952,89 @@ function HostConsole({
     )
   }, [scene, engine])
 
-  // Dev automation handle.
+  // Dev automation handles.
   React.useEffect(() => {
     if (!import.meta.env.DEV) return
-    window.__atlasHost = { runner, engine, controller, editor }
+    window.__atlasHost = {
+      runner,
+      engine,
+      controller,
+      editor,
+      mode,
+      setMode: switchMode,
+    }
+    if (editor)
+      window.__atlasEditor = {
+        store: editor.ctx.store,
+        controller: editor.ctx.controller,
+        engine,
+      }
     return () => {
       if (window.__atlasHost?.runner === runner) delete window.__atlasHost
+      if (editor && window.__atlasEditor?.store === editor.ctx.store)
+        delete window.__atlasEditor
     }
-  }, [runner, engine, controller, editor])
+  }, [runner, engine, controller, editor, mode, switchMode])
+
+  // ---- page commands (menus, panels) -------------------------------------------------------------------
+  const commands = React.useMemo<MapScreenCommands>(
+    () => ({
+      save: saveRestorePoint,
+      newMap: (opts) => doc.newMap(opts),
+      openMapImport: (levelId) => {
+        if (!editing) switchMode("edit")
+        setImportRequest({ mode: "existing", levelId: levelId ?? null })
+      },
+      openVersions: () => setVersionsOpen(true),
+      exportFile: () => void doc.exportFile(),
+      importFile: () => fileRef.current?.click(),
+      openShare: () => setShareOpen(true),
+      leave: () => go(paths.home()),
+      openShortcuts: () => setKeysOpen(true),
+    }),
+    [saveRestorePoint, doc, editing, switchMode, go]
+  )
+
+  // ---- drag and drop: battlemaps onto the map (Edit), .atlas.json files anywhere ------------------------
+  const [dropHint, setDropHint] = React.useState(false)
+  const activeLevelName = editor
+    ? (scene.levels[editor.ctx.store.getState().activeLevelId]?.name ??
+      "the active level")
+    : "the active level"
+  const dropProps: React.HTMLAttributes<HTMLDivElement> = {
+    onDragOver: (e) => {
+      if (!hosting || !e.dataTransfer.types.includes("Files")) return
+      e.preventDefault()
+      e.dataTransfer.dropEffect = "copy"
+      if (!dropHint) setDropHint(true)
+    },
+    onDragLeave: (e) => {
+      if (!e.currentTarget.contains(e.relatedTarget as Node | null))
+        setDropHint(false)
+    },
+    onDrop: (e) => {
+      if (!hosting) return
+      e.preventDefault()
+      setDropHint(false)
+      const files = [...e.dataTransfer.files]
+      const json = files.find((f) => /\.json$/i.test(f.name))
+      if (json) return void doc.importFile(json)
+      const images = files.filter(
+        (f) => /^image\//.test(f.type) || /\.(png|jpe?g|webp)$/i.test(f.name)
+      )
+      if (images.length === 0)
+        return void toast.error(
+          "Drop battlemap images (PNG, JPEG, WebP) or an .atlas.json file"
+        )
+      if (!editor) return
+      if (!editing) switchMode("edit")
+      setImportRequest({
+        mode: "existing",
+        levelId: editor.ctx.store.getState().activeLevelId,
+        files: images,
+      })
+    },
+  }
 
   const main = (
     <div className="flex h-svh flex-col overflow-hidden bg-background text-foreground">
@@ -757,20 +1042,35 @@ function HostConsole({
         snap={snap}
         sceneName={scene.name}
         mode={mode}
-        onMode={(m) => (m === "edit" ? enterEdit() : exitEdit())}
+        onMode={switchMode}
+        menus={editor !== null}
+        doc={doc}
         previewing={activePreview !== null}
         onPreview={togglePreview}
         sidebar={sidebar}
         onSidebar={setSidebar}
-        onEnd={() => setEnding(true)}
+        onLeave={commands.leave}
         onChangeMap={() => setChanging(true)}
-        saveMap={saveMap}
+        savingMap={saveMap.saving}
+        onOpenTable={openTable}
+        onCloseTable={() => setClosingTable(true)}
       />
       <div className="flex min-h-0 flex-1">
-        {editor ? <ToolRail /> : null}
+        {editing ? <ToolRail /> : null}
         <main className="flex min-w-0 flex-1 flex-col">
-          {editor ? <ToolOptionsBar /> : null}
-          <div className="relative min-h-0 flex-1">
+          {editing ? <ToolOptionsBar /> : null}
+          <div className="relative min-h-0 flex-1" {...dropProps}>
+            {dropHint ? (
+              <div className="pointer-events-none absolute inset-3 z-20 grid place-items-center rounded-xl border-2 border-dashed border-primary/60 bg-background/60 backdrop-blur-sm">
+                <div className="flex flex-col items-center gap-2 text-sm text-foreground">
+                  <ImagePlus className="size-6 text-primary" />
+                  Drop battlemaps to import them onto “{activeLevelName}”
+                  <span className="text-xs text-muted-foreground">
+                    …or an .atlas.json map file to add it to your library
+                  </span>
+                </div>
+              </div>
+            ) : null}
             <HostViewport
               key={quality.engineKey}
               quality={quality.quality}
@@ -778,7 +1078,7 @@ function HostConsole({
               state={state}
               actions={actions}
               controller={controller}
-              editor={editor}
+              editor={editing ? editor : null}
               activeLevelId={activeLevelId}
               camera={camera}
               grid={grid}
@@ -791,17 +1091,24 @@ function HostConsole({
               }
               onSelectToken={(id) => setSelected(id)}
             >
-              {editor ? (
-                <div className="pointer-events-none absolute inset-x-3 top-3 z-10 flex items-start justify-between gap-3">
-                  <LevelSwitcher />
-                  <HudPanel className="flex items-center gap-2 px-3 py-1.5 text-xs">
-                    <span className="size-2 animate-pulse rounded-full bg-primary" />
-                    Editing the live map — changes reach players as they explore
-                    <Button size="xs" variant="outline" onClick={exitEdit}>
-                      Done
-                    </Button>
-                  </HudPanel>
-                  <CameraControls />
+              {editing ? (
+                <div className="pointer-events-none absolute inset-0 z-10">
+                  <div className="absolute inset-x-3 top-3 flex items-start justify-between gap-3">
+                    <LevelSwitcher />
+                    {snap.tableOpen ? (
+                      <HudPanel className="flex items-center gap-2 px-3 py-1.5 text-xs">
+                        <span className="size-2 animate-pulse rounded-full bg-primary" />
+                        The table is open: players see your changes as they
+                        explore
+                      </HudPanel>
+                    ) : (
+                      <span />
+                    )}
+                    <CameraControls />
+                  </div>
+                  <div className="absolute bottom-3 left-3">
+                    <GettingStarted />
+                  </div>
                 </div>
               ) : (
                 <div className="pointer-events-none absolute inset-0 z-10 select-none">
@@ -937,14 +1244,14 @@ function HostConsole({
                         if (error) toast.error(error, { id: "dm-roll" })
                       }}
                       disabledReason={
-                        hosting ? null : "This tab is not hosting the session."
+                        hosting ? null : "This tab isn't running the table."
                       }
                       focusSignal={chatFocus}
                     />
                   </div>
                 </div>
               )}
-              {!editor ? (
+              {!editing ? (
                 <TokenBadges
                   tokens={badges}
                   showOn={(levelId) =>
@@ -952,7 +1259,7 @@ function HostConsole({
                   }
                 />
               ) : null}
-              {!editor &&
+              {!editing &&
               turn?.activeTokenId &&
               Object.hasOwn(scene.tokens, turn.activeTokenId) ? (
                 <TurnMarker
@@ -983,25 +1290,14 @@ function HostConsole({
                 onSelect={selectTemplate}
                 onSelectedView={setTemplateView}
                 showOn={(levelId) => levelShown(scene, activeLevelId, levelId)}
-                enabled={!editor}
+                enabled={!editing}
               />
             </HostViewport>
-            {snap.status === "ended" ? (
-              <BlockingScreen
-                icon={<Crown />}
-                title="The session has ended"
-                description="Players were disconnected. You can start a new session for this map from your library."
-                actions={
-                  <Button onClick={() => navigate(paths.home())}>
-                    Back to home
-                  </Button>
-                }
-              />
-            ) : null}
+            {snap.status === "ended" ? <TableEnded /> : null}
           </div>
         </main>
         {sidebar ? (
-          editor ? (
+          editing ? (
             <EditorSidebar />
           ) : (
             <SessionPanel
@@ -1016,6 +1312,7 @@ function HostConsole({
               onPreviewToken={previewToken}
               onKick={(uid) => runner.kick(uid)}
               onTakeOver={() => void runner.takeOver()}
+              onOpenTable={openTable}
               activeLevelId={activeLevelId}
             />
           )
@@ -1027,17 +1324,21 @@ function HostConsole({
         scopes={["editor", "play"]}
         host
       />
-      <EndSessionDialog
-        open={ending}
-        onOpenChange={setEnding}
-        dirty={saveMap.dirty}
-        canSave={saveMap.library.status === "linked"}
-        sceneName={
-          saveMap.library.status === "linked"
-            ? saveMap.library.name
-            : scene.name
+      <CloseTableDialog
+        open={closingTable}
+        onOpenChange={setClosingTable}
+        players={playersAtTable}
+        onClose={closeTable}
+      />
+      <LeaveTableDialog
+        open={leaveTo !== null}
+        onOpenChange={(o) => {
+          if (!o) setLeaveTo(null)
+        }}
+        players={playersAtTable}
+        onLeave={(choice) =>
+          leaveTo ? leaveNow(leaveTo, choice) : Promise.resolve(true)
         }
-        onEnd={endSession}
       />
       <ChangeMapDialog
         open={changing && hosting}
@@ -1047,16 +1348,45 @@ function HostConsole({
         saveMap={saveMap}
         onChange={changeMap}
       />
+      <VersionHistorySheet
+        open={versionsOpen}
+        onOpenChange={setVersionsOpen}
+        doc={doc}
+      />
+      <ShareDialog open={shareOpen} onOpenChange={setShareOpen} doc={doc} />
+      {editor ? (
+        <MapImportDialog
+          request={importRequest}
+          onClose={() => setImportRequest(null)}
+          doc={doc}
+        />
+      ) : null}
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".json,.atlas.json,application/json"
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          e.target.value = ""
+          if (file) void doc.importFile(file)
+        }}
+      />
       <HostStatusBar
         snap={snap}
         frame={frame}
         quality={quality.choice}
         onQuality={quality.setChoice}
+        edit={
+          editing && editor ? (
+            <EditStatusItems cursor={editor.cursor} />
+          ) : undefined
+        }
       />
     </div>
   )
 
-  // The providers are always present (null while playing) so entering edit mode never remounts the map.
+  // The providers are always present (null until the editor exists) so switching modes never remounts the map.
   // The inspector's asset pickers offer what this game loads (GameState.freeAssets).
   return (
     <FreeAssetScopeContext.Provider value={freeAssetScope}>
@@ -1064,13 +1394,7 @@ function HostConsole({
         <HostEditorProviders
           editor={editor}
           engine={engine}
-          onPreviewToken={(id) => {
-            exitEdit()
-            previewToken(id)
-          }}
-          onExit={exitEdit}
-          onSave={saveToLibrary}
-          onShortcuts={() => setKeysOpen(true)}
+          commands={commands}
         >
           {main}
         </HostEditorProviders>

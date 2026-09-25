@@ -2,6 +2,7 @@ import * as React from "react"
 import { Check, Copy, Link2, RefreshCw, ShieldAlert } from "lucide-react"
 import { toast } from "sonner"
 
+import { userMessage } from "@/app/library"
 import { paths } from "@/app/routes"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -9,13 +10,22 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { InputGroup, InputGroupAddon, InputGroupButton, InputGroupInput } from "@/components/ui/input-group"
 import { Spinner } from "@/components/ui/spinner"
 
-import { errorText, type SceneDocument } from "../useSceneDocument"
+import type { SceneSummary, SceneVisibility } from "@/net/scenesRepo"
 
 function shareUrl(slug: string): string {
   return `${location.origin}${paths.shared(slug)}`
 }
 
-export function ShareDialog({ open, onOpenChange, doc }: { open: boolean; onOpenChange(open: boolean): void; doc: SceneDocument }) {
+/** The map's library entry, as the share dialog needs it. */
+export interface ShareDocument {
+  summary: Pick<SceneSummary, "name" | "visibility" | "shareSlug"> | null
+  libraryId: string | null
+  storage: "remote" | "local"
+  /** Save a restore point, then turn the link on / off (or issue a new one). Resolves with the slug. */
+  setSharing(visibility: SceneVisibility, opts?: { rotate?: boolean }): Promise<string | null>
+}
+
+export function ShareDialog({ open, onOpenChange, doc }: { open: boolean; onOpenChange(open: boolean): void; doc: ShareDocument }) {
   const [busy, setBusy] = React.useState<"on" | "off" | "rotate" | null>(null)
   const [copied, setCopied] = React.useState(false)
   const slug = doc.summary?.visibility === "link" ? doc.summary.shareSlug : null
@@ -31,7 +41,7 @@ export function ShareDialog({ open, onOpenChange, doc }: { open: boolean; onOpen
         if (kind === "rotate") toast.success("New link created", { description: "The previous link stopped working." })
       }
     } catch (err) {
-      toast.error("Could not change sharing", { description: errorText(err) })
+      toast.error("Could not change sharing", { description: userMessage(err) })
     } finally {
       setBusy(null)
     }
@@ -54,16 +64,18 @@ export function ShareDialog({ open, onOpenChange, doc }: { open: boolean; onOpen
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Link2 className="size-4" /> Share “{doc.summary?.name ?? "this scene"}”
+            <Link2 className="size-4" /> Share “{doc.summary?.name ?? "this map"}”
           </DialogTitle>
-          <DialogDescription>Anyone with the link can open a read-only copy of the latest saved version.</DialogDescription>
+          <DialogDescription>
+            Anyone with the link can open a read-only copy of the map's latest restore point. Sharing saves one first, so the link shows the map as it is now.
+          </DialogDescription>
         </DialogHeader>
         <Alert variant="destructive">
           <ShieldAlert />
           <AlertTitle>The link publishes the full DM document</AlertTitle>
           <AlertDescription>
-            Hidden objects and tokens, secret doors, DM notes and every level are visible to whoever has the link. Share it with co-DMs, not with players — players see the map through a
-            session.
+            Hidden objects and tokens, secret doors, DM notes and every level are visible to whoever has the link. Share it with co-DMs, not with players —
+            players see the map through a table.
           </AlertDescription>
         </Alert>
         {url ? (
@@ -77,7 +89,7 @@ export function ShareDialog({ open, onOpenChange, doc }: { open: boolean; onOpen
             </InputGroupAddon>
           </InputGroup>
         ) : !doc.libraryId ? (
-          <p className="text-xs text-muted-foreground">The scene is saved to your library first.</p>
+          <p className="text-xs text-muted-foreground">This map is no longer in your library.</p>
         ) : null}
         <DialogFooter className="gap-2 sm:justify-between">
           {url ? (
@@ -92,7 +104,7 @@ export function ShareDialog({ open, onOpenChange, doc }: { open: boolean; onOpen
               </Button>
             </>
           ) : (
-            <Button size="sm" className="ml-auto" disabled={busy !== null || doc.storage !== "remote"} onClick={() => void run("on")}>
+            <Button size="sm" className="ml-auto" disabled={busy !== null || doc.storage !== "remote" || !doc.libraryId} onClick={() => void run("on")}>
               {busy === "on" ? <Spinner className="size-3.5" /> : <Link2 data-icon="inline-start" />}
               Create link and copy
             </Button>

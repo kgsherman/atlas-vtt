@@ -1,15 +1,16 @@
 /**
- * "Edit map" during a live session: canvas pointer events → the editor controller, on the host's own
+ * Edit on the map screen: canvas pointer events → the editor controller, on the host's own
  * engine (no second WebGL context). Mirrors the editor viewport's input handling (components/editor
  * EditorViewport): picks on the editor's active level, marching its terrain, + snapping (Alt = free),
  * canvas-relative positions and pressed buttons, floors as background for the select tool,
  * right-click-without-drag as a tool click, tool extras applied in one undo step, the active tool's
- * CSS cursor (Tool.cursor).
+ * CSS cursor (Tool.cursor), and the cursor readout (cell and point under the cursor) for the status bar.
  */
 import * as React from "react"
 
 import type { EditorContextValue } from "@/components/editor/context"
 import {
+  cursorReadout,
   editorCursor,
   stripBackgroundFloor,
   toToolPointerEvent,
@@ -21,6 +22,11 @@ import {
   newItemIds,
 } from "@/components/editor/lib/toolExtras"
 import { toolMeta } from "@/components/editor/toolMeta"
+import {
+  sameCursor,
+  type CursorStore,
+} from "@/components/editor/lib/viewportInfo"
+import type { Vec3 } from "@/core/scene/types"
 import type { Engine } from "@/render/contracts"
 
 const RIGHT_CLICK_SLOP = 5
@@ -28,7 +34,8 @@ const RIGHT_CLICK_SLOP = 5
 export function useHostEditInput(
   engine: Engine | null,
   canvas: HTMLCanvasElement | null,
-  ctx: EditorContextValue | null
+  ctx: EditorContextValue | null,
+  readout: CursorStore | null
 ): void {
   React.useEffect(() => {
     if (!engine || !canvas || !ctx) return
@@ -64,8 +71,20 @@ export function useHostEditInput(
       if (canvas.style.cursor !== css) canvas.style.cursor = css
     }
     const updateCursor = () => setCursor(editorCursor(controller, leftDown))
+    const updateReadout = (ground: Vec3 | null) => {
+      if (!readout) return
+      const s = store.getState()
+      const level = Object.hasOwn(s.scene.levels, s.activeLevelId)
+        ? s.scene.levels[s.activeLevelId]
+        : null
+      const next = cursorReadout(s.scene.grid, ground, level?.elevation ?? 0)
+      if (!sameCursor(next, readout.getState().cursor))
+        readout.setState({ cursor: next })
+    }
     const processMove = (e: PointerEvent) => {
-      controller.pointerMove(background(build(e)).event)
+      const ev = background(build(e)).event
+      controller.pointerMove(ev)
+      updateReadout(ev.pick.ground)
       updateCursor()
     }
     const flushMove = () => {
@@ -115,6 +134,7 @@ export function useHostEditInput(
       }
       if (controller.activeTool().capturesPointer)
         engine.setCameraControlsEnabled(false)
+      updateReadout(ev.pick.ground)
       updateCursor()
     }
     const onPointerMove = (e: PointerEvent) => {
@@ -171,6 +191,7 @@ export function useHostEditInput(
     const onPointerLeave = (e: PointerEvent) => {
       if (leftDown) return
       pendingMove = null
+      updateReadout(null)
       const s = store.getState()
       controller.pointerMove(
         toToolPointerEvent(
@@ -206,6 +227,7 @@ export function useHostEditInput(
       controller.cancelGesture()
       engine.setCameraControlsEnabled(true)
       canvas.style.cursor = "default"
+      readout?.setState({ cursor: null })
     }
-  }, [engine, canvas, ctx])
+  }, [engine, canvas, ctx, readout])
 }

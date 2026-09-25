@@ -30,8 +30,9 @@ export async function drainWire(page) {
 // ---- setting up a game ---------------------------------------------------------------------------------
 
 /**
- * From the library, open a scene in the editor: a copy of a sample (`sample`: its display name) or an
- * imported .atlas.json (`file`: a path). `mode` is "local" (?local=1) or "supabase" (?local=0).
+ * From the library, open a map (its map screen, in Edit): a copy of a sample (`sample`: its display
+ * name) or an imported .atlas.json (`file`: a path). `mode` is "local" (?local=1) or "supabase"
+ * (?local=0). Resolves with the map's library id once the editor is on it (the table is closed).
  */
 export async function openSceneInEditor(
   page,
@@ -56,41 +57,51 @@ export async function openSceneInEditor(
   await waitFor(
     page,
     () =>
-      /^\/editor\/(?!new)/.test(location.pathname) &&
+      location.pathname.startsWith("/host/") &&
+      window.__atlasHost?.mode === "edit" &&
       window.__atlasEditor?.engine != null,
     null,
-    { timeout: 90000, label: "editor on the scene" }
+    { timeout: 90000, label: "the map screen in Edit" }
   )
-  return page.evaluate(() => location.pathname.split("/").pop())
+  return page.evaluate(
+    () => window.__atlasHost.runner.getSnapshot().library?.sceneId ?? null
+  )
 }
 
 /**
- * Editor → "Start session" → "Start a game" dialog → the host console is hosting. `freeAssets`: the
- * labels of the free asset categories to load (e.g. ["Token models"]; the others are unticked);
- * default: the dialog's remembered choice. Returns the session id, room code and state.
+ * On the map screen: "Open the table" (players may join) and switch to Play. `freeAssets`: the labels
+ * of the free asset categories the game loads (e.g. ["Token models"]), ticked in the Assets tab.
+ * Returns the session id, room code and state.
  */
 export async function startSession(dm, { freeAssets = null } = {}) {
+  await waitHosting(dm, 60000)
   await sleep(300)
-  await dm.getByRole("button", { name: "Start session" }).click()
-  const dialog = dm.getByRole("dialog", { name: "Start a game" })
+  await dm.getByRole("button", { name: "Open the table" }).click()
+  await waitFor(
+    dm,
+    () => window.__atlasHost?.runner.getSnapshot().tableOpen === true,
+    null,
+    { timeout: 30000, label: "the table is open" }
+  )
+  if ((await dm.evaluate(() => window.__atlasHost.mode)) !== "play")
+    await dm.getByRole("button", { name: "Play", exact: true }).click()
+  await waitFor(dm, () => window.__atlasHost?.mode === "play", null, {
+    timeout: 10000,
+    label: "Play",
+  })
   if (freeAssets) {
-    for (const box of await dialog.getByRole("checkbox").all()) {
-      const name = await box.evaluate(
-        (el) =>
-          document.getElementById(el.getAttribute("aria-labelledby") ?? "")
-            ?.textContent ?? ""
-      )
-      const want = freeAssets.includes(name.trim())
-      if ((await box.getAttribute("aria-checked")) !== String(want))
-        await box.click()
+    // The Assets tab's switches (a new table loads the categories last chosen on this browser).
+    await dm.getByRole("tab", { name: /Assets/ }).click()
+    for (const section of await dm
+      .locator("aside section", { has: dm.locator("[role=switch]") })
+      .all()) {
+      const text = (await section.textContent()) ?? ""
+      const want = freeAssets.some((label) => text.includes(label))
+      const toggle = section.locator("[role=switch]").first()
+      if (((await toggle.getAttribute("aria-checked")) === "true") !== want)
+        await toggle.click()
     }
   }
-  await dialog.getByRole("button", { name: "Start game" }).click()
-  await waitFor(dm, () => location.pathname.startsWith("/host/"), null, {
-    timeout: 30000,
-    label: "host route",
-  })
-  await waitHosting(dm, 60000)
   const h = await hostState(dm)
   return {
     sessionId: await dm.evaluate(() => location.pathname.split("/").pop()),

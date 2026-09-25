@@ -20,7 +20,7 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { createScene } from "@/core/scene/factory"
-import type { Id } from "@/core/scene/types"
+import type { Id, Scene } from "@/core/scene/types"
 import { addBackdrop, floorFromImage, wallsFromImage } from "@/editor/imageOps"
 import { createEditorStore, type EditorStore } from "@/editor/store"
 import { decodeImageBlob, guessGridFromName, importMapImage, probeImageSize, type ImageSize } from "@/net/assets"
@@ -29,11 +29,24 @@ import { cn } from "@/lib/utils"
 import { useEditorContext, useEditorEngine, useEditorState } from "../context"
 import { FieldPair, NumberInput, SelectInput, TextInput, type Option } from "../fields"
 import { formatBytes, formatElevation, trimNumber } from "../lib/format"
-import { clampCells, defaultCalibration, floorPlanForLevel, importRect, pxPerCell, requiredGrid, sceneNameFromFiles, type ImportEntrySettings } from "../lib/importPlan"
+import {
+  clampCells,
+  defaultCalibration,
+  floorPlanForLevel,
+  importRect,
+  pxPerCell,
+  requiredGrid,
+  sceneNameFromFiles,
+  type ImportEntrySettings,
+} from "../lib/importPlan"
 import { seedLevelImage } from "../lib/levelImages"
 import { ENV_PRESETS, presetForFileNames, withPreset, type EnvPresetId } from "../lib/environmentPresets"
 import { levelsTopDown, suggestLevelForImage } from "../lib/levelOps"
-import type { SceneDocument } from "../useSceneDocument"
+
+/** Where "new map from map images" puts its result: it replaces the live map (same document id). */
+export interface MapImportTarget {
+  adoptNewScene(scene: Scene): void
+}
 
 type EntryStatus = { kind: "idle" } | { kind: "working"; stage: string } | { kind: "done"; summary: string } | { kind: "error"; message: string }
 
@@ -71,7 +84,10 @@ function Thumb({ entry }: { entry: Entry }) {
   const aspect = entry.size ? entry.size.width / entry.size.height : 0.75
   const lines = (n: number) => Array.from({ length: Math.max(0, Math.min(n, 200) - 1) }, (_, i) => ((i + 1) / n) * 100)
   return (
-    <div className="relative w-32 self-start overflow-hidden rounded-md border bg-[repeating-conic-gradient(var(--muted)_0_25%,transparent_0_50%)] bg-[length:10px_10px]" style={{ aspectRatio: `${Math.max(0.25, Math.min(4, aspect))}` }}>
+    <div
+      className="relative w-32 self-start overflow-hidden rounded-md border bg-[repeating-conic-gradient(var(--muted)_0_25%,transparent_0_50%)] bg-[length:10px_10px]"
+      style={{ aspectRatio: `${Math.max(0.25, Math.min(4, aspect))}` }}
+    >
       {thumb ? <canvas ref={ref} className="absolute inset-0 size-full" /> : <Skeleton className="absolute inset-0 rounded-none" />}
       {thumb ? (
         <svg className="pointer-events-none absolute inset-0 size-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden>
@@ -140,14 +156,36 @@ function EntryCard({
                 value={target.kind === "existing" ? target.levelId : "new"}
                 options={levelOptions}
                 disabled={disabled}
-                onValueChange={(v) => onChange({ target: v === "new" ? { kind: "new", name: target.kind === "new" ? target.name : "New level", elevation: target.kind === "new" ? target.elevation : 0 } : { kind: "existing", levelId: v } })}
+                onValueChange={(v) =>
+                  onChange({
+                    target:
+                      v === "new"
+                        ? { kind: "new", name: target.kind === "new" ? target.name : "New level", elevation: target.kind === "new" ? target.elevation : 0 }
+                        : { kind: "existing", levelId: v },
+                  })
+                }
                 aria-label="Target level"
               />
             ) : null}
             {target.kind === "new" ? (
               <>
-                <TextInput className="min-w-0 flex-1" value={target.name} disabled={disabled} onCommit={(name) => onChange({ target: { ...target, name: name.trim() || target.name } })} />
-                <NumberInput className="w-24 shrink-0" value={target.elevation} step={10} min={-1000} max={1000} unit="ft" disabled={disabled} onCommit={(elevation) => onChange({ target: { ...target, elevation } })} aria-label="Elevation" />
+                <TextInput
+                  className="min-w-0 flex-1"
+                  value={target.name}
+                  disabled={disabled}
+                  onCommit={(name) => onChange({ target: { ...target, name: name.trim() || target.name } })}
+                />
+                <NumberInput
+                  className="w-24 shrink-0"
+                  value={target.elevation}
+                  step={10}
+                  min={-1000}
+                  max={1000}
+                  unit="ft"
+                  disabled={disabled}
+                  onCommit={(elevation) => onChange({ target: { ...target, elevation } })}
+                  aria-label="Elevation"
+                />
               </>
             ) : null}
           </div>
@@ -155,15 +193,51 @@ function EntryCard({
           <span className="text-xs text-muted-foreground">Grid</span>
           <div className="flex min-w-0 items-center gap-1.5">
             <FieldPair>
-              <NumberInput prefix="W" value={s.cellsX} min={1} max={200} precision={0} unit="cells" disabled={disabled} onCommit={(v) => onChange({ cellsX: clampCells(v) })} aria-label="Cells across" />
-              <NumberInput prefix="H" value={s.cellsZ} min={1} max={200} precision={0} unit="cells" disabled={disabled} onCommit={(v) => onChange({ cellsZ: clampCells(v) })} aria-label="Cells down" />
+              <NumberInput
+                prefix="W"
+                value={s.cellsX}
+                min={1}
+                max={200}
+                precision={0}
+                unit="cells"
+                disabled={disabled}
+                onCommit={(v) => onChange({ cellsX: clampCells(v) })}
+                aria-label="Cells across"
+              />
+              <NumberInput
+                prefix="H"
+                value={s.cellsZ}
+                min={1}
+                max={200}
+                precision={0}
+                unit="cells"
+                disabled={disabled}
+                onCommit={(v) => onChange({ cellsZ: clampCells(v) })}
+                aria-label="Cells down"
+              />
             </FieldPair>
           </div>
 
           <span className="text-xs text-muted-foreground">Offset</span>
           <FieldPair>
-            <NumberInput prefix="X" value={s.offsetX} step={5} unit="ft" disabled={disabled} onCommit={(offsetX) => onChange({ offsetX })} aria-label="Offset X" />
-            <NumberInput prefix="Z" value={s.offsetZ} step={5} unit="ft" disabled={disabled} onCommit={(offsetZ) => onChange({ offsetZ })} aria-label="Offset Z" />
+            <NumberInput
+              prefix="X"
+              value={s.offsetX}
+              step={5}
+              unit="ft"
+              disabled={disabled}
+              onCommit={(offsetX) => onChange({ offsetX })}
+              aria-label="Offset X"
+            />
+            <NumberInput
+              prefix="Z"
+              value={s.offsetZ}
+              step={5}
+              unit="ft"
+              disabled={disabled}
+              onCommit={(offsetZ) => onChange({ offsetZ })}
+              aria-label="Offset Z"
+            />
           </FieldPair>
         </div>
 
@@ -193,7 +267,13 @@ function EntryCard({
               entry.status.kind === "error" ? "text-destructive" : entry.status.kind === "done" ? "text-primary" : "text-muted-foreground"
             )}
           >
-            {entry.status.kind === "working" ? <Spinner className="size-3" /> : entry.status.kind === "done" ? <Check className="size-3" /> : <AlertTriangle className="size-3" />}
+            {entry.status.kind === "working" ? (
+              <Spinner className="size-3" />
+            ) : entry.status.kind === "done" ? (
+              <Check className="size-3" />
+            ) : (
+              <AlertTriangle className="size-3" />
+            )}
             {entry.status.kind === "working" ? entry.status.stage : entry.status.kind === "done" ? entry.status.summary : entry.status.message}
           </div>
         ) : null}
@@ -202,7 +282,7 @@ function EntryCard({
   )
 }
 
-export function MapImportDialog({ request, onClose, doc }: { request: MapImportRequest | null; onClose(): void; doc: SceneDocument }) {
+export function MapImportDialog({ request, onClose, doc }: { request: MapImportRequest | null; onClose(): void; doc: MapImportTarget }) {
   const open = request !== null
   const mode = request?.mode ?? "existing"
   const { store } = useEditorContext()
@@ -232,7 +312,10 @@ export function MapImportDialog({ request, onClose, doc }: { request: MapImportR
   }, [request])
 
   const levelOptions: Option<string>[] = React.useMemo(
-    () => [{ value: "new", label: "New level" }, ...levelsTopDown({ levels }).map((l) => ({ value: l.id, label: `${l.name} (${formatElevation(l.elevation)})` }))],
+    () => [
+      { value: "new", label: "New level" },
+      ...levelsTopDown({ levels }).map((l) => ({ value: l.id, label: `${l.name} (${formatElevation(l.elevation)})` })),
+    ],
     [levels]
   )
 
@@ -248,7 +331,10 @@ export function MapImportDialog({ request, onClose, doc }: { request: MapImportR
     for (const file of images) {
       const size = await probeImageSize(file).catch(() => null)
       const calib = defaultCalibration(guessGridFromName(file.name), size, mode === "new" ? { width: 40, depth: 30 } : grid)
-      const pre = requestRef.current?.levelId && entries.length + added.length === 0 && Object.hasOwn(sceneLevels, requestRef.current.levelId) ? requestRef.current.levelId : null
+      const pre =
+        requestRef.current?.levelId && entries.length + added.length === 0 && Object.hasOwn(sceneLevels, requestRef.current.levelId)
+          ? requestRef.current.levelId
+          : null
       const guess = suggestLevelForImage({ levels: sceneLevels }, file.name, taken)
       const levelId = pre ?? guess.levelId
       if (levelId) taken.add(levelId)
@@ -314,8 +400,13 @@ export function MapImportDialog({ request, onClose, doc }: { request: MapImportR
     let target: EditorStore
     const cellSize = store.getState().scene.grid.cellSize
     if (mode === "new") {
-      const size = requiredGrid(list.map((e) => e.settings), cellSize)
+      const size = requiredGrid(
+        list.map((e) => e.settings),
+        cellSize
+      )
       const scene = createScene({ name: sceneNameFromFiles(list.map((e) => e.file.name)), width: size.width, depth: size.depth, groundFloor: false })
+      // It replaces the map being built (its images are stored under the live document's id).
+      scene.id = store.getState().scene.id
       scene.environment = withPreset(scene.environment, lightingValue)
       target = createEditorStore({ scene, systemClipboard: null })
     } else {
@@ -355,10 +446,18 @@ export function MapImportDialog({ request, onClose, doc }: { request: MapImportR
       try {
         setStatus(e.key, { kind: "working", stage: e.size && e.size.width * e.size.height > 50e6 ? "Decoding a large image…" : "Decoding and resampling…" })
         await tick()
-        const imported = await importMapImage(e.file, { cellsX: s.cellsX, cellsZ: s.cellsZ, origin: { x: s.offsetX, z: s.offsetZ } }, cellSize, { skipPixels: !(s.floor || s.walls) })
+        const imported = await importMapImage(e.file, { cellsX: s.cellsX, cellsZ: s.cellsZ, origin: { x: s.offsetX, z: s.offsetZ } }, cellSize, {
+          skipPixels: !(s.floor || s.walls),
+        })
         step()
         setStatus(e.key, { kind: "working", stage: "Saving the image…" })
-        const meta = await assets.putImage(sceneId, imported.blob, { kind: "image", name: e.file.name, mime: imported.mime, width: imported.width, height: imported.height })
+        const meta = await assets.putImage(sceneId, imported.blob, {
+          kind: "image",
+          name: e.file.name,
+          mime: imported.mime,
+          width: imported.width,
+          height: imported.height,
+        })
         const decoded = decodeImageBlob(imported.blob).then((b) => {
           if (!b) throw new Error("could not decode the stored image")
           return b
@@ -412,7 +511,9 @@ export function MapImportDialog({ request, onClose, doc }: { request: MapImportR
     }
     setRunning(false)
     if (ok === list.length) {
-      toast.success(ok === 1 ? "Map image imported" : `${ok} map images imported`, { description: walls > 0 ? `${walls} walls traced from the outlines.` : undefined })
+      toast.success(ok === 1 ? "Map image imported" : `${ok} map images imported`, {
+        description: walls > 0 ? `${walls} walls traced from the outlines.` : undefined,
+      })
       reset()
       onClose()
     } else if (ok > 0) {
@@ -484,7 +585,9 @@ export function MapImportDialog({ request, onClose, doc }: { request: MapImportR
                 <Upload className="size-5" />
               </span>
               <span className="text-sm font-medium">Drop battlemap images here</span>
-              <span className="max-w-sm text-xs text-muted-foreground">PNG, JPEG or WebP — huge maps are fine. Transparent areas (caves, upper storeys) can become floors and walls automatically.</span>
+              <span className="max-w-sm text-xs text-muted-foreground">
+                PNG, JPEG or WebP — huge maps are fine. Transparent areas (caves, upper storeys) can become floors and walls automatically.
+              </span>
               <span className="mt-1 inline-flex h-7 items-center gap-1 rounded-md border px-2.5 text-xs">
                 <FileImage className="size-3.5" /> Choose files
               </span>
@@ -563,7 +666,11 @@ export function MapImportDialog({ request, onClose, doc }: { request: MapImportR
           </Button>
           <Button disabled={running || entries.length === 0 || entries.some((e) => !e.size)} onClick={() => void run()}>
             {running ? <Spinner className="size-3.5" /> : null}
-            {running ? "Importing…" : mode === "new" ? `Create scene from ${entries.length || ""} image${entries.length === 1 ? "" : "s"}` : `Import ${entries.length || ""} image${entries.length === 1 ? "" : "s"}`}
+            {running
+              ? "Importing…"
+              : mode === "new"
+                ? `Create scene from ${entries.length || ""} image${entries.length === 1 ? "" : "s"}`
+                : `Import ${entries.length || ""} image${entries.length === 1 ? "" : "s"}`}
           </Button>
         </DialogFooter>
       </DialogContent>

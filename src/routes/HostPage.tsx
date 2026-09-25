@@ -1,6 +1,6 @@
 /**
- * /host/:sessionId — the DM's host console (ARCHITECTURE §6.2, §8): the authoritative host runner,
- * the live map with direct manipulation and vision previews, the session panel and live map editing.
+ * /host/:sessionId — the map screen (ARCHITECTURE §6.8, §7, §8): a map's table, run by the authoritative
+ * host runner, in Edit or Play, with its doors open or closed.
  */
 import { useParams } from "wouter"
 

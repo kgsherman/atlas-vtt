@@ -4,7 +4,6 @@ import { createFloor, createLevel, createLight, createScene, createToken, create
 import { parseScene, serializeScene } from "@/core/scene/schema"
 import { blockShape, rampShape } from "@/core/scene/terrainShapes"
 import type { Scene } from "@/core/scene/types"
-import { decodeGrades, decodeMask, getCell } from "@/core/vision"
 import { createEditorController } from "@/editor/controller"
 import { createEditorStore } from "@/editor/store"
 
@@ -13,7 +12,6 @@ import { duplicateLevel, guessStoreyFromName, levelNameFromFile, levelsTopDown, 
 import { presetForFileNames, withPreset } from "./environmentPresets"
 import { defaultCalibration, floorPlanForLevel, importRect, pxPerCell, requiredGrid, sceneNameFromFiles } from "./importPlan"
 import { cursorReadout, editorCursor, editorMayHandleKey, isTextEntryTarget, stripBackgroundFloor, toToolPointerEvent } from "./pointer"
-import { createPreviewVision, defaultPreviewToken, playerPreviewScene, previewCandidates } from "./preview"
 import {
   alsoAppliedShapes,
   applyInspectorTerrainEdit,
@@ -155,7 +153,10 @@ describe("pointer", () => {
     expect(e.detail).toBe(2)
     const free = toToolPointerEvent({ ...base, altKey: true }, pick, { grid, snapMode: "center", altHeld: false })
     expect(free.snapped).toEqual({ x: 6.2, z: 13.9 })
-    expect(toToolPointerEvent(base, { ...pick, ground: null }, { grid, snapMode: "vertex", altHeld: false }, { button: 2 })).toMatchObject({ snapped: null, button: 2 })
+    expect(toToolPointerEvent(base, { ...pick, ground: null }, { grid, snapMode: "vertex", altHeld: false }, { button: 2 })).toMatchObject({
+      snapped: null,
+      button: 2,
+    })
     expect(cursorReadout(grid, { x: 12, y: 13, z: 49 }, 10)).toEqual({ i: 2, j: 9, x: 12, y: 3, z: 49, inside: true })
     expect(cursorReadout(grid, { x: -1, y: 0, z: 3 })?.inside).toBe(false)
     expect(isTextEntryTarget(null)).toBe(false)
@@ -263,60 +264,6 @@ describe("terrainMode", () => {
   })
 })
 
-describe("preview", () => {
-  const lit = () => {
-    const scene = createScene({ width: 12, depth: 12 })
-    const g = groundOf(scene)
-    const pc = createToken(g, { x: 12.5, z: 12.5 }, { name: "Aria", kind: "pc" })
-    const npc = createToken(g, { x: 22.5, z: 12.5 }, { name: "Bob", kind: "npc" })
-    const spy = createToken(g, { x: 32.5, z: 12.5 }, { name: "Spy", kind: "monster", hidden: true })
-    const torch = createLight(g, "torch", { x: 15, z: 15 })
-    const secret = createWall(g, { x: 40, z: 0 }, { x: 40, z: 20 }, { hidden: true })
-    for (const t of [pc, npc, spy]) scene.tokens[t.id] = t
-    scene.objects[torch.id] = torch
-    scene.objects[secret.id] = secret
-    return { scene, g, pc, npc, spy, torch, secret }
-  }
-
-  it("chooses candidates and the default viewer", () => {
-    const { scene, pc, npc } = lit()
-    expect(previewCandidates(scene)[0]).toBe(pc.id)
-    expect(defaultPreviewToken(scene, [npc.id])).toBe(npc.id)
-    expect(defaultPreviewToken(scene, [])).toBe(pc.id)
-  })
-
-  it("computes perception masks with explored = perceived and a filtered scene", () => {
-    const { scene, g, pc, npc, spy, secret } = lit()
-    const vision = createPreviewVision()
-    const r = vision.compute(scene, [pc.id])
-    const grades = decodeGrades(r.masks[g].perception)
-    const explored = decodeMask(r.masks[g].explored)
-    const cell = 2 * scene.grid.width + 2 // the viewer's own cell
-    expect(grades.grades[cell]).toBe(3)
-    expect(getCell(explored, cell)).toBe(true)
-    // Unlit far corner: not perceived, not explored.
-    const far = 11 * scene.grid.width + 11
-    expect(grades.grades[far]).toBe(0)
-    expect(getCell(explored, far)).toBe(false)
-    expect(r.visibleTokenIds).toContain(npc.id)
-    expect(Object.keys(r.scene.tokens).sort()).toEqual([pc.id, npc.id].sort())
-    expect(Object.hasOwn(r.scene.tokens, spy.id)).toBe(false)
-    expect(Object.hasOwn(r.scene.objects, secret.id)).toBe(false)
-    // Incremental update after an edit.
-    const moved: Scene = { ...scene, tokens: { ...scene.tokens, [pc.id]: { ...pc, position: { x: 57.5, z: 57.5 } } } }
-    const r2 = vision.compute(moved, [pc.id], { tokens: [pc.id] })
-    expect(decodeGrades(r2.masks[g].perception).grades[cell]).toBe(3) // still inside the torch light
-  })
-
-  it("drops lights carried by tokens that are not kept", () => {
-    const { scene, g, npc } = lit()
-    const carried = createLight(g, "torch", { x: 0, z: 0 }, { attachedTokenId: npc.id, position: { x: 0, y: 4, z: 0 } })
-    scene.objects[carried.id] = carried
-    expect(Object.hasOwn(playerPreviewScene(scene, new Set()).objects, carried.id)).toBe(false)
-    expect(Object.hasOwn(playerPreviewScene(scene, new Set([npc.id])).objects, carried.id)).toBe(true)
-  })
-})
-
 describe("toolExtras", () => {
   it("applies door, token and light extras to new items only", () => {
     const scene = createScene()
@@ -393,7 +340,11 @@ describe("stripBackgroundFloor", () => {
     const g = groundOf(scene)
     const wall = createWall(g, { x: 0, z: 0 }, { x: 10, z: 0 })
     scene.objects[wall.id] = wall
-    const ev = (objectId: string | null, shift = false) => ({ pick: { ground: { x: 1, y: 0, z: 1 }, objectId, tokenId: null, hitPoint: { x: 1, y: 0, z: 1 } }, shift, ctrl: false })
+    const ev = (objectId: string | null, shift = false) => ({
+      pick: { ground: { x: 1, y: 0, z: 1 }, objectId, tokenId: null, hitPoint: { x: 1, y: 0, z: 1 } },
+      shift,
+      ctrl: false,
+    })
     expect(stripBackgroundFloor(scene, [], ev(floorId))).toMatchObject({ floorId, event: { pick: { objectId: null, hitPoint: null } } })
     expect(stripBackgroundFloor(scene, [floorId], ev(floorId)).floorId).toBeNull()
     expect(stripBackgroundFloor(scene, [], ev(floorId, true)).event.pick.objectId).toBe(floorId)
@@ -565,7 +516,8 @@ describe("terrainInspect", () => {
 
 describe("editorMayHandleKey", () => {
   it("leaves navigation keys to focused widgets", () => {
-    const el = (tagName: string, extra: Record<string, unknown> = {}) => ({ tagName, closest: () => null, isContentEditable: false, ...extra }) as unknown as EventTarget
+    const el = (tagName: string, extra: Record<string, unknown> = {}) =>
+      ({ tagName, closest: () => null, isContentEditable: false, ...extra }) as unknown as EventTarget
     expect(editorMayHandleKey("ArrowUp", el("CANVAS"))).toBe(true)
     expect(editorMayHandleKey("ArrowUp", el("BODY"))).toBe(true)
     expect(editorMayHandleKey("ArrowUp", el("BUTTON"))).toBe(false)

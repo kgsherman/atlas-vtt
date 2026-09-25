@@ -2,9 +2,9 @@
 // not on the map views (D pans right there; W A S D pan the editor camera and select no tool) → the editor's "?" opens the Keyboard shortcuts
 // dialog → recording a key (Escape cancels without closing the dialog, a key taken from another command
 // moves, browser-reserved keys are refused, Enter records without re-triggering the button) → the remapped
-// keys drive the editor and survive a reload → reset → the play tab refuses camera keys → in a session, the
-// DM's V previews vision and can be remapped from the HUD's shortcuts popover → a player's popover and
-// dialog show only player keys.
+// keys drive the editor and survive a reload → reset → the play tab refuses camera keys → at an open table,
+// the DM's V previews vision and can be remapped from the HUD's shortcuts popover, and Tab switches Play ↔
+// Edit (on a focused button too) → a player's popover and dialog show only player keys.
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/keybindings.mjs
 import {
@@ -170,7 +170,9 @@ try {
     .click()
   await sleep(150)
   checks.ok(
-    await dialog.getByRole("button", { name: "Change C", exact: true }).isVisible(),
+    await dialog
+      .getByRole("button", { name: "Change C", exact: true })
+      .isVisible(),
     "reset all brings C back"
   )
   await dialog.getByRole("tab", { name: "Play" }).click()
@@ -229,6 +231,20 @@ try {
   await sleep(200)
   checks.eq(await preview.getAttribute("aria-pressed"), "true", "B does")
   await page.keyboard.press("b")
+  // Tab switches the map screen between Play and Edit, on a focused button too.
+  await page.keyboard.press("Tab")
+  await waitFor(page, () => window.__atlasHost?.mode === "edit", null, {
+    timeout: 5000,
+    label: "Tab → Edit",
+  })
+  checks.ok(true, "Tab switches to Edit")
+  await page.getByRole("button", { name: "Wall", exact: true }).click()
+  await page.keyboard.press("Tab")
+  await waitFor(page, () => window.__atlasHost?.mode === "play", null, {
+    timeout: 5000,
+    label: "Tab → Play",
+  })
+  checks.ok(true, "Tab switches back to Play, with a tool button focused")
 
   checks.step("Player")
   const player = await joinGame(context, { roomCode, name: "Morgana", logs })

@@ -3,7 +3,6 @@
  * in the home bundle). `preloadRoute` warms a chunk ahead of navigation (hover / intent).
  */
 export const loaders = {
-  editor: () => import("@/routes/EditorPage"),
   host: () => import("@/routes/HostPage"),
   play: () => import("@/routes/PlayPage"),
   tokens: () => import("@/routes/TokenMakerPage"),
@@ -21,9 +20,11 @@ export function preloadRoute(route: LazyRoute): void {
 
 export const paths = {
   home: () => "/",
-  editor: (sceneId: string, opts: { import?: boolean } = {}) => `/editor/${encodeURIComponent(sceneId)}${opts.import ? "?import=1" : ""}`,
-  newScene: () => "/editor/new",
-  newFromImages: () => "/editor/new?import=1",
+  /** One of the DM's maps, at its table (Edit / Play; `mode` picks one instead of the remembered one). */
+  map: (sceneId: string, opts: { mode?: "edit" | "play" } = {}) => `/map/${encodeURIComponent(sceneId)}${opts.mode ? `?mode=${opts.mode}` : ""}`,
+  newScene: () => "/map/new",
+  newFromImages: () => "/map/new?import=1",
+  /** A map's table by session id (where /map/:sceneId lands). */
   host: (sessionId: string) => `/host/${encodeURIComponent(sessionId)}`,
   play: (sessionId: string) => `/play/${encodeURIComponent(sessionId)}`,
   join: (code?: string) => (code ? `/join/${encodeURIComponent(code)}` : "/join"),

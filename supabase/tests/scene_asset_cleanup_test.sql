@@ -107,7 +107,9 @@ declare
   v_a uuid;
   v_b uuid;
   v_c uuid;
+  v_e uuid;
   v_sid uuid;
+  v_esid uuid;
 begin
   insert into auth.users (id, aud, role, is_anonymous)
   select u, 'authenticated', 'authenticated', true
@@ -123,13 +125,21 @@ begin
   v_a := pg_temp.val($q$select public.create_scene('A', 1, '{"id": "docA", "assets": {"a1": {}}}')$q$)::uuid;
   perform public.save_scene_version(v_a, 1, '{"id": "docX", "assets": {"x1": {}}}');
   v_b := pg_temp.val($q$select public.create_scene('B', 1, '{"id": "docX", "assets": {"x1": {}}}')$q$)::uuid;
-  -- Scene C (document docS) runs in an active session.
+  -- Scene C (document docS) runs at its open table.
   v_c := pg_temp.val($q$select public.create_scene('C', 1, '{"id": "docS", "assets": {"s1": {}}}')$q$)::uuid;
   select s.session_id into v_sid from public.create_session(v_c) s;
 
   perform pg_temp.eq('folders: only what no other scene or session uses',
     pg_temp.val(format('select string_agg(f, '','' order by f) from public.image_folders_to_free(%L) f', v_a)), 'docA');
-  perform pg_temp.eq('folders: a scene in an active session frees nothing',
+  perform pg_temp.eq('folders: the map''s own table does not keep them (it ends with the map)',
+    pg_temp.val(format('select string_agg(f, '','') from public.image_folders_to_free(%L) f', v_c)), 'docS');
+  -- Another map's table whose live map uses docS (e.g. after a map change) keeps it, closed or open.
+  v_e := pg_temp.val($q$select public.create_scene('E', 1, '{"id": "docE"}')$q$)::uuid;
+  select t.session_id into v_esid from public.open_map(v_e) t;
+  perform pg_temp.logout();
+  update public.session_state set state = jsonb_build_object('scene', jsonb_build_object('id', 'docS')) where session_id = v_esid;
+  perform pg_temp.login(d);
+  perform pg_temp.eq('folders: another (closed) table using the document keeps them',
     pg_temp.val(format('select count(*) from public.image_folders_to_free(%L) f', v_c)), '0');
   perform pg_temp.login(o);
   perform pg_temp.eq('folders: nothing for someone else''s scene',

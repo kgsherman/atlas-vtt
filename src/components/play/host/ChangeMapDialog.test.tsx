@@ -217,7 +217,7 @@ describe("ChangeMapDialog", () => {
     expect(checked("Wolf")).toBe(false)
   })
 
-  it("offers to save unsaved edits first and stays open when that fails", async () => {
+  it("keeps a restore point of a changed map first and stays open when that fails", async () => {
     const onChange = vi.fn(
       async (_req: ChangeMapRequest): Promise<ChangeMapOutcome> => false
     )
@@ -226,15 +226,17 @@ describe("ChangeMapDialog", () => {
       saveMap: { library: linked, dirty: true, saving: false },
     })
     await toConfirm()
-    // Keep playing, change without saving, or save and change.
-    expect(button("Keep playing here")).toBeTruthy()
-    expect(button("Change without saving").disabled).toBe(false)
-    expect(button("Save map & change").disabled).toBe(false)
+    // One way on: the map left keeps a restore point first.
+    expect(button("Stay on this map")).toBeTruthy()
+    expect(
+      buttons().some((b) => b.textContent?.includes("without saving"))
+    ).toBe(false)
+    expect(button("Change map").disabled).toBe(false)
     expect(document.body.textContent).toContain(
-      "Save it to “The Crooked Lantern” in your library first"
+      "“The Crooked Lantern” keeps a restore point of how it is now."
     )
 
-    await click(button("Save map & change"))
+    await click(button("Change map"))
     expect(onChange).toHaveBeenCalledTimes(1)
     const req = onChange.mock.calls[0][0]
     expect(req.save).toBe(true)
@@ -244,7 +246,26 @@ describe("ChangeMapDialog", () => {
     expect([...req.tokenIds].sort()).toEqual([ids.mira, ids.pony].sort())
     expect(req.arrival.levelId).toBe(sortedLevels(target)[0].id)
     expect(onOpenChange).not.toHaveBeenCalledWith(false)
-    expect(button("Save map & change").disabled).toBe(false)
+    expect(button("Change map").disabled).toBe(false)
+  })
+
+  it("changes without a restore point only when the library can't be reached", async () => {
+    const onChange = vi.fn(async (): Promise<ChangeMapOutcome> => true)
+    await mount({
+      onChange,
+      saveMap: {
+        library: { status: "unavailable", error: "You're offline." },
+        dirty: true,
+        saving: false,
+      },
+    })
+    await toConfirm()
+    expect(buttons().some((b) => b.textContent === "Change map")).toBe(false)
+    expect(document.body.textContent).toContain("You're offline.")
+    await click(button("Change without saving"))
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({ save: false })
+    )
   })
 
   it("shows a refusal inline and keeps the dialog open", async () => {
@@ -265,9 +286,7 @@ describe("ChangeMapDialog", () => {
     const onChange = vi.fn(async (): Promise<ChangeMapOutcome> => true)
     const { onOpenChange } = await mount({ onChange })
     await toConfirm()
-    expect(buttons().some((b) => b.textContent?.includes("Save map"))).toBe(
-      false
-    )
+    expect(document.body.textContent).not.toContain("restore point")
     await click(button("Change map"))
     expect(onChange).toHaveBeenCalledWith(
       expect.objectContaining({ save: false })
@@ -306,17 +325,14 @@ describe("ChangeMapDialog", () => {
     expect(document.body.textContent).toContain(said)
   })
 
-  it("holds the save choice while the library scene is looked up, and refuses to change while saving", async () => {
+  it("holds the change while the library scene is looked up or a restore point is saved", async () => {
     const onChange = vi.fn(async (): Promise<ChangeMapOutcome> => true)
     await mount({
       onChange,
       saveMap: { library: { status: "loading" }, dirty: true, saving: true },
     })
     await toConfirm()
-    expect(button("Save map & change").disabled).toBe(true)
-    expect(button("Change without saving").disabled).toBe(true)
-    expect(document.body.textContent).toContain(
-      "Saving the map to your library"
-    )
+    expect(button("Change map").disabled).toBe(true)
+    expect(document.body.textContent).toContain("Saving a restore point")
   })
 })

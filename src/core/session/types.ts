@@ -48,20 +48,15 @@ export type PlayerProp = Pick<PropObject, "id" | "type" | "levelId" | "kind" | "
  * Lights are always sent RESOLVED: levelId = the light's current level, position relative to that
  * level's ground at (x, z) — attachment is never sent.
  */
-export type PlayerLight = Pick<LightObject, "id" | "type" | "levelId" | "position" | "color" | "intensity" | "brightRadius" | "dimRadius" | "flicker" | "on" | "castsShadows"> & {
+export type PlayerLight = Pick<
+  LightObject,
+  "id" | "type" | "levelId" | "position" | "color" | "intensity" | "brightRadius" | "dimRadius" | "flicker" | "on" | "castsShadows"
+> & {
   /** true: feeds the renderer's light list. false: memory fixture, drawn as a fixture only. */
   emitting: boolean
 }
 
-export type PlayerObject =
-  | PlayerFloor
-  | PlayerWall
-  | PlayerDoor
-  | PlayerWindow
-  | PlayerConnector
-  | PlayerPillar
-  | PlayerProp
-  | PlayerLight
+export type PlayerObject = PlayerFloor | PlayerWall | PlayerDoor | PlayerWindow | PlayerConnector | PlayerPillar | PlayerProp | PlayerLight
 
 export type PlayerToken = Pick<Token, "id" | "levelId" | "position" | "size" | "height" | "color" | "imageUrl" | "model"> & {
   label: string | null
@@ -321,15 +316,18 @@ export type AreaTemplateInput = AreaGeometry & Pick<AreaTemplate, "label" | "col
 export const GAME_STATE_VERSION = 1 as const
 
 /**
- * The library scene a live session's map comes from, so the DM can save map edits made during play
- * back to the library (and be warned before ending a session with unsaved edits).
+ * The library scene the table's live map comes from: restore points (library versions) of the map as it
+ * is now are saved to it (ARCHITECTURE §6.8).
  */
 export interface SceneOrigin {
   /** Library scene row id (`scenes.id`, not `Scene.id`). */
   sceneId: string
   /** Library version the live map is based on (null = unknown). */
   version: number | null
-  /** The live map was edited ("apply-scene-patches") since that version. Play actions never set it. */
+  /**
+   * The live map changed since that version: edited ("apply-scene-patches") or played on (tokens moved,
+   * doors, lights: the map remembers everything that happens on it). Set by the host runner.
+   */
   dirty: boolean
 }
 
@@ -480,6 +478,8 @@ export type TileChunkEntry = [number, number, number] | [number, number, number,
 export type HostBroadcast =
   | { t: "status"; epoch: string; sceneName: string }
   | { t: "ended" }
+  /** The DM closed the table: players disconnect until it opens again (ARCHITECTURE §6.8). */
+  | { t: "closed" }
 
 /** Commands the DM issues directly to the host state (never over the wire). */
 export type DmCommand =
@@ -492,7 +492,7 @@ export type DmCommand =
   | { t: "set-free-movement"; enabled: boolean }
   | { t: "assign-token"; tokenId: Id; userId: string; assigned: boolean }
   | { t: "reveal-object"; objectId: Id; userId?: string }
-  /** Editor edits during a live session (immer patches against GameState.scene). */
+  /** Editor edits on the map screen (immer patches against GameState.scene). */
   | { t: "apply-scene-patches"; patches: Patch[] }
   /**
    * Switch to a different map; resets explored/memory/revealed, ends combat, clears templates. `origin`: its

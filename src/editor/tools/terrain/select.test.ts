@@ -598,7 +598,7 @@ describe("terrain select: advanced mode", () => {
     expect(act(t, { type: "terrain-advanced" })).toBe(true)
     expect(t.tool.hint()).toMatch(/Select a shape/)
     click(t, t.at(15, 5, 15))
-    expect(t.tool.hint()).toMatch(/Tab: edit vertices\/edges\/faces/)
+    expect(t.tool.hint()).toMatch(/1 \/ 2 \/ 3: edit vertices\/edges\/faces/)
     act(t, { type: "terrain-element", element: "edge" }, "2")
     expect(t.store.getState().toolSettings.terrain).toMatchObject({ advanced: true, element: "edge" })
     expect(t.overlay().elements?.mode).toBe("edge")

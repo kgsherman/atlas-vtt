@@ -101,7 +101,7 @@ export function DeleteSceneDialog({ scene, onClose, onDeleted }: { scene: SceneS
     if (!scene) return
     setDeleting(true)
     try {
-      // Also removes the scene's map images (unless a running game still uses them).
+      // Also removes the scene's map images (unless another table still uses them) and ends its table.
       const { warnings } = await deleteScene(services, scene)
       onDeleted(scene)
       onClose()
@@ -122,8 +122,8 @@ export function DeleteSceneDialog({ scene, onClose, onDeleted }: { scene: SceneS
           </AlertDialogMedia>
           <AlertDialogTitle>Delete “{shown?.name}”?</AlertDialogTitle>
           <AlertDialogDescription>
-            This permanently removes the scene{shown && shown.latestVersion > 1 ? " and its version history" : ""}. Games already started from it keep their own
-            copy.
+            This permanently removes the scene{shown && shown.latestVersion > 1 ? " and its version history" : ""}. Its table ends: players there are
+            disconnected.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

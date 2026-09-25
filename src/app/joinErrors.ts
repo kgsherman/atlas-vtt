@@ -24,6 +24,8 @@ export function describeJoinError(err: unknown, mode: AppMode): JoinFailure {
       return f("No game with that code", "Check the code with your DM — it may have a typo, or the game may have ended.", "code")
     case "session_ended":
       return f("This game has ended", "Ask your DM for the code of their next game.", "code")
+    case "table_closed":
+      return f("The table isn't open", "Your DM hasn't opened the table yet. Try again once they have.")
     case "kicked":
       return f("You can't rejoin this game", "The DM removed you from this game. Ask them if you think that was a mistake.")
     case "is_dm":

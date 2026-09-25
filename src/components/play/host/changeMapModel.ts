@@ -106,16 +106,17 @@ export function frameCentre(
   return clampToGrid({ x: x + w / 2, z: z + d / 2 }, grid)
 }
 
-// ---- the unsaved-edits guard -------------------------------------------------------------------------
+// ---- the restore point of the map being left ---------------------------------------------------------
 
 /**
- * What the confirm step offers about map edits the library does not have yet (read when the DM
- * confirms: the map may be edited or saved while the dialog is open).
- * - clean: nothing to save; one "Change map".
- * - offer: "Save map & change" / "Change without saving".
- * - looking-up: the same, the save choice disabled until the library scene is found.
- * - unavailable: the library can't be reached; changing discards the edits.
- * - deleted: the library scene is gone; changing discards the edits.
+ * What happens to the map the table leaves (ARCHITECTURE §6.8: the table releases it, so what changed on
+ * it since its last restore point must reach the library first). Read when the DM confirms: the map may
+ * change or be saved while the dialog is open.
+ * - clean: nothing to save; "Change map".
+ * - offer: "Change map" saves a restore point first.
+ * - looking-up: the same, disabled until the library scene is found.
+ * - unavailable: the library can't be reached; only "Change without saving" (what changed is lost).
+ * - deleted: the map left the library; "Change map" (nothing to save it to).
  */
 export type SaveChoice =
   | { kind: "clean" }
@@ -147,13 +148,13 @@ export function saveChoiceText(choice: SaveChoice): string | null {
     case "clean":
       return null
     case "offer":
-      return `You edited this map during the session. Save it to “${choice.name}” in your library first, or those edits are discarded.`
+      return `“${choice.name}” keeps a restore point of how it is now.`
     case "looking-up":
-      return "You edited this map during the session. Looking up its library scene to save them to…"
+      return "Looking up this map in your library to keep a restore point of it…"
     case "unavailable":
-      return `You edited this map during the session, but the library can't be reached (${choice.error}). Changing the map now discards those edits.`
+      return `Your library can't be reached (${choice.error}), so this map can't keep a restore point: what changed on it since the last one is lost if you change now.`
     case "deleted":
-      return "You edited this map during the session. Those edits are discarded: its library scene was deleted."
+      return "This map is no longer in your library: what changed on it is lost when the table moves."
   }
 }
 
@@ -189,6 +190,8 @@ export function changeMapErrorText(
     case "same-map":
       return "That's the map you're playing. Pick another one."
     case "not-hosting":
-      return "This tab isn't hosting the session any more."
+      return "This tab isn't hosting the table any more."
+    case "map-in-use":
+      return "Players are at another table on that map. Close that table first, or duplicate the map and bring the party to the copy."
   }
 }

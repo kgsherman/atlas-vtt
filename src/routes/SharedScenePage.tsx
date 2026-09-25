@@ -144,7 +144,7 @@ function SharedView({ shared }: { shared: SharedScene }) {
       const { summary, warnings } = await copySharedScene(services, shared)
       toast.success(`Copied “${summary.name}” to your scenes`)
       for (const w of warnings) toast.warning(w)
-      navigate(paths.editor(summary.id))
+      navigate(paths.map(summary.id))
     } catch (err) {
       toast.error("Couldn't copy the scene", { description: userMessage(err) })
       setCopying(false)
@@ -221,7 +221,7 @@ function SharedView({ shared }: { shared: SharedScene }) {
             size="lg"
             className="h-9 px-4 text-sm"
             onClick={() => void copy()}
-            onPointerEnter={() => preloadRoute("editor")}
+            onPointerEnter={() => preloadRoute("host")}
             disabled={!parsed.ok || copying}
           >
             {copying ? <Spinner className="size-4" data-icon="inline-start" /> : <CopyPlusIcon data-icon="inline-start" />}

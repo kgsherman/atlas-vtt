@@ -259,11 +259,11 @@ describe("editor controller", () => {
     store.getState().setTool("floor")
     expect(pressKey(controller, "x")).toBe(true)
     // Unused tool-only keys are not consumed (the browser default stays).
-    expect(pressKey(controller, "Tab")).toBe(false)
+    expect(pressKey(controller, "Enter")).toBe(false)
     expect(pressKey(controller, "g")).toBe(true)
     expect(seen.map((e) => [e.key, e.action])).toEqual([
       ["x", { type: "axis", axis: "x" }],
-      ["Tab", { type: "terrain-advanced" }],
+      ["Enter", { type: "confirm" }],
       ["g", { type: "toggle-grid" }],
     ])
     // Remapped keys carry their command's action.

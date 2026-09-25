@@ -1,6 +1,6 @@
 /**
- * Home / library: brand hero with the primary actions, "My scenes" (open, start a session, rename,
- * duplicate, export, share, delete), sample scenes, and "My sessions" (resume hosting, rejoin).
+ * Home / library: brand hero with the primary actions, "My scenes" (Edit / Play — the same map screen —,
+ * rename, duplicate, export, share, delete), sample scenes, and "My sessions" (open tables, rejoin).
  */
 import * as React from "react"
 import { FileUpIcon, HardDriveIcon, LibraryBigIcon, PlusIcon, SearchIcon, UploadIcon, UserRoundIcon, XIcon } from "lucide-react"
@@ -20,8 +20,6 @@ import { HomeHero } from "@/components/app/HomeHero"
 import { SampleSceneCard } from "@/components/app/SampleSceneCard"
 import { SceneCard, SceneCardSkeleton, type SceneAction } from "@/components/app/SceneCard"
 import { DeleteSceneDialog, RenameSceneDialog, ShareSceneDialog } from "@/components/app/SceneDialogs"
-import { StartGameDialog } from "@/components/app/StartGameDialog"
-import type { FreeAssetCategory } from "@/core/session/freeAssets"
 import { SessionsPanel } from "@/components/app/SessionsPanel"
 import { SignInButtons } from "@/components/app/SignInButtons"
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -35,7 +33,7 @@ import { formatRoomCode } from "@/net/sessionsRepo"
 
 const SHOWN_SAMPLES = SAMPLE_SCENES.filter((s) => s.id === "crooked-lantern" || s.id === "stress-test")
 
-type DialogState = { kind: "rename" | "share" | "delete" | "start"; scene: SceneSummary } | null
+type DialogState = { kind: "rename" | "share" | "delete"; scene: SceneSummary } | null
 
 export default function HomePage() {
   const services = useServices()
@@ -68,17 +66,19 @@ export default function HomePage() {
 
   // ---- scene actions ---------------------------------------------------------------------------
 
-  const openEditor = React.useCallback((id: string) => navigate(paths.editor(id)), [navigate])
+  const openEditor = React.useCallback((id: string) => navigate(paths.map(id)), [navigate])
 
   const onAction = async (action: SceneAction, scene: SceneSummary) => {
     switch (action) {
       case "open":
-        openEditor(scene.id)
+        navigate(paths.map(scene.id, { mode: "edit" }))
+        return
+      case "play":
+        navigate(paths.map(scene.id, { mode: "play" }))
         return
       case "rename":
       case "share":
       case "delete":
-      case "start":
         setDialog({ kind: action, scene })
         return
       default:
@@ -104,20 +104,6 @@ export default function HomePage() {
     } catch (err) {
       const verb = action === "duplicate" ? "duplicate the scene" : "export the scene"
       toast.error(`Couldn't ${verb}`, { description: describeError(err) })
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const startGame = async (scene: SceneSummary, freeAssets: FreeAssetCategory[]) => {
-    setBusy({ id: scene.id, action: "start" })
-    try {
-      const created = await services.sessions.createSession(scene.id, { freeAssets })
-      toast.success(`Game started · room ${formatRoomCode(created.roomCode)}`, { description: "Share the room code with your players." })
-      setDialog(null)
-      navigate(paths.host(created.sessionId))
-    } catch (err) {
-      toast.error("Couldn't start the game", { description: describeError(err) })
     } finally {
       setBusy(null)
     }
@@ -152,7 +138,7 @@ export default function HomePage() {
         try {
           const { summary, warnings } = await importSceneFile(services, file)
           imported++
-          toast.success(`Imported “${summary.name}”`, { id, action: { label: "Open", onClick: () => navigate(paths.editor(summary.id)) } })
+          toast.success(`Imported “${summary.name}”`, { id, action: { label: "Open", onClick: () => navigate(paths.map(summary.id)) } })
           for (const w of warnings) toast.warning(w)
         } catch (err) {
           toast.error(`Couldn't import ${file.name}`, { id, description: describeError(err) })
@@ -182,8 +168,8 @@ export default function HomePage() {
       const f = describeJoinError(err, services.mode)
       if (f.isDm) {
         const mine = await services.sessions.listMySessions().catch(() => [])
-        const hosted = mine.find((s) => s.roomCode === joinCode && s.status === "active")
-        toast.info(f.title, { description: f.description, action: hosted ? { label: "Host it", onClick: () => navigate(paths.host(hosted.id)) } : undefined })
+        const hosted = mine.find((s) => s.roomCode === joinCode && s.status !== "ended")
+        toast.info(f.title, { description: f.description, action: hosted ? { label: "Open it", onClick: () => navigate(paths.host(hosted.id)) } : undefined })
       } else {
         toast.error(f.title, { description: f.description })
       }
@@ -234,8 +220,8 @@ export default function HomePage() {
     }
   }, [importFiles])
 
-  const warmEditor = () => preloadRoute("editor")
-  const onIntent = (action: "open" | "start") => preloadRoute(action === "open" ? "editor" : "host")
+  const warmEditor = () => preloadRoute("host")
+  const onIntent = warmEditor
   const libraryBusy = busy !== null || sampleBusy !== null
 
   return (
@@ -429,13 +415,6 @@ export default function HomePage() {
       />
 
       <RenameSceneDialog scene={dialog?.kind === "rename" ? dialog.scene : null} onClose={() => setDialog(null)} onRenamed={replaceScene} />
-      <StartGameDialog
-        target={dialog?.kind === "start" ? dialog.scene : null}
-        onClose={() => setDialog(null)}
-        onStart={async ({ freeAssets }) => {
-          if (dialog?.kind === "start") await startGame(dialog.scene, freeAssets)
-        }}
-      />
       <ShareSceneDialog scene={dialog?.kind === "share" ? dialog.scene : null} onClose={() => setDialog(null)} onChanged={replaceScene} />
       <DeleteSceneDialog
         scene={dialog?.kind === "delete" ? dialog.scene : null}

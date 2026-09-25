@@ -31,7 +31,8 @@ export function zoomCanvas(
 
 /**
  * Play keymap with the user's remaps. The handler returns false when the key did nothing. Host-only
- * commands (level switching, vision preview) are bound only when `host`.
+ * commands (level switching, vision preview, Edit) are bound only when `host`, player-only ones (Tab
+ * through one's characters) only when not.
  */
 export function usePlayKeys(
   handler: (action: PlayKeyAction, e: KeyboardEvent) => boolean | void,
@@ -39,7 +40,10 @@ export function usePlayKeys(
 ): void {
   const overrides = useKeyOverrides("play")
   const bindings = React.useMemo(
-    () => playBindings(overrides).filter((b) => host || !b.hostOnly),
+    () =>
+      playBindings(overrides).filter((b) =>
+        host ? !b.playerOnly : !b.hostOnly
+      ),
     [overrides, host]
   )
   useAppHotkeys(

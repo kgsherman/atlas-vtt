@@ -4,8 +4,7 @@ import {
   EllipsisIcon,
   ImageIcon,
   Link2Icon,
-  MapIcon,
-  PencilIcon,
+  HammerIcon,
   PencilLineIcon,
   PlayIcon,
   Share2Icon,
@@ -36,7 +35,8 @@ import { cn } from "@/lib/utils"
 
 import { SceneThumbnail } from "./SceneThumbnail"
 
-export type SceneAction = "open" | "start" | "rename" | "duplicate" | "export" | "share" | "delete"
+/** "open" opens the map in Edit, "play" in Play (the same map screen: ARCHITECTURE §6.8). */
+export type SceneAction = "open" | "play" | "rename" | "duplicate" | "export" | "share" | "delete"
 
 export interface SceneCardProps {
   scene: SceneSummary
@@ -45,7 +45,7 @@ export interface SceneCardProps {
   /** Another library action is running: disable this card's actions. */
   disabled?: boolean
   onAction(action: SceneAction, scene: SceneSummary): void
-  onIntent?(action: "open" | "start"): void
+  onIntent?(): void
 }
 
 export function SceneCard({ scene, busy, disabled: otherBusy = false, onAction, onIntent }: SceneCardProps) {
@@ -62,11 +62,11 @@ export function SceneCard({ scene, busy, disabled: otherBusy = false, onAction, 
       <button
         type="button"
         onClick={act("open")}
-        onPointerEnter={() => onIntent?.("open")}
-        onFocus={() => onIntent?.("open")}
+        onPointerEnter={() => onIntent?.()}
+        onFocus={() => onIntent?.()}
         disabled={disabled}
         className="relative block aspect-[16/10] w-full overflow-hidden bg-muted/40 outline-none focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-inset"
-        aria-label={`Open ${scene.name} in the editor`}
+        aria-label={`Open ${scene.name}`}
       >
         <SceneCardPreview entry={entry} status={status} thumbnailClassName="transition-transform duration-500 ease-out group-hover/scene:scale-[1.03]" />
         <div className="pointer-events-none absolute inset-0 bg-linear-to-t from-background/70 via-transparent to-transparent opacity-80" />
@@ -85,8 +85,8 @@ export function SceneCard({ scene, busy, disabled: otherBusy = false, onAction, 
           )}
         </div>
         <span className="pointer-events-none absolute right-2 bottom-2 inline-flex translate-y-1 items-center gap-1 rounded-full bg-background/85 px-2 py-0.5 text-[0.65rem] font-medium opacity-0 shadow-sm backdrop-blur-sm transition-all duration-200 group-hover/scene:translate-y-0 group-hover/scene:opacity-100">
-          <PencilIcon className="size-3" />
-          Open in editor
+          <HammerIcon className="size-3" />
+          Open in Edit
         </span>
       </button>
 
@@ -119,13 +119,13 @@ export function SceneCard({ scene, busy, disabled: otherBusy = false, onAction, 
       </div>
 
       <div className="flex gap-2 px-4 pb-4">
-        <Button variant="outline" className="flex-1" onClick={act("open")} onPointerEnter={() => onIntent?.("open")} disabled={disabled}>
-          {busy === "open" ? <Spinner className="size-3.5" data-icon="inline-start" /> : <MapIcon data-icon="inline-start" />}
+        <Button variant="outline" className="flex-1" onClick={act("open")} onPointerEnter={() => onIntent?.()} disabled={disabled}>
+          {busy === "open" ? <Spinner className="size-3.5" data-icon="inline-start" /> : <HammerIcon data-icon="inline-start" />}
           Edit
         </Button>
-        <Button className="flex-1" onClick={act("start")} onPointerEnter={() => onIntent?.("start")} disabled={disabled}>
-          {busy === "start" ? <Spinner className="size-3.5" data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}
-          Start session
+        <Button className="flex-1" onClick={act("play")} onPointerEnter={() => onIntent?.()} disabled={disabled}>
+          {busy === "play" ? <Spinner className="size-3.5" data-icon="inline-start" /> : <PlayIcon data-icon="inline-start" />}
+          Play
         </Button>
       </div>
     </Card>
@@ -173,12 +173,12 @@ function SceneMenu({ scene, disabled, onAction }: { scene: SceneSummary; disable
       <DropdownMenuContent align="end" className="w-48">
         <DropdownMenuGroup>
           <DropdownMenuItem onClick={item("open")}>
-            <MapIcon />
-            Open in editor
+            <HammerIcon />
+            Edit
           </DropdownMenuItem>
-          <DropdownMenuItem onClick={item("start")}>
+          <DropdownMenuItem onClick={item("play")}>
             <PlayIcon />
-            Start session
+            Play
           </DropdownMenuItem>
         </DropdownMenuGroup>
         <DropdownMenuSeparator />

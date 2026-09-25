@@ -1,6 +1,6 @@
 /**
- * Free assets in the UI: the catalog (loaded once per app run by the repository) and the categories
- * the "Start a game" dialog pre-selects (the DM's last choice in this browser; all categories at first).
+ * Free assets in the UI: the catalog (loaded once per app run by the repository) and the categories a
+ * new table loads (the DM's last choice in the Assets tab on this browser; all categories at first).
  */
 import * as React from "react"
 

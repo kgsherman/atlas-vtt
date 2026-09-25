@@ -53,9 +53,9 @@ src/
     player/             Player client (sync rules, requests), backdrop compositor
   app/                  Service wiring (Supabase or local mode), router + lazy routes, library, scene digests
   lib/                  keymap (pure: remappable command tables, overrides), hotkeys (TanStack Hotkeys wrapper, key labels), utils
-  components/           React + shadcn UI (app shell, editor panels, play HUD, host console, lobby; play/table: chat,
-                        dice, turn order, map markers, areas of effect)
-  routes/               Page-level components (home, editor, host, play, join, shared scene, token maker)
+  components/           React + shadcn UI (app shell, editor panels, play HUD, the map screen (play/host), lobby;
+                        play/table: chat, dice, turn order, map markers, areas of effect)
+  routes/               Page-level components (home, map → the map screen (host), play, join, shared scene, token maker)
   dev/                  Dev-only render harness (`dev/render.html`) and the Vineyard build helpers
   integration/          Cross-module consistency tests (render ↔ occlusion, vision ↔ movement, host → player, editor → session)
 supabase/migrations/    SQL: schema, RLS, RPCs, realtime policies
@@ -66,8 +66,9 @@ scripts/free-assets/    Build (STL → LOD GLB + thumbnail) and publish free tok
 
 Dependency rule: `core` imports nothing outside `core` (immer types allowed). `render` imports `core`.
 `editor`/`play`/`net` import `core` and `render/contracts.ts` (`editor`/`play` also the pure `lib/keymap`). `components`/`routes` import everything.
-Bundling: `/editor`, `/host`, `/play` and `/tokens` are lazy routes (`app/routes.ts`), so three.js and the
-renderer load only in the first three; the home, join, shared-scene and token maker routes never download them.
+Bundling: `/host` (the map screen), `/play` and `/tokens` are lazy routes (`app/routes.ts`), so three.js and the
+renderer load only in the first two; the home, map (`/map/:id` only finds the table), join, shared-scene and token
+maker routes never download them.
 
 UI rule: compose from shadcn components in `src/components/ui` (preset `b5UKukPFuS` → style `base-mira`,
 Base UI primitives, Outfit + Roboto Slab, lucide). Dark theme first.
@@ -80,7 +81,7 @@ pick the look up through the components rather than styling it themselves. Butto
 Kings III: `default` is the primary action (a bronze plate in a gold frame), `outline` a secondary one
 (slate plate), `selected` the current choice in a set, and `decision` a choice in an event-style prompt
 (full-width bands between gold hairlines, stacked: the decision first, backing out last; `useConfirm()`
-and the End session dialog).
+and the table dialogs).
 
 ---
 
@@ -265,9 +266,6 @@ and the End session dialog).
   `parseSceneJson(text)` wraps JSON syntax errors as `invalid`. `MIGRATIONS[2]` (v2 → v3): every wall whose
   `followTerrain` is not a boolean gets `true` (the closest v3 equivalent of the old midpoint base; identical
   on flat levels). Duck-typed, idempotent, never throws on garbage (the schema reports it); levels untouched.
-- Editor autosave drafts are stored as saved, so a recovered draft goes through `parseScene` too
-  (`components/editor/useSceneDocument.ts` `draftScene`): an older draft is migrated, an invalid or too-new
-  one is not offered (logged, kept).
 - The editor never commits a revision `parseScene` would refuse (`editor/validate.ts`, see §7), so every
   saved version can be reopened.
 - Heightmaps are chunked (8×8 cells per chunk, base64 Float32) so edits, undo patches and network diffs touch
@@ -548,9 +546,9 @@ Per level, the engine expands `HostLevelMasks` into R8 layers of `DataArrayTextu
   short synthetic world-shader workload in its own tiny WebGL2 context, then picks the highest tier whose
   predicted frame cost leaves headroom (cached per GPU for 30 days under `atlas:quality-probe:v2`; the tier is
   re-derived from the cached measurement for the current window size). `EngineCanvas` on "Auto" (every route:
-  editor, host console, player) reads the cache synchronously with `cachedQuality()` and creates the engine at
+  the map screen, player) reads the cache synchronously with `cachedQuality()` and creates the engine at
   once; only without a fresh cache entry does it run `pickInitialQuality()` first (one probe at a time). On "Auto" the probed tier is both the starting tier and the adaptive ceiling; an explicit tier is
-  the ceiling. The editor, the host console and the player page each have a quality selector
+  the ceiling. The map screen and the player page each have a quality selector
   (`components/canvas/QualitySelect`, choice stored per browser under `atlas:quality`).
 - Adaptive quality (`render/engine/quality.ts`) steps one **whole tier** down when p95 frame cost > 18 ms for
   2 s. It steps up when p95 < 12 ms for 5 s **and** p95 × the next tier's cost ratio fits ~14 ms, never above
@@ -888,6 +886,9 @@ exists (or became hidden) are deleted. Everything else is unchanged — DM edits
 ### 6.1 Roles, topics, transport
 
 - The DM's tab is the **host**: owns `GameState`, validates requests, runs vision (Worker), filters, diffs, sends.
+- A session is the **table** of one map (§6.8): its doors are open (`sessions.status` `active`) or closed
+  (`closed`: only the DM, no channel at all). The host runs either way; everything below about players is
+  about an open table.
 - Single host: same browser via `navigator.locks` (`atlas-host:{sid}`); across devices via `claim_host(sid)`
   which bumps `sessions.host_epoch`. Each host start also creates a random `epoch` string used on the wire,
   formatted `${hostEpoch}.${uuid}` (`net/host/flush.ts` `makeWireEpoch`). Clients only compare wire epochs for
@@ -990,7 +991,7 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
   Token image requests (`token-image`, §11): ownership first (`not-owner`, as for moves), then the URL must be
   an image in the player's own folder of the token image store (`HostRunnerOptions.tokenImageBase`,
   `core/session/tokenImages.ts`), else `"invalid"`; `null` clears the image. Movement locks do not apply.
-- DM edits during a live session: the editor applies immer patches to `GameState.scene`
+- DM edits at the table (the map screen's Edit, §6.8): the editor applies immer patches to `GameState.scene`
   (`apply-scene-patches`); play actions (token moves, door/light toggles) are DmCommands and never enter undo.
   Grid resizes remap explored masks; deleting a level drops its masks/memory.
   `levels/<id>/terrainEdits/**` patches are DM-only bookkeeping with no visual effect (the baked result
@@ -1002,22 +1003,25 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
   which ignores `terrainEdits`). The vision worker never receives `terrainEdits`
   (`net/host/visionProtocol.ts` `visionLevels`).
   `GameState.origin = {sceneId, version, dirty}` records the library scene row the live map comes from (the
-  one the session started from, or the one a map change loaded, §6.7) and the version it is based on; `apply-scene-patches` sets `dirty` (play actions never do), and
-  `set-origin` records a save. `HostRunner.saveMapToLibrary({force?})` saves the live map (edits, token
-  positions, hidden tokens, door and light state as they are now) as a new version of that library scene
-  with a `baseVersion` conflict check: another version saved meanwhile (e.g. from the editor) rejects with
+  map the table was opened on, or the one a map change loaded, §6.7) and the version it is based on (its
+  last restore point). Every change of the map sets `dirty`, edits and play actions alike (the map remembers
+  what happens on it: `HostRunnerImpl.mapChanged`; a `load-scene` brings its own origin), and `set-origin`
+  records a save. `HostRunner.saveMapToLibrary({force?})` saves a **restore point**: the live map (edits,
+  token positions, hidden tokens, door and light state as they are now) as a new version of that library
+  scene with a `baseVersion` conflict check: another version saved meanwhile rejects with
   `version_conflict`, and `force` overwrites (the version history still keeps every earlier version); a
   deleted library scene rejects with `not_found`. It needs `HostRunnerOptions.scenes` (the scene library),
   and `HostSnapshot.library = {sceneId, version, dirty} | null` exposes the origin. The saved version keeps
-  the library entry's current name, and edits made while a save is in flight leave `dirty` set. A save that
-  resolves after a map change leaves the new map's origin alone, and a conflict toast's "Overwrite" does
-  nothing once the map changed.
-  The host console passes `services.scenes`, and its "Save map to library" button, Ctrl+S in Edit map and
-  "Save map & end" (end-session dialog, offered while `origin.dirty`) all call `saveMapToLibrary` through
-  `components/play/host/useSaveMap`; a conflict toast offers "Overwrite" (force). The "unsaved edits" dot is
-  `origin.dirty`, stored with the game, so it survives reloads and other devices. A game saved before the
-  origin existed resumes with `version: null` (the scene id comes from the DM's session list): its first
-  save treats a library scene updated after the session started as changed elsewhere and asks first.
+  the library entry's current name, and changes made while a save is in flight leave `dirty` set. A save
+  that resolves after a map change leaves the new map's origin alone, and a conflict toast's "Save anyway"
+  does nothing once the map changed.
+  The map screen passes `services.scenes`; Ctrl+S (File › Save a restore point) and the restore points kept
+  on the way (§6.8: closing the table, leaving, a map change, sharing, restoring a version) all call
+  `saveMapToLibrary` through `components/play/host/useSaveMap` (`quiet` skips the success toast); a
+  conflict toast offers "Save anyway" (force). `origin.dirty` is stored with the game, so it survives
+  reloads and other devices. A game saved before the origin existed resumes with `version: null` (the scene
+  id comes from the DM's session list): its first save treats a library scene updated after the table
+  started as changed elsewhere and asks first.
 
 ### 6.3 Sync, reconnection, persistence
 
@@ -1034,7 +1038,9 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
   client has seen (epochs are random, so this is how a stale host is told from a new one); a `nonce: null` is
   treated as absent; same-epoch snapshots/patches older than the local seq are ignored without a hello; a
   standalone `result` or `sync` with `seq` > local (or another epoch) triggers a hello. Hellos are coalesced and
-  retried with backoff (2.5 s doubling to 15 s).
+  retried with backoff (2.5 s doubling to 15 s). A HostBroadcast `closed`, or `session_info` saying `closed`
+  (asked at start and while not live), ends the client with status `closed` (§6.8: the page waits for the
+  table to open and starts a new client).
 - Join order (client): subscribe `view:{uid}` → SUBSCRIBED → subscribe `req:{uid}` → send hello. Host: when a
   player's link becomes ready for the first time in this host run (boot, new member) it pushes a
   snapshot / snapshot_ready. A later rejoin of the same link (Realtime error, JWT refresh, network blip), where
@@ -1047,9 +1053,9 @@ request (req:{uid}) ─▶ zod-validate (strict, limits) ─▶ authorize (owner
   detected.
 - Host liveness = DM presence on `session:{sid}:host` (1.5 s grace after the host channel joins). On leave: the
   client loads its `player_views` row (adopted only if it has no view, or the row is the same epoch with a
-  higher seq), shows "Waiting for DM", disables moves. While not live, the client re-checks
-  `session_info(sid)` every ~10 s, so it notices a kick or a session ended from the library (where no host is
-  running to broadcast `ended`) and shows the ended / kicked screen. Pending optimistic moves are overlays
+  higher seq), shows "Waiting for DM", disables moves. The client asks `session_info(sid)` at start and, while
+  not live, every ~10 s, so it notices a kick, a closed table (whose channels it cannot join) or a table ended
+  with no host running to broadcast `ended`, and shows the kicked / closed / ended screen. Pending optimistic moves are overlays
   only; they clear when their result is applied, on snapshot/epoch change, or after 5 s ("DM not responding").
   The client's own network is watched separately (`Transport.networkOnline` / `onNetworkChange`; Supabase:
   `navigator.onLine` plus a socket poll that needs two failures): while it is down, requests are refused
@@ -1105,8 +1111,11 @@ Tables (RLS enabled on every table; default privileges revoke anon; functions re
 - `profiles(id → auth.users, display_name)` — own row only.
 - `scenes(id, owner_id, name, visibility 'private'|'link', share_slug (≥128-bit random), latest_version, …)` and
   `scene_versions(scene_id, version, schema_version, data jsonb, created_at)` — owner only; versions immutable.
-- `sessions(id, dm_id not null, scene_id, room_code unique while active, status, host_epoch, created_at)` —
-  DM full access; players no direct SELECT (they use `session_info(sid)` RPC).
+- `sessions(id, dm_id not null, scene_id, room_code, status 'active'|'closed'|'ended', host_epoch, created_at)` —
+  a map's table (§6.8): `scene_id` is the map it holds (it follows map changes), at most one live (not
+  ended) table per map (`sessions_live_scene_key`), room codes unique among live tables
+  (`sessions_live_room_code_key`: a closed table keeps its code). DM full access; players no direct SELECT
+  (they use `session_info(sid)` RPC). Deleting a scene ends its table (trigger `scenes_end_tables`).
 - `session_members(session_id, user_id, display_name 1..32, status 'active'|'kicked', joined_at)` — SELECT own row
   or DM; no client INSERT/UPDATE; writes via RPCs. A display name changes only by joining again
   (`join_session`), which refuses (`name_taken`) names that pose as the DM ("DM", "GM", "Dungeon Master",
@@ -1150,11 +1159,16 @@ then granted to authenticated only for the ones policies call, which are `securi
 RPCs (`security definer` unless noted, `search_path=''`, execute granted to authenticated
 only; return ids/booleans/small records, never whole rows; errors carry a stable MESSAGE code mapped by
 `net/supabase.ts`): `create_scene`, `save_scene_version` (optimistic `p_base_version`), `set_scene_visibility`,
-`set_display_name` (`security invoker`: own profile row under RLS), `create_session(scene_id, free_assets = '{}')` (owner check, copies the scene into session_state,
+`set_display_name` (`security invoker`: own profile row under RLS), `open_map(scene_id, free_assets = '{}')`
+(owner check; the map's live table, or a new closed one: copies the latest version into session_state,
 generates an 8-char Crockford room code; `free_assets`: the categories the game loads, validated against
-`private.free_asset_categories()`, stored de-duplicated and sorted in the seed's `freeAssets`), `join_session(room_code, display_name)`, `session_info(sid)`,
+`private.free_asset_categories()`, stored de-duplicated and sorted in the seed's `freeAssets`),
+`set_table_open(sid, open)` (DM; active ↔ closed), `set_session_scene(sid, host_epoch, scene_id)` (DM,
+fenced: the table now holds that map; an idle table holding it ends, one with active members raises
+`map_in_use`), `create_session(scene_id, free_assets)` (older clients: `open_map` + open),
+`join_session(room_code, display_name)` (`table_closed` for a closed table), `session_info(sid)`,
 `list_session_members(sid)` (DM; `security invoker`: it reads only rows the DM's RLS already allows),
-`set_member_status(sid, uid, status)` (DM), `claim_host(sid)`,
+`set_member_status(sid, uid, status)` (DM), `claim_host(sid)` (open or closed tables),
 `save_session_state`, `upsert_player_view`, `end_session(sid)`, `get_shared_scene(slug)`, and (`security invoker`,
 naming what the client then deletes through the Storage API, since SQL cannot delete Storage objects)
 `image_folders_to_free(scene_id)` / `unreferenced_scene_assets(min_age)` for map images no scene uses.
@@ -1166,8 +1180,9 @@ advisory lock). Sizes are `pg_column_size` (on-disk, compressed). Over a limit, 
 - scenes: ≤ 50 library scenes and ≤ 200 MB of stored versions per owner (`create_scene`,
   `save_scene_version`); each scene's history keeps ≤ 50 versions and ≤ 100 MB, pruned oldest first (the
   latest version always stays);
-- sessions: ≤ 20 active sessions per DM (`too_many_sessions`) and ≤ 50 sessions including ended ones —
-  `create_session` deletes the oldest ended sessions beyond that (state, members and views cascade);
+- sessions: one live table per map (so the scene quota bounds them; `open_map` also refuses beyond 50,
+  `too_many_sessions`) and ≤ 50 sessions including ended ones — `open_map` deletes the oldest ended sessions
+  beyond that (state, members and views cascade);
 - `scene-assets`: ≤ 300 objects and ≤ 1 GiB per owner (storage insert policy; 50 MB per object);
 - `session-tiles`: a chunk's `{userId}` must be a member of the session, and a session holds ≤ 20,000
   objects;
@@ -1255,9 +1270,9 @@ authoritative, and a player receives only what filter.ts lets through.
   points, two quick ticks before the first result is back) is never overwritten. The DM's UI sends
   `change-token-status {tokenId, hp?: HpChange, conditions?: ConditionChange}` (`HostActions.
   changeTokenStatus`; the reducer applies it; hit points only when tracked); only starting / stopping
-  tracking uses `set-token-status`. The live "Edit map" inspector does the same through the editor's play
+  tracking uses `set-token-status`. The map screen's Edit inspector does the same through the editor's play
   sink (`store.changeTokenStatus` / `setTokenHp`): play actions with no undo entry, since undoing would
-  write a stale value over players' changes; the standalone editor edits them like any field. A player's
+  write a stale value over players' changes (an editor without a play sink edits them like any field). A player's
   request `token-status {tokenId, hp?: {kind: damage | heal | temp, amount: 1 … 99 999},
   conditions?: {add?, remove?}}` (strict zod: at least one change) is accepted only for a token they own
   (`not-owner`) that players can see (`unknown-token`), and hit points only while the DM tracks them
@@ -1410,11 +1425,15 @@ players keep playing without rejoining.
   must not learn of them) as a public system message, and bumps `GameState.mapSerial` (saved with the game;
   sent as `view.scene.mapSerial` once > 0), which tells a player's page that the map changed even when its
   level ids did not.
-- **Host** (`HostRunnerImpl.changeMap(target, {tokenIds, arrival, origin})`): builds the command from the
-  runner's own state (a player's hit point change a moment earlier travels too, where the page's state
-  could be a render behind) and dispatches it in the same step, reusing the occlusion world built for the
-  placement in the full rebuild (tokens and lights are not occluders). It refuses `same-map` (the live
-  `Scene.id`: engines rebuild only for another id) and `not-hosting`. It returns right after the dispatch
+- **Host** (`HostRunnerImpl.changeMap(target, {tokenIds, arrival, origin})`, async): plans the command from the
+  runner's own state (refusals come back at once), then moves the table to the new map with the fenced
+  `set_session_scene` (§6.8: an idle table holding that map ends — the dialog loaded its live copy,
+  `app/library` `loadLiveMap` —, one with players refuses: `map-in-use`), then builds the command again from
+  the live state (a player's hit point change a moment earlier travels too, where the page's state could be
+  a render behind) and dispatches it in the same step, reusing the occlusion world built for the placement
+  in the full rebuild (tokens and lights are not occluders); a refusal at that point gives the table its
+  old map back. It refuses `same-map` (the live `Scene.id`: engines rebuild only for another id) and
+  `not-hosting`. It returns right after the dispatch
   and saves the game at once, so a reload right after the change resumes on the new map: `saved` is a
   promise, false when that save failed (it is retried) or hosting stopped meanwhile. On `load-scene` the
   runner also looks for images under the new map's folders only (its id and library row, never the
@@ -1448,24 +1467,93 @@ players keep playing without rejoining.
   player's token and says "The party travels to …" (or "The DM moved the game to …" when the player has no
   token there). A stranded move whose level is gone is dismissed.
 - **DM** (`components/play/host/ChangeMapDialog`, `changeMapModel`): "Change map" in the top bar (disabled
-  outside Play, while not hosting and while the map is being saved) opens three steps: (1) a library
-  scene (searchable, with the Home cards' thumbnails; the current one is marked and can't be picked; a
-  sample is first copied into the library, so the new map can be saved back), loaded latest and migrated
-  (`app/library` `loadLibraryScene`: too-new and invalid documents are refused, as is one with the live
-  `Scene.id`); (2) who comes along (PCs and every player's token ticked by default) and where they arrive
-  (a level and a point on its thumbnail, by default the middle of what the thumbnail frames); (3) a
-  summary of what stays and what resets, with the unsaved-edits guard read when the DM confirms, its
-  choices as event-style decisions (as the End session dialog): "Save map & change" saves the live map to
-  its library scene first and stays open if that fails, "Change without saving" discards the edits. The console leaves Edit map before the swap (the editor's undo history
-  belongs to the old map), clears the selection, shows the arrival level and focuses the arrival point;
+  while not hosting and while a restore point is being saved) opens three steps: (1) a library scene
+  (searchable, with the Home cards' thumbnails; the current one is marked and can't be picked; a sample is
+  first copied into the library, so the new map keeps restore points), loaded as it is now and migrated
+  (`app/library` `loadLiveMap`: its table's live copy when it has one, else the latest version; too-new and
+  invalid documents are refused, as is one with the live `Scene.id`); (2) who comes along (PCs and every
+  player's token ticked by default) and where they arrive (a level and a point on its thumbnail, by default
+  the middle of what the thumbnail frames); (3) a summary of what stays and what resets, as event-style
+  decisions: "Change map" keeps a restore point of the map left first when it changed (read when the DM
+  confirms; the dialog stays open if that fails: the table releases the map, so its changes must reach the
+  library), "Change without saving" only when the library can't be reached. The map screen disposes of the
+  editor before the swap (its undo history belongs to the old map; a new one follows), clears the
+  selection, shows the arrival level and focuses the arrival point;
   `HostViewport` reframes and reloads level images keyed by the document (`play/host` `levelImageKey`,
   `backdropFolders`) and drops the old map's cached images.
+
+### 6.8 Tables and the map screen (`routes/MapPage`, `components/play/host/HostSession`, `net/sessionsRepo`)
+
+The DM works on a map in one place, the **map screen**: two views of the same live map, Edit and Play (Tab
+switches), while the map's **table** decides who else is there. Starting a game is opening the table's
+doors, not a change of mode; closing them disconnects the players and keeps the DM where they are.
+
+- **One table per map.** A session is the table of one map (`sessions.scene_id`, at most one live table per
+  map). `/map/:sceneId` (`routes/MapPage`) asks `open_map` for it — a new one starts closed, seeded from the
+  map's latest version, with the free asset categories last chosen in the Assets tab on this browser
+  (`readStartFreeAssets`) — and replaces itself with `/host/:sessionId`. `/map/new` first adds a blank map to
+  the library (`createBlankMap`: one grassy level under a moonlit sky); `?import=1` then opens the map image
+  import in its "new" mode, whose result replaces the live map as one edit, keeping its document id (the
+  images are stored under it). The old `/editor/:id` links land on `/map/:id`.
+- **The doors** (`sessions.status`): `active` = open (the room code works, members connect), `closed` = only
+  the DM (members are disconnected; `is_active_member` is false, so they can neither join the table's
+  channels nor read their stored view or tiles; `join_session` answers `table_closed`; the room code stays
+  reserved), `ended` = gone (its map was deleted, or it moved to another table). The host runs either way
+  (`HostSnapshot.tableOpen`). While closed it has **no channel at all**: no host, lobby or player topics, no
+  view sent or stored; the members are read once at start (the Players list). `setTableOpen(false)`:
+  `set_table_open`, a `{t: "closed"}` HostBroadcast, the players' stored views flushed (≤ 3 s), every channel
+  closed. `setTableOpen(true)`: a **new wire epoch** (same host epoch, fresh uuid), the channels, a member
+  refresh: every active member is linked and sent a snapshot. Knowledge (explored cells, memory) follows
+  linked players only, so a player catches up with where their tokens are when they come back.
+- **Players**: a `closed` broadcast, or `session_info` saying `closed` (§6.3), ends the client (`closed`);
+  the play page shows "The table is closed" (`components/play/player/ClosedTable`), asks `session_info`
+  every 5 s and starts a new client once the doors open (a new client: its first snapshot of the new epoch is
+  taken as is), or shows the ended / removed screen. The join page says "The table isn't open".
+- **The screen** (`HostSession`, top bar in `HostChrome`): File / Edit / View / Level / Help (Play keeps File
+  and Help), the map's name (renames the live map and its library entry), the table's state ("Table open · 2
+  players", "Table closed · only you"), Edit | Play in the middle, undo / redo (Edit) or Preview vision
+  (Play), the Token Maker, Change map, the side panel and the doors: "Open the table", or "Table open · CODE"
+  with the code, the invite link and "Close the table…" (`TableDialogs`: players disconnected, the same code
+  when it opens again). Edit shows the editor's tool rail, options bar, sidebar and overlays on the host's
+  engine (`HostViewport` gets the editor only in Edit); Play shows the play HUD and the session panel, whose
+  room code card says whether the doors are open (and opens them). The mode is remembered per table on the
+  device (`atlas-table:mode:{sid}`; `?mode=` from the library's Edit / Play buttons wins, Edit for
+  `?import=1`, else Play while the doors are open and Edit otherwise). One host editor lives for the whole
+  visit of a map (`createHostEditor` through `useSessionResource`, keyed by the map's document id; a map
+  change disposes of it before the swap and a new one follows, and `useAdoptHostScene` never feeds another
+  map's document to an editor), so undo survives Edit ↔ Play; a switch cancels gestures under way and keeps
+  the level and the camera (one camera kind for both). The editor's view options per map on the device
+  (`viewPrefs`) apply, the camera kind excepted.
+- **Tab**: the editor keymap's `mode.play` and the play keymap's host-only `mode.edit` (remappable). Unlike the
+  other navigation keys it also fires on a focused button (`useEditorHotkeys` `mode` uses `canUseShortcut`),
+  never in text fields, dialogs or menus. The terrain tool's advanced mode has no default key any more (1 / 2 /
+  3 and the options bar's switch enter it, Escape leaves it); the DM's next / previous PC moved to `]` / `[`,
+  and players keep Tab / Shift+Tab (`playerOnly` commands may share keys with `hostOnly` ones: the two never
+  register together, `playCommandsFor(host)`).
+- **The map remembers.** A map has one version: its table's live `GameState.scene`, saved with the game
+  (§6.3), which every change marks `origin.dirty` (§6.2). Restore points are library versions of it: Ctrl+S,
+  and quietly on the way when it changed — closing the table, leaving (the logo / File › Back to library;
+  with the doors open the DM first picks "Close the table and leave", "Leave it open" or "Stay"), before a map
+  change, before sharing (the link shows the map as it is) and before restoring. Version history
+  (`VersionHistorySheet`) restores a version into the live map as one undoable edit (`useMapDocument`
+  `replaceMap`, keeping the document id). Export writes the live map; import and "New map" open another map.
+  Library consumers (card thumbnails, share links, export and duplicate from a card) see the latest restore
+  point; opening a map always goes through its table. Every token move is a play action there (never in
+  undo), in Edit too.
+- **The library**: a scene card's Edit and Play open the map in that mode; "My sessions" lists the open
+  tables (open, copy invite) and the games joined (Open / Closed / Ended). Deleting a map ends its table
+  (players disconnected) and frees its images (`image_folders_to_free` ignores the table of the map being
+  deleted; `unreferenced_scene_assets` keeps what closed tables use).
+- Migration `20260925154256_map_tables.sql` ended every game in progress (each held its own copy of its map).
+  Older clients keep working: `create_session` opens the map's table, `end_session` ends open or closed ones.
 
 ---
 
 ## 7. Editor
 
-- Zustand store `editor/store.ts`: working `Scene` (or, during a live session, a proxy onto `GameState.scene`),
+- The editor runs on the map screen's Edit (§6.8), against the table's live map; there is no separate editor
+  page (no drafts on the device, no unsaved documents: a new map is in the library at once).
+- Zustand store `editor/store.ts`: working `Scene` (on the map screen, a proxy onto `GameState.scene`),
   selection, terrain selection, active level, tool, snap mode, view options. Mutations:
   `editor.apply(recipe, label)` → `produceWithPatches`; `core/history` records `{patches, inversePatches, label}`, supports transactions
   (`begin`/`commit` squash to net patches), caps depth (200).
@@ -1666,11 +1754,10 @@ players keep playing without rejoining.
   Pasting at the pointer (Ctrl+V) snaps the paste translation with the current snap mode, anchored on a
   reference item (the first token, else a structural item, else a point item) with the same rules as a drag,
   so pasted tokens land on cell centres. Free mode, Alt held, or Ctrl+Alt+V keeps the raw pointer point.
-- "Preview player view": pick a token → render mode player with masks computed locally by core/vision
-  (explored = currently perceived, no memory).
-- View options (camera, grid, helpers, ghosts, dark vision) are remembered per scene on the device
-  (`components/editor/lib/viewPrefs.ts`); the host's live editor carries ghosts, level visibility and dark
-  vision over between "Edit map" sessions. Dark vision (§4.1) is off whenever the host console is in play mode.
+- View options (grid, helpers, ghosts, dark vision) are remembered per scene on the device
+  (`components/editor/lib/viewPrefs.ts`); the camera kind is the map screen's (shared by Edit and Play).
+  Dark vision (§4.1) is off whenever the map screen is in Play. A token's vision is previewed in Play
+  (Preview vision, §8).
 - Keyboard (TanStack Hotkeys): keymaps are command tables, `EDITOR_COMMANDS` (`editor/shortcuts.ts`) and
   `PLAY_COMMANDS` (`play/keys.ts`), each command with a stable id, a label, default keys (`Hotkey` strings,
   `Mod` = Cmd on macOS / Ctrl elsewhere) and an action. Users remap keys in the Keyboard shortcuts dialog
@@ -1678,17 +1765,16 @@ players keep playing without rejoining.
   saved in localStorage (`atlas-vtt:keymap`, versioned), and a key belongs to at most one command per
   keymap (`lib/keymap.ts`). Pages register the effective bindings through `useAppHotkeys` (`lib/hotkeys.ts`),
   which adds the app's rules to the manager's matching. Shortcuts don't fire in text fields or under
-  dialogs or menus. Navigation keys stay with a focused widget (`editorMayHandleKey`; Tab too, so the
-  terrain tool's Tab never steals focus navigation from a focused control, and the tool also leaves Tab
-  to the browser when no shape is selected). The default is prevented only
-  when the handler used the key. Propagation is never stopped. `useEditorHotkeys` (editor
-  page and the host's live editor) hands the matched action to `controller.keyDown(e, action)`: the
+  dialogs or menus. Navigation keys stay with a focused widget (`editorMayHandleKey`), except the map
+  screen's Edit / Play switch (Tab, §6.8). The default is prevented only
+  when the handler used the key. Propagation is never stopped. `useEditorHotkeys` (the map screen's
+  editor) hands the matched action to `controller.keyDown(e, action)`: the
   active tool sees the key first, with the action as `ToolKeyEvent.action` (tools match actions, so
   remapped keys work), then `runShortcut`. Tool-only actions (`confirm`, `terrain-advanced`,
   `terrain-element`, `axis`) do nothing in `runShortcut`, so an unused key keeps its browser default.
   Commands may declare `repeat: false` (fire once per press). The "Terrain" group: Q select, Shift+B brush (B toggles dark vision), Shift+C loop cut,
-  E block → ramp → cylinder → polygon (from another tool it re-enters the last creation sub-tool), Tab advanced mode,
-  1 / 2 / 3 element kind, X / Y / Z axis constraint (all but Q and Shift+B without auto-repeat); Enter confirms a
+  E block → ramp → cylinder → polygon (from another tool it re-enters the last creation sub-tool), advanced mode
+  (no default key), 1 / 2 / 3 element kind (entering the advanced mode), X / Y / Z axis constraint (all but Q and Shift+B without auto-repeat); Enter confirms a
   shape's height (`confirm`). Alt for free placement comes from the library's key-state tracker. Map views turn off the theme provider's "D" hotkey
   (`useSuppressThemeHotkey`), because D pans the camera there. W A S D are the cameras' own held-key pan
   input in every map view (the editor keeps arrows for nudges), so the dialog refuses them for editor commands
@@ -1739,22 +1825,22 @@ players keep playing without rejoining.
 - Areas of effect (§6.6): the Area tool (T; players and DM) places spell templates from a picker of presets
   and shapes; chips on the map open a template's card (the creatures it catches, Move / Remove; the DM also
   hides it and rolls its damage).
-- Play keys: `usePlayKeys` registers `PLAY_COMMANDS` (host-only commands, level switching and vision preview,
-  only for the DM). WASD / arrow panning is the top-down camera's own held-key input and is not remappable, so
-  the dialog refuses those keys for play commands.
+- Play keys: `usePlayKeys` registers `PLAY_COMMANDS` (host-only commands — level switching, vision preview,
+  the next / previous PC on `]` / `[`, Tab to Edit — only for the DM; player-only ones, Tab / Shift+Tab
+  through one's characters, only for players). WASD / arrow panning is the top-down camera's own held-key
+  input and is not remappable, so the dialog refuses those keys for play commands.
 - DM play controls: lock/unlock movement (global and per player), shared vision toggle, enforce speed, snap
   players to the grid (`set-free-movement`: off lets players move off the grid with Alt, §5.3), door and
   light toggles, sun/moon on/off (scene patch), move any token, hide/reveal tokens, reveal secret doors, assign
   tokens to players, preview any token's vision, kick players, and run combat (§6.5: the Combat tab, the
   turn strip, "Add to combat" in the token menus).
-- Free assets: "Start a game" (library and editor, `components/app/StartGameDialog`) chooses the free asset
-  categories the game loads (remembered per browser); they reach `GameState.freeAssets` through the seed
-  (§6.4) and are DM-only (never sent). The host console's Assets tab switches categories
-  (`set-free-assets` DmCommand) and lists their assets: a token model click sets the selected token's
-  `model`, a scene patch like hiding a token (so it marks the map as edited and "Save map to library" keeps
-  it). The Tokens tab menu and the inspector's Model field (editor: every model; host "Edit map": the
-  game's categories, `FreeAssetScopeContext`) offer the same models. Unloading a category keeps the
-  models tokens already have.
+- Free assets: a new table loads the categories last chosen in the Assets tab on this browser (all at first,
+  `readStartFreeAssets`); they reach `GameState.freeAssets` through the seed (§6.4) and are DM-only (never
+  sent). The Assets tab switches categories (`set-free-assets` DmCommand, remembered for the next table) and
+  lists their assets: a token model click sets the selected token's `model`, a scene patch like hiding a
+  token (so the map changes and the next restore point keeps it). The Tokens tab menu and the inspector's
+  Model field (the game's categories, `FreeAssetScopeContext`) offer the same models. Unloading a category
+  keeps the models tokens already have.
 
 ---
 
@@ -1960,6 +2046,23 @@ circle-cropped) and every avatar shows. Local mode has no token image store: dow
 ---
 
 ## Appendix: Implementation status (2026-09-23)
+
+**2026-09-25, one map screen (§6.8).** The standalone editor page and "Start / End session" gave way to the
+map screen: Edit / Play (Tab) on the table's live map, and doors that open and close. Verification: `tsc -b`,
+`npx vitest run` and `npx eslint .` clean; against a Vite dev server (local mode, NVIDIA): `editor-smoke`
+55/55 (it also had stale tool keys from the W A S D camera change), `map-table-local` 19/19 (replaces
+`host-save-map`: Tab and undo across modes, restore points, closing / reopening with a player, leaving,
+version restore), `keybindings` 35/35, `multiplayer-local` 54/54, `change-map-local` 39/39, `table-local` 35/35,
+`templates-local` 30/30, `multiplayer-latency` 7/7, `engine-leak` 5/5, `vineyard-build` 23/23, `showcase` (the
+Crooked Lantern shots in `docs/screenshots/` re-shot with the new top bar). Against Supabase with the migration
+applied: `multiplayer-supabase` 32/33 (the "Allow public access" dashboard check, as before; closing the table
+reaches the player and hides their stored view, deleting the map ends the table), `free-assets` 12/12; SQL tests
+`map_tables_test` 36/36 (new), `rls_test` 334/336 before its two stale catalog lists were brought up to date
+(`create_merge_ticket`, `can_insert_token_image`, both from later migrations; now closed tables' Realtime topics
+are checked too), `quotas_test` 27/27, `free_assets_test` 17/17, `scene_asset_cleanup_test` 10/10,
+`guest_merge_test` 28/28; the live vitest files pass except `live.assets.supabase` (a non-member's chunk upload
+is still refused, but Storage now reports it as `not_found` rather than `permission_denied`). The review history
+below describes the app as it was then (the editor page, "Save map to library", the End session dialog).
 
 Everything above is implemented, except for the known gaps and deliberate limits listed at the end of
 this appendix. Final verification of the tree after the wave-4 fixes (before the terrain tools and walls on
@@ -2279,8 +2382,8 @@ Known gaps and deliberate limits:
   stored, so a reload shows none.
 - "Roll for NPCs" writes the values into the tracker without log messages. Table actions are not part of
   the editor's undo history.
-- The log and combat belong to the game (`session_state`), not the map: "Save map to library" does not
-  keep them, and a new game starts with neither.
+- The log and combat belong to the table (`session_state`), not the map: restore points do not keep them,
+  and a new table starts with neither.
 
 **Areas of effect**
 
@@ -2292,8 +2395,8 @@ Known gaps and deliberate limits:
   modelled; the DM can place a second template. Squares are judged by their centre column (the 5e grid rule);
   an area covering only part of a square does not cover it.
 - "Roll damage" deals one roll to creatures whose hit points are tracked; saving throws are the DM's to
-  mark (no rolled saves, resistances or immunities). Templates are game state: "Save map to library" does
-  not keep them, and they are not part of the editor's undo history.
+  mark (no rolled saves, resistances or immunities). Templates are table state: restore points do not keep
+  them, and they are not part of the editor's undo history.
 - Chips stack when they would overlap each other, not other HUD elements.
 
 **Changing the map**
@@ -2354,7 +2457,6 @@ Known gaps and deliberate limits:
 - Vertex, edge and gizmo picking need the engine's projector (`controller.setProjector`); without it only
   shapes and faces can be picked (by ray). The terrain tool's store subscription is never removed (tools
   have no dispose).
-- An autosave draft that cannot be opened (invalid or too new) is only logged to the console and kept.
 
 **Rendering**
 

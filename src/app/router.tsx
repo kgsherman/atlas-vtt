@@ -1,8 +1,8 @@
 /**
- * Routes (wouter). Editor / host / play / token maker pages are code-split so three.js is never part of the home
- * bundle. Every route renders inside an error boundary that resets on navigation. Pages read their
- * parameters with wouter's useParams() (they stay mounted when only the parameter changes, e.g. the
- * editor replacing /editor/new with /editor/:id after the first save).
+ * Routes (wouter). The map screen (host) / play / token maker pages are code-split so three.js is never part
+ * of the home bundle. Every route renders inside an error boundary that resets on navigation. Pages read
+ * their parameters with wouter's useParams(). /map/:sceneId (and the old /editor/:sceneId links) finds the
+ * map's table and replaces itself with /host/:sessionId.
  */
 import * as React from "react"
 import { Route, Switch, useLocation } from "wouter"
@@ -12,11 +12,11 @@ import { NotFoundPage } from "@/components/app/NotFoundPage"
 import { PageLoader } from "@/components/app/Splash"
 import HomePage from "@/routes/HomePage"
 import JoinPage from "@/routes/JoinPage"
+import MapPage from "@/routes/MapPage"
 import SharedScenePage from "@/routes/SharedScenePage"
 
 import { loaders } from "./routes"
 
-const EditorPage = React.lazy(loaders.editor)
 const HostPage = React.lazy(loaders.host)
 const PlayPage = React.lazy(loaders.play)
 const TokenMakerPage = React.lazy(loaders.tokens)
@@ -31,13 +31,10 @@ export function AppRouter() {
     <AppErrorBoundary resetKey={location}>
       <Switch>
         <Route path="/" component={HomePage} />
-        <Route path="/editor/:sceneId">
-          <Lazy label="Opening the editor…">
-            <EditorPage />
-          </Lazy>
-        </Route>
+        <Route path="/map/:sceneId" component={MapPage} />
+        <Route path="/editor/:sceneId" component={MapPage} />
         <Route path="/host/:sessionId">
-          <Lazy label="Starting the session…">
+          <Lazy label="Opening the table…">
             <HostPage />
           </Lazy>
         </Route>

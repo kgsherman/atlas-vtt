@@ -97,11 +97,8 @@ export interface EditorActions {
   /** Pick an .atlas.json file and import it as a new library scene. */
   importFile(): void
   openShare(): void
-  startSession(): void
   goHome(): void
   openShortcuts(): void
-  enterPreview(tokenId?: string): void
-  exitPreview(): void
   frameScene(): void
   focusSelection(): void
   addLevel(): void

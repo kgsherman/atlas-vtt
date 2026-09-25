@@ -119,15 +119,33 @@ describe("useEditorHotkeys", () => {
     expect(nudges()).toBe(2)
   })
 
-  it("leaves Tab to a focused widget", () => {
+  it("leaves navigation keys to a focused widget", () => {
     render()
     const keyDown = vi.spyOn(controller, "keyDown")
     const button = document.body.appendChild(document.createElement("button"))
-    expect(press("Tab", {}, button).defaultPrevented).toBe(false)
+    expect(press("ArrowUp", {}, button).defaultPrevented).toBe(false)
     expect(keyDown).not.toHaveBeenCalled()
+    press("ArrowUp")
+    expect(keyDown.mock.calls.map(([, a]) => a.type)).toEqual(["nudge"])
+  })
+
+  it("Tab switches to Play (on a focused button too), never while typing; without a handler it stays with the browser", () => {
+    render()
+    const keyDown = vi.spyOn(controller, "keyDown")
+    expect(press("Tab").defaultPrevented).toBe(false)
     press("Tab", {}, document.body, "keyup")
+    const mode = vi.fn()
+    render({ mode })
     press("Tab")
-    expect(keyDown.mock.calls.map(([, a]) => a.type)).toEqual(["terrain-advanced"])
+    press("Tab", {}, document.body, "keyup")
+    const button = document.body.appendChild(document.createElement("button"))
+    expect(press("Tab", {}, button).defaultPrevented).toBe(true)
+    press("Tab", {}, button, "keyup")
+    const input = document.body.appendChild(document.createElement("input"))
+    expect(press("Tab", {}, input).defaultPrevented).toBe(false)
+    expect(mode).toHaveBeenCalledTimes(2)
+    // The terrain tool's advanced mode no longer has Tab.
+    expect(keyDown).not.toHaveBeenCalled()
   })
 
   it("follows remaps live", () => {

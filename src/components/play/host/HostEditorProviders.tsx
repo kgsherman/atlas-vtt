@@ -1,6 +1,6 @@
 /**
- * Editor contexts for "Edit map" in a live session: the editor page's actions (where they make sense
- * during a session) and the engine handle, so the editor's panels work unchanged.
+ * Editor contexts of the map screen (ARCHITECTURE §7): the page commands the editor's menus and panels
+ * call, and the engine handle, so the editor's components work unchanged on the table's live map.
  */
 import * as React from "react"
 import { toast } from "sonner"
@@ -23,24 +23,30 @@ import type { Engine } from "@/render/contracts"
 
 import type { HostEditor } from "./hostEditor"
 
-/** Editor page actions as far as they make sense in a live session. */
+/** The map screen's commands that live outside the editor (dialogs, files, navigation). */
+export interface MapScreenCommands {
+  /** Save a restore point (Ctrl+S / File › Save a restore point). */
+  save(): void
+  newMap(opts?: { importImages?: boolean }): void
+  openMapImport(levelId?: Id): void
+  openVersions(): void
+  exportFile(): void
+  importFile(): void
+  openShare(): void
+  /** Back to the library. */
+  leave(): void
+  openShortcuts(): void
+}
+
 export function HostEditorProviders({
   editor,
   engine,
-  onPreviewToken,
-  onExit,
-  onSave,
-  onShortcuts,
+  commands,
   children,
 }: {
   editor: HostEditor | null
   engine: Engine | null
-  onPreviewToken(id: Id): void
-  onExit(): void
-  /** Save the live map to the library (Ctrl+S / File › Save). */
-  onSave(): void
-  /** Open the keyboard shortcuts dialog. */
-  onShortcuts(): void
+  commands: MapScreenCommands
   children: React.ReactNode
 }) {
   const confirm = useConfirm()
@@ -48,11 +54,6 @@ export function HostEditorProviders({
   const controller = editor?.ctx.controller ?? null
   const actions = React.useMemo<EditorActions | null>(() => {
     if (!store || !controller) return null
-    const unavailable = (what: string) => () =>
-      toast.info(`${what} isn't available during a live session`, {
-        description:
-          "Open the scene in the editor after the session to do this.",
-      })
     // In the terrain mode "the selection" is the terrain tool's shapes.
     const focusSelection = () => {
       const s = store.getState()
@@ -65,29 +66,16 @@ export function HostEditorProviders({
       )
     }
     return {
-      save: onSave,
-      newScene: unavailable("Creating a scene"),
-      newFromImages: unavailable("Creating a scene"),
-      openMapImport: unavailable("Importing map images"),
-      openVersions: unavailable("Version history"),
-      exportFile: unavailable("Exporting"),
-      importFile: unavailable("Importing"),
-      openShare: unavailable("Sharing"),
-      startSession: () => toast.info("This session is already running"),
-      goHome: onExit,
-      openShortcuts: onShortcuts,
-      enterPreview: (tokenId?: Id) => {
-        const id =
-          tokenId ??
-          store
-            .getState()
-            .selection.find((sid) =>
-              Object.hasOwn(store.getState().scene.tokens, sid)
-            )
-        if (id) onPreviewToken(id)
-        else toast.info("Select a token to preview its vision")
-      },
-      exitPreview: () => {},
+      save: commands.save,
+      newScene: () => commands.newMap(),
+      newFromImages: () => commands.newMap({ importImages: true }),
+      openMapImport: (levelId?: Id) => commands.openMapImport(levelId),
+      openVersions: commands.openVersions,
+      exportFile: commands.exportFile,
+      importFile: commands.importFile,
+      openShare: commands.openShare,
+      goHome: commands.leave,
+      openShortcuts: commands.openShortcuts,
       frameScene: () => engine?.frameScene(),
       focusSelection,
       addLevel: () => {
@@ -109,7 +97,7 @@ export function HostEditorProviders({
         const ok = await confirm({
           title: `Delete “${level.name}”?`,
           description:
-            "The level and everything on it are deleted for everyone at the table, and players forget what they explored there. You can undo this.",
+            "The level and everything on it are deleted (for everyone at the table, if it is open), and players forget what they explored there. You can undo this.",
           confirmLabel: "Delete level",
           destructive: true,
         })
@@ -123,16 +111,7 @@ export function HostEditorProviders({
         else store.getState().deleteSelection()
       },
     }
-  }, [
-    store,
-    controller,
-    engine,
-    confirm,
-    onExit,
-    onPreviewToken,
-    onSave,
-    onShortcuts,
-  ])
+  }, [store, controller, engine, confirm, commands])
   const engineHandle = React.useMemo(() => ({ engine }), [engine])
   return (
     <EditorActionsContext.Provider value={actions}>

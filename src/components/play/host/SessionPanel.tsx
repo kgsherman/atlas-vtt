@@ -44,6 +44,7 @@ import {
   tokenModelAsset,
   tokenModelChoices,
   useFreeAssets,
+  writeStartFreeAssets,
 } from "@/app/freeAssets"
 import { currentMode, withModeParam } from "@/app/mode"
 import { paths } from "@/app/routes"
@@ -81,6 +82,7 @@ import {
 } from "@/components/ui/field"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Separator } from "@/components/ui/separator"
+import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
@@ -124,6 +126,8 @@ export interface SessionPanelProps {
   onPreviewToken(id: Id): void
   onKick(userId: string): Promise<void>
   onTakeOver(): void
+  /** Open the table's doors (the room code card offers it while closed). */
+  onOpenTable(): Promise<void>
   /** The level shown on the map (Combat: "everyone on this level"). */
   activeLevelId: Id | null
 }
@@ -137,7 +141,12 @@ export function SessionPanel(props: SessionPanelProps) {
       aria-label="Session"
       className="flex w-80 shrink-0 flex-col border-l bg-card/40"
     >
-      <RoomCodeCard roomCode={snap.roomCode || state.roomCode} />
+      <RoomCodeCard
+        roomCode={snap.roomCode || state.roomCode}
+        open={snap.tableOpen}
+        canOpen={snap.status === "hosting"}
+        onOpen={props.onOpenTable}
+      />
       {snap.status === "standby" ? (
         <StandbyNotice error={snap.error} onTakeOver={props.onTakeOver} />
       ) : null}
@@ -215,8 +224,20 @@ export function SessionPanel(props: SessionPanelProps) {
 // Room code
 // ---------------------------------------------------------------------------
 
-function RoomCodeCard({ roomCode }: { roomCode: string }) {
+function RoomCodeCard({
+  roomCode,
+  open,
+  canOpen,
+  onOpen,
+}: {
+  roomCode: string
+  /** The table's doors are open (the code works). */
+  open: boolean
+  canOpen: boolean
+  onOpen(): Promise<void>
+}) {
   const code = formatRoomCode(roomCode)
+  const [opening, setOpening] = React.useState(false)
   const link = `${location.origin}${withModeParam(paths.join(code))}`
   const local = currentMode().mode === "local"
   const [copied, setCopied] = React.useState(false)
@@ -228,8 +249,13 @@ function RoomCodeCard({ roomCode }: { roomCode: string }) {
   return (
     <div className="flex flex-col gap-2 border-b p-3">
       <div className="flex items-center justify-between">
-        <span className="atlas-rubric text-[0.6875rem] uppercase">
-          Room code
+        <span className="flex items-center gap-2">
+          <span className="text-[0.6875rem] atlas-rubric uppercase">
+            Room code
+          </span>
+          <Badge variant={open ? "secondary" : "outline"}>
+            {open ? "Open" : "Closed"}
+          </Badge>
         </span>
         {local ? (
           <Tooltip>
@@ -292,6 +318,22 @@ function RoomCodeCard({ roomCode }: { roomCode: string }) {
           </Tooltip>
         </div>
       </div>
+      {!open ? (
+        <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+          <span>The table is closed: players can't join or connect.</span>
+          <Button
+            size="xs"
+            disabled={!canOpen || opening}
+            onClick={() => {
+              setOpening(true)
+              void onOpen().finally(() => setOpening(false))
+            }}
+          >
+            {opening ? <Spinner data-icon="inline-start" /> : null}
+            Open
+          </Button>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -344,8 +386,9 @@ function PlayersTab({ snap, state, actions, onKick }: SessionPanelProps) {
           </EmptyMedia>
           <EmptyTitle>No players yet</EmptyTitle>
           <EmptyDescription>
-            Share the room code above. Players appear here as they join, and you
-            can hand them their characters.
+            {snap.tableOpen
+              ? "Share the room code above. Players appear here as they join, and you can hand them their characters."
+              : "Open the table and share the room code. Players appear here as they join, and you can hand them their characters."}
           </EmptyDescription>
         </EmptyHeader>
       </Empty>
@@ -615,8 +658,8 @@ function TokensTab({
           </EmptyMedia>
           <EmptyTitle>No tokens on this map</EmptyTitle>
           <EmptyDescription>
-            Use “Edit map” and the token tool (K) to place characters and
-            monsters.
+            Switch to Edit (Tab) and use the token tool (K) to place characters
+            and monsters.
           </EmptyDescription>
         </EmptyHeader>
       </Empty>
@@ -629,7 +672,7 @@ function TokensTab({
         if (list.length === 0) return null
         return (
           <section key={level.id} className="flex flex-col gap-0.5">
-            <h3 className="flex items-center gap-1.5 px-1.5 pb-1 atlas-rubric text-[0.6875rem] uppercase">
+            <h3 className="flex items-center gap-1.5 px-1.5 pb-1 text-[0.6875rem] atlas-rubric uppercase">
               <Layers className="size-3" /> {level.name}
               <span className="ml-auto normal-case tabular-nums">
                 {list.length}
@@ -980,8 +1023,12 @@ function AssetsTab({ state, actions, selectedTokenId }: SessionPanelProps) {
   const catalog = useFreeAssets()
   const available = useServices().freeAssets.available
   const loaded = state.freeAssets ?? []
-  const setLoaded = (id: FreeAssetCategory, on: boolean) =>
-    actions.setFreeAssets(on ? [...loaded, id] : loaded.filter((c) => c !== id))
+  const setLoaded = (id: FreeAssetCategory, on: boolean) => {
+    const next = on ? [...loaded, id] : loaded.filter((c) => c !== id)
+    actions.setFreeAssets(next)
+    // The next new table on this browser loads the same categories.
+    writeStartFreeAssets(next)
+  }
   if (!available) {
     return (
       <Empty className="m-3 border border-dashed">

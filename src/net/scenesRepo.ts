@@ -180,18 +180,25 @@ export function createRemoteScenesRepo(client: AtlasClient): ScenesRepo {
     async load(id, version) {
       const summary = await mustGet(id)
       const wanted = version ?? summary.latestVersion
-      const row = unwrap(
-        await client.from("scene_versions").select("version, schema_version, data").eq("scene_id", id).eq("version", wanted).maybeSingle()
-      )
+      const row = unwrap(await client.from("scene_versions").select("version, schema_version, data").eq("scene_id", id).eq("version", wanted).maybeSingle())
       if (!row) throw new NetError("not_found", `version ${wanted} not found`)
       return { summary, version: row.version, schemaVersion: row.schema_version, parsed: parseStored(row.data, summary.name) }
     },
     async listVersions(id) {
-      const rows = unwrap(await client.from("scene_versions").select("version, schema_version, created_at").eq("scene_id", id).order("version", { ascending: false }))
+      const rows = unwrap(
+        await client.from("scene_versions").select("version, schema_version, created_at").eq("scene_id", id).order("version", { ascending: false })
+      )
       return (rows ?? []).map((r) => ({ version: r.version, schemaVersion: r.schema_version, createdAt: r.created_at }))
     },
     async rename(id, name) {
-      const row = unwrap(await client.from("scenes").update({ name: normalizeSceneName(name) }).eq("id", id).select(SUMMARY_COLUMNS).maybeSingle())
+      const row = unwrap(
+        await client
+          .from("scenes")
+          .update({ name: normalizeSceneName(name) })
+          .eq("id", id)
+          .select(SUMMARY_COLUMNS)
+          .maybeSingle()
+      )
       if (!row) throw new NetError("not_found", "scene not found")
       return fromRow(row)
     },
@@ -279,7 +286,12 @@ export function createLocalScenesRepo(storeOrPromise: LocalStore | Promise<Local
       const s = await store()
       const now = stamp()
       const r: LocalSceneRecord = { id: crypto.randomUUID(), name: normalizeSceneName(scene.name), latestVersion: 1, createdAt: now, updatedAt: now }
-      await s.put<LocalVersionRecord>("sceneVersions", versionKey(r.id, 1), { version: 1, schemaVersion: scene.schemaVersion, createdAt: now, data: toStoredJson(scene) })
+      await s.put<LocalVersionRecord>("sceneVersions", versionKey(r.id, 1), {
+        version: 1,
+        schemaVersion: scene.schemaVersion,
+        createdAt: now,
+        data: toStoredJson(scene),
+      })
       await s.put("scenes", r.id, r)
       return localSummary(r)
     },
@@ -291,7 +303,12 @@ export function createLocalScenesRepo(storeOrPromise: LocalStore | Promise<Local
       }
       const version = r.latestVersion + 1
       const now = stamp()
-      await s.put<LocalVersionRecord>("sceneVersions", versionKey(id, version), { version, schemaVersion: scene.schemaVersion, createdAt: now, data: toStoredJson(scene) })
+      await s.put<LocalVersionRecord>("sceneVersions", versionKey(id, version), {
+        version,
+        schemaVersion: scene.schemaVersion,
+        createdAt: now,
+        data: toStoredJson(scene),
+      })
       await s.put<LocalSceneRecord>("scenes", id, { ...r, name: normalizeSceneName(opts.name ?? scene.name), latestVersion: version, updatedAt: now })
       // Prune like the server: keep the newest MAX_SCENE_VERSIONS.
       const oldest = version - MAX_SCENE_VERSIONS
@@ -325,19 +342,32 @@ export function createLocalScenesRepo(storeOrPromise: LocalStore | Promise<Local
       await record(id)
       await s.deletePrefix("sceneVersions", `${id}:`)
       await s.delete("scenes", id)
+      // Like the SQL trigger scenes_end_tables: the map's table ends with it (net/sessionsRepo keeps
+      // tables in the same store: s:{id}, code:{room code}, view:{id}:{uid}).
+      for (const [key, table] of await s.entries<{ sceneId?: string | null; status?: string; roomCode?: string; hostEpoch?: number; endedAt?: string | null }>(
+        "sessions",
+        "s:"
+      )) {
+        if (table?.sceneId !== id || table.status === "ended") continue
+        await s.put("sessions", key, { ...table, status: "ended", endedAt: new Date().toISOString(), hostEpoch: (table.hostEpoch ?? 0) + 1 })
+        if (table.roomCode) await s.delete("sessions", `code:${table.roomCode}`)
+        await s.deletePrefix("sessions", `view:${key.slice(2)}:`)
+      }
     },
     async imageFoldersToFree(id) {
       const s = await store()
-      const docId = (data: unknown) => (data && typeof data === "object" && typeof (data as { id?: unknown }).id === "string" ? (data as { id: string }).id : null)
+      const docId = (data: unknown) =>
+        data && typeof data === "object" && typeof (data as { id?: unknown }).id === "string" ? (data as { id: string }).id : null
       const mine = new Set<string>()
       const elsewhere = new Set<string>()
       for (const [key, v] of await s.entries<LocalVersionRecord>("sceneVersions")) {
         const d = docId(v?.data)
         if (d) (key.startsWith(`${id}:`) ? mine : elsewhere).add(d)
       }
-      // Active local sessions (net/sessionsRepo keeps them in the same store: s:{id} + state:{id}).
-      for (const [key, session] of await s.entries<{ status?: string }>("sessions", "s:")) {
-        if (session?.status !== "active") continue
+      // Live local tables (net/sessionsRepo keeps them in the same store: s:{id} + state:{id}), except
+      // this map's own, which ends with it.
+      for (const [key, session] of await s.entries<{ status?: string; sceneId?: string | null }>("sessions", "s:")) {
+        if (!session || session.status === "ended" || session.sceneId === id) continue
         const rec = await s.get<{ state?: { scene?: unknown } }>("sessions", `state:${key.slice(2)}`)
         const d = docId(rec?.state?.scene)
         if (d) elsewhere.add(d)

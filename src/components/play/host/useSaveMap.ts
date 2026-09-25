@@ -1,23 +1,22 @@
 /**
- * "Save map to library" for the DM's host console (ARCHITECTURE §6.2): HostRunner.saveMapToLibrary
- * writes the live session's map (as it is now: token positions, hidden tokens, doors and lights
- * included) as a new version of the library scene the live map comes from (the one the session started
- * from, or the one the DM last changed the map to) — the game's origin, exposed as
- * HostSnapshot.library. Earlier versions stay in version history.
+ * Restore points of the map screen (ARCHITECTURE §6.2, §6.8): HostRunner.saveMapToLibrary writes the
+ * live map (as it is now: token positions, hidden tokens, doors and lights included) as a new version of
+ * its library scene — the game's origin, exposed as HostSnapshot.library. Ctrl+S saves one; closing the
+ * table, leaving, changing maps and sharing save one when the map changed since the last. Earlier
+ * versions stay in version history.
  *
  * The origin records the library version the live map is based on, so a version saved meanwhile
- * elsewhere (e.g. in the editor) is a version_conflict; the conflict toast offers "Overwrite" (force),
- * only while the game still plays that map. Games saved before the origin was recorded have no base
- * version: their first save treats a library scene updated after the session started as changed
- * elsewhere and asks first. "Dirty" (the map was edited in Edit map since it was loaded or last saved)
- * is the origin's flag, stored with the game, so it survives reloads and devices.
+ * elsewhere is a version_conflict; the conflict toast offers "Overwrite" (force), only while the table
+ * still holds that map. Games saved before the origin was recorded have no base version: their first
+ * save treats a library scene updated after the table started as changed elsewhere and asks first.
+ * "Dirty" (the map changed since it was loaded or last saved: edits and play alike) is the origin's
+ * flag, stored with the game, so it survives reloads and devices.
  */
 import * as React from "react"
 import { toast } from "sonner"
 
 import { useServices } from "@/app/services"
 import { userMessage } from "@/app/library"
-import { useConfirm } from "@/components/editor/context"
 import type { HostRunner, HostSnapshot } from "@/net/host"
 import { isNetError } from "@/net/supabase"
 
@@ -31,20 +30,19 @@ export type LibraryLink =
 export interface SaveMap {
   library: LibraryLink
   saving: boolean
-  /** The map was edited (Edit map) since it was loaded or last saved to the library. */
+  /** The map changed (edits or play) since it was loaded or last saved to the library. */
   dirty: boolean
   /**
-   * Save to the library. `confirm` (default true) asks first; `force` overwrites a library scene
-   * changed elsewhere. Resolves true when saved.
+   * Save a restore point. `force` overwrites a library scene changed elsewhere; `quiet` skips the
+   * success toast (restore points saved on the way: closing, leaving). Resolves true when saved.
    */
-  save(opts?: { confirm?: boolean; force?: boolean }): Promise<boolean>
+  save(opts?: { force?: boolean; quiet?: boolean }): Promise<boolean>
 }
 
 export type SaveMapRunner = Pick<HostRunner, "saveMapToLibrary">
 
-/** Why "Save map to library" has nothing to save to (the live map's library scene is gone). */
-export const LIBRARY_SCENE_DELETED =
-  "The library scene this map came from was deleted from your library."
+/** Why there is nothing to save restore points to (the live map's library scene is gone). */
+export const LIBRARY_SCENE_DELETED = "This map was deleted from your library."
 
 /** The version-conflict toast (one at a time; dismissed when the game moves to another map). */
 const CONFLICT_TOAST = "save-map-conflict"
@@ -64,7 +62,6 @@ export function useSaveMap(
   snap: Pick<HostSnapshot, "sessionId" | "library">
 ): SaveMap {
   const services = useServices()
-  const confirm = useConfirm()
   const origin = snap.library
   const sceneId = origin?.sceneId ?? null
   const [lookup, setLookup] = React.useState<{
@@ -121,10 +118,12 @@ export function useSaveMap(
   )
 
   const saveRef = React.useRef<SaveMap["save"]>(async () => false)
-  const save = React.useCallback<SaveMap["save"]>(
+  /** The restore point being saved: a second save asked for meanwhile (closing, then leaving) joins it. */
+  const inFlight = React.useRef<Promise<boolean> | null>(null)
+  const saveOnce = React.useCallback<SaveMap["save"]>(
     async (opts = {}) => {
       if (library.status !== "linked") {
-        toast.error("There is no library scene to save to", {
+        toast.error("There is no library entry to save to", {
           description:
             library.status === "deleted"
               ? LIBRARY_SCENE_DELETED
@@ -134,33 +133,22 @@ export function useSaveMap(
         })
         return false
       }
-      if (opts.confirm !== false) {
-        const ok = await confirm({
-          title: "Save the live map to your library?",
-          description: `Saves a new version of “${library.name}”. Token positions, hidden tokens, doors and lights are saved as they are now. Earlier versions stay in version history.`,
-          confirmLabel: "Save map",
-        })
-        if (!ok) return false
-      }
       const target = library.sceneId
       const conflict = () => {
-        toast.error(
-          "This map was changed in your library since it was loaded",
-          {
-            id: CONFLICT_TOAST,
-            description:
-              "Overwrite it with the live map, or keep the library version. Either way, earlier versions stay in version history.",
-            duration: 12_000,
-            action: {
-              label: "Overwrite",
-              onClick: () => {
-                // The game may have moved to another map since: never write that one over this row.
-                if (originRef.current?.sceneId !== target) return
-                void saveRef.current({ confirm: false, force: true })
-              },
+        toast.error("Another restore point of this map was saved elsewhere", {
+          id: CONFLICT_TOAST,
+          description:
+            "Save the map as it is here anyway, or keep that one. Either way, earlier versions stay in version history.",
+          duration: 12_000,
+          action: {
+            label: "Save anyway",
+            onClick: () => {
+              // The table may have moved to another map since: never write that one over this row.
+              if (originRef.current?.sceneId !== target) return
+              void saveRef.current({ force: true })
             },
-          }
-        )
+          },
+        })
       }
       setSaving(true)
       try {
@@ -182,19 +170,20 @@ export function useSaveMap(
           }
         }
         const version = await runner.saveMapToLibrary({ force: opts.force })
-        toast.success(`Saved version ${version}`, {
-          description: `“${library.name}” in your library now has the live map.`,
-        })
+        if (!opts.quiet)
+          toast.success("Restore point saved", {
+            description: `Version ${version} of “${library.name}”.`,
+          })
         return true
       } catch (err) {
         if (isNetError(err, "version_conflict")) conflict()
         else if (isNetError(err, "not_found")) {
           setLookup({ sceneId: library.sceneId, link: { status: "deleted" } })
-          toast.error("The library scene was deleted", {
-            description: "There is nothing to save the map to.",
+          toast.error("This map was deleted from your library", {
+            description: "There is nothing to save restore points to.",
           })
         } else
-          toast.error("Couldn't save the map", {
+          toast.error("Couldn't save a restore point", {
             description: userMessage(err),
           })
         return false
@@ -202,7 +191,18 @@ export function useSaveMap(
         setSaving(false)
       }
     },
-    [library, confirm, services, runner, snap.sessionId]
+    [library, services, runner, snap.sessionId]
+  )
+  const save = React.useCallback<SaveMap["save"]>(
+    (opts = {}) => {
+      if (inFlight.current && !opts.force) return inFlight.current
+      const p = saveOnce(opts).finally(() => {
+        if (inFlight.current === p) inFlight.current = null
+      })
+      inFlight.current = p
+      return p
+    },
+    [saveOnce]
   )
   React.useEffect(() => {
     saveRef.current = save

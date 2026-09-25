@@ -1,28 +1,35 @@
 /**
- * HTML chrome floating over the viewport: level switcher, camera controls, document banners
- * (read-only version, recoverable draft), the player-preview bar and a first-steps hint.
+ * HTML chrome floating over the map screen's viewport in Edit: level switcher, camera controls and a
+ * first-steps hint.
  */
 import * as React from "react"
-import { Box, ChevronDown, ChevronsDownUp, ChevronsUpDown, ChevronUp, Eye, EyeOff, History, ImagePlus, Keyboard, LifeBuoy, Map as MapIcon, Maximize, MoonStar, RotateCcw, Undo2, X } from "lucide-react"
+import {
+  Box,
+  ChevronDown,
+  ChevronsDownUp,
+  ChevronsUpDown,
+  ChevronUp,
+  Eye,
+  EyeOff,
+  ImagePlus,
+  Keyboard,
+  Map as MapIcon,
+  Maximize,
+  MoonStar,
+  X,
+} from "lucide-react"
 
 import { CommandKbd } from "@/components/keybindings/CommandKbd"
-import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ButtonGroup } from "@/components/ui/button-group"
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { Kbd } from "@/components/ui/kbd"
-import { Spinner } from "@/components/ui/spinner"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { adjacentLevels, sortedLevels } from "@/core/scene/queries"
-import type { Id } from "@/core/scene/types"
 import { cn } from "@/lib/utils"
 
 import { useEditorActions, useEditorContext, useEditorShallow, useEditorState } from "./context"
-import { SelectInput } from "./fields"
-import { clockTime, formatElevation, relativeTime, tokenLabel } from "./lib/format"
+import { formatElevation } from "./lib/format"
 import { axisTicks, levelAxisBounds, minorTicks, spreadLabels } from "./lib/levelAxis"
-import { previewCandidates, type PreviewResult } from "./lib/preview"
-import type { SceneDocument } from "./useSceneDocument"
 
 const glass = "border bg-card/85 shadow-lg shadow-black/20 backdrop-blur-md"
 
@@ -74,7 +81,13 @@ export function LevelSwitcher() {
       <div className="flex items-center gap-1">
         <Tooltip>
           <TooltipTrigger
-            render={<CollapsibleTrigger render={<Button variant="ghost" size="icon-xs" className="text-muted-foreground" aria-label={open ? "Hide the level axis" : "Show the level axis"} />} />}
+            render={
+              <CollapsibleTrigger
+                render={
+                  <Button variant="ghost" size="icon-xs" className="text-muted-foreground" aria-label={open ? "Hide the level axis" : "Show the level axis"} />
+                }
+              />
+            }
           >
             {open ? <ChevronsDownUp /> : <ChevronsUpDown />}
           </TooltipTrigger>
@@ -86,7 +99,9 @@ export function LevelSwitcher() {
         </div>
         <ButtonGroup orientation="vertical" className="ml-1">
           <Tooltip>
-            <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="Level above" disabled={!above} onClick={() => store.getState().stepActiveLevel(1)} />}>
+            <TooltipTrigger
+              render={<Button variant="ghost" size="icon-xs" aria-label="Level above" disabled={!above} onClick={() => store.getState().stepActiveLevel(1)} />}
+            >
               <ChevronUp />
             </TooltipTrigger>
             <TooltipContent side="right">
@@ -94,7 +109,9 @@ export function LevelSwitcher() {
             </TooltipContent>
           </Tooltip>
           <Tooltip>
-            <TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label="Level below" disabled={!below} onClick={() => store.getState().stepActiveLevel(-1)} />}>
+            <TooltipTrigger
+              render={<Button variant="ghost" size="icon-xs" aria-label="Level below" disabled={!below} onClick={() => store.getState().stepActiveLevel(-1)} />}
+            >
               <ChevronDown />
             </TooltipTrigger>
             <TooltipContent side="right">
@@ -173,7 +190,13 @@ function LevelAxis() {
           />
         ))}
         {rows.map(({ level, y }) => (
-          <circle key={level.id} cx={AXIS.x} cy={y} r={level.id === activeLevelId ? 3.5 : 2.5} className={level.id === activeLevelId ? "fill-primary" : "fill-foreground"} />
+          <circle
+            key={level.id}
+            cx={AXIS.x}
+            cy={y}
+            r={level.id === activeLevelId ? 3.5 : 2.5}
+            className={level.id === activeLevelId ? "fill-primary" : "fill-foreground"}
+          />
         ))}
       </svg>
       {rows.map(({ level, labelY }) => {
@@ -230,7 +253,12 @@ export function CameraControls() {
       <Tooltip>
         <TooltipTrigger
           render={
-            <Button variant={camera === "orbit" ? "secondary" : "ghost"} size="icon-sm" aria-label="3D orbit camera" onClick={() => store.getState().setView({ camera: "orbit" })} />
+            <Button
+              variant={camera === "orbit" ? "secondary" : "ghost"}
+              size="icon-sm"
+              aria-label="3D orbit camera"
+              onClick={() => store.getState().setView({ camera: "orbit" })}
+            />
           }
         >
           <Box />
@@ -240,7 +268,12 @@ export function CameraControls() {
       <Tooltip>
         <TooltipTrigger
           render={
-            <Button variant={camera === "topdown" ? "secondary" : "ghost"} size="icon-sm" aria-label="Top-down camera" onClick={() => store.getState().setView({ camera: "topdown" })} />
+            <Button
+              variant={camera === "topdown" ? "secondary" : "ghost"}
+              size="icon-sm"
+              aria-label="Top-down camera"
+              onClick={() => store.getState().setView({ camera: "topdown" })}
+            />
           }
         >
           <MapIcon />
@@ -277,47 +310,6 @@ export function CameraControls() {
   )
 }
 
-export function DocumentBanners({ doc }: { doc: SceneDocument }) {
-  const v = doc.viewingVersion
-  return (
-    <div className="pointer-events-none flex flex-col items-center gap-2">
-      {v ? (
-        <div className={cn("pointer-events-auto flex items-center gap-3 rounded-lg px-3 py-2 text-xs", glass)}>
-          <History className="size-4 text-primary" />
-          <span>
-            Viewing <span className="font-medium">version {v.version}</span> from {relativeTime(v.createdAt)} — read-only
-          </span>
-          <Button size="xs" variant="outline" disabled={doc.busy !== null} onClick={() => void doc.restoreVersion(v)}>
-            <RotateCcw data-icon="inline-start" /> Restore this version
-          </Button>
-          <Button size="xs" variant="ghost" disabled={doc.busy !== null} onClick={() => void doc.backToLatest()}>
-            Back to latest
-          </Button>
-        </div>
-      ) : null}
-      {doc.recoverable ? (
-        <div className={cn("pointer-events-auto flex items-center gap-3 rounded-lg px-3 py-2 text-xs", glass)}>
-          <LifeBuoy className="size-4 text-primary" />
-          <span>
-            Unsaved changes from {clockTime(doc.recoverable.savedAt)} ({relativeTime(doc.recoverable.savedAt)}) were found on this device.
-          </span>
-          <Button size="xs" variant="outline" onClick={doc.restoreDraft}>
-            <Undo2 data-icon="inline-start" /> Restore
-          </Button>
-          <Button size="xs" variant="ghost" onClick={() => void doc.discardDraft()}>
-            Discard
-          </Button>
-        </div>
-      ) : null}
-      {doc.busy ? (
-        <div className={cn("pointer-events-auto flex items-center gap-2 rounded-full px-3 py-1.5 text-xs", glass)}>
-          <Spinner className="size-3.5" /> {doc.busy}
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
 /** First steps for a (nearly) empty scene. */
 export function GettingStarted() {
   const actions = useEditorActions()
@@ -350,52 +342,6 @@ export function GettingStarted() {
           <Keyboard data-icon="inline-start" /> Shortcuts
         </Button>
       </div>
-    </div>
-  )
-}
-
-export function PreviewBar({ tokenId, result, onTokenChange }: { tokenId: Id; result: PreviewResult | null; onTokenChange(id: Id): void }) {
-  const actions = useEditorActions()
-  const tokens = useEditorState((s) => s.scene.tokens)
-  const levelName = useEditorState((s) => {
-    const t = Object.hasOwn(s.scene.tokens, tokenId) ? s.scene.tokens[tokenId] : null
-    return t && Object.hasOwn(s.scene.levels, t.levelId) ? s.scene.levels[t.levelId].name : null
-  })
-  const options = previewCandidates({ tokens }).map((id) => ({ value: id, label: `${tokenLabel(tokens[id])}${tokens[id].hidden ? " (hidden)" : ""}` }))
-  const t = Object.hasOwn(tokens, tokenId) ? tokens[tokenId] : null
-  const senses = t ? [t.vision.blind ? "blind" : t.vision.darkvision > 0 ? `darkvision ${t.vision.darkvision} ft` : "normal vision", t.vision.blindsight > 0 ? `blindsight ${t.vision.blindsight} ft` : null].filter(Boolean).join(" · ") : ""
-  return (
-    <div className="flex h-10 shrink-0 items-center gap-3 border-b bg-primary/10 px-3">
-      <div className="flex shrink-0 items-center gap-1.5 text-xs font-medium whitespace-nowrap text-primary">
-        <Eye className="size-3.5" /> Player view preview
-      </div>
-      <div className="h-5 w-px shrink-0 bg-border" />
-      <span className="shrink-0 text-[0.6875rem] whitespace-nowrap text-muted-foreground">Seeing as</span>
-      <SelectInput className="w-44 shrink-0" value={tokenId} options={options} onValueChange={onTokenChange} aria-label="Previewed token" />
-      <Tooltip>
-        <TooltipTrigger render={<span className="min-w-0 cursor-default truncate text-[0.6875rem] whitespace-nowrap text-muted-foreground" />}>
-          {levelName ? `${levelName} · ` : ""}
-          {senses}
-        </TooltipTrigger>
-        <TooltipContent>
-          {levelName ? `${levelName} · ` : ""}
-          {senses}
-        </TooltipContent>
-      </Tooltip>
-      <div className="flex-1" />
-      {result ? (
-        <Tooltip>
-          <TooltipTrigger render={<Badge variant="outline" className="shrink-0 cursor-default font-normal tabular-nums" />}>
-            {result.visibleTokenIds.length} other token{result.visibleTokenIds.length === 1 ? "" : "s"} visible · {Math.round(result.ms)} ms
-          </TooltipTrigger>
-          <TooltipContent>Computed locally by the vision engine; explored = what is perceived right now. Click another token to switch.</TooltipContent>
-        </Tooltip>
-      ) : (
-        <Spinner className="size-3.5" />
-      )}
-      <Button size="sm" variant="outline" className="shrink-0" onClick={actions.exitPreview}>
-        <X data-icon="inline-start" /> Exit preview <Kbd className="ml-1">Esc</Kbd>
-      </Button>
     </div>
   )
 }

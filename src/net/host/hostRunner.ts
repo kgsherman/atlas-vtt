@@ -253,7 +253,7 @@ function jsonBytes(value: unknown): number {
  * resolves once the game's save after the swap is done, true when the swap reached storage), or why not.
  */
 export type HostChangeMapResult =
-  { ok: true; carried: Record<Id, Id>; saved: Promise<boolean> } | { ok: false; error: CarryError | "same-map" | "not-hosting"; unplaced: Id[] }
+  { ok: true; carried: Record<Id, Id>; saved: Promise<boolean> } | { ok: false; error: CarryError | "same-map" | "not-hosting" | "map-in-use"; unplaced: Id[] }
 
 /** DM commands after which the saved state must not lag (it would re-reveal things after a crash). */
 function reducesVisibility(cmd: DmCommand): boolean {
@@ -314,6 +314,11 @@ export class HostRunnerImpl implements HostRunner {
   private hostEpoch: number | null = null
   private wireEpoch: string | null = null
   private roomCode = ""
+  /**
+   * The table's doors (sessions.status "active"): members connect. While closed the host runs without any
+   * channel (ARCHITECTURE §6.8): the DM plays and edits alone, nothing reaches a player.
+   */
+  private tableOpen = false
   private state: GameState | null = null
   /** Scene row id from the seed (asset lookups may key by it). */
   private sceneRowId: string | null = null
@@ -347,7 +352,7 @@ export class HostRunnerImpl implements HostRunner {
    * context again adds no knowledge.
    */
   private probedSteps: { vision: VisionClient; rev: number; size: number; byContext: Map<string, Set<string>> } | null = null
-  /** Editor edits applied so far (tells a library save whether the map changed while it ran). */
+  /** Changes of the map so far, edits and play actions (tells a library save whether the map changed while it ran). */
   private sceneEdits = 0
 
   private readonly conns = new Map<string, PlayerConn>()
@@ -413,6 +418,7 @@ export class HostRunnerImpl implements HostRunner {
         error: this.error,
         sessionId: this.o.sessionId,
         roomCode: this.roomCode,
+        tableOpen: this.tableOpen,
         epoch: this.wireEpoch,
         state: this.state,
         members,
@@ -506,12 +512,13 @@ export class HostRunnerImpl implements HostRunner {
       const info = await this.o.repo.sessionInfo(sid)
       if (gen !== this.gen) return
       if (!info || info.role !== "dm") throw new Error("You are not the DM of this session.")
-      if (info.status !== "active") {
+      if (info.status === "ended") {
         this.releaseLock()
         this.setStatus("ended", null)
         return
       }
       this.roomCode = info.roomCode
+      this.tableOpen = info.status === "active"
       // 3. Fencing epoch + wire epoch.
       const hostEpoch = await this.o.repo.claimHost(sid)
       if (gen !== this.gen) return
@@ -561,14 +568,15 @@ export class HostRunnerImpl implements HostRunner {
         log: this.log,
       })
       this.tiler.setScene(state.scene)
-      // 7. Channels.
-      this.openChannels(gen)
+      // 7. Channels (only while the table is open).
+      if (this.tableOpen) this.openChannels(gen)
       this.setStatus("hosting")
       if (seeded) this.stateSaver.request(true)
       // 8. Members (links), then periodic re-reads, idle syncs and page-hide saves.
       await this.refreshMembers(gen)
       if (!this.hosting(gen)) return
-      this.intervals.push(clock.setInterval(() => void this.refreshMembers(gen), this.t.memberPollMs))
+      // Nobody joins a closed table: members are re-read while it is open.
+      this.intervals.push(clock.setInterval(() => void (this.tableOpen ? this.refreshMembers(gen) : undefined), this.t.memberPollMs))
       this.intervals.push(clock.setInterval(() => this.idleSync(gen), Math.max(250, Math.min(1000, this.t.idleSyncMs / 4))))
       this.watchVisibility(gen)
     } catch (err) {
@@ -592,6 +600,45 @@ export class HostRunnerImpl implements HostRunner {
     if (this.status !== "ended") this.setStatus("standby", null)
   }
 
+  /**
+   * Open or close the table's doors (sessions.status). Opening starts a fresh wire epoch (players' clients
+   * start over after the closed screen) and links every active member. Closing tells the players, stores
+   * their views as they are, then drops every channel: the DM keeps playing and editing alone.
+   */
+  async setTableOpen(open: boolean): Promise<void> {
+    if (this.status !== "hosting") throw new Error("This tab is not hosting the table.")
+    const gen = this.gen
+    const status = await this.o.repo.setTableOpen(this.o.sessionId, open)
+    if (!this.hosting(gen)) return
+    const nowOpen = status === "active"
+    if (nowOpen === this.tableOpen) return
+    this.tableOpen = nowOpen
+    if (nowOpen) {
+      this.wireEpoch = makeWireEpoch(this.hostEpoch!)
+      this.openChannels(gen)
+      this.notify()
+      await this.refreshMembers(gen)
+      return
+    }
+    // From here on no link sends anything: the links and channels leave the runner at once (opening the
+    // table again meanwhile starts from scratch), the players are told, their views stored as they are
+    // (a player who comes back resumes from them), then the channels close.
+    const hostEpoch = this.hostEpoch
+    const epoch = this.wireEpoch
+    const { channels, conns } = this.detachChannels()
+    this.notify()
+    if (channels) await channels.host.broadcast({ t: "closed" }).catch(() => undefined)
+    const unsaved = conns.filter((c) => c.lastSent !== null && c.savedSeq !== c.seq)
+    if (hostEpoch !== null && epoch)
+      await this.within(
+        Promise.allSettled(
+          unsaved.map((c) => this.o.repo.upsertPlayerView({ sessionId: this.o.sessionId, userId: c.userId, hostEpoch, epoch, seq: c.seq, view: c.lastSent! }))
+        ).then(() => undefined),
+        3000
+      )
+    if (channels) await channels.close().catch((err) => this.log("closing channels failed", err))
+  }
+
   async endSession(): Promise<void> {
     if (this.channels && this.status === "hosting") {
       await this.channels.host.broadcast({ t: "ended" }).catch(() => undefined)
@@ -611,11 +658,10 @@ export class HostRunnerImpl implements HostRunner {
   }
 
   /**
-   * Save the live map as a new version of the library scene the session was started from (edits made
-   * in "Edit map" during the session are otherwise lost for the next one). Optimistic: fails with
-   * NetError("version_conflict") when the library scene got a version since the one the session is
-   * based on (unless `force`). Also works right after endSession(), while the state is still here.
-   * Returns the new version.
+   * Save the live map as a new version (a restore point) of its library scene (GameState.origin: the map
+   * the table holds). Optimistic: fails with NetError("version_conflict") when the library scene got a
+   * version since the one the map is based on (unless `force`). Also works right after endSession(),
+   * while the state is still here. Returns the new version.
    */
   async saveMapToLibrary(opts: { force?: boolean } = {}): Promise<number> {
     const scenes = this.o.scenes
@@ -673,19 +719,11 @@ export class HostRunnerImpl implements HostRunner {
   private async teardown(): Promise<void> {
     for (const t of this.intervals) this.clock?.clearInterval(t)
     this.intervals = []
-    if (this.lobbyTimer !== null) this.clock?.clearTimeout(this.lobbyTimer)
-    this.lobbyTimer = null
     this.visibilityOff?.()
     this.visibilityOff = null
     this.stateSaver?.cancel()
     this.stateSaver = null
-    for (const conn of this.conns.values()) this.disposeConn(conn)
-    this.conns.clear()
-    this.inFlightMoves.clear()
-    for (const off of this.channelOffs) off()
-    this.channelOffs = []
-    const channels = this.channels
-    this.channels = null
+    const closing = this.closeChannels()
     this.visionOff?.()
     this.visionOff = null
     this.vision?.dispose()
@@ -698,7 +736,31 @@ export class HostRunnerImpl implements HostRunner {
     this.releaseLock()
     this.clock?.dispose()
     this.clock = null
+    await closing
+  }
+
+  /** Drop every player link and channel (teardown). */
+  private async closeChannels(): Promise<void> {
+    const { channels } = this.detachChannels()
     if (channels) await channels.close().catch((err) => this.log("closing channels failed", err))
+  }
+
+  /** Take every player link and the channels out of the runner (the links stop; the caller closes the channels). */
+  private detachChannels(): { channels: HostChannels | null; conns: PlayerConn[] } {
+    if (this.lobbyTimer !== null) this.clock?.clearTimeout(this.lobbyTimer)
+    this.lobbyTimer = null
+    const conns = [...this.conns.values()]
+    for (const conn of conns) {
+      this.disposeConn(conn)
+      this.tiler?.forgetPlayer(conn.userId)
+    }
+    this.conns.clear()
+    this.inFlightMoves.clear()
+    for (const off of this.channelOffs) off()
+    this.channelOffs = []
+    const channels = this.channels
+    this.channels = null
+    return { channels, conns }
   }
 
   private disposeConn(conn: PlayerConn): void {
@@ -1011,8 +1073,9 @@ export class HostRunnerImpl implements HostRunner {
         if (!this.hosting(gen)) return
         this.members = list
         for (const m of list) {
-          if (m.status === "active") this.ensureMember(m, gen)
-          else await this.expel(m.userId, true)
+          if (m.status === "active") {
+            if (this.tableOpen) this.ensureMember(m, gen)
+          } else await this.expel(m.userId, true)
           if (!this.hosting(gen)) return
         }
         this.notify()
@@ -1097,10 +1160,10 @@ export class HostRunnerImpl implements HostRunner {
     if (r.error) this.log(`DM command ${cmd.t} not applied: ${r.error}`)
     if (r.state === state) return r
     const prevName = state.scene.name
-    this.state = r.state
+    // Another map arrives with its own origin; any other change of the map makes it differ from its library version.
+    this.state = cmd.t === "load-scene" ? r.state : this.mapChanged(state, r.state)
     // Step probes of earlier moves must not add what the token saw before this change.
     if (reducesVisibility(cmd)) this.knowledgeRev++
-    if (cmd.t === "apply-scene-patches") this.sceneEdits++
     if (cmd.t === "load-scene") {
       // Another map: its images live under its own id or library row, never the previous map's (a duplicate
       // shares asset ids with it); moves still in flight belong to the old one.
@@ -1129,18 +1192,52 @@ export class HostRunnerImpl implements HostRunner {
    * bring the old map back), and `saved` resolves false when that failed or hosting stopped meanwhile (the
    * swap stays in place).
    */
-  changeMap(target: Scene, opts: { tokenIds: Id[]; arrival: Arrival; origin: SceneOrigin | null }): HostChangeMapResult {
+  async changeMap(target: Scene, opts: { tokenIds: Id[]; arrival: Arrival; origin: SceneOrigin | null }): Promise<HostChangeMapResult> {
+    const notHosting = { ok: false as const, error: "not-hosting" as const, unplaced: [] }
     const state = this.state
-    if (!state || this.status !== "hosting") return { ok: false, error: "not-hosting", unplaced: [] }
+    if (!state || this.status !== "hosting") return notHosting
     if (target.id === state.scene.id) return { ok: false, error: "same-map", unplaced: [] }
     const world = buildOcclusionWorld(target)
-    const built = changeMapCommand(state, target, opts, { now: this.wallClock(), newId, world })
-    if (!built.ok) return built
+    const planned = changeMapCommand(state, target, opts, { now: this.wallClock(), newId, world })
+    if (!planned.ok) return planned
+    // The table holds the new map from now on (ARCHITECTURE §6.8): an idle table there ends, one with
+    // players refuses. The previous map is free for another table.
+    const gen = this.gen
+    const mapId = opts.origin?.sceneId ?? null
+    const previousId = state.origin?.sceneId ?? null
+    if (mapId && this.hostEpoch !== null) {
+      try {
+        await this.o.repo.setSessionScene(this.o.sessionId, this.hostEpoch, mapId)
+      } catch (err) {
+        if (isNetError(err, "map_in_use")) return { ok: false, error: "map-in-use", unplaced: [] }
+        if (fencingFailure(err)) {
+          this.onPersistError(err, gen, "moving the table to the new map")
+          return notHosting
+        }
+        throw err
+      }
+      if (!this.hosting(gen) || !this.state) return notHosting
+    }
+    // Refused after the claim: the table holds its previous map again (best effort).
+    const giveBack = () => {
+      if (mapId && previousId && this.hostEpoch !== null)
+        void this.o.repo.setSessionScene(this.o.sessionId, this.hostEpoch, previousId).catch((err) => this.log("giving the previous map back failed", err))
+    }
+    // Players may have moved while the table claimed the map: the command is built from the live state again.
+    const live = this.state
+    if (!live) return notHosting
+    const built = live === state ? planned : changeMapCommand(live, target, opts, { now: this.wallClock(), newId, world })
+    if (!built.ok) {
+      giveBack()
+      return built
+    }
     this.prebuiltWorld = { scene: built.cmd.scene, world }
     const r = this.dispatch(built.cmd)
     this.prebuiltWorld = null
-    if (!r || r.error) return { ok: false, error: "not-hosting", unplaced: [] }
-    const gen = this.gen
+    if (!r || r.error) {
+      giveBack()
+      return notHosting
+    }
     const saved = this.save().then(
       // A save cut short by a stand-down (another tab took over, the session ended) never stored the swap.
       () => this.hosting(gen),
@@ -1150,6 +1247,16 @@ export class HostRunnerImpl implements HostRunner {
       }
     )
     return { ok: true, carried: built.carried, saved }
+  }
+
+  /**
+   * The map changed (an edit or a play action: the map remembers everything that happens on it): it now
+   * differs from its library version (origin.dirty), and a library save running now does not cover it.
+   */
+  private mapChanged(prev: GameState, next: GameState): GameState {
+    if (next.scene === prev.scene) return next
+    this.sceneEdits++
+    return next.origin && !next.origin.dirty ? { ...next, origin: { ...next.origin, dirty: true } } : next
   }
 
   applyScenePatches(patches: Patch[]): void {
@@ -1293,7 +1400,7 @@ export class HostRunnerImpl implements HostRunner {
       tokenImageBase: this.o.tokenImageBase ?? null,
     })
     if (out.state !== state) {
-      this.state = out.state
+      this.state = this.mapChanged(state, out.state)
       const move = moves && out.tokenId ? out.tokenId : null
       // The final revision (and so the flush carrying the result) goes to the vision client first.
       this.applyDelta(out.delta, false, move !== null)

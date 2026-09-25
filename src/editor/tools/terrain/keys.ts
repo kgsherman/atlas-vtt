@@ -83,7 +83,6 @@ function fromKey(e: ToolKeyEvent): TerrainKey {
   if (k === "Escape") return { type: "escape" }
   if (k === "Enter") return { type: "confirm" }
   if (k === "Delete" || k === "Backspace") return { type: "delete" }
-  if (k === "Tab") return { type: "advanced" }
   if (Object.hasOwn(NUDGE_KEYS, k)) {
     const [x, z] = NUDGE_KEYS[k]
     return { type: "nudge", x, z, fine: e.shift }

@@ -737,8 +737,37 @@ describe("PlayerClient: membership", () => {
     })
     const client = makeClient(newTab({ joinDelayMs: 60_000 }), { repo })
     await client.start()
-    expect(client.getSnapshot().status).toBe("connecting")
-    await waitFor(() => client.getSnapshot().status === "kicked", "kicked")
+    // Asked at start: no need to wait for the first periodic check.
+    await waitFor(() => client.getSnapshot().status === "kicked", "kicked", 200)
+  })
+
+  it("finds a closed table at start (its channels never join) and after the DM closes it", async () => {
+    const newTab = tabs()
+    let status: "active" | "closed" = "closed"
+    const repo = stubRepo({
+      sessionInfo: async () => ({
+        sessionId: SID,
+        status,
+        roomCode: "ABCD1234",
+        role: "player",
+        memberStatus: "active",
+        displayName: "Alice",
+        dmDisplayName: null,
+        createdAt: "",
+      }),
+    })
+    const closed = makeClient(newTab({ joinDelayMs: 60_000 }), { repo })
+    await closed.start()
+    await waitFor(() => closed.getSnapshot().status === "closed", "closed at start", 200)
+    // Open, then closed while connected: the host drops its channels, the membership check finds out.
+    status = "active"
+    const host = rawHost(newTab())
+    const client = makeClient(newTab(), { repo })
+    await client.start()
+    await waitFor(() => host.hellos().length >= 1, "hello")
+    status = "closed"
+    await host.ch.close()
+    await waitFor(() => client.getSnapshot().status === "closed", "closed later", 3000)
   })
 
   it("notices a kick while syncing with a host that never answers (local mode: channels still join)", async () => {
@@ -1229,6 +1258,16 @@ describe("PlayerClient: requests", () => {
     const { client, host } = await live()
     await host.broadcast({ t: "ended" })
     await waitFor(() => client.getSnapshot().status === "ended", "ended")
+  })
+
+  it("closes when the DM closes the table, keeping the last view for display", async () => {
+    const { client, token, host } = await live()
+    const view = client.getSnapshot().view
+    await host.broadcast({ t: "closed" })
+    await waitFor(() => client.getSnapshot().status === "closed", "closed")
+    expect(client.getSnapshot().view).toBe(view)
+    const reqId = client.requestMove(token.id, [{ cell: { i: 2, j: 2 }, levelId: token.levelId }])
+    expect(client.getSnapshot().results.at(-1)).toEqual({ reqId, ok: false, local: "closed", kind: "move" })
   })
 
   it("stop() settles pending requests and disposes the tile source", async () => {

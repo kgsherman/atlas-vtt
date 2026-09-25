@@ -68,7 +68,14 @@ describe("parseSessionStateContent", () => {
   })
 
   it("reads the free asset categories of the seed (known ones, sorted, each once)", () => {
-    const content = parseSessionStateContent({ kind: "seed", sceneId: "x", sceneVersion: 1, schemaVersion: 2, scene: {}, freeAssets: ["token-models", "maps", "token-models"] })
+    const content = parseSessionStateContent({
+      kind: "seed",
+      sceneId: "x",
+      sceneVersion: 1,
+      schemaVersion: 2,
+      scene: {},
+      freeAssets: ["token-models", "maps", "token-models"],
+    })
     expect(content).toMatchObject({ kind: "seed", freeAssets: ["token-models"] })
   })
 
@@ -132,7 +139,10 @@ describe("local sessions repo (dev mode, mirrors the SQL rules)", () => {
     as = DM
     expect(await repo.setMemberStatus(sessionId, P1, "kicked")).toBe(true)
     expect(await repo.setMemberStatus(sessionId, P1, "kicked")).toBe(false)
-    expect(await repo.listSessionMembers(sessionId)).toEqual([expect.objectContaining({ userId: P1, status: "kicked" }), expect.objectContaining({ userId: P2, status: "active" })])
+    expect(await repo.listSessionMembers(sessionId)).toEqual([
+      expect.objectContaining({ userId: P1, status: "kicked" }),
+      expect.objectContaining({ userId: P2, status: "active" }),
+    ])
     as = P1
     await expectNetError(repo.joinSession(roomCode, "Alice"), "kicked")
     expect((await repo.sessionInfo(sessionId))?.memberStatus).toBe("kicked")
@@ -184,6 +194,95 @@ describe("local sessions repo (dev mode, mirrors the SQL rules)", () => {
   })
 })
 
+describe("local map tables (mirror open_map / set_table_open / set_session_scene)", () => {
+  let store: LocalStore
+  let as: string
+  let repo: SessionsRepo
+  let scenes: ReturnType<typeof createLocalScenesRepo>
+  let sceneId: string
+  let otherId: string
+
+  beforeEach(async () => {
+    store = createMemoryStore()
+    as = DM
+    scenes = createLocalScenesRepo(store)
+    repo = createLocalSessionsRepo({ store, scenes, userId: () => as })
+    sceneId = (await scenes.create(createScene({ name: "Keep" }))).id
+    otherId = (await scenes.create(createScene({ name: "Crypt" }))).id
+  })
+
+  it("gives each map one table, created closed and seeded from the latest version", async () => {
+    const first = await repo.openMap(sceneId, { freeAssets: ["token-models"] })
+    expect(first).toMatchObject({ status: "closed", created: true })
+    expect(first.roomCode).toMatch(ROOM_CODE_RE)
+    expect(await repo.openMap(sceneId)).toEqual({ ...first, created: false })
+    expect((await repo.loadSessionState(first.sessionId))?.content).toMatchObject({ kind: "seed", sceneId, freeAssets: ["token-models"] })
+    expect(await repo.sessionInfo(first.sessionId)).toMatchObject({ status: "closed", role: "dm" })
+    await expectNetError(repo.openMap("no-such-scene"), "not_found")
+  })
+
+  it("keeps players out while closed and lets them back in with the same code", async () => {
+    const { sessionId, roomCode } = await repo.openMap(sceneId)
+    as = P1
+    await expectNetError(repo.joinSession(roomCode, "Alice"), "table_closed")
+    as = DM
+    expect(await repo.setTableOpen(sessionId, true)).toBe("active")
+    as = P1
+    expect(await repo.joinSession(roomCode, "Alice")).toBe(sessionId)
+    as = DM
+    const epoch = await repo.claimHost(sessionId)
+    await repo.upsertPlayerView({ sessionId, userId: P1, hostEpoch: epoch, epoch: "w", seq: 1, view: view(P1) })
+    expect(await repo.setTableOpen(sessionId, false)).toBe("closed")
+    // The DM keeps working: host claims and fenced writes go on while closed.
+    await repo.saveSessionState(sessionId, epoch, state)
+    expect(await repo.claimHost(sessionId)).toBe(epoch + 1)
+    as = P1
+    expect(await repo.loadPlayerView(sessionId, P1)).toBeNull()
+    expect(await repo.sessionInfo(sessionId)).toMatchObject({ status: "closed", memberStatus: "active" })
+    await expectNetError(repo.joinSession(roomCode, "Alice"), "table_closed")
+    await expectNetError(repo.setTableOpen(sessionId, true), "not_found")
+    as = DM
+    await repo.setTableOpen(sessionId, true)
+    as = P1
+    expect(await repo.loadPlayerView(sessionId, P1)).toMatchObject({ seq: 1 })
+    expect(await repo.joinSession(roomCode, "Alice")).toBe(sessionId)
+  })
+
+  it("moves a table to another map: an idle table there ends, one with players refuses", async () => {
+    const a = await repo.openMap(sceneId)
+    const b = await repo.openMap(otherId)
+    const epoch = await repo.claimHost(a.sessionId)
+    await repo.setSessionScene(a.sessionId, epoch, otherId)
+    expect((await repo.sessionInfo(b.sessionId))?.status).toBe("ended")
+    expect(await repo.openMap(otherId)).toMatchObject({ sessionId: a.sessionId, created: false })
+    // The first map is free again: opening it makes a new table.
+    const c = await repo.openMap(sceneId)
+    expect(c).toMatchObject({ created: true })
+    await repo.setTableOpen(c.sessionId, true)
+    as = P1
+    await repo.joinSession(c.roomCode, "Alice")
+    as = DM
+    await expectNetError(repo.setSessionScene(a.sessionId, epoch, sceneId), "map_in_use")
+    await expectNetError(repo.setSessionScene(a.sessionId, epoch - 1, sceneId), "stale_epoch")
+    await expectNetError(repo.setSessionScene(a.sessionId, epoch, "no-such-scene"), "not_found")
+  })
+
+  it("createSession opens the map's table (older clients' Start session)", async () => {
+    const table = await repo.openMap(sceneId)
+    expect(await repo.createSession(sceneId)).toEqual({ sessionId: table.sessionId, roomCode: table.roomCode })
+    expect((await repo.sessionInfo(table.sessionId))?.status).toBe("active")
+  })
+
+  it("deleting a map ends its table", async () => {
+    const { sessionId, roomCode } = await repo.openMap(sceneId)
+    await repo.setTableOpen(sessionId, true)
+    await scenes.remove(sceneId)
+    expect((await repo.sessionInfo(sessionId))?.status).toBe("ended")
+    as = P1
+    await expectNetError(repo.joinSession(roomCode, "Alice"), "session_not_found")
+  })
+})
+
 // ---------------------------------------------------------------------------
 // Remote wrappers against a fake supabase client (no network)
 // ---------------------------------------------------------------------------
@@ -227,14 +326,19 @@ describe("remote sessions repo", () => {
   })
 
   it("maps RPC exception codes to typed NetErrors", async () => {
-    const { client } = fakeClient((fn) => ({ data: null, error: { message: fn === "join_session" ? "kicked" : "stale_epoch", code: "P0001", details: "why", hint: null } }))
+    const { client } = fakeClient((fn) => ({
+      data: null,
+      error: { message: fn === "join_session" ? "kicked" : "stale_epoch", code: "P0001", details: "why", hint: null },
+    }))
     const repo = createRemoteSessionsRepo(client)
     await expectNetError(repo.joinSession("ABCDEFGH", "Bob"), "kicked")
     await expectNetError(repo.saveSessionState("s", 1, state), "stale_epoch")
   })
 
   it("maps permission errors and network failures", async () => {
-    const denied = createRemoteSessionsRepo(fakeClient(() => ({ data: null, error: { message: "permission denied for function claim_host", code: "42501" } })).client)
+    const denied = createRemoteSessionsRepo(
+      fakeClient(() => ({ data: null, error: { message: "permission denied for function claim_host", code: "42501" } })).client
+    )
     await expectNetError(denied.claimHost("s"), "permission_denied")
     const offline = createRemoteSessionsRepo(fakeClient(() => ({ data: null, error: { message: "TypeError: fetch failed", code: "" } })).client)
     await expectNetError(offline.claimHost("s"), "network")
@@ -248,8 +352,32 @@ describe("remote sessions repo", () => {
     expect(calls[0]).toEqual({ fn: "upsert_player_view", args: { p_session_id: "s", p_user_id: P1, p_host_epoch: 3, p_epoch: "w", p_seq: 7, p_view: v } })
   })
 
+  it("opens a map's table and its doors", async () => {
+    const { client, calls } = fakeClient((fn) =>
+      fn === "open_map" ? { data: [{ session_id: "s", room_code: "ABCDEFGH", status: "closed", created: true }], error: null } : { data: "active", error: null }
+    )
+    const repo = createRemoteSessionsRepo(client)
+    expect(await repo.openMap("scene", { freeAssets: ["token-models"] })).toEqual({ sessionId: "s", roomCode: "ABCDEFGH", status: "closed", created: true })
+    expect(await repo.setTableOpen("s", true)).toBe("active")
+    await repo.setSessionScene("s", 4, "other")
+    expect(calls).toEqual([
+      { fn: "open_map", args: { p_scene_id: "scene", p_free_assets: ["token-models"] } },
+      { fn: "set_table_open", args: { p_session_id: "s", p_open: true } },
+      { fn: "set_session_scene", args: { p_session_id: "s", p_host_epoch: 4, p_scene_id: "other" } },
+    ])
+  })
+
   it("maps session_info rows, including NULL member columns for the DM", async () => {
-    const row = { session_id: "s", status: "active", room_code: "ABCDEFGH", role: "dm", member_status: null, display_name: null, dm_display_name: "Kev", created_at: "t" }
+    const row = {
+      session_id: "s",
+      status: "active",
+      room_code: "ABCDEFGH",
+      role: "dm",
+      member_status: null,
+      display_name: null,
+      dm_display_name: "Kev",
+      created_at: "t",
+    }
     const repo = createRemoteSessionsRepo(fakeClient(() => ({ data: [row], error: null })).client)
     expect(await repo.sessionInfo("s")).toEqual({
       sessionId: "s",

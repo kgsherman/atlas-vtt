@@ -53,15 +53,17 @@ export interface HostSnapshot {
   error: string | null
   sessionId: string
   roomCode: string
-  /** Wire epoch (random per host start). */
+  /** The table's doors are open (sessions.status "active"): members may join and connect. */
+  tableOpen: boolean
+  /** Wire epoch (random per host start and per opening of the table; null while closed or not hosting). */
   epoch: string | null
   state: GameState | null
   members: HostMember[]
   stats: HostStats
   /**
    * The library scene the live map comes from (GameState.origin): its row id, the version the map is
-   * based on (null = unknown, e.g. a game saved before this was recorded) and whether the map was
-   * edited since. null: none (started from a file, or the library scene was deleted).
+   * based on (its last restore point; null = unknown, e.g. a game saved before this was recorded) and
+   * whether the map changed since (edits and play actions). null: none (the library scene was deleted).
    */
   library: { sceneId: string; version: number | null; dirty: boolean } | null
 }
@@ -118,8 +120,13 @@ export interface VisionClient {
 
 export interface HostRunner {
   start(): Promise<void>
-  /** Stop hosting (keeps the session active; players see "Waiting for DM"). */
+  /** Stop hosting (keeps the table as it is; players at an open table see "Waiting for DM"). */
   stop(): Promise<void>
+  /**
+   * Open or close the table's doors (ARCHITECTURE §6.8). Closed: players are told and disconnected, the
+   * host keeps running without channels, the room code stays reserved. Open: members connect again.
+   */
+  setTableOpen(open: boolean): Promise<void>
   /** Steal the host lock / claim a new epoch after standby. */
   takeOver(): Promise<void>
   getSnapshot(): HostSnapshot
@@ -130,7 +137,7 @@ export interface HostRunner {
    * when this tab is not hosting.
    */
   dispatch(cmd: DmCommand): ReduceResult | null
-  /** Editor edits during the live session (immer patches against GameState.scene). */
+  /** Editor edits on the map screen (immer patches against GameState.scene). */
   applyScenePatches(patches: Patch[]): void
   /** DM "preview token vision": visibility for these tokens against the live scene (no knowledge update). */
   previewVisibility(tokenIds: Id[]): Promise<VisibilityResult>
@@ -142,10 +149,11 @@ export interface HostRunner {
    * Save the live map (as it is now, edits made during the session included) as a new version of the
    * library scene the session was started from. Rejects with NetError("version_conflict") when that
    * scene got another version meanwhile (retry with `force` to overwrite), and with "not_found" when it
-   * was deleted. Works after endSession() too. Resolves with the new version number.
+   * was deleted. Works after endSession() too. Resolves with the new version number (the map's newest
+   * restore point).
    */
   saveMapToLibrary(opts?: { force?: boolean }): Promise<number>
-  /** End the session for everyone. */
+  /** End the table for good (players disconnected, the room code released). */
   endSession(): Promise<void>
   /**
    * Point at a spot for every player who knows its level (filter.ts pingForPlayer). `focus`: ask their

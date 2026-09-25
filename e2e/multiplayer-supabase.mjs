@@ -5,7 +5,8 @@
 // movement lock, reload → same state, Realtime RLS refuses another user's topics and the host topic
 // for writes, table RLS hides the DM's rows, no secret in any websocket frame the player received,
 // Realtime refuses public channels and a kicked member's host subscription stops receiving once its
-// client sends a new JWT, and ending the session reaches the player. Cleans up: ends the session and deletes the scene copy
+// client sends a new JWT, closing the table reaches the player (and hides their stored view), and deleting the map ends
+// the table and removes its players' tiles. Cleans up whatever is left: ends the table and deletes the scene copy
 // (anonymous users cannot be deleted with the publishable key; they are listed at the end).
 //
 //   ATLAS_URL=http://127.0.0.1:5173 node e2e/multiplayer-supabase.mjs
@@ -861,28 +862,71 @@ try {
     )
   }
 
-  checks.step("DM ends the session")
-  await dm.getByRole("button", { name: "End session" }).click()
+  checks.step("DM closes the table")
+  await dm.getByRole("button", { name: /Table open/ }).click()
+  await dm.getByRole("menuitem", { name: /Close the table/ }).click()
   await dm
     .getByRole("alertdialog")
-    .getByRole("button", { name: "End session" })
+    .getByRole("button", { name: "Close the table" })
+    .click()
+  await waitFor(
+    pl,
+    () => window.__atlasPlayer?.client.getSnapshot().status === "closed",
+    null,
+    { timeout: 20000, label: "player sees the table close" }
+  ).then(
+    () => checks.ok(true, "the player is told the table closed"),
+    (e) => checks.fail("the player is told the table closed", e.message)
+  )
+  checks.eq(
+    await dm.evaluate(() => window.__atlasHost.runner.getSnapshot().status),
+    "hosting",
+    "the DM stays on the map"
+  )
+  checks.eq(
+    await pl.evaluate(async (sid) => {
+      const { getSupabase } = await import("/src/net/supabase.ts")
+      const { data } = await getSupabase()
+        .from("player_views")
+        .select("seq")
+        .eq("session_id", sid)
+      return data?.length ?? -1
+    }, sessionId),
+    0,
+    "the closed table's stored view is out of the player's reach"
+  )
+  await shot(pl, OUT, "03-player-closed")
+
+  checks.step("DM deletes the map: its table ends")
+  await dm.getByRole("button", { name: "Back to library" }).click()
+  await waitFor(dm, () => location.pathname === "/", null, {
+    timeout: 30000,
+    label: "library",
+  })
+  const card = dm.locator("[data-slot=card]", { hasText: scene0.name }).first()
+  await card.getByRole("button", { name: /More actions for/ }).click()
+  await dm.getByRole("menuitem", { name: /Delete/ }).click()
+  await dm
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "Delete scene" })
     .click()
   await waitFor(
     pl,
     () =>
       ["ended", "kicked"].includes(
         window.__atlasPlayer?.client.getSnapshot().status
-      ) || document.body.innerText.includes("ended"),
+      ) || document.body.innerText.includes("has ended"),
     null,
-    { timeout: 20000, label: "player sees the end" }
+    { timeout: 30000, label: "player sees the end" }
   ).then(
-    () => checks.ok(true, "the player is told the session ended"),
-    (e) => checks.fail("the player is told the session ended", e.message)
+    () => checks.ok(true, "the waiting player is told the game ended"),
+    (e) => checks.fail("the waiting player is told the game ended", e.message)
   )
-  await shot(pl, OUT, "03-player-ended")
+  await shot(pl, OUT, "04-player-ended")
   cleanup.sessionId = null
+  cleanup.sceneId = null
   if (Object.values(scene0.levels).some((l) => l.backdrop)) {
-    // The host deletes the players' tile chunks once the session has ended (best effort, in the background).
+    // Deleting the map removes its players' tile chunks (best effort).
     const leftover = async () =>
       dm.evaluate(async (sid) => {
         const { getSupabase } = await import("/src/net/supabase.ts")
@@ -907,7 +951,7 @@ try {
       await sleep(1000)
       left = await leftover()
     }
-    checks.eq(left, 0, "ending the session deletes the players' map tiles")
+    checks.eq(left, 0, "deleting the map deletes its players' map tiles")
   }
 } catch (err) {
   checks.fail("multiplayer-supabase crashed", err)
@@ -929,7 +973,9 @@ try {
               await s.sessions.endSession(sessionId).catch(() => false)
             // Uploaded map images (stored under the scene DOCUMENT id), any tiles the host left behind,
             // then the library row.
-            const scene = await s.scenes.load(sceneId).catch(() => null)
+            const scene = sceneId
+              ? await s.scenes.load(sceneId).catch(() => null)
+              : null
             const doc = scene?.parsed?.ok ? scene.parsed.scene : null
             const assets = Object.keys(doc?.assets ?? {})
             let deleted = 0
@@ -952,7 +998,7 @@ try {
                   () => -1
                 )
               : 0
-            await s.scenes.remove(sceneId)
+            if (sceneId) await s.scenes.remove(sceneId)
             return { userId: s.identity.userId, assets: deleted, left, tiles }
           },
           { ...cleanup, cleanupSid: cleanup.sid }

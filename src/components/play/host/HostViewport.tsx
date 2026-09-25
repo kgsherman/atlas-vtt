@@ -392,6 +392,11 @@ function HostBridge({
     activeLevelId: () => activeLevelId,
     enabled: editor === null,
   })
-  useHostEditInput(engine, canvas, editor ? editor.ctx : null)
+  useHostEditInput(
+    engine,
+    canvas,
+    editor ? editor.ctx : null,
+    editor ? editor.cursor : null
+  )
   return null
 }

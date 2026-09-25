@@ -38,7 +38,7 @@ export interface TemplateLayerProps {
   onSelectedView(view: TemplateView | null): void
   /** Whether a level's contents are shown (cutaway). */
   showOn(levelId: Id): boolean
-  /** false: draw nothing (the DM's Edit map). */
+  /** false: draw nothing (the DM's map screen in Edit). */
   enabled?: boolean
 }
 

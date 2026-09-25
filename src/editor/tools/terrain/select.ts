@@ -231,7 +231,6 @@ const shapeTied = (h: ShapeHit, front: ShapeHit) => h.hidden === front.hidden &&
 const elementTied = (c: ElementHit, front: ElementHit) => near(c.distance, front.distance)
 const shapeOnGround = (h: ShapeHit) => h.onGround
 
-
 export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<ShapeActions, "select">): SubTool {
   const { store, deps } = ctx
   let gesture: Gesture | null = null
@@ -309,7 +308,9 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
     }
     const cursor = canvasOf(e)
     if (!cursor || !deps.project) return []
-    return mode === "vertex" ? vertexHits(shapes, level.elevation, deps.project, cursor) : edgeHits(shapes, level.elevation, deps.project, cursor, undefined, "all")
+    return mode === "vertex"
+      ? vertexHits(shapes, level.elevation, deps.project, cursor)
+      : edgeHits(shapes, level.elevation, deps.project, cursor, undefined, "all")
   }
 
   const shapeCandidates = (e: ToolPointerEvent, ray: Ray, shapes: readonly TerrainShape[], level: Level) => {
@@ -510,7 +511,13 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
       if (d.indices && !ks) continue
       const low = d.lower.get(id)
       if (d.rotate) next = rotateShape(orig, d.rotate.pivot, angle, ks ?? null)
-      else if (ks && low) next = translateVertices(orig, ks.filter((k) => !low.flat.includes(k)), delta, low)
+      else if (ks && low)
+        next = translateVertices(
+          orig,
+          ks.filter((k) => !low.flat.includes(k)),
+          delta,
+          low
+        )
       else if (ks) next = translateVertices(orig, ks, delta)
       else next = translateShape(orig, delta)
       if (!next || !shapeInExtent(next, grid)) return null
@@ -834,7 +841,9 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
       const drag = gesture?.kind === "drag" ? gesture : null
       const subs = drag?.current ?? null
       const at = gizmoAt(subs)
-      const active: GizmoPart | null = drag?.rotate ? "rotate" : (drag?.axis ?? (gesture?.kind === "pending" && gesture.target.kind === "gizmo" ? gesture.target.part : null))
+      const active: GizmoPart | null = drag?.rotate
+        ? "rotate"
+        : (drag?.axis ?? (gesture?.kind === "pending" && gesture.target.kind === "gizmo" ? gesture.target.part : null))
       const gizmo = at ? { at, active, hover: gesture ? null : hover.gizmo } : null
       const label = drag?.rotate
         ? drag.rotate.angle !== 0
@@ -875,9 +884,9 @@ export function createSelectSubTool(ctx: TerrainToolContext, actions: Pick<Shape
       if (!sel) return "Click a shape to select it, drag to select several"
       if (editMode(s)) {
         const kind = s.toolSettings.terrain.element
-        return `Editing ${kind === "vertex" ? "vertices" : kind === "edge" ? "edges" : "faces"}: click or drag a box to select, drag to move (1 / 2 / 3 switch, Tab: object mode)`
+        return `Editing ${kind === "vertex" ? "vertices" : kind === "edge" ? "edges" : "faces"}: click or drag a box to select, drag to move (1 / 2 / 3 switch, Esc: object mode)`
       }
-      return "Drag to move, drag the green ring to rotate (R: 90°) · Tab: edit vertices/edges/faces"
+      return "Drag to move, drag the green ring to rotate (R: 90°) · 1 / 2 / 3: edit vertices/edges/faces"
     },
   }
 }

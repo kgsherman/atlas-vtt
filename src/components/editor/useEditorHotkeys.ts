@@ -26,20 +26,29 @@ export interface EditorHotkeysOptions {
   help?(): void
   /** Escape the editor did not use (no gesture to cancel, nothing selected). */
   escape?(): void
+  /**
+   * The "mode" command (Tab: switch to Play). Unlike the other navigation keys it also fires on a
+   * focused button or toggle (only text fields, dialogs and menus keep it); without a handler the key
+   * stays with the browser.
+   */
+  mode?(): void
 }
 
-export function useEditorHotkeys(controller: EditorController | null, { enabled, save, help, escape }: EditorHotkeysOptions): void {
+export function useEditorHotkeys(controller: EditorController | null, { enabled, save, help, escape, mode }: EditorHotkeysOptions): void {
   const active = controller !== null && enabled
   const overrides = useKeyOverrides("editor")
   const bindings = React.useMemo(() => editorBindings(overrides), [overrides])
 
   const saveKeys: AppHotkey[] = []
+  const modeKeys: AppHotkey[] = []
   const keymap: AppHotkey[] = []
   if (controller) {
     // `repeat: false` commands (toggles: Tab, 1/2/3, X/Y/Z, E) fire once per press, not on auto-repeat.
     for (const { hotkey, action, repeat } of bindings) {
       if (action.type === "save") saveKeys.push({ hotkey, anywhere: true, run: () => save() })
-      else if (action.type === "help") keymap.push({ hotkey, repeat, run: () => (help ? help() : false) })
+      else if (action.type === "mode") {
+        if (mode) modeKeys.push({ hotkey, repeat, run: () => mode() })
+      } else if (action.type === "help") keymap.push({ hotkey, repeat, run: () => (help ? help() : false) })
       else
         keymap.push({
           hotkey,
@@ -55,6 +64,7 @@ export function useEditorHotkeys(controller: EditorController | null, { enabled,
     keymap.push({ hotkey: { key: "Alt", alt: true }, run: () => {} })
   }
   useAppHotkeys(saveKeys)
+  useAppHotkeys(modeKeys, { enabled: active })
   useAppHotkeys(keymap, { enabled: active, accepts: acceptsEditorKey })
 
   // Alt held → free placement. The key-state tracker also drops held keys when the window blurs.

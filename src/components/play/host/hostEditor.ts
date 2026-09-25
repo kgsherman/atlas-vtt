@@ -1,10 +1,11 @@
 /**
- * "Edit map" during a live session (ARCHITECTURE §6.2 "DM edits during a live session", §7): an editor
- * store seeded with the live scene whose patch sink forwards every edit to HostRunner (DmCommand
- * apply-scene-patches) and whose play sink routes door/light/token-drag actions as DmCommands. The host's
- * scene is adopted back after every change (players moving, DM commands), so the editor always edits
- * the authoritative document. The editor's own components (tool rail, options bar, sidebar panels) are
- * reused as-is through the editor contexts.
+ * Edit on the map screen (ARCHITECTURE §6.2 "DM edits at the table", §7): an editor store seeded with the
+ * live map whose patch sink forwards every edit to HostRunner (DmCommand apply-scene-patches) and whose
+ * play sink routes door/light/token-drag actions as DmCommands. The host's scene is adopted back after
+ * every change (players moving, DM commands), so the editor always edits the authoritative document. One
+ * editor lives for the whole visit of a map (undo survives Edit ↔ Play); another map gets a new one. The
+ * editor's own components (tool rail, options bar, sidebar panels, menus) are reused as-is through the
+ * editor contexts.
  */
 import * as React from "react"
 import { toast } from "sonner"
@@ -12,6 +13,10 @@ import { toast } from "sonner"
 import type { EditorContextValue } from "@/components/editor/context"
 import { describeIssues } from "@/components/editor/lib/format"
 import { createToolExtrasStore } from "@/components/editor/lib/toolExtras"
+import {
+  createCursorStore,
+  type CursorStore,
+} from "@/components/editor/lib/viewportInfo"
 import type { Id, Scene } from "@/core/scene/types"
 import { createEditorController } from "@/editor/controller"
 import type { EditorViewOptions } from "@/editor/settings"
@@ -21,18 +26,27 @@ import type { CameraKind } from "@/render/contracts"
 
 export interface HostEditor {
   ctx: EditorContextValue
+  /** The cell and point under the cursor in Edit (the status bar's readout). */
+  cursor: CursorStore
   dispose(): void
 }
 
-/** View options the DM's choices carry over between "Edit map" sessions. */
+/** View options the editor starts with (the DM's choices for this map on this device). */
 export type HostEditorView = Partial<
-  Pick<EditorViewOptions, "ghostAdjacent" | "levelVisibility" | "darkVision">
+  Pick<
+    EditorViewOptions,
+    | "ghostAdjacent"
+    | "levelVisibility"
+    | "darkVision"
+    | "showGrid"
+    | "showHelpers"
+  >
 >
 
 /**
- * Editor store + controller bound to the live session. The view starts from the editor defaults
- * (adjacent levels ghosted, like the standalone editor, so an upper storey never covers the level
- * being edited), then `opts.view` (the DM's choices from the previous edit).
+ * Editor store + controller bound to the table's live map. The view starts from the editor defaults
+ * (adjacent levels ghosted, so an upper storey never covers the level being edited), then `opts.view`
+ * (the DM's choices for this map on this device).
  */
 export function createHostEditor(
   runner: HostRunnerImpl,
@@ -57,8 +71,8 @@ export function createHostEditor(
   store.getState().setPatchSink((patches, meta) => {
     const r = runner.dispatch({ t: "apply-scene-patches", patches })
     if (!r || r.error) {
-      toast.error(`Couldn't apply “${meta.label}” to the live session`, {
-        description: r?.error ?? "This tab is not hosting the session.",
+      toast.error(`Couldn't apply “${meta.label}” to the map`, {
+        description: r?.error ?? "This tab isn't running the table.",
       })
       resync()
     }
@@ -67,7 +81,7 @@ export function createHostEditor(
     const r = runner.dispatch(cmd)
     if (!r || r.error)
       toast.error("That didn't work", {
-        description: r?.error ?? "This tab is not hosting the session.",
+        description: r?.error ?? "This tab isn't running the table.",
       })
   })
   const controller = createEditorController(store)
@@ -82,6 +96,7 @@ export function createHostEditor(
   })
   return {
     ctx: { store, controller, extras },
+    cursor: createCursorStore(),
     dispose() {
       unsubRejected()
       store.getState().setPatchSink(null)
@@ -91,7 +106,7 @@ export function createHostEditor(
   }
 }
 
-/** Keep the editor on the authoritative scene. */
+/** Keep the editor on the authoritative scene (never another map's: a map change brings a new editor). */
 export function useAdoptHostScene(
   editor: HostEditor | null,
   scene: Scene | null
@@ -99,6 +114,6 @@ export function useAdoptHostScene(
   React.useEffect(() => {
     if (!editor || !scene) return
     const st = editor.ctx.store.getState()
-    if (st.scene !== scene) st.syncScene(scene)
+    if (st.scene !== scene && st.scene.id === scene.id) st.syncScene(scene)
   }, [editor, scene])
 }

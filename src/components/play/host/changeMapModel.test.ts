@@ -108,7 +108,7 @@ describe("the unsaved-edits guard", () => {
     expect(saveChoiceText({ kind: "clean" })).toBeNull()
   })
 
-  it("offers to save edits to a linked library scene", () => {
+  it("keeps a restore point of a changed map in its linked library scene", () => {
     const c = saveChoice({ dirty: true, library: linked })
     expect(c).toEqual({ kind: "offer", name: "The Crooked Lantern" })
     expect(saveChoiceText(c)).toContain("“The Crooked Lantern”")
@@ -128,7 +128,7 @@ describe("the unsaved-edits guard", () => {
       saveChoiceText(
         saveChoice({ dirty: true, library: { status: "deleted" } })
       )
-    ).toMatch(/discarded: its library scene was deleted/)
+    ).toMatch(/no longer in your library/)
   })
 })
 

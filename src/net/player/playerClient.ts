@@ -19,9 +19,11 @@
  *    the view, scene and pending overlays, only applies the results it carries.
  *  - Host liveness = DM presence on the host topic. Offline: load our own row, status "host-offline",
  *    requests are rejected locally. Back online: hello.
- *  - While not live (connecting, syncing, host offline) the client re-checks session_info every
- *    membershipCheckMs, so a session ended from the library (no host to broadcast `ended`) or a kick
- *    that the channels cannot report still reaches the player.
+ *  - At start, and while not live (connecting, syncing, host offline) every membershipCheckMs, the client
+ *    checks session_info, so a session ended from the library (no host to broadcast `ended`), a closed
+ *    table (whose channels players cannot join) or a kick that the channels cannot report still reaches
+ *    the player. A `closed` broadcast or a closed table ends this client ("closed"): the page starts a
+ *    new one once the DM opens the table again (a new wire epoch, a fresh snapshot).
  *  - Our own network (transport.networkOnline, e.g. navigator.onLine) down: requests are refused locally
  *    as "not-connected" and expiring requests are not blamed on the DM (`networkOffline` in the snapshot).
  *  - Pending requests are overlays only: cleared by their result, by a snapshot / epoch change, or
@@ -494,7 +496,7 @@ export function pendingMovesOverlay(pending: readonly PendingRequest[]): Record<
 // Client
 // ---------------------------------------------------------------------------
 
-type Terminal = "kicked" | "ended" | "error"
+type Terminal = "kicked" | "closed" | "ended" | "error"
 
 interface HelloInFlight {
   nonce: string
@@ -665,7 +667,9 @@ class PlayerClientImpl implements AtlasPlayerClient {
     if (this.hostOnline) this.presenceSettled = true
     else if (ch.host.status() === "SUBSCRIBED") this.armPresenceGrace()
     if (ch.isReady()) this.onReady()
-    // A kicked player's channels may never join (RLS): notice through the membership RPC.
+    // A kicked player's channels, or those of a closed table, never join (RLS): ask at once, then keep
+    // checking while not live.
+    void this.checkMembership()
     this.armMembershipCheck()
     this.evaluate()
     this.changed()
@@ -716,7 +720,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
     this.enterTerminal("error")
   }
 
-  /** kicked / ended / error: close everything, keep the last view for display. */
+  /** kicked / closed / ended / error: close everything, keep the last view for display. */
   private enterTerminal(kind: Terminal): void {
     if (this.terminal || this.stopped) return
     this.terminal = kind
@@ -835,8 +839,8 @@ class PlayerClientImpl implements AtlasPlayerClient {
 
   private onHostBroadcast(msg: HostBroadcast): void {
     if (this.stopped || this.terminal) return
-    if (msg.t === "ended") {
-      this.enterTerminal("ended")
+    if (msg.t === "ended" || msg.t === "closed") {
+      this.enterTerminal(msg.t)
       return
     }
     if (msg.t === "status" && typeof msg.epoch === "string") {
@@ -1289,7 +1293,7 @@ class PlayerClientImpl implements AtlasPlayerClient {
     }, this.t.membershipCheckMs)
   }
 
-  /** Detect kicked / ended / not-a-member when the channels alone cannot tell. */
+  /** Detect kicked / closed / ended / not-a-member when the channels alone cannot tell. */
   private async checkMembership(): Promise<void> {
     let info
     try {
@@ -1304,6 +1308,8 @@ class PlayerClientImpl implements AtlasPlayerClient {
       this.enterTerminal("ended")
     } else if (info.memberStatus === "kicked") {
       this.enterTerminal("kicked")
+    } else if (info.status === "closed") {
+      this.enterTerminal("closed")
     }
   }
 

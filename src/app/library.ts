@@ -1,12 +1,15 @@
 /**
- * Scene-library operations used by the home and shared pages and the host console (duplicate, samples,
- * import/export, copying a shared scene, loading a scene to play). Each returns user-facing warnings for
- * partial successes (e.g. a map image that could not be copied) and throws LibraryError / NetError on failure.
+ * Scene-library operations used by the home and shared pages and the map screen (new maps, duplicate,
+ * samples, import/export, copying a shared scene, loading a map to play). Each returns user-facing
+ * warnings for partial successes (e.g. a map image that could not be copied) and throws LibraryError /
+ * NetError on failure.
  */
-import { newId } from "@/core/scene/factory"
+import { withPreset } from "@/components/editor/lib/environmentPresets"
+import { createScene, newId } from "@/core/scene/factory"
 import { sampleById } from "@/core/scene/samples"
 import type { ParseSceneResult } from "@/core/scene/schema"
 import type { Scene } from "@/core/scene/types"
+import { parseGameStateDetailed } from "@/core/session/persist"
 import type { SceneOrigin } from "@/core/session/types"
 import { exportSceneFile, exportSceneFileWithAssets, importSceneFileWithAssets, type SceneSummary, type SharedScene } from "@/net/scenesRepo"
 import { describeNetError, isNetError } from "@/net/supabase"
@@ -71,6 +74,41 @@ export async function loadLibraryScene(services: Pick<AppServices, "scenes">, sc
   return { scene, origin: { sceneId: loaded.summary.id, version: loaded.version, dirty: false }, name: loaded.summary.name }
 }
 
+/**
+ * The map as it is now (ARCHITECTURE §6.8): the live copy of the table holding it (a closed table the DM
+ * left without a restore point may be ahead of the library), else its latest library version. For a map
+ * change: the origin carries the table's base version and whether it changed since.
+ */
+export async function loadLiveMap(services: Pick<AppServices, "scenes" | "sessions">, sceneId: string): Promise<PlayableScene> {
+  const library = await loadLibraryScene(services, sceneId)
+  try {
+    const table = (await services.sessions.listMySessions()).find((s) => s.sceneId === sceneId && s.status !== "ended")
+    const row = table ? await services.sessions.loadSessionState(table.id) : null
+    if (row?.content.kind === "game") {
+      const parsed = parseGameStateDetailed(row.content.state)
+      if (parsed.ok && parsed.state.origin?.sceneId === sceneId) {
+        const origin = parsed.state.origin
+        return { scene: { ...parsed.state.scene, name: library.name }, origin: { sceneId, version: origin.version, dirty: origin.dirty }, name: library.name }
+      }
+    }
+  } catch {
+    // The table can't be read: the library version is the best there is.
+  }
+  return library
+}
+
+/** A new map: one grassy ground level under a moonlit sky (so the DM can see what they build). */
+export function blankMap(): Scene {
+  const scene = createScene()
+  scene.environment = withPreset(scene.environment, "moonlit")
+  return scene
+}
+
+/** Add a new blank map to the library. */
+export function createBlankMap(services: Pick<AppServices, "scenes">): Promise<SceneSummary> {
+  return services.scenes.create(blankMap())
+}
+
 /** A copy of a document with a fresh identity (never shares ids with its source). */
 function forkScene(scene: Scene, name: string): Scene {
   const copy = structuredClone(scene)
@@ -124,10 +162,11 @@ async function deleteImages(services: AppServices, docId: string, assetIds: read
 
 /**
  * Delete a library scene and (best-effort) its map images. The image folders only this scene's
- * versions use (ScenesRepo.imageFoldersToFree: no other scene's versions, no active session) are
+ * versions use (ScenesRepo.imageFoldersToFree: no other scene's versions, no other live table) are
  * looked up BEFORE the row goes, and deleted after it (AssetStore.deleteSceneImages), so a failed image
- * delete leaves an orphan image, never a scene with missing images. Folders still in use (e.g. by an
- * active session started from the scene) stay; orphans are collected later by sweepUnusedImages.
+ * delete leaves an orphan image, never a scene with missing images. Folders still in use (e.g. by
+ * another table whose live map uses them) stay; orphans are collected later by sweepUnusedImages. The
+ * map's table ends with it (ARCHITECTURE §6.8), and its players' map tiles are removed (best-effort).
  */
 export async function deleteScene(services: AppServices, summary: SceneSummary): Promise<{ warnings: string[] }> {
   let folders: string[] = []
@@ -136,8 +175,15 @@ export async function deleteScene(services: AppServices, summary: SceneSummary):
   } catch {
     // Can't tell which images are unused: delete the row anyway; the images stay for the sweep.
   }
+  let tables: string[] = []
+  try {
+    tables = (await services.sessions.listMySessions()).filter((s) => s.sceneId === summary.id && s.status !== "ended").map((s) => s.id)
+  } catch {
+    // Can't tell: its players' tiles stay behind.
+  }
   await services.scenes.remove(summary.id)
   const warnings: string[] = []
+  if (services.assets.mode === "supabase") for (const sid of tables) await services.assets.removeSessionTiles(sid).catch(() => 0)
   const deleteFolder = services.assets.deleteSceneImages?.bind(services.assets)
   if (deleteFolder && folders.length > 0) {
     let failed = 0

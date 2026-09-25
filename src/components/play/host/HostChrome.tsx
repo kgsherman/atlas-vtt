@@ -1,17 +1,22 @@
 /**
- * The DM console's top bar (scene, hosting status, play/edit switch, vision preview, sidebar, save
- * map, change map, end session) and bottom status bar (host pipeline stats, save state, frame rate).
+ * The map screen's top bar (ARCHITECTURE §6.8): the menus, the map's name and its table's state, the
+ * Edit / Play switch (Tab), undo / redo in Edit or vision preview in Play, the Token Maker, Change map,
+ * the side panel and the table's doors (open / close); and the bottom status bar (host pipeline stats,
+ * save state, frame rate).
  */
 import * as React from "react"
 import { useStore } from "zustand"
 import {
   Activity,
+  ChevronDown,
   CircleUserRound,
+  Copy,
   Cpu,
   DoorClosed,
+  DoorOpen,
   Gauge,
   Hammer,
-  LibraryBig,
+  Link2,
   Map as MapIcon,
   PanelRight,
   PanelRightClose,
@@ -21,17 +26,33 @@ import {
   ScanEye,
   Send,
 } from "lucide-react"
-import { useLocation } from "wouter"
 
-import { openTokenMaker, paths } from "@/app/routes"
+import { copyText } from "@/app/clipboard"
+import { withModeParam } from "@/app/mode"
+import { inviteLink } from "@/app/roomCodeInput"
+import { openTokenMaker } from "@/app/routes"
 import { AppLogoMark } from "@/components/app/AppLogo"
 import { QualitySelect } from "@/components/canvas/QualitySelect"
 import type { QualityChoice } from "@/components/canvas/qualityChoice"
 import { ModeBadge } from "@/components/app/ModeBadge"
-import { useConfirm } from "@/components/editor/context"
+import {
+  EditorMenus,
+  SceneName,
+  UndoRedo,
+  type MenuDocument,
+} from "@/components/editor/MenuBar"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { CommandKbd } from "@/components/keybindings/CommandKbd"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
@@ -42,25 +63,35 @@ import {
 } from "@/components/ui/tooltip"
 import { cn } from "@/lib/utils"
 import type { HostSnapshot } from "@/net/host"
+import { formatRoomCode } from "@/net/sessionsRepo"
 import type { FrameStats } from "@/render/contracts"
 import type { StoreApi } from "zustand/vanilla"
 
 import { StatusDot } from "../hud"
-import { LIBRARY_SCENE_DELETED, type SaveMap } from "./useSaveMap"
 
 export type HostMode = "play" | "edit"
 
-function hostStatus(snap: HostSnapshot): {
+/** The line under the map's name: who can reach the table right now. */
+function tableStatus(snap: HostSnapshot): {
   tone: "ok" | "warn" | "bad" | "off"
   label: string
 } {
   switch (snap.status) {
-    case "hosting":
-      return { tone: "ok", label: "Hosting" }
+    case "hosting": {
+      if (!snap.tableOpen)
+        return { tone: "off", label: "Table closed · only you" }
+      const online = snap.members.filter(
+        (m) => m.status === "active" && m.online
+      ).length
+      return {
+        tone: "ok",
+        label: `Table open · ${online === 0 ? "no players yet" : online === 1 ? "1 player" : `${online} players`}`,
+      }
+    }
     case "starting":
       return { tone: "warn", label: "Starting…" }
     case "standby":
-      return { tone: "off", label: "Standby" }
+      return { tone: "off", label: "Open in another tab" }
     case "ended":
       return { tone: "off", label: "Ended" }
     default:
@@ -73,265 +104,316 @@ export function HostTopBar({
   sceneName,
   mode,
   onMode,
+  menus,
+  doc,
   previewing,
   onPreview,
   sidebar,
   onSidebar,
-  onEnd,
+  onLeave,
   onChangeMap,
-  saveMap,
+  savingMap,
+  onOpenTable,
+  onCloseTable,
 }: {
   snap: HostSnapshot
   sceneName: string
   mode: HostMode
   onMode(m: HostMode): void
+  /** The editor contexts are ready (menus, undo / redo). */
+  menus: boolean
+  doc: MenuDocument & { rename(name: string): void }
   previewing: boolean
   onPreview(): void
   sidebar: boolean
   onSidebar(open: boolean): void
-  onEnd(): void
+  /** Back to the library (the table stays as it is). */
+  onLeave(): void
   /** Open the Change map dialog. */
   onChangeMap(): void
-  saveMap: Pick<SaveMap, "library" | "dirty" | "saving" | "save">
+  /** A restore point is being saved (Change map waits for it). */
+  savingMap: boolean
+  onOpenTable(): Promise<void>
+  onCloseTable(): void
 }) {
-  const [, navigate] = useLocation()
-  const confirm = useConfirm()
-  const st = hostStatus(snap)
+  const st = tableStatus(snap)
   const hosting = snap.status === "hosting"
-  const leave = async () => {
-    if (hosting) {
-      const ok = await confirm({
-        title: "Leave the table?",
-        description:
-          "The session stays open: players keep their view and wait for you. Come back from the home page to resume.",
-        confirmLabel: "Leave",
-      })
-      if (!ok) return
-    }
-    navigate(paths.home())
-  }
   return (
     <header className="flex h-11 shrink-0 items-center gap-2 border-b bg-card/60 px-2">
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Leave the table"
-              onClick={() => void leave()}
+      <div className="flex min-w-0 flex-1 items-center gap-1">
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Back to library"
+                onClick={onLeave}
+              />
+            }
+          >
+            <AppLogoMark className="size-5" />
+          </TooltipTrigger>
+          <TooltipContent side="bottom">Back to library</TooltipContent>
+        </Tooltip>
+        {menus ? <EditorMenus doc={doc} mode={mode} /> : null}
+        <Separator orientation="vertical" className="mx-1 h-5 self-center" />
+        <div className="flex min-w-0 flex-col leading-tight">
+          <SceneName
+            name={sceneName}
+            disabled={!hosting || !menus}
+            onRename={doc.rename}
+          />
+          <span className="flex items-center gap-1.5 px-2 text-[0.6875rem] text-muted-foreground">
+            <StatusDot
+              tone={st.tone}
+              pulse={snap.status === "starting" || (hosting && snap.tableOpen)}
             />
-          }
-        >
-          <AppLogoMark className="size-5" />
-        </TooltipTrigger>
-        <TooltipContent side="bottom">
-          Leave the table (the session stays open)
-        </TooltipContent>
-      </Tooltip>
-      <div className="flex min-w-0 flex-col leading-tight">
-        <span className="truncate font-heading text-[0.8125rem] font-medium">
-          {sceneName || "Untitled scene"}
-        </span>
-        <span className="flex items-center gap-1.5 text-[0.6875rem] text-muted-foreground">
-          <StatusDot tone={st.tone} pulse={snap.status === "starting"} />{" "}
-          {st.label}
-          {snap.status === "hosting" ? (
-            <span className="text-muted-foreground">· live session</span>
-          ) : null}
-        </span>
+            {st.label}
+          </span>
+        </div>
+        <ModeBadge className="ml-1" />
       </div>
-      <ModeBadge className="ml-1" />
-      <div className="flex flex-1 justify-center">
-        <ToggleGroup
-          value={[mode]}
-          onValueChange={(v) => {
-            const next = v[0] as HostMode | undefined
-            if (next) onMode(next)
-          }}
-          className="rounded-lg bg-muted p-0.5"
-          spacing={1}
-        >
+      <ModeSwitch mode={mode} onMode={onMode} disabled={!hosting || !menus} />
+      <div className="flex min-w-0 flex-1 items-center justify-end gap-1">
+        {mode === "edit" ? (
+          menus ? (
+            <UndoRedo disabled={!hosting} />
+          ) : null
+        ) : (
           <Tooltip>
             <TooltipTrigger
               render={
-                <ToggleGroupItem
-                  value="play"
-                  aria-label="Run the table"
-                  className="h-7 gap-1.5 px-3 text-xs aria-pressed:bg-background aria-pressed:shadow-sm data-[pressed]:bg-background"
+                <Button
+                  variant={previewing ? "secondary" : "ghost"}
+                  size="sm"
+                  aria-pressed={previewing}
+                  onClick={onPreview}
+                  className={cn(previewing && "text-sidebar-primary")}
                 />
               }
             >
-              <Play className="size-3.5" /> Play
+              <ScanEye data-icon="inline-start" /> Preview vision
             </TooltipTrigger>
             <TooltipContent side="bottom">
-              Run the table: move tokens, doors, lights, vision previews
+              See what the selected token (or the first PC) perceives{" "}
+              <CommandKbd scope="play" command="preview-vision" />
             </TooltipContent>
           </Tooltip>
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <ToggleGroupItem
-                  value="edit"
-                  aria-label="Edit map"
-                  disabled={!hosting}
-                  className="h-7 gap-1.5 px-3 text-xs aria-pressed:bg-background aria-pressed:shadow-sm data-[pressed]:bg-background"
-                />
-              }
-            >
-              <Hammer className="size-3.5" /> Edit map
-            </TooltipTrigger>
-            <TooltipContent side="bottom">
-              Full editor tools on the live map — players see changes as they
-              explore
-            </TooltipContent>
-          </Tooltip>
-        </ToggleGroup>
+        )}
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="Token maker"
+                onClick={() => openTokenMaker({ session: snap.sessionId })}
+              />
+            }
+          >
+            <CircleUserRound />
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-64">
+            Token maker: make token art in a new tab and put it on any token of
+            this map
+          </TooltipContent>
+        </Tooltip>
+        <ChangeMapButton
+          hosting={hosting}
+          saving={savingMap}
+          onClick={onChangeMap}
+        />
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label={
+                  sidebar ? "Hide the side panel" : "Show the side panel"
+                }
+                onClick={() => onSidebar(!sidebar)}
+              />
+            }
+          >
+            {sidebar ? <PanelRightClose /> : <PanelRight />}
+          </TooltipTrigger>
+          <TooltipContent side="bottom">
+            {sidebar ? "Hide the side panel" : "Show the side panel"}
+          </TooltipContent>
+        </Tooltip>
+        <Separator orientation="vertical" className="mx-1 h-5 self-center" />
+        <TableDoors snap={snap} onOpen={onOpenTable} onClose={onCloseTable} />
       </div>
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Button
-              variant={previewing ? "secondary" : "ghost"}
-              size="sm"
-              aria-pressed={previewing}
-              onClick={onPreview}
-              disabled={mode === "edit"}
-              className={cn(previewing && "text-sidebar-primary")}
-            />
-          }
-        >
-          <ScanEye data-icon="inline-start" /> Preview vision
-        </TooltipTrigger>
-        <TooltipContent side="bottom">
-          See what the selected token (or the first PC) perceives{" "}
-          <CommandKbd scope="play" command="preview-vision" />
-        </TooltipContent>
-      </Tooltip>
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => openTokenMaker({ session: snap.sessionId })}
-            />
-          }
-        >
-          <CircleUserRound data-icon="inline-start" /> Token maker
-        </TooltipTrigger>
-        <TooltipContent side="bottom" className="max-w-64">
-          Make token art in a new tab and put it on any token of this game
-        </TooltipContent>
-      </Tooltip>
-      <Separator orientation="vertical" className="mx-1 h-5 self-center" />
-      <Tooltip>
-        <TooltipTrigger
-          render={
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label={
-                sidebar ? "Hide the side panel" : "Show the side panel"
-              }
-              onClick={() => onSidebar(!sidebar)}
-            />
-          }
-        >
-          {sidebar ? <PanelRightClose /> : <PanelRight />}
-        </TooltipTrigger>
-        <TooltipContent side="bottom">
-          {sidebar ? "Hide the side panel" : "Show the side panel"}
-        </TooltipContent>
-      </Tooltip>
-      <SaveMapButton saveMap={saveMap} />
-      <ChangeMapButton
-        hosting={hosting}
-        editing={mode === "edit"}
-        saving={saveMap.saving}
-        onClick={onChangeMap}
-      />
-      <Button
-        variant="destructive"
-        size="sm"
-        // Light theme: the tinted fill left the red label at 4.0:1; on the plain bar it passes 4.5:1.
-        className="border-destructive/30 bg-transparent hover:bg-destructive/5"
-        onClick={onEnd}
-        disabled={snap.status === "ended"}
-      >
-        <DoorClosed data-icon="inline-start" /> End session
-      </Button>
     </header>
   )
 }
 
-function SaveMapButton({
-  saveMap,
+/** Edit / Play: two views of the same map; Tab switches. */
+function ModeSwitch({
+  mode,
+  onMode,
+  disabled,
 }: {
-  saveMap: Pick<SaveMap, "library" | "dirty" | "saving" | "save">
+  mode: HostMode
+  onMode(m: HostMode): void
+  disabled: boolean
 }) {
-  const lib = saveMap.library
-  const linked = lib.status === "linked"
-  const tip =
-    lib.status === "linked"
-      ? saveMap.dirty
-        ? `The live map has edits that are not in “${lib.name}” yet. Save them as a new version.`
-        : `Save the live map as a new version of “${lib.name}”.`
-      : lib.status === "deleted"
-        ? LIBRARY_SCENE_DELETED
-        : lib.status === "unavailable"
-          ? `The library can't be reached: ${lib.error}`
-          : "Looking up the library scene…"
+  const item =
+    "h-7 gap-1.5 px-3 text-xs aria-pressed:bg-background aria-pressed:shadow-sm data-[pressed]:bg-background"
   return (
-    <Tooltip>
-      {/* The span keeps the tooltip working while the button is disabled. */}
-      <TooltipTrigger render={<span className="inline-flex" />}>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={!linked || saveMap.saving}
-          onClick={() => void saveMap.save()}
+    <ToggleGroup
+      value={[mode]}
+      onValueChange={(v) => {
+        const next = v[0] as HostMode | undefined
+        if (next) onMode(next)
+      }}
+      className="shrink-0 rounded-lg bg-muted p-0.5"
+      spacing={1}
+      aria-label="Edit or play the map"
+    >
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <ToggleGroupItem
+              value="edit"
+              aria-label="Edit"
+              disabled={disabled}
+              className={item}
+            />
+          }
         >
-          {saveMap.saving ? (
-            <Spinner data-icon="inline-start" />
-          ) : (
-            <LibraryBig data-icon="inline-start" />
-          )}
-          Save map to library
-          {linked && saveMap.dirty ? (
-            <>
-              <span aria-hidden className="size-1.5 rounded-full bg-primary" />
-              <span className="sr-only">(unsaved map edits)</span>
-            </>
-          ) : null}
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent side="bottom" className="max-w-64">
-        {tip}
-      </TooltipContent>
-    </Tooltip>
+          <Hammer className="size-3.5" /> Edit
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-64">
+          Build the map: walls, doors, lights, levels, terrain, tokens{" "}
+          <CommandKbd scope="play" command="mode.edit" />
+        </TooltipContent>
+      </Tooltip>
+      <Tooltip>
+        <TooltipTrigger
+          render={
+            <ToggleGroupItem
+              value="play"
+              aria-label="Play"
+              disabled={disabled}
+              className={item}
+            />
+          }
+        >
+          <Play className="size-3.5" /> Play
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-64">
+          Run the map: move tokens, open doors, preview vision, combat{" "}
+          <CommandKbd scope="editor" command="mode.play" />
+        </TooltipContent>
+      </Tooltip>
+    </ToggleGroup>
   )
 }
 
-/** "Change map": disabled (with the reason as its tooltip) unless hosting in Play with no save running. */
+/**
+ * The table's doors: "Open the table" lets players in with the room code; once open, the room code and
+ * "Close the table" (players are disconnected, the DM stays).
+ */
+function TableDoors({
+  snap,
+  onOpen,
+  onClose,
+}: {
+  snap: HostSnapshot
+  onOpen(): Promise<void>
+  onClose(): void
+}) {
+  const [opening, setOpening] = React.useState(false)
+  const hosting = snap.status === "hosting"
+  const code = formatRoomCode(snap.roomCode)
+  if (!snap.tableOpen || !hosting)
+    return (
+      <Tooltip>
+        {/* The span keeps the tooltip working while the button is disabled. */}
+        <TooltipTrigger render={<span className="inline-flex" />}>
+          <Button
+            size="sm"
+            disabled={!hosting || opening}
+            onClick={() => {
+              setOpening(true)
+              void onOpen().finally(() => setOpening(false))
+            }}
+          >
+            {opening ? (
+              <Spinner data-icon="inline-start" />
+            ) : (
+              <DoorOpen data-icon="inline-start" />
+            )}
+            Open the table
+          </Button>
+        </TooltipTrigger>
+        <TooltipContent side="bottom" className="max-w-64">
+          {hosting
+            ? "Let players in with the room code. You keep editing and playing as before."
+            : "This tab isn't running the table."}
+        </TooltipContent>
+      </Tooltip>
+    )
+  const invite = () =>
+    void copyText(
+      inviteLink(window.location.origin, snap.roomCode, withModeParam("")),
+      "Invite link"
+    )
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger
+        render={
+          <Button
+            variant="outline"
+            size="sm"
+            aria-label={`Table open, room code ${code}`}
+          />
+        }
+      >
+        <StatusDot tone="ok" pulse />
+        Table open
+        <span className="font-mono tracking-wider text-muted-foreground">
+          {code}
+        </span>
+        <ChevronDown data-icon="inline-end" />
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-60">
+        <DropdownMenuGroup>
+          <DropdownMenuLabel>Players join with {code}</DropdownMenuLabel>
+          <DropdownMenuItem onClick={() => void copyText(code, "Room code")}>
+            <Copy /> Copy the room code
+          </DropdownMenuItem>
+          <DropdownMenuItem onClick={invite}>
+            <Link2 /> Copy the invite link
+          </DropdownMenuItem>
+        </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem variant="destructive" onClick={onClose}>
+          <DoorClosed /> Close the table…
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
+/** "Change map": disabled (with the reason as its tooltip) unless hosting with no restore point being saved. */
 function ChangeMapButton({
   hosting,
-  editing,
   saving,
   onClick,
 }: {
   hosting: boolean
-  editing: boolean
   saving: boolean
   onClick(): void
 }) {
   const reason = !hosting
-    ? "This tab isn't hosting the session."
-    : editing
-      ? "Leave Edit map first (Done), then change the map."
-      : saving
-        ? "Saving the map to your library…"
-        : null
+    ? "This tab isn't running the table."
+    : saving
+      ? "Saving a restore point…"
+      : null
   return (
     <Tooltip>
       {/* The span keeps the tooltip working while the button is disabled. */}
@@ -347,7 +429,7 @@ function ChangeMapButton({
       </TooltipTrigger>
       <TooltipContent side="bottom" className="max-w-64">
         {reason ??
-          "Move the game to another map of your library and bring the party along"}
+          "Move the table to another map of your library and bring the party along"}
       </TooltipContent>
     </Tooltip>
   )
@@ -389,9 +471,12 @@ export function HostStatusBar({
   frame,
   quality,
   onQuality,
+  edit,
 }: {
   snap: HostSnapshot
   frame: StoreApi<{ stats: FrameStats | null }>
+  /** In Edit: the editor's readouts (cursor, level, snap, selection) in place of the table's stats. */
+  edit?: React.ReactNode
   quality: QualityChoice
   onQuality(q: QualityChoice): void
 }) {
@@ -410,37 +495,41 @@ export function HostStatusBar({
   ).length
   return (
     <footer className="flex h-7 shrink-0 items-center gap-3 border-t bg-card/60 px-3 text-[0.6875rem] text-muted-foreground">
-      <Stat
-        icon={<Radio className="size-3" />}
-        tooltip="Players online / connected to this host"
-      >
-        {online} online · {linked} linked
-      </Stat>
-      <Separator orientation="vertical" className="h-3.5 self-center" />
-      <Stat
-        icon={<Cpu className="size-3" />}
-        tooltip="Last vision computation in the worker, and the last per-player filter + diff + send pass"
-      >
-        vision {stats.visionMs.toFixed(1)} ms · flush {stats.flushMs.toFixed(1)}{" "}
-        ms
-      </Stat>
-      <Separator orientation="vertical" className="h-3.5 self-center" />
-      <Stat
-        icon={<Send className="size-3" />}
-        tooltip="Messages and bytes sent to players (pending sends in brackets)"
-      >
-        {stats.messagesSent} msgs · {(stats.bytesSent / 1024).toFixed(0)} KB
-        {stats.pendingSends > 0 ? ` (${stats.pendingSends} pending)` : ""}
-      </Stat>
-      <Separator orientation="vertical" className="h-3.5 self-center" />
-      <Stat
-        icon={<Save className="size-3" />}
-        tooltip="The session state is saved automatically (fenced by the host epoch)"
-      >
-        {stats.lastSaveAt
-          ? `saved ${ago(now - stats.lastSaveAt)}`
-          : "not saved yet"}
-      </Stat>
+      {edit ?? (
+        <>
+          <Stat
+            icon={<Radio className="size-3" />}
+            tooltip="Players online / connected to this host"
+          >
+            {online} online · {linked} linked
+          </Stat>
+          <Separator orientation="vertical" className="h-3.5 self-center" />
+          <Stat
+            icon={<Cpu className="size-3" />}
+            tooltip="Last vision computation in the worker, and the last per-player filter + diff + send pass"
+          >
+            vision {stats.visionMs.toFixed(1)} ms · flush{" "}
+            {stats.flushMs.toFixed(1)} ms
+          </Stat>
+          <Separator orientation="vertical" className="h-3.5 self-center" />
+          <Stat
+            icon={<Send className="size-3" />}
+            tooltip="Messages and bytes sent to players (pending sends in brackets)"
+          >
+            {stats.messagesSent} msgs · {(stats.bytesSent / 1024).toFixed(0)} KB
+            {stats.pendingSends > 0 ? ` (${stats.pendingSends} pending)` : ""}
+          </Stat>
+          <Separator orientation="vertical" className="h-3.5 self-center" />
+          <Stat
+            icon={<Save className="size-3" />}
+            tooltip="The session state is saved automatically (fenced by the host epoch)"
+          >
+            {stats.lastSaveAt
+              ? `saved ${ago(now - stats.lastSaveAt)}`
+              : "not saved yet"}
+          </Stat>
+        </>
+      )}
       <div className="flex-1" />
       {snap.epoch ? (
         <Badge

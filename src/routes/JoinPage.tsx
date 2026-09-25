@@ -63,7 +63,7 @@ export default function JoinPage() {
       let hosted: DmSession | null = null
       if (f.isDm) {
         const mine = await services.sessions.listMySessions().catch(() => [] as DmSession[])
-        hosted = mine.find((s) => s.roomCode === code && s.status === "active") ?? null
+        hosted = mine.find((s) => s.roomCode === code && s.status !== "ended") ?? null
       }
       setFailure({ ...f, hosted })
       setJoining(false)
@@ -144,7 +144,7 @@ export default function JoinPage() {
                         {failure.hosted && (
                           <Button size="sm" className="mt-2" onClick={() => navigate(paths.host(failure.hosted!.id))} type="button">
                             <CastIcon data-icon="inline-start" />
-                            Host this game
+                            Open this map
                           </Button>
                         )}
                       </AlertDescription>
@@ -177,7 +177,7 @@ export default function JoinPage() {
   )
 }
 
-/** Games this user joined before that are still running. */
+/** Games this user joined before whose table is open. */
 function RecentGames() {
   const { sessions, identity, mode } = useServices()
   const [, navigate] = useLocation()

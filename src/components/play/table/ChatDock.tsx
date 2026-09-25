@@ -134,7 +134,7 @@ export function ChatDock({
   }
 
   // ---- open / focus -------------------------------------------------------------------------------
-  // Only new requests: a dock mounted again (e.g. after the DM's Edit map) must not reopen itself.
+  // Only new requests: a dock mounted again (e.g. after the DM's Edit ↔ Play switch) must not reopen itself.
   const handledSignal = React.useRef(focusSignal)
   React.useEffect(() => {
     if (focusSignal === handledSignal.current) return

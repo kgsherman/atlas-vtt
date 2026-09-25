@@ -374,15 +374,16 @@ describe("map image cleanup", () => {
     expect(s.assets.blobs.has(`${loaded.parsed.scene.id}/map1`)).toBe(true)
   })
 
-  it("keeps the images while an active session started from the scene may use them", async () => {
+  it("ends the map's table with it, and its images go too", async () => {
     const s = await localServices()
     const scene = sceneWithBackdrop()
     await storeMap(s, scene)
     const summary = await s.scenes.create(scene)
-    await s.sessions.createSession(summary.id)
+    const table = await s.sessions.openMap(summary.id)
     await deleteScene(s, summary)
     expect(await s.scenes.get(summary.id)).toBeNull()
-    expect(s.assets.blobs.has(`${scene.id}/map1`)).toBe(true)
+    expect((await s.sessions.sessionInfo(table.sessionId))?.status).toBe("ended")
+    expect(s.assets.blobs.has(`${scene.id}/map1`)).toBe(false)
   })
 
   it("an import that fails to create the scene removes the images it stored", async () => {

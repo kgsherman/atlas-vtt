@@ -1,10 +1,8 @@
 /**
- * High-frequency viewport readouts (cursor position, frame stats) kept outside React state so only
- * the status bar re-renders when they change.
+ * The cursor readout (cell and world point under the cursor in Edit), kept outside React state so only
+ * the status bar re-renders when it changes.
  */
 import { createStore, type StoreApi } from "zustand/vanilla"
-
-import type { FrameStats } from "@/render/contracts"
 
 export interface CursorReadout {
   i: number
@@ -16,15 +14,10 @@ export interface CursorReadout {
   inside: boolean
 }
 
-export interface ViewportInfo {
-  cursor: CursorReadout | null
-  stats: FrameStats | null
-}
+export type CursorStore = StoreApi<{ cursor: CursorReadout | null }>
 
-export type ViewportInfoStore = StoreApi<ViewportInfo>
-
-export function createViewportInfoStore(): ViewportInfoStore {
-  return createStore<ViewportInfo>()(() => ({ cursor: null, stats: null }))
+export function createCursorStore(): CursorStore {
+  return createStore<{ cursor: CursorReadout | null }>()(() => ({ cursor: null }))
 }
 
 export function sameCursor(a: CursorReadout | null, b: CursorReadout | null): boolean {

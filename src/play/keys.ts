@@ -20,6 +20,8 @@ export type PlayKeyAction =
   | { type: "cancel" }
   | { type: "preview-vision" }
   | { type: "chat" }
+  /** The DM's map screen: switch to Edit (Tab by default). */
+  | { type: "mode" }
 
 export interface PlayCommand extends Command {
   action: PlayKeyAction
@@ -27,6 +29,11 @@ export interface PlayCommand extends Command {
   repeat?: boolean
   /** Only the DM's view uses it (hidden from players' help and settings). */
   hostOnly?: boolean
+  /**
+   * Only players' views use it (hidden from the DM's help and settings). Such a command may share keys
+   * with a hostOnly one: the two never register together.
+   */
+  playerOnly?: boolean
 }
 
 export interface PlayBinding {
@@ -34,6 +41,7 @@ export interface PlayBinding {
   action: PlayKeyAction
   repeat?: boolean
   hostOnly?: boolean
+  playerOnly?: boolean
 }
 
 /** Every play command, in help / settings order. `+` / `_` are Shift+= / Shift+- on US layouts. */
@@ -69,12 +77,28 @@ export const PLAY_COMMANDS: PlayCommand[] = [
     label: "Next character",
     keys: ["Tab"],
     action: { type: "cycle-token", dir: 1 },
+    playerOnly: true,
   },
   {
     id: "token.previous",
     label: "Previous character",
     keys: ["Shift+Tab"],
     action: { type: "cycle-token", dir: -1 },
+    playerOnly: true,
+  },
+  {
+    id: "dm.token.next",
+    label: "Next player character",
+    keys: ["]"],
+    action: { type: "cycle-token", dir: 1 },
+    hostOnly: true,
+  },
+  {
+    id: "dm.token.previous",
+    label: "Previous player character",
+    keys: ["["],
+    action: { type: "cycle-token", dir: -1 },
+    hostOnly: true,
   },
   {
     id: "focus-selected",
@@ -133,7 +157,19 @@ export const PLAY_COMMANDS: PlayCommand[] = [
     action: { type: "preview-vision" },
     hostOnly: true,
   },
+  {
+    id: "mode.edit",
+    label: "Switch to Edit",
+    keys: ["Tab"],
+    action: { type: "mode" },
+    hostOnly: true,
+  },
 ]
+
+/** The commands of one audience's play view: the DM's (host) or a player's. */
+export function playCommandsFor(host: boolean): PlayCommand[] {
+  return PLAY_COMMANDS.filter((c) => (host ? !c.playerOnly : !c.hostOnly))
+}
 
 /** The bindings to register: every key of every command, after the user's overrides. */
 export function playBindings(overrides: KeyOverrides = {}): PlayBinding[] {
@@ -142,6 +178,7 @@ export function playBindings(overrides: KeyOverrides = {}): PlayBinding[] {
     action: command.action,
     repeat: command.repeat,
     hostOnly: command.hostOnly,
+    playerOnly: command.playerOnly,
   }))
 }
 
