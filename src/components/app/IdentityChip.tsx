@@ -1,5 +1,5 @@
 import * as React from "react"
-import { CheckIcon, LogOutIcon, UserRoundIcon } from "lucide-react"
+import { LogOutIcon, UserRoundIcon } from "lucide-react"
 import { toast } from "sonner"
 
 import { providerLabel } from "@/app/account"
@@ -8,7 +8,7 @@ import { userMessage } from "@/app/library"
 import { useServices } from "@/app/services"
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
 import { Button } from "@/components/ui/button"
-import { Field, FieldDescription, FieldError, FieldLabel } from "@/components/ui/field"
+import { Field, FieldError, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { Separator } from "@/components/ui/separator"
@@ -58,35 +58,41 @@ export function IdentityChip({ className }: { className?: string }) {
 function DisplayNameForm({ onDone }: { onDone: () => void }) {
   const services = useServices()
   const [value, setValue] = React.useState(services.identity.displayName ?? "")
-  const [saving, setSaving] = React.useState(false)
   const [touched, setTouched] = React.useState(false)
   const normalized = normalizeDisplayName(value)
   const invalid = touched && !normalized
   const id = React.useId()
-  const account = services.identity.account
 
-  const submit = async (e: React.FormEvent) => {
+  // Saves whenever the name is committed: on blur, on Enter, and when the popover closes.
+  const saved = React.useRef(services.identity.displayName)
+  const commit = React.useCallback(
+    async (name: string | null) => {
+      if (!name || name === saved.current) return
+      saved.current = name
+      try {
+        const stored = await services.setDisplayName(name)
+        saved.current = stored
+        toast.success(`You're now “${stored}”`)
+      } catch (err) {
+        saved.current = services.identity.displayName
+        toast.error("Couldn't save your name", { description: userMessage(err) })
+      }
+    },
+    [services]
+  )
+  const latest = React.useRef(normalized)
+  React.useEffect(() => () => void commit(latest.current), [commit])
+
+  const submit = (e: React.FormEvent) => {
     e.preventDefault()
     setTouched(true)
     if (!normalized) return
-    if (normalized === services.identity.displayName) {
-      onDone()
-      return
-    }
-    setSaving(true)
-    try {
-      const stored = await services.setDisplayName(normalized)
-      toast.success(`You're now “${stored}”`)
-      onDone()
-    } catch (err) {
-      toast.error("Couldn't save your name", { description: userMessage(err) })
-    } finally {
-      setSaving(false)
-    }
+    void commit(normalized)
+    onDone()
   }
 
   return (
-    <form onSubmit={submit} className="flex flex-col gap-3">
+    <form onSubmit={submit}>
       <Field data-invalid={invalid || undefined}>
         <FieldLabel htmlFor={id}>Display name</FieldLabel>
         <Input
@@ -96,23 +102,18 @@ function DisplayNameForm({ onDone }: { onDone: () => void }) {
           maxLength={DISPLAY_NAME_MAX + 8}
           placeholder="e.g. Morgana"
           aria-invalid={invalid || undefined}
-          onChange={(e) => setValue(e.target.value)}
-          onBlur={() => setTouched(true)}
+          onChange={(e) => {
+            setValue(e.target.value)
+            latest.current = normalizeDisplayName(e.target.value)
+          }}
+          onBlur={() => {
+            setTouched(true)
+            void commit(normalized)
+          }}
           autoComplete="nickname"
         />
-        {invalid ? (
-          <FieldError>Use 1 to {DISPLAY_NAME_MAX} characters.</FieldError>
-        ) : (
-          <FieldDescription>
-            Shown to your party when you host or join a game.
-            {account && ` Only used in Atlas: your ${providerLabel(account.provider)} name stays as it is.`}
-          </FieldDescription>
-        )}
+        {invalid && <FieldError>Use 1 to {DISPLAY_NAME_MAX} characters.</FieldError>}
       </Field>
-      <Button type="submit" size="sm" disabled={saving} className="self-end">
-        {saving ? <Spinner className="size-3" data-icon="inline-start" /> : <CheckIcon data-icon="inline-start" />}
-        Save
-      </Button>
     </form>
   )
 }
