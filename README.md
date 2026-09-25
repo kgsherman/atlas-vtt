@@ -101,6 +101,8 @@ All screenshots show the bundled *The Crooked Lantern* sample at 1920×1080. The
 - The DM's card rolls the damage once for everyone caught ("8d6 Fireball" in the log) and deals it to their
   tracked hit points, halved for those marked as having saved.
 
+![Areas of effect on the DM's map: a Fireball cut short by the tavern's walls, Spirit Guardians around an NPC stopping at the courtyard wall, a Lightning Bolt stopped by the same wall, and the Fireball's card](docs/screenshots/crooked-lantern-dm-areas-of-effect-high.png)
+
 **Token maker**
 - A tab of its own (**Token maker** in the header, `/tokens`) for round, modern tokens: stack a background,
   character art and a frame, move / scale / rotate / flip each layer, and mask it to the token disc. Let the

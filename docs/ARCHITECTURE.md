@@ -2056,7 +2056,9 @@ the DM had hidden back into view, that a template's label could extend the DM's 
 a large area was recomputed on every door toggle anywhere; each is fixed with a regression test (angles
 stay within [−π, π] and a template that does not parse is dropped rather than failing the load; hidden
 templates are `cannot` for their owner; the label follows a `#`; cells are kept while objects change out
-of reach, and the largest area is 120 ft). `templates-local` 29/29 on SwiftShader.
+of reach, and the largest area is 120 ft). Final verification (2026-09-25, after the review's fixes):
+`tsc -b` 0 errors, `eslint .` clean, `npx vitest run` 2084 tests pass (4 live Supabase files skipped); on
+SwiftShader `templates-local` 29/29 (new), `table-local` 35/35 and `keybindings` 33/33.
 
 **Terrain review fixes (2026-09-23)**, each with a regression test that fails on the previous code:
 - Document: "Apply to terrain" bakes the downward closure, so the terrain no longer changes (§3, §7);
