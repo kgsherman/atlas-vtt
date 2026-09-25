@@ -11,7 +11,7 @@ import type { CreateHostRunner } from "./types"
 
 export type * from "./types"
 export type { CreateHostRunnerOptions, HostRunnerInternalOptions, HostTiming, LockManagerLike } from "./hostRunner"
-export { HostRunnerImpl } from "./hostRunner"
+export { HostRunnerImpl, type HostChangeMapResult } from "./hostRunner"
 export { createDefaultVisionClient, createInThreadVisionClient, createWorkerVisionClient, type VisionClientExt, type WorkerLike } from "./visionClient"
 export { createCanvasTileCodec, type TileCodec, type TileCrop, type TileImage } from "./tiles"
 export { hostEpochOfWire, HOST_TIMING, makeWireEpoch } from "./flush"

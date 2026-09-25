@@ -320,6 +320,7 @@ export const playerViewSchema = z.strictObject({
   sessionId: text,
   userId: text,
   scene: z.strictObject({
+    mapSerial: z.int().min(1).optional(),
     name: text,
     grid,
     environment,

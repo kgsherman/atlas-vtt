@@ -559,6 +559,7 @@ export function filterForPlayer(state: GameState, userId: string, vis: Visibilit
     sessionId: state.sessionId,
     userId,
     scene: {
+      ...(state.mapSerial ? { mapSerial: state.mapSerial } : {}),
       name: scene.name,
       grid: { cellSize: grid.cellSize, width: grid.width, depth: grid.depth, diagonalRule: grid.diagonalRule },
       environment: playerEnvironment(scene.environment),

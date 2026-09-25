@@ -200,6 +200,8 @@ const gameStateShape = z.strictObject({
   table: tableSchema.optional(),
   // Optional too (absent: players see other creatures' health bands).
   hideWounds: z.boolean().optional(),
+  // Optional too (absent: still on the game's first map).
+  mapSerial: z.int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
   // Optional too (absent: no areas of effect on the map). Entries are validated one by one below: a
   // template that does not parse is dropped, never the game.
   templates: z.array(z.unknown()).max(TEMPLATE_LIMITS.max).optional(),
@@ -332,6 +334,7 @@ export function parseGameStateDetailed(json: unknown): ParseGameStateResult {
       ...(raw.freeMovement !== undefined ? { freeMovement: raw.freeMovement } : {}),
       ...(table !== undefined ? { table } : {}),
       ...(raw.hideWounds !== undefined ? { hideWounds: raw.hideWounds } : {}),
+      ...(raw.mapSerial !== undefined ? { mapSerial: raw.mapSerial } : {}),
       ...(templates.length > 0 ? { templates } : {}),
     },
   }
@@ -379,6 +382,7 @@ export function serializeGameState(state: GameState): string {
   if (state.freeMovement !== undefined) ordered.freeMovement = state.freeMovement
   if (state.table !== undefined) ordered.table = state.table
   if (state.hideWounds !== undefined) ordered.hideWounds = state.hideWounds
+  if (state.mapSerial !== undefined) ordered.mapSerial = state.mapSerial
   if (state.templates !== undefined) ordered.templates = state.templates
   return JSON.stringify(ordered)
 }

@@ -90,6 +90,13 @@ function systemMessage(stamp: TableStamp, text: string): TableMessage {
   return { id: stamp.id, at: stamp.at, kind: "system", from: null, name: "", color: SYSTEM_COLOR, to: "all", text }
 }
 
+/** The log with a system notice appended (a bad stamp or empty text: unchanged). */
+export function appendSystemNotice(table: TableState, stamp: TableStamp, text: string): TableState {
+  const clean = cleanText(String(text ?? ""), TABLE_LIMITS.maxText)
+  if (!clean || typeof stamp?.id !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(stamp.id) || !finite(stamp.at)) return table
+  return appendMessage(table, systemMessage(stamp, clean))
+}
+
 /** A message from the DM (the host fills in the id, time and any roll). */
 export function dmMessage(args: { stamp: TableStamp; kind: "chat" | "roll"; to: TableMessage["to"]; text: string; roll?: TableMessage["roll"] }): TableMessage {
   const m: TableMessage = { id: args.stamp.id, at: args.stamp.at, kind: args.kind, from: null, name: DM_NAME, color: DM_COLOR, to: args.to, text: args.text }

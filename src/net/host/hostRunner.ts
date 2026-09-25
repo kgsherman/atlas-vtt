@@ -37,6 +37,7 @@ import { newId } from "@/core/scene/factory"
 import { parseScene } from "@/core/scene/schema"
 import type { Id, Scene, Vec2 } from "@/core/scene/types"
 import {
+  changeMapCommand,
   diffViews,
   filterForPlayer,
   DM_COLOR,
@@ -51,6 +52,8 @@ import {
   sceneWithTokenAt,
   updateKnowledge,
   viewerTokenIds,
+  type Arrival,
+  type CarryError,
   type ClientToHost,
   type DmCommand,
   type GameState,
@@ -61,6 +64,7 @@ import {
   type RequestOutcome,
   type RequestResult,
   type SceneDelta,
+  type SceneOrigin,
   type StateRequest,
   type TablePing,
 } from "@/core/session"
@@ -136,6 +140,11 @@ class PlayerConn {
   offs: Unsubscribe[] = []
   /** The view the client holds (as far as the host knows). */
   lastSent: PlayerView | null = null
+  /**
+   * The map changed and this client has not been sent a view of the new one yet: requests tied to places
+   * (moves, jumps, doors, templates) are refused, since `lastSent` still describes the old map.
+   */
+  staleMap = false
   seq = 0
   readonly log = new OpLog()
   /** The player's view may have changed since lastSent. */
@@ -203,6 +212,14 @@ function emptyVisibility(): VisibilityResult {
 function jsonBytes(value: unknown): number {
   return utf8Length(JSON.stringify(value))
 }
+
+/**
+ * What HostRunnerImpl.changeMap did: the map changed (`carried`: old token id → id on the new map; `saved`:
+ * the swap reached storage), or why not.
+ */
+export type HostChangeMapResult =
+  | { ok: true; carried: Record<Id, Id>; saved: boolean }
+  | { ok: false; error: CarryError | "same-map" | "not-hosting"; unplaced: Id[] }
 
 /** DM commands after which the saved state must not lag (it would re-reveal things after a crash). */
 function reducesVisibility(cmd: DmCommand): boolean {
@@ -272,6 +289,8 @@ export class HostRunnerImpl implements HostRunner {
   private vision: VisionClient | null = null
   private visionOff: (() => void) | null = null
   private world: OcclusionWorld | null = null
+  /** The occlusion world of the scene a map change is about to load (changeMap → applyDelta). */
+  private prebuiltWorld: { scene: Scene; world: OcclusionWorld } | null = null
   /** Levels each occlusion world was last brought up to date with (terrain updates rebuild only what changed). */
   private readonly worldLevels = new WeakMap<OcclusionWorld, Scene["levels"]>()
   /** Tag of the last revision posted to the vision client, and of the revision = state.scene. */
@@ -556,16 +575,17 @@ export class HostRunnerImpl implements HostRunner {
     if (!scenes) throw new Error("No scene library is available here.")
     const state = this.state
     const origin = state?.origin
-    if (!state || !origin?.sceneId) throw new NetError("not_found", "The library scene this session was started from no longer exists.")
+    if (!state || !origin?.sceneId) throw new NetError("not_found", "The library scene this map comes from no longer exists.")
     const summary = await scenes.get(origin.sceneId)
-    if (!summary) throw new NetError("not_found", "The library scene this session was started from no longer exists.")
+    if (!summary) throw new NetError("not_found", "The library scene this map comes from no longer exists.")
     const edits = this.sceneEdits
     const doc = { ...state.scene, updatedAt: new Date().toISOString() }
     const base = opts.force || origin.version === null ? {} : { baseVersion: origin.version }
     // Keep the library entry's own name (it may have been renamed since the session started).
     const version = await scenes.saveVersion(origin.sceneId, doc, { ...base, name: summary.name })
     const cur = this.state
-    if (cur) {
+    // The map may have changed while the save was on its way: its origin is another library scene's.
+    if (cur && cur.scene.id === state.scene.id && cur.origin?.sceneId === origin.sceneId) {
       // Edits made while the save was on its way are not in the saved version.
       this.state = { ...cur, origin: { sceneId: origin.sceneId, version, dirty: this.sceneEdits !== edits }, seq: cur.seq + 1 }
       this.notify()
@@ -766,7 +786,9 @@ export class HostRunnerImpl implements HostRunner {
     if (fullRebuild || (!fromMove && (delta.objects.length > 0 || delta.terrain.length > 0 || delta.structure))) this.knowledgeRev++
     if (fullRebuild) {
       const tag = ++this.visionTag
-      this.world = buildOcclusionWorld(scene)
+      // A map change built the target's world already (tokens and lights are not occluders).
+      const pre = this.prebuiltWorld
+      this.world = pre && pre.scene === scene ? pre.world : buildOcclusionWorld(scene)
       this.worldLevels.set(this.world, scene.levels)
       this.sceneTag = tag
       void this.vision.setScene(scene, tag).catch((err) => this.log("vision setScene failed", err))
@@ -1010,16 +1032,50 @@ export class HostRunnerImpl implements HostRunner {
     if (reducesVisibility(cmd)) this.knowledgeRev++
     if (cmd.t === "apply-scene-patches") this.sceneEdits++
     if (cmd.t === "load-scene") {
+      // Another map: its images live under its own library row; moves still in flight belong to the old one.
+      this.sceneRowId = this.state.origin?.sceneId ?? this.sceneRowId
+      this.inFlightMoves.clear()
       this.applyDelta(r.delta, true)
-      for (const conn of this.conns.values()) conn.lastVis = null
+      for (const conn of this.conns.values()) {
+        conn.lastVis = null
+        conn.staleMap = true
+      }
     } else {
       this.applyDelta(r.delta)
     }
     this.markDirty(r.dirtyPlayers)
     this.stateSaver?.request(reducesVisibility(cmd) ? true : cmd.t === "move-token" ? "soon" : false)
-    if (this.state.scene.name !== prevName) this.broadcastStatus()
+    if (cmd.t === "load-scene" || this.state.scene.name !== prevName) this.broadcastStatus()
     this.notify()
     return r
+  }
+
+  /**
+   * Move the game to another map, bringing `tokenIds` of the current one along (ARCHITECTURE §6.7). The
+   * command is built from the live state and applied in the same step (a change a player made a moment ago
+   * travels too); the target's occlusion world is built once, for the arrival placement and the host's
+   * rebuild. Resolves once the swap is saved (a reload right after must not bring the old map back); a
+   * failed save leaves the swap in place and is reported as `saved: false`.
+   */
+  async changeMap(target: Scene, opts: { tokenIds: Id[]; arrival: Arrival; origin: SceneOrigin | null }): Promise<HostChangeMapResult> {
+    const state = this.state
+    if (!state || this.status !== "hosting") return { ok: false, error: "not-hosting", unplaced: [] }
+    if (target.id === state.scene.id) return { ok: false, error: "same-map", unplaced: [] }
+    const world = buildOcclusionWorld(target)
+    const built = changeMapCommand(state, target, opts, { now: this.wallClock(), newId, world })
+    if (!built.ok) return built
+    this.prebuiltWorld = { scene: built.cmd.scene, world }
+    const r = this.dispatch(built.cmd)
+    this.prebuiltWorld = null
+    if (!r || r.error) return { ok: false, error: "not-hosting", unplaced: [] }
+    let saved = true
+    try {
+      await this.save()
+    } catch (err) {
+      saved = false
+      this.log("saving the game after the map change failed", err)
+    }
+    return { ok: true, carried: built.carried, saved }
   }
 
   applyScenePatches(patches: Patch[]): void {
@@ -1082,7 +1138,8 @@ export class HostRunnerImpl implements HostRunner {
   private handlePing(conn: PlayerConn, msg: Extract<ClientToHost, { t: "ping" }>): void {
     const player = this.state && Object.hasOwn(this.state.players, conn.userId) ? this.state.players[conn.userId] : null
     // Only on a level the sender knows (so pings cannot probe for levels).
-    if (!player || !levelKnown(conn.lastSent, msg.levelId)) return
+    // The level must also still exist: right after a map change `lastSent` describes the old map.
+    if (!player || !this.state || !Object.hasOwn(this.state.scene.levels, msg.levelId) || !levelKnown(conn.lastSent, msg.levelId)) return
     this.firePing({ levelId: msg.levelId, x: msg.x, z: msg.z, name: player.displayName, color: player.color, focus: false }, conn.userId)
   }
 
@@ -1144,6 +1201,11 @@ export class HostRunnerImpl implements HostRunner {
         this.pushResult(conn, { reqId: msg.reqId, ok: false, reason: "rate-limited" })
         return
       }
+    }
+    // The client still plays on the old map (no view of the new one sent yet): nothing tied to a place applies.
+    if (conn.staleMap && (moves || msg.t === "door" || msg.t === "template" || msg.t === "template-remove")) {
+      this.pushResult(conn, { reqId: msg.reqId, ok: false, reason: "cannot" })
+      return
     }
     const out = reduceRequest(state, conn.userId, msg, {
       world,
@@ -1463,6 +1525,7 @@ export class HostRunnerImpl implements HostRunner {
     const enc = encodePayload(msg)
     conn.seq = baseSeq + 1
     conn.lastSent = view
+    conn.staleMap = false
     if (enc.ok) {
       conn.log.push({ baseSeq, seq: conn.seq, ops, bytes: enc.bytes, at: this.now() })
       const res = await this.send(conn, msg, enc.bytes)
@@ -1501,6 +1564,8 @@ export class HostRunnerImpl implements HostRunner {
     conn.lastFlushAt = this.now()
     if (conn.lastSent === null) {
       conn.lastSent = view
+      conn.staleMap = false
+    conn.staleMap = false
       conn.log.clear()
     } else if (view !== conn.lastSent) {
       const ops = diffViews(conn.lastSent, view)
@@ -1509,6 +1574,9 @@ export class HostRunnerImpl implements HostRunner {
         conn.log.push({ baseSeq: conn.seq, seq: conn.seq + 1, ops, bytes: jsonBytes(ops), at: this.now() })
         conn.seq++
         conn.lastSent = view
+        conn.staleMap = false
+      conn.staleMap = false
+    conn.staleMap = false
       }
     }
     conn.needsSnapshot = false

@@ -16,7 +16,8 @@ import { remapExplored } from "./masks"
 import { sanitizeObject } from "./sanitize"
 import { staticLightWorldY } from "./memory"
 import { attachedLightIds, emptyDelta, nextPlayerColor, own, type ReduceResult, type SceneDelta } from "./state"
-import { isTableCommand, pruneCombat, rebindTable, reduceTableDm, tableOf } from "./table"
+import { carriedOwners } from "./changeMap"
+import { appendSystemNotice, isTableCommand, pruneCombat, rebindTable, reduceTableDm, tableOf } from "./table"
 import { isTemplateCommand, pruneTemplates, rebindTemplates, reduceTemplateDm, withoutPlayerTemplates } from "./templates"
 import type { DmCommand, GameState, PlayerObject } from "./types"
 
@@ -305,13 +306,21 @@ export function reduceDm(state: GameState, cmd: DmCommand): ReduceResult {
     }
     case "load-scene": {
       const prev = state.scene
-      const owners: GameState["owners"] = {}
-      for (const [id, list] of Object.entries(state.owners)) if (Object.hasOwn(cmd.scene.tokens, id)) owners[id] = list
+      // A map change bringing the party along keeps only the carried tokens' owners: a token left behind
+      // whose twin stands on the new map (a duplicated scene keeps ids) must not stay under a player's control.
+      let owners: GameState["owners"] = {}
+      if (cmd.carried) owners = carriedOwners(state.owners, cmd.carried, cmd.scene)
+      else for (const [id, list] of Object.entries(state.owners)) if (Object.hasOwn(cmd.scene.tokens, id)) owners[id] = list
       // Another map: the old origin no longer applies.
       const origin = cmd.origin ? { sceneId: cmd.origin.sceneId, version: cmd.origin.version, dirty: cmd.origin.dirty } : null
       const next: GameState = { ...state, scene: cmd.scene, owners, explored: {}, memory: {}, revealed: {}, seq: state.seq + 1, origin }
+      next.mapSerial = (state.mapSerial ?? 0) + 1
       // Combat is about the old map's tokens, templates about its places; the table log stays.
       if (state.table?.combat) next.table = { ...tableOf(state), combat: null }
+      if (cmd.stamp && cmd.notice) {
+        const table = appendSystemNotice({ ...tableOf(state), combat: null }, cmd.stamp, cmd.notice)
+        if (table.log.length > 0) next.table = table
+      }
       delete next.templates
       const delta: SceneDelta = {
         objects: sorted([...Object.keys(prev.objects), ...Object.keys(cmd.scene.objects)]),

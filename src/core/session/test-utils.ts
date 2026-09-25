@@ -39,9 +39,13 @@ export class TestHost {
   }
 
   dm(cmd: DmCommand): ReduceResult {
+    const prev = this.state.scene
     const r = reduceDm(this.state, cmd)
     this.state = r.state
-    this.sync(r.delta)
+    // Another document (a map change) is a full rebuild, like the host's: a duplicated map keeps level ids,
+    // so a structure update alone would keep the old terrain.
+    if (r.state.scene !== prev && r.state.scene.id !== prev.id) this.engine.setScene(r.state.scene)
+    else this.sync(r.delta)
     return r
   }
 

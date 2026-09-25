@@ -91,6 +91,11 @@ export interface PlayerLevel {
 }
 
 export interface PlayerSceneInfo {
+  /**
+   * Which map of the game this is (GameState.mapSerial; absent: the first). A client whose view changes it
+   * knows the DM switched maps, even between duplicated scenes that share level and token ids.
+   */
+  mapSerial?: number
   name: string
   grid: GridSettings
   environment: Environment
@@ -367,6 +372,8 @@ export interface GameState {
   hideWounds?: boolean
   /** Areas of effect on the map, oldest first (absent: none). */
   templates?: AreaTemplate[]
+  /** Maps played so far in this game besides the first (bumped by every `load-scene`; absent: 0). */
+  mapSerial?: number
 }
 
 // ===========================================================================
@@ -483,8 +490,13 @@ export type DmCommand =
   | { t: "reveal-object"; objectId: Id; userId?: string }
   /** Editor edits during a live session (immer patches against GameState.scene). */
   | { t: "apply-scene-patches"; patches: Patch[] }
-  /** Switch to a different map; resets explored/memory/revealed. `origin`: its library scene (default: none). */
-  | { t: "load-scene"; scene: Scene; origin?: SceneOrigin | null }
+  /**
+   * Switch to a different map; resets explored/memory/revealed, ends combat, clears templates. `origin`: its
+   * library scene (default: none). `carried` (a map change bringing the party along, core/session/changeMap):
+   * the tokens of the old map already placed in `scene` (old id → id in `scene`), the only ones whose owners
+   * are kept. `notice` with `stamp`: a system line for the log ("The party travels to …").
+   */
+  | { t: "load-scene"; scene: Scene; origin?: SceneOrigin | null; carried?: Record<Id, Id>; stamp?: TableStamp; notice?: string }
   /** Record where the live map comes from (e.g. after saving it back to the library: clean, new version). */
   | { t: "set-origin"; origin: SceneOrigin | null }
   | { t: "add-player"; userId: string; displayName: string }

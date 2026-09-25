@@ -24,6 +24,18 @@ export {
 } from "./state"
 export { clientMessageSchema, parseClientMessage, PROTOCOL_LIMITS } from "./protocol"
 export { deltaFromPatches, onlyTerrainEdits, reduceDm } from "./reduceDm"
+export {
+  carriedOwners,
+  carryParty,
+  changeMapCommand,
+  travelNotice,
+  type Arrival,
+  type CarryDeps,
+  type CarryError,
+  type CarryOptions,
+  type CarryResult,
+  type ChangeMapResult,
+} from "./changeMap"
 export { reduceRequest, segmentRectDistance, type RequestContext, type StateRequest } from "./reduceRequest"
 export { updateKnowledge } from "./memory"
 export { filterForPlayer, levelKnown, pingForPlayer, type TablePing } from "./filter"

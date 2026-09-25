@@ -10,7 +10,7 @@
  *    (display only: the host validates the grid path).
  */
 import type { OcclusionWorld } from "../occlusion/types"
-import { groundIndex } from "../scene/queries"
+import { groundIndex, type GroundIndex } from "../scene/queries"
 import type { Id, SceneLike, Token, Vec2 } from "../scene/types"
 import { footprintOverlapsSpan, MoveContext, STEP_UP_HEIGHT } from "./context"
 import { anchorOf } from "./footprint"
@@ -44,12 +44,19 @@ export function checkEnd(scene: SceneLike, world: OcclusionWorld, token: Token, 
 
 /** Why a token cannot jump to `p` on `levelId` (not walking there), or null when it can. */
 export function checkJump(scene: SceneLike, world: OcclusionWorld, token: Token, levelId: Id, p: Vec2): MoveRejectReason | null {
+  return jumpReason(new MoveContext(scene, world, token), groundIndex(scene), levelId, p)
+}
+
+/**
+ * checkJump with a prepared context (one per token size and height) and the scene's GroundIndex, for callers
+ * testing many points (arrival placement).
+ */
+export function jumpReason(ctx: MoveContext, ground: GroundIndex, levelId: Id, p: Vec2): MoveRejectReason | null {
   if (!finite(p)) return "out-of-bounds"
-  const ctx = new MoveContext(scene, world, token)
-  const anchor = anchorOf(scene.grid, token.size, p)
+  const anchor = anchorOf(ctx.scene.grid, ctx.size, p)
   if (!ctx.inBounds(anchor)) return "out-of-bounds"
   if (!ctx.hasLevel(levelId)) return "no-ground"
-  if (!groundIndex(scene).hasGroundAt(levelId, p) || !ctx.footprintGrounded(levelId, anchor)) return "no-ground"
+  if (!ground.hasGroundAt(levelId, p) || !ctx.footprintGrounded(levelId, anchor)) return "no-ground"
   const g = ctx.groundAt(levelId, p)
   return ctx.discBlocked([levelId], p, g + STEP_UP_HEIGHT, g + ctx.height) ? "blocked" : null
 }

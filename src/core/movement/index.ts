@@ -16,7 +16,8 @@ export type * from "./types"
 
 export { footprintCells, tokenAnchor } from "./footprint"
 export { DOORWAY_MARGIN, MOVE_CLEARANCE, MoveContext, STEP_UP_HEIGHT, sweepRadius, walkableDoorOffset } from "./context"
-export { checkEnd, checkJump, smoothPath, type MotionPoint } from "./free"
+export { checkEnd, checkJump, jumpReason, smoothPath, type MotionPoint } from "./free"
+export { ARRIVAL_NODE_LIMIT, arrivalAnchors, arrivalOrder, type Arrival, type ArrivalOptions } from "./arrival"
 export { PATH_NODE_LIMIT } from "./pathfind"
 export { candidateSteps, checkStep, MAX_RUN_SIDE_STEP } from "./rules"
 
