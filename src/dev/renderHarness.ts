@@ -44,7 +44,7 @@
  *   dark      1 = DM dark vision (vision off only)
  *   stats     0 hides the stats corner (F3 toggles it)
  *   moon      0 | 1 overrides the directional light's on/off state
- *   sky       bright | dim | dark overrides the environment's sky level
+ *   sky, ambient   bright | dim | dark override the environment's sky / ambient (under cover) level
  *   lights    0 turns every point light off; "name,name" keeps only these lights on
  *   pipeline  1 = player mode renders what a player is actually sent: GameState → core/vision →
  *             updateKnowledge → filterForPlayer → viewToScene, with the view's own masks (ARCHITECTURE §6.2)
@@ -159,10 +159,13 @@ function placeTokens(scene: Scene, spec: string | null): void {
   }
 }
 
-/** moon / lights / sky parameters: switch the directional light and point lights, set the sky level. */
+/** moon / lights / sky / ambient parameters: switch the directional light and point lights, set light levels. */
 function overrideEnvironment(scene: Scene): void {
-  const sky = params.get("sky")
-  if (sky === "bright" || sky === "dim" || sky === "dark") scene.environment = { ...scene.environment, skyLevel: sky }
+  const levelOf = (v: string | null) => (v === "bright" || v === "dim" || v === "dark" ? v : null)
+  const sky = levelOf(params.get("sky"))
+  if (sky) scene.environment = { ...scene.environment, skyLevel: sky }
+  const ambient = levelOf(params.get("ambient"))
+  if (ambient) scene.environment = { ...scene.environment, ambientLevel: ambient }
   const moon = params.get("moon")
   if (moon !== null) scene.environment.directional = { ...scene.environment.directional, enabled: moon !== "0" }
   const lights = params.get("lights")
