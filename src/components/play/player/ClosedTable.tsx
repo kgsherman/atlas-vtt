@@ -35,6 +35,8 @@ export function ClosedTableScreen({
   const [, navigate] = useLocation()
   const [outcome, setOutcome] = React.useState<"ended" | "kicked" | null>(null)
   const [worldName, setWorldName] = React.useState<string | null>(null)
+  // The table ended while the player waited (its scene deleted, say): they wait for the world's next table.
+  const [gone, setGone] = React.useState(ended)
   const reopened = React.useRef(onReopened)
   React.useEffect(() => {
     reopened.current = onReopened
@@ -48,6 +50,7 @@ export function ClosedTableScreen({
         if (!alive) return
         if (!info) return setOutcome("ended")
         if (info.memberStatus === "kicked") return setOutcome("kicked")
+        if (info.status === "ended") setGone(true)
         if (info.worldId) {
           const world = await worlds.info(info.worldId).catch(() => null)
           if (!alive) return
@@ -75,10 +78,10 @@ export function ClosedTableScreen({
   return (
     <BlockingScreen
       icon={<DoorClosed />}
-      title={ended ? "This table has ended" : "The table is closed"}
+      title={gone ? "This table has ended" : "The table is closed"}
       description={
         <>
-          {ended
+          {gone
             ? `The DM ended this scene's table. You'll be let in as soon as they open a table${worldName ? ` in ${worldName}` : ""}.`
             : `The DM closed the table for now. You'll be let back in as soon as they open it again${worldName ? `, or another table in ${worldName}` : ""}.`}
           <span className="mt-3 flex items-center justify-center gap-2 text-xs">

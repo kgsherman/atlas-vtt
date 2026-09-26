@@ -923,8 +923,16 @@ try {
     null,
     { timeout: 30000, label: "player sees the end" }
   ).then(
-    () => checks.ok(true, "the waiting player is told the game ended"),
-    (e) => checks.fail("the waiting player is told the game ended", e.message)
+    () =>
+      checks.ok(
+        true,
+        "the waiting player is told the table ended (they wait for the world's next one)"
+      ),
+    (e) =>
+      checks.fail(
+        "the waiting player is told the table ended (they wait for the world's next one)",
+        e.message
+      )
   )
   await shot(pl, OUT, "04-player-ended")
   cleanup.sessionId = null

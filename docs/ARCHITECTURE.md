@@ -1640,7 +1640,7 @@ code. Players join the world once; the DM hands them characters there, for every
 than at a table. Moving between scenes (§6.7) stays inside the world. The UI says "scene" for what a world
 holds (never "map", which now only means a battlemap image, §9) and "world" for the collection (no "library").
 
-- **Model** (migration `20260925200000_worlds.sql`, §6.4): `worlds(owner, name, room_code)`; every scene is in
+- **Model** (migration `20260926162402_worlds.sql`, §6.4): `worlds(owner, name, room_code)`; every scene is in
   one (`scenes.world_id`, not null; `create_scene`'s `p_world_id`, default the owner's first world, a "My
   world" created when they have none; `move_scene` moves one, its closed table with it, and refuses
   `table_open` while its doors are open); `world_members` (THE membership: display name per world, active /
@@ -2224,16 +2224,21 @@ following a moved table's world, "Make it a character" reaching the table's rost
 states where loads could fail silently. Also fixed on the way: a host restarted on the same page right after leaving (world page
 and straight back) waited in standby as "open in another tab" — it now waits (≤ 5 s) for the runner still
 stopping there (`hostRunner` `stoppingHere`). Verification: `tsc -b`, `npx vitest run` and `npx eslint .` clean;
-the SQL suites on the linked project with the migration applied inside the rolled-back transaction (the
-migration itself not applied): `worlds_test` 113/113 (new), `map_tables_test` 37/37, `rls_test` 336/336,
+the SQL suites on the linked project, first with the migration inside each rolled-back transaction, then again
+once it was applied (2026-09-26, as `20260926162402_worlds`; the backfill made 19 "My world"s, every scene in its
+owner's, every live table on its world's code): `worlds_test` 113/113 (new), `map_tables_test` 37/37, `rls_test` 336/336,
 `guest_merge_test` 34/34, `quotas_test` 27/27, `scene_asset_cleanup_test` 10/10, `tile_chunks_test` 22/22,
 `assets_storage_test` 24/24, `free_assets_test` 17/17, `token_maker_test` 23/23, and a one-off backfill check
 (a DM with two live tables and a kicked player, 17/17); against a Vite dev server in local mode (NVIDIA):
 `worlds-local` 16/16 (new), `editor-smoke` 55/55, `map-table-local` 20/20, `multiplayer-local` 54/54,
 `change-map-local` 39/39, `table-local` 35/35, `templates-local` 30/30, `keybindings` 35/35, `engine-leak` 5/5,
 `multiplayer-latency` 7/7, `vineyard-build` 23/23, `firefox-smoke` 15/15; an IndexedDB v1 library (a scene from
-before worlds) upgrades to a "My world" holding it. Not run: `multiplayer-supabase`, `free-assets` (they need
-the migration applied), `perf`, `showcase`.
+before worlds) upgrades to a "My world" holding it; against Supabase with the migration applied:
+`multiplayer-supabase` 33/33 (a world, joining by its code, Realtime RLS, a kick, closing the table, the scene
+deleted while the player waited: "This table has ended" and they wait for the world's next table), `free-assets`
+12/12. `src/net/database.types.ts` was regenerated. Security advisors: only the intentional warnings listed
+below (the new RPCs are SECURITY DEFINER callable by signed-in users, the new tables' policies also cover
+anonymous sign-ins). Not run: `perf`, `showcase`.
 
 **2026-09-25, one map screen (§6.8).** The standalone editor page and "Start / End session" gave way to the
 map screen: Edit / Play (Tab) on the table's live map, and doors that open and close. Verification: `tsc -b`,

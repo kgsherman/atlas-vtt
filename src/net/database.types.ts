@@ -446,6 +446,10 @@ export type Database = {
         Returns: Json
       }
       claim_host: { Args: { p_session_id: string }; Returns: number }
+      consume_image_tool_quota: {
+        Args: { p_anonymous: boolean; p_user: string }
+        Returns: number
+      }
       create_merge_ticket: { Args: never; Returns: string }
       create_scene: {
         Args: { p_data: Json; p_name: string; p_schema_version: number; p_world_id?: string }
@@ -458,9 +462,9 @@ export type Database = {
           session_id: string
         }[]
       }
-      end_session: { Args: { p_session_id: string }; Returns: boolean }
       create_world: { Args: { p_name: string }; Returns: string }
       delete_world: { Args: { p_world_id: string }; Returns: boolean }
+      end_session: { Args: { p_session_id: string }; Returns: boolean }
       finish_guest_merge: {
         Args: { p_target: string; p_token: string }
         Returns: Json
@@ -552,6 +556,10 @@ export type Database = {
           world_name: string
         }[]
       }
+      set_character_players: {
+        Args: { p_character_id: string; p_user_ids: string[] }
+        Returns: boolean
+      }
       set_display_name: { Args: { p_display_name: string }; Returns: string }
       set_member_status: {
         Args: { p_session_id: string; p_status: string; p_user_id: string }
@@ -568,10 +576,6 @@ export type Database = {
       set_table_open: {
         Args: { p_open: boolean; p_session_id: string }
         Returns: string
-      }
-      set_character_players: {
-        Args: { p_character_id: string; p_user_ids: string[] }
-        Returns: boolean
       }
       set_world_member_status: {
         Args: { p_status: string; p_user_id: string; p_world_id: string }
