@@ -405,12 +405,12 @@ describe("viewer line of sight at a grazing edge", () => {
     // out along the rays (the feathers).
     expect(spread(edge("bilinear"))).toBeGreaterThan(0.45)
     expect(ramp("bilinear")).toBeGreaterThan(1.2)
-    // The contour alone ends the tails (a short ramp) but still wobbles nearly as far (scallops); averaged
-    // across the ray the edge is straight, a soft ramp about as wide as a texel's span of ground.
+    // The contour alone ends the tails (a short ramp) but still wobbles nearly as far (scallops); with the
+    // field averaged across the ray the edge is straight and stays sharp.
     expect(ramp("contour")).toBeLessThan(0.3)
     expect(spread(edge("contour"))).toBeGreaterThan(0.35)
     expect(spread(edge("shader"))).toBeLessThan(0.2)
-    expect(ramp("shader")).toBeLessThan(0.8)
+    expect(ramp("shader")).toBeLessThan(0.35)
   })
 
   it("tests a single tap where a texel is smaller than the pixel", () => {
@@ -431,6 +431,107 @@ describe("viewer line of sight at a grazing edge", () => {
       [-1, 1],
     ])
       expect(() => losContour(fetch, tile, u, v, 20)).not.toThrow()
+  })
+})
+
+/**
+ * A shadow line along the ray: the eye at the origin 5.5 ft over the ground, and a wall x ∈ [−10.5, −10],
+ * full height, for z ≥ 0.5 (a door jamb). Behind it the ground is hidden above z = 0.5·|x|/10.5, a line
+ * running away from the eye, which the map resolves to a texel's angle. The shader's averaging must not smear
+ * it (averaging across the ray drew it as 4 bands, one per tap).
+ */
+describe("viewer line of sight along the ray", () => {
+  const T = 512
+  const tile: TileRect = { x: 0, y: 0, size: T }
+  const atlas = new Float32Array(T * T)
+  const scene = (d: Dir3): number => {
+    let best = 1e6
+    if (d[1] < 0) best = Math.min(best, -6.5 / d[1])
+    if (d[0] < 0) {
+      const t = 10.5 / -d[0]
+      if (d[2] * t >= 0.5 && d[1] * t > -6.5 && d[1] * t < 5) best = Math.min(best, t)
+    }
+    return best
+  }
+  for (let ty = 0; ty < T; ty++) for (let tx = 0; tx < T; tx++) atlas[ty * T + tx] = reencodeTexel(tx, ty, T, scene)
+  const fetch = (ax: number, ay: number) => atlas[ay * T + ax]
+
+  it("keeps the edge sharp and monotone when zoomed in", () => {
+    const x = -30
+    const edgeZ = (0.5 * 30) / 10.5
+    const profile: number[] = []
+    for (let z = edgeZ - 0.6; z <= edgeZ + 0.6; z += 0.005) profile.push(viewerLosSample(fetch, tile, [x, -5.25, z], [0, 1, 0], 0.02))
+    expect(profile[0]).toBe(1)
+    expect(profile[profile.length - 1]).toBe(0)
+    for (let i = 1; i < profile.length; i++) expect(profile[i]).toBeLessThanOrEqual(profile[i - 1] + 1e-3)
+    // From 95 % to 5 % seen within a tenth of a foot (a texel's angle is 0.12 ft here).
+    const from = profile.findIndex((v) => v < 0.95)
+    const to = profile.findIndex((v) => v < 0.05)
+    expect((to - from) * 0.005).toBeLessThan(0.1)
+  })
+})
+
+/**
+ * A window's corner: the wall x ∈ [−10.5, −10] with an opening for z < 0.5 above a sill 3.2 ft high. The ground
+ * beyond is seen past the sill line (x ≈ −23) and inside the jamb's line (z < 0.5·|x|/10.5). Averaging across
+ * the ray near the corner must neither drag the jamb's side into the sill's edge (hard-edged slivers) nor leak.
+ */
+describe("viewer line of sight at a window's corner", () => {
+  const T = 512
+  const tile: TileRect = { x: 0, y: 0, size: T }
+  const atlas = new Float32Array(T * T)
+  const scene = (d: Dir3): number => {
+    let best = 1e6
+    if (d[1] < 0) best = Math.min(best, -6.5 / d[1])
+    if (d[0] < 0) {
+      const t = 10.5 / -d[0]
+      const y = d[1] * t
+      if (y > -6.5 && y < 5 && (d[2] * t >= 0.5 || y < -2.3)) best = Math.min(best, t)
+    }
+    return best
+  }
+  for (let ty = 0; ty < T; ty++) for (let tx = 0; tx < T; tx++) atlas[ty * T + tx] = reencodeTexel(tx, ty, T, scene)
+  const fetch = (ax: number, ay: number) => atlas[ay * T + ax]
+  const seen = (x: number, z: number) => viewerLosSample(fetch, tile, [x, -5.25, z], [0, 1, 0], 0.02)
+
+  it("keeps the jamb's edge sharp beyond the sill and hidden ground hidden", () => {
+    const jamb = (0.5 * 26) / 10.5
+    const profile: number[] = []
+    for (let z = jamb - 0.4; z <= jamb + 0.4; z += 0.005) profile.push(seen(-26, z))
+    expect(profile[0]).toBe(1)
+    expect(profile[profile.length - 1]).toBe(0)
+    for (let i = 1; i < profile.length; i++) expect(profile[i]).toBeLessThanOrEqual(profile[i - 1] + 1e-3)
+    expect((profile.findIndex((v) => v < 0.05) - profile.findIndex((v) => v < 0.95)) * 0.005).toBeLessThan(0.1)
+    for (const [x, z] of [
+      [-26, jamb + 0.3],
+      [-24, 1.5],
+      [-21, 0.9],
+      [-21, 0],
+    ])
+      expect(seen(x, z), `${x}, ${z}`).toBe(0)
+  })
+
+  it("keeps the sill's edge monotone and in line up to the jamb", () => {
+    const crossing = (z: number) => {
+      let lo = -30
+      let hi = -20
+      for (let k = 0; k < 40; k++) {
+        const mid = (lo + hi) / 2
+        if (seen(mid, z) >= 0.5) lo = mid
+        else hi = mid
+      }
+      return (lo + hi) / 2
+    }
+    const open = crossing(-0.5)
+    for (const z of [0, 0.4, 0.8, 1.0]) expect(Math.abs(crossing(z) - open), `z ${z}`).toBeLessThan(0.25)
+    // Across the sill's edge next to the jamb: seen only grows going out.
+    let prev = 0
+    for (let x = -21; x >= -28; x -= 0.01) {
+      const v = seen(x, 0.95)
+      expect(v).toBeGreaterThanOrEqual(prev - 1e-3)
+      prev = v
+    }
+    expect(prev).toBe(1)
   })
 })
 

@@ -4,7 +4,7 @@
  * `linearToOutputTexel()`, `luminance()` and, when tone mapping is on, `TONE_MAPPING` + `toneMapping()`.
  * Every identifier here is prefixed `at`/`AT_`/`u` so nothing collides with those.
  *
- * TypeScript mirrors (keep in sync): render/shadows/octahedral.ts (atOctEncode, atPcf, atLosContour, normal offset),
+ * TypeScript mirrors (keep in sync): render/shadows/octahedral.ts (atOctEncode, atPcf, atLosField, atViewerLos, normal offset),
  * render/lighting/lightModel.ts (atLightFalloff, atSoftLambert, atLambertDir, atLambertGate, atLuma), render/lighting/uniforms.ts
  * (uLights / uViewers layouts), render/fog/maskExpand.ts (uMasks channels).
  */
@@ -695,48 +695,71 @@ vec2 atHostFields(vec2 xz, int layer) {
   return sum;
 }
 
-// Line of sight in a viewer tile (octahedral.ts losContour): the binary test |q| <= stored + eps at the 4 × 4
-// texels around q's direction, weighted by a cubic B-spline and cut at 0.5. An occluder's outline in the map
-// is a staircase of texels; the bilinear filter follows it, and where the view grazes the ground past a sill
-// or a ledge each texel step stretches to a foot or more of ground, drawn as long feathered teeth along the
-// fog edge. The spline's contour is a smooth curve through the steps. Where the 2 × 2 around q agree it is
-// past the cut whatever the outer ring holds (the inner taps carry >= 25/36 of the weight), so only edge
-// pixels read the other 12 texels. Outer taps are clamped to the guard ring.
-float atLosContour(vec3 tile, vec3 q, float eps) {
-  float dist = length(q);
-  if (dist < 1e-4) return 1.0;
+// Derivatives of atBSpline's weights with respect to f.
+vec4 atBSplineSlope(float f) {
+  float g = 1.0 - f;
+  return vec4(-g * g, 3.0 * f * f - 4.0 * f, -3.0 * f * f + 2.0 * f + 1.0, f * f) * 0.5;
+}
+
+// Line-of-sight field in a viewer tile (octahedral.ts losField) at f, in interior texel coordinates: the
+// binary test dist <= stored + eps at the 4 × 4 texels around f weighted by a cubic B-spline (its gradient
+// in grad), to be cut at 0.5. An occluder's outline in the map is a staircase of texels; the bilinear filter
+// followed it, and where the view grazes the ground past a sill or a ledge each texel step stretches to a
+// foot or more of ground, drawn as long feathered teeth along the fog edge. The spline's contour is a smooth
+// curve through the steps. Unless full, when the 2 × 2 around f agree it returns their verdict (0 or 1): the
+// spline is past its cut whatever the outer ring holds (the inner taps carry >= 25/36 of the weight), so only
+// edge pixels read the other 12 texels. Taps are clamped to the guard ring.
+float atLosField(vec3 tile, vec2 f, float dist, float eps, bool full, out vec2 grad) {
   float s = tile.z - 2.0;
-  vec2 f = clamp((atOctEncode(q / dist) * 0.5 + 0.5) * s - 0.5, vec2(-0.5), vec2(s - 0.5));
-  vec2 i0 = floor(f);
   ivec2 base = ivec2(tile.xy) + ivec2(1);
-  ivec2 c = base + ivec2(i0);
-  float inner = step(dist, texelFetch(uViewerAtlas, c, 0).r + eps) + step(dist, texelFetch(uViewerAtlas, c + ivec2(1, 0), 0).r + eps)
-    + step(dist, texelFetch(uViewerAtlas, c + ivec2(0, 1), 0).r + eps) + step(dist, texelFetch(uViewerAtlas, c + ivec2(1, 1), 0).r + eps);
-  if (inner < 0.5 || inner > 3.5) return inner * 0.25;
-  vec4 wx = atBSpline(f.x - i0.x);
-  vec4 wy = atBSpline(f.y - i0.y);
   ivec2 hi = ivec2(int(s));
+  f = clamp(f, vec2(-0.5), vec2(s - 0.5));
+  vec2 i0 = floor(f);
+  ivec2 c = ivec2(i0);
+  grad = vec2(0.0);
+  if (!full) {
+    float inner = step(dist, texelFetch(uViewerAtlas, base + c, 0).r + eps) + step(dist, texelFetch(uViewerAtlas, base + c + ivec2(1, 0), 0).r + eps)
+      + step(dist, texelFetch(uViewerAtlas, base + c + ivec2(0, 1), 0).r + eps) + step(dist, texelFetch(uViewerAtlas, base + c + ivec2(1, 1), 0).r + eps);
+    if (inner < 0.5 || inner > 3.5) return inner * 0.25;
+  }
+  vec2 t = f - i0;
+  vec4 wx = atBSpline(t.x);
+  vec4 wy = atBSpline(t.y);
+  vec4 sx = atBSplineSlope(t.x);
+  vec4 sy = atBSplineSlope(t.y);
   float sum = 0.0;
   for (int j = 0; j < 4; j++) {
     for (int i = 0; i < 4; i++) {
-      ivec2 t = clamp(ivec2(i0) + ivec2(i - 1, j - 1), ivec2(-1), hi);
-      sum += step(dist, texelFetch(uViewerAtlas, base + t, 0).r + eps) * (wx[i] * wy[j]);
+      ivec2 k = clamp(c + ivec2(i - 1, j - 1), ivec2(-1), hi);
+      float b = step(dist, texelFetch(uViewerAtlas, base + k, 0).r + eps);
+      sum += b * (wx[i] * wy[j]);
+      grad += b * vec2(sx[i] * wy[j], wx[i] * sy[j]);
     }
   }
-  return smoothstep(0.38, 0.62, sum);
+  return sum;
 }
 
-// Per-pixel line of sight against the viewer atlas (only ever REMOVES host perception). Returns the
-// best visible fraction over eyes; 1 when refinement is off or an eye has no tile yet. fw = the pixel's
-// footprint (ft).
+// Weight of a receiver's own field in atViewerLos' average across the ray (octahedral.ts LOS_OWN_WEIGHT;
+// a tap on an edge across the ray weighs up to 2/3).
+#define AT_LOS_OWN_WEIGHT 0.25
+
+// Per-pixel line of sight against the viewer atlas (only ever REMOVES host perception; octahedral.ts
+// viewerLosSample). Returns the best visible fraction over eyes; 1 when refinement is off or an eye has no
+// tile yet. fw = the pixel's footprint (ft).
 //
 // Across the ray the map is precise to a texel's angle (a tenth of a foot at 20 ft), but along it, on a
 // surface seen at a grazing angle, one texel spans texAng·d / sin(graze) of it: over half a foot of ground
-// 20 ft away at head height. There the contour of an occluder's outline wobbles out and back along the edge
-// (the staircase of a line at a slope near the texel diagonal repeats every few texels, longer than the
-// spline evens out), drawn as scallops or a saw blade once zoomed in. Where that error spans more than a
-// pixel, the test is averaged over 4 texels across the ray (taps 1 texel apart, weights 1 2 2 2 1): the
-// wobble cancels, and the edge is a straight soft ramp as wide as the error.
+// 20 ft away at head height. There the spline's contour of an edge across the ray still wobbles out and back
+// by about a texel (a line's staircase repeats every few texels, longer than the spline evens out; the
+// capture's cube texels add finer jitter), drawn as scallops or a saw blade once zoomed in. So where that
+// span exceeds the pixel, the field is averaged across the ray before the cut: 9 taps 0.8 texel apart (that
+// spacing cancels wobbles of 1, 2 and 4 texels outright), stepped in world space so they follow the map's
+// folds, each weighted by its field's slope along the ray in the map where its contour runs within ~55° of
+// across the ray, and the average is used as far as the pixel's own contour does. An edge across the ray is
+// drawn at its mean position, a straight line; an edge along the ray (a door jamb's or a pillar's shadow,
+// which the map resolves to a texel's angle) stays sharp, and taps on one or in open space weigh nothing,
+// so nothing is dragged round a corner or past a thin line's end (averaging the cut taps evenly drew an edge
+// along the ray as 4 bands). Pixels whose 4 × 4 texels agree skip all of it.
 float atViewerLos(vec3 p, vec3 n, float surf, float fw) {
   if (uGpuRefine < 0.5 || uViewerCount <= 0) return 1.0;
   float best = 0.0;
@@ -754,26 +777,54 @@ float atViewerLos(vec3 p, vec3 n, float surf, float fw) {
       test = p - n * AT_CAP_LOS_INSET + atHoriz(eye - p) * 0.1;
     }
     vec3 rel = test - eye;
-    float d = length(rel);
-    float texAng = AT_SQRT_4PI / (v1.z - 2.0);
-    float k = 1.5 * texAng;
+    float d = max(length(rel), 1e-4);
+    float s = v1.z - 2.0;
+    float texAng = AT_SQRT_4PI / s;
     // Caps keep their test point inside the solid (no outward normal offset): pushed up past the top
     // it would sit in free space the eye can only reach through the wall, and flicker.
-    vec3 q = surf > 1.5 ? rel : rel + n * (k * d);
-    vec3 dir = rel / max(d, 1e-4);
-    vec3 lat = cross(dir, n);
+    vec3 q = surf > 1.5 ? rel : rel + n * (1.5 * texAng * d);
+    float qd = length(q);
+    if (qd < 1e-4) return 1.0;
+    float dn = dot(rel, n);
+    float graze = max(abs(dn) / d, 0.02);
+    bool wide = texAng * d / graze > fw;
+    // One texel's angle across the ray: in ft along lat (step) and in texels in the map (ll); and the map's
+    // direction for a step along the ray on the surface (rt: the map is sheared, not square to the first).
+    vec3 lat = cross(rel, n) / d;
     float latLen = length(lat);
-    int reach = texAng * d / max(abs(dot(dir, n)), 0.02) > fw && latLen > 0.05 ? 2 : 0;
-    lat *= texAng * d / max(latLen, 1e-4);
-    float sum = 0.0;
-    float weight = 0.0;
-    for (int t = -2; t <= 2; t++) {
-      if (abs(t) > reach) continue;
-      float w = abs(t) == 2 ? 1.0 : 2.0;
-      sum += w * atLosContour(v1.xyz, q + lat * float(t), AT_DIST_EPS);
-      weight += w;
+    float step = texAng * qd / max(latLen, 1e-4);
+    vec2 m0 = atOctEncode(q);
+    float ll = length(atOctEncode(q + lat * step) - m0) * 0.5 * s;
+    vec2 rt = atOctEncode(q + (rel - n * dn) * (texAng * qd / graze / d)) - m0;
+    float rl = length(rt);
+    float tap = step / max(ll, 1e-3);
+    float own = 0.0;
+    float mine = 0.0;
+    float num = 0.0;
+    float den = AT_LOS_OWN_WEIGHT;
+    for (int k = 0; k < 9; k++) {
+      vec3 qt = q + lat * (float((k + 1) / 2) * (k % 2 == 1 ? 0.8 : -0.8) * tap);
+      vec2 grad;
+      float field = atLosField(v1.xyz, (atOctEncode(qt) * 0.5 + 0.5) * s - 0.5, length(qt), AT_DIST_EPS, wide, grad);
+      // How far this contour runs across the ray (the staircase tilts a contour by up to ~25°).
+      float g = length(grad);
+      float c = g > 1e-6 ? abs(dot(grad, rt)) / (rl * g) : 0.0;
+      float a = smoothstep(0.5, 0.8, c);
+      if (k == 0) {
+        own = field;
+        mine = a;
+        num = AT_LOS_OWN_WEIGHT * field;
+        if (!wide || field <= 0.0 || field >= 1.0 || latLen < 0.05 || ll < 1e-3 || ll > 4.0 || rl < 1e-9 || rl * 0.5 * s > 4.0 || a <= 0.0) {
+          mine = 0.0;
+          break;
+        }
+      }
+      num += g * c * a * field;
+      den += g * c * a;
     }
-    best = max(best, sum / weight);
+    // Only as far as the pixel's own contour runs across the ray: past the end of a thin shadow line (an edge
+    // along the ray) the taps would reach back into the line's sides.
+    best = max(best, smoothstep(0.38, 0.62, mix(own, num / den, mine)));
     if (best >= 1.0) break;
   }
   return best;

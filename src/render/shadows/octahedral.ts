@@ -265,16 +265,69 @@ export function bSplineWeights(f: number): [number, number, number, number] {
   return [(g * g * g) / 6, (3 * f3 - 6 * f2 + 4) / 6, (-3 * f3 + 3 * f2 + 3 * f + 1) / 6, f3 / 6]
 }
 
+/** Derivatives of bSplineWeights with respect to f (atBSplineSlope). */
+export function bSplineSlopes(f: number): [number, number, number, number] {
+  const g = 1 - f
+  return [(-g * g) / 2, (3 * f * f - 4 * f) / 2, (-3 * f * f + 2 * f + 1) / 2, (f * f) / 2]
+}
+
+/** Continuous interior texel coordinate of an octahedral uv component in a tile with `interior` texels. */
+const texelCoord = (uv: number, interior: number): number => (uv * 0.5 + 0.5) * interior - 0.5
+
+const cut = (field: number): number => {
+  const t = Math.min(Math.max((field - 0.38) / 0.24, 0), 1)
+  return t * t * (3 - 2 * t)
+}
+
 /**
- * CPU mirror of the viewer line-of-sight filter (`atLosContour` in glsl/common.ts): the binary test
- * `dist ≤ stored + epsilon` at the 4×4 texels around (u, v), weighted by a cubic B-spline and cut at 0.5
- * (smoothstep 0.38 … 0.62). An occluder's outline in the map is a staircase of texels; the bilinear 2×2
- * filter follows it, and where the view grazes the ground past a sill or a ledge each texel step stretches
- * to a foot or more of ground (teeth along the fog edge). The spline's 0.5 contour is a smooth curve through
- * the steps instead. When the 2×2 around (u, v) agree the spline is past its cut whatever the outer ring holds
- * (the inner taps carry ≥ 25/36 of the weight), so the other 12 taps are read at edges only. Outer taps are
- * clamped to the guard ring.
+ * CPU mirror of the viewer line-of-sight field (`atLosField` in glsl/common.ts) at (fx, fy), in interior texel
+ * coordinates: the binary test `dist ≤ stored + epsilon` at the 4×4 texels around it weighted by a cubic
+ * B-spline, with its gradient, to be cut at 0.5. An occluder's outline in the map is a staircase of texels;
+ * the bilinear 2×2 filter followed it, and where the view grazes the ground past a sill or a ledge each texel
+ * step stretches to a foot or more of ground (feathered teeth along the fog edge). The spline's contour is a
+ * smooth curve through the steps. Unless `full`, when the 2×2 around (fx, fy) agree it returns their verdict
+ * (0 or 1, no gradient): the spline is past its cut whatever the outer ring holds (the inner taps carry
+ * ≥ 25/36 of the weight). Taps are clamped to the guard ring.
  */
+export function losField(
+  fetch: (ax: number, ay: number) => number,
+  tile: TileRect,
+  fx: number,
+  fy: number,
+  dist: number,
+  epsilon = DISTANCE_EPSILON,
+  full = false
+): { field: number; gx: number; gy: number } {
+  const s = tileInterior(tile.size)
+  const x = Math.min(Math.max(fx, -0.5), s - 0.5)
+  const y = Math.min(Math.max(fy, -0.5), s - 0.5)
+  const ix = Math.floor(x)
+  const iy = Math.floor(y)
+  const clampI = (i: number) => Math.min(Math.max(i, -1), s)
+  const pass = (i: number, j: number): number => (dist <= fetch(tile.x + 1 + clampI(i), tile.y + 1 + clampI(j)) + epsilon ? 1 : 0)
+  if (!full) {
+    const inner = pass(ix, iy) + pass(ix + 1, iy) + pass(ix, iy + 1) + pass(ix + 1, iy + 1)
+    if (inner === 0 || inner === 4) return { field: inner / 4, gx: 0, gy: 0 }
+  }
+  const wx = bSplineWeights(x - ix)
+  const wy = bSplineWeights(y - iy)
+  const sx = bSplineSlopes(x - ix)
+  const sy = bSplineSlopes(y - iy)
+  let field = 0
+  let gx = 0
+  let gy = 0
+  for (let j = 0; j < 4; j++) {
+    for (let i = 0; i < 4; i++) {
+      const b = pass(ix + i - 1, iy + j - 1)
+      field += b * wx[i] * wy[j]
+      gx += b * sx[i] * wy[j]
+      gy += b * wx[i] * sy[j]
+    }
+  }
+  return { field, gx, gy }
+}
+
+/** The line-of-sight field at octahedral (u, v), cut at 0.5 (smoothstep 0.38 … 0.62): one tap of atViewerLos. */
 export function losContour(
   fetch: (ax: number, ay: number) => number,
   tile: TileRect,
@@ -284,31 +337,19 @@ export function losContour(
   epsilon = DISTANCE_EPSILON
 ): number {
   const s = tileInterior(tile.size)
-  const bx = tile.x + 1
-  const by = tile.y + 1
-  const fx = Math.min(Math.max(((u * 0.5 + 0.5) * s) - 0.5, -0.5), s - 0.5)
-  const fy = Math.min(Math.max(((v * 0.5 + 0.5) * s) - 0.5, -0.5), s - 0.5)
-  const ix = Math.floor(fx)
-  const iy = Math.floor(fy)
-  const clampI = (i: number) => Math.min(Math.max(i, -1), s)
-  const pass = (x: number, y: number): number => (dist <= fetch(bx + clampI(x), by + clampI(y)) + epsilon ? 1 : 0)
-  const inner = pass(ix, iy) + pass(ix + 1, iy) + pass(ix, iy + 1) + pass(ix + 1, iy + 1)
-  if (inner === 0 || inner === 4) return inner / 4
-  const wx = bSplineWeights(fx - ix)
-  const wy = bSplineWeights(fy - iy)
-  let sum = 0
-  for (let j = 0; j < 4; j++) {
-    for (let i = 0; i < 4; i++) sum += pass(ix + i - 1, iy + j - 1) * wx[i] * wy[j]
-  }
-  const t = Math.min(Math.max((sum - 0.38) / 0.24, 0), 1)
-  return t * t * (3 - 2 * t)
+  return cut(losField(fetch, tile, texelCoord(u, s), texelCoord(v, s), dist, epsilon).field)
 }
 
 /**
  * CPU mirror of one eye's test in `atViewerLos` (glsl/common.ts). rel = the receiver's test point relative to
  * the eye (surface offsets applied), n = its normal, footprint = the pixel's size on it (ft). The normal
- * offset of §4.2 (none for caps), then losContour, averaged across the ray over 4 texels (taps a texel's
- * angle apart, weights 1 2 2 2 1) where one texel spans more than the footprint along the ray on the surface.
+ * offset of §4.2 (none for caps), then the field cut at 0.5. Where one texel spans more than the footprint
+ * along the ray on the surface, the field is first averaged across the ray (9 taps 0.8 texel apart, stepped
+ * in world space so they follow the map's folds), each tap weighted by its field's slope along the ray in the
+ * map where its contour runs across the ray, and used as far as the receiver's own contour does: an edge
+ * across the ray, whose position wobbles by about a texel there, gets its mean position (a straight line);
+ * an edge along the ray (resolved to a texel's angle) stays sharp, and taps on one or in open space carry no
+ * weight, so nothing leaks round a corner or past a line's end. Receivers whose 4×4 texels agree skip it.
  */
 export function viewerLosSample(
   fetch: (ax: number, ay: number) => number,
@@ -319,24 +360,65 @@ export function viewerLosSample(
   cap = false
 ): number {
   const d = Math.hypot(rel[0], rel[1], rel[2])
-  const texAng = SQRT_4PI / tileInterior(tile.size)
+  const s = tileInterior(tile.size)
+  const texAng = SQRT_4PI / s
   const lift = cap ? 0 : 1.5 * texAng * d
   const q: Dir3 = [rel[0] + n[0] * lift, rel[1] + n[1] * lift, rel[2] + n[2] * lift]
-  const inv = 1 / Math.max(d, 1e-4)
-  const dir: Dir3 = [rel[0] * inv, rel[1] * inv, rel[2] * inv]
-  const lat: Dir3 = [dir[1] * n[2] - dir[2] * n[1], dir[2] * n[0] - dir[0] * n[2], dir[0] * n[1] - dir[1] * n[0]]
-  const latLen = Math.hypot(lat[0], lat[1], lat[2])
-  const graze = Math.max(Math.abs(dir[0] * n[0] + dir[1] * n[1] + dir[2] * n[2]), 0.02)
-  const reach = (texAng * d) / graze > footprint && latLen > 0.05 ? 2 : 0
-  const step = (texAng * d) / Math.max(latLen, 1e-4)
-  let sum = 0
-  let weight = 0
-  for (let t = -reach; t <= reach; t++) {
-    const w = Math.abs(t) === 2 ? 1 : 2
-    const qt: Dir3 = [q[0] + lat[0] * step * t, q[1] + lat[1] * step * t, q[2] + lat[2] * step * t]
-    const [u, v] = octEncode(qt[0], qt[1], qt[2])
-    sum += w * losContour(fetch, tile, u, v, Math.hypot(qt[0], qt[1], qt[2]))
-    weight += w
+  const at = (p: Dir3, full: boolean) => {
+    const [u, v] = octEncode(p[0], p[1], p[2])
+    return losField(fetch, tile, texelCoord(u, s), texelCoord(v, s), Math.hypot(p[0], p[1], p[2]), DISTANCE_EPSILON, full)
   }
-  return sum / weight
+  const qd = Math.hypot(q[0], q[1], q[2])
+  if (qd < 1e-4) return 1
+  const graze = Math.max(Math.abs(rel[0] * n[0] + rel[1] * n[1] + rel[2] * n[2]) / Math.max(d, 1e-4), 0.02)
+  const wide = (texAng * d) / graze > footprint
+  const centre = at(q, wide)
+  const inv = 1 / Math.max(d, 1e-4)
+  const lat: Dir3 = [(rel[1] * n[2] - rel[2] * n[1]) * inv, (rel[2] * n[0] - rel[0] * n[2]) * inv, (rel[0] * n[1] - rel[1] * n[0]) * inv]
+  const latLen = Math.hypot(lat[0], lat[1], lat[2])
+  if (!wide || centre.field <= 0 || centre.field >= 1 || latLen < 0.05) return cut(centre.field)
+  // One texel's angle across the ray, in world units along lat and in texels in the map; and the map's
+  // direction for a step along the ray on the surface (the map is sheared: not square to the first).
+  const step = (texAng * qd) / latLen
+  const [u0, v0] = octEncode(q[0], q[1], q[2])
+  const [u1, v1] = octEncode(q[0] + lat[0] * step, q[1] + lat[1] * step, q[2] + lat[2] * step)
+  const ll = Math.hypot(u1 - u0, v1 - v0) * 0.5 * s
+  const dn = rel[0] * n[0] + rel[1] * n[1] + rel[2] * n[2]
+  const along = (texAng * qd) / graze / Math.max(d, 1e-4)
+  const [u2, v2] = octEncode(q[0] + (rel[0] - n[0] * dn) * along, q[1] + (rel[1] - n[1] * dn) * along, q[2] + (rel[2] - n[2] * dn) * along)
+  const rx = u2 - u0
+  const ry = v2 - v0
+  const rl = Math.hypot(rx, ry)
+  if (ll < 1e-3 || ll > 4 || rl < 1e-9 || rl * 0.5 * s > 4) return cut(centre.field)
+  // How far a contour runs across the ray (1 within ~35° of it, 0 beyond ~60°: the staircase tilts a contour
+  // by up to ~25°), and a tap's weight: that times its field's slope along the ray in the map.
+  const across = (t: { gx: number; gy: number }) => {
+    const g = Math.hypot(t.gx, t.gy)
+    if (g < 1e-6) return { a: 0, w: 0 }
+    const c = Math.abs(t.gx * rx + t.gy * ry) / (rl * g)
+    const k = Math.min(Math.max((c - 0.5) / 0.3, 0), 1)
+    const a = k * k * (3 - 2 * k)
+    return { a, w: g * c * a }
+  }
+  const own = across(centre).a
+  if (own <= 0) return cut(centre.field)
+  let num = LOS_OWN_WEIGHT * centre.field
+  let den = LOS_OWN_WEIGHT
+  for (let k = -4; k <= 4; k++) {
+    const o = (0.8 * k * step) / ll
+    const tap = k === 0 ? centre : at([q[0] + lat[0] * o, q[1] + lat[1] * o, q[2] + lat[2] * o], true)
+    const w = across(tap).w
+    num += w * tap.field
+    den += w
+  }
+  // Only as far as the receiver's own contour runs across the ray: past the end of a thin shadow line (an
+  // edge along the ray) the taps would reach back into the line's sides.
+  return cut(centre.field + (num / den - centre.field) * own)
 }
+
+/**
+ * Weight of the receiver's own field in viewerLosSample's average (AT_LOS_OWN_WEIGHT; a tap on an edge
+ * across the ray weighs up to 2/3): enough that a few taps on an edge along the ray, their contour tilted
+ * by the staircase, cannot outweigh it.
+ */
+export const LOS_OWN_WEIGHT = 0.25
