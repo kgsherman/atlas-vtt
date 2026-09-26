@@ -124,6 +124,9 @@ could succeed). Ray queries use a 5 ft uniform grid with DDA traversal and mailb
 Players' GPUs only refine line-of-sight edges inside host-perceived cells using the viewer atlas (≤ 8 viewers,
 one tile per eye: 5 per viewer with "square" sight, ≤ 40 in all), updated only when a viewer moves; a move
 recaptures its viewer's 5 tiles (the primary viewer's are forced over the per-frame budget).
+The per-pixel test reads 4 texels per eye (the first eye that sees a pixel ends the loop); edge pixels read 16,
+and where a texel spans more than a pixel along the ray (grazing ground, mostly when zoomed in) 5 taps across
+the ray. Measured within noise on the RTX 5070 Ti (lodge, ultra, 1080p: 2.3 → 2.4 ms per frame zoomed in).
 Host masks are expanded into the mask texture only when they change (per level); smooth fog's band pass adds
 ~2 ms on a 200×200 grid with a 60-cell perceived area (6–8 ms vs 4–5 ms for grid fog, Node), on the main thread.
 A move's result waits only for the vision compute of its final position; the intermediate steps (which OR

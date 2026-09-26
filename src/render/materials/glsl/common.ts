@@ -4,7 +4,7 @@
  * `linearToOutputTexel()`, `luminance()` and, when tone mapping is on, `TONE_MAPPING` + `toneMapping()`.
  * Every identifier here is prefixed `at`/`AT_`/`u` so nothing collides with those.
  *
- * TypeScript mirrors (keep in sync): render/shadows/octahedral.ts (atOctEncode, atPcf, normal offset),
+ * TypeScript mirrors (keep in sync): render/shadows/octahedral.ts (atOctEncode, atPcf, atLosContour, normal offset),
  * render/lighting/lightModel.ts (atLightFalloff, atSoftLambert, atLambertDir, atLambertGate, atLuma), render/lighting/uniforms.ts
  * (uLights / uViewers layouts), render/fog/maskExpand.ts (uMasks channels).
  */
@@ -695,9 +695,49 @@ vec2 atHostFields(vec2 xz, int layer) {
   return sum;
 }
 
+// Line of sight in a viewer tile (octahedral.ts losContour): the binary test |q| <= stored + eps at the 4 × 4
+// texels around q's direction, weighted by a cubic B-spline and cut at 0.5. An occluder's outline in the map
+// is a staircase of texels; the bilinear filter follows it, and where the view grazes the ground past a sill
+// or a ledge each texel step stretches to a foot or more of ground, drawn as long feathered teeth along the
+// fog edge. The spline's contour is a smooth curve through the steps. Where the 2 × 2 around q agree it is
+// past the cut whatever the outer ring holds (the inner taps carry >= 25/36 of the weight), so only edge
+// pixels read the other 12 texels. Outer taps are clamped to the guard ring.
+float atLosContour(vec3 tile, vec3 q, float eps) {
+  float dist = length(q);
+  if (dist < 1e-4) return 1.0;
+  float s = tile.z - 2.0;
+  vec2 f = clamp((atOctEncode(q / dist) * 0.5 + 0.5) * s - 0.5, vec2(-0.5), vec2(s - 0.5));
+  vec2 i0 = floor(f);
+  ivec2 base = ivec2(tile.xy) + ivec2(1);
+  ivec2 c = base + ivec2(i0);
+  float inner = step(dist, texelFetch(uViewerAtlas, c, 0).r + eps) + step(dist, texelFetch(uViewerAtlas, c + ivec2(1, 0), 0).r + eps)
+    + step(dist, texelFetch(uViewerAtlas, c + ivec2(0, 1), 0).r + eps) + step(dist, texelFetch(uViewerAtlas, c + ivec2(1, 1), 0).r + eps);
+  if (inner < 0.5 || inner > 3.5) return inner * 0.25;
+  vec4 wx = atBSpline(f.x - i0.x);
+  vec4 wy = atBSpline(f.y - i0.y);
+  ivec2 hi = ivec2(int(s));
+  float sum = 0.0;
+  for (int j = 0; j < 4; j++) {
+    for (int i = 0; i < 4; i++) {
+      ivec2 t = clamp(ivec2(i0) + ivec2(i - 1, j - 1), ivec2(-1), hi);
+      sum += step(dist, texelFetch(uViewerAtlas, base + t, 0).r + eps) * (wx[i] * wy[j]);
+    }
+  }
+  return smoothstep(0.38, 0.62, sum);
+}
+
 // Per-pixel line of sight against the viewer atlas (only ever REMOVES host perception). Returns the
-// best visible fraction over eyes; 1 when refinement is off or an eye has no tile yet.
-float atViewerLos(vec3 p, vec3 n, float surf) {
+// best visible fraction over eyes; 1 when refinement is off or an eye has no tile yet. fw = the pixel's
+// footprint (ft).
+//
+// Across the ray the map is precise to a texel's angle (a tenth of a foot at 20 ft), but along it, on a
+// surface seen at a grazing angle, one texel spans texAng·d / sin(graze) of it: over half a foot of ground
+// 20 ft away at head height. There the contour of an occluder's outline wobbles out and back along the edge
+// (the staircase of a line at a slope near the texel diagonal repeats every few texels, longer than the
+// spline evens out), drawn as scallops or a saw blade once zoomed in. Where that error spans more than a
+// pixel, the test is averaged over 4 texels across the ray (taps 1 texel apart, weights 1 2 2 2 1): the
+// wobble cancels, and the edge is a straight soft ramp as wide as the error.
+float atViewerLos(vec3 p, vec3 n, float surf, float fw) {
   if (uGpuRefine < 0.5 || uViewerCount <= 0) return 1.0;
   float best = 0.0;
   for (int v = 0; v < min(uViewerCount, AT_MAX_EYES); v++) {
@@ -715,12 +755,25 @@ float atViewerLos(vec3 p, vec3 n, float surf) {
     }
     vec3 rel = test - eye;
     float d = length(rel);
-    float k = 1.5 * AT_SQRT_4PI / (v1.z - 2.0);
+    float texAng = AT_SQRT_4PI / (v1.z - 2.0);
+    float k = 1.5 * texAng;
     // Caps keep their test point inside the solid (no outward normal offset): pushed up past the top
     // it would sit in free space the eye can only reach through the wall, and flicker.
     vec3 q = surf > 1.5 ? rel : rel + n * (k * d);
-    float vis = atPcf(AT_ATLAS_VIEWER, v1.xyz, q, AT_DIST_EPS, false);
-    best = max(best, vis);
+    vec3 dir = rel / max(d, 1e-4);
+    vec3 lat = cross(dir, n);
+    float latLen = length(lat);
+    int reach = texAng * d / max(abs(dot(dir, n)), 0.02) > fw && latLen > 0.05 ? 2 : 0;
+    lat *= texAng * d / max(latLen, 1e-4);
+    float sum = 0.0;
+    float weight = 0.0;
+    for (int t = -2; t <= 2; t++) {
+      if (abs(t) > reach) continue;
+      float w = abs(t) == 2 ? 1.0 : 2.0;
+      sum += w * atLosContour(v1.xyz, q + lat * float(t), AT_DIST_EPS);
+      weight += w;
+    }
+    best = max(best, sum / weight);
     if (best >= 1.0) break;
   }
   return best;

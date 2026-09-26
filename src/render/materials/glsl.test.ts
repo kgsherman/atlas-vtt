@@ -384,10 +384,12 @@ describe("quality tier defines", () => {
     const m = createWorldMaterial({ shared, levelUniform: () => ({ value: 0 }) }, { levelId: "L", variant: "opaque", instanced: false })
     const calls = (fn: string) => (m.fragmentShader.match(new RegExp(`[^a-zA-Z]${fn}\\(`, "g")) ?? []).length - 1
     // Every call site is a full inlined copy for D3D's HLSL compiler (ANGLE on Windows): one shadow filter
-    // per light for all atlases, one atPcf call per atShadowIn (plus the viewer line of sight).
+    // per light for all atlases, one atPcf call per atShadowIn, and one line-of-sight filter for the
+    // viewer's taps across the ray.
     expect(calls("atShadowIn")).toBe(1)
     expect(calls("atPcss")).toBe(1)
-    expect(calls("atPcf")).toBe(2)
+    expect(calls("atPcf")).toBe(1)
+    expect(calls("atLosContour")).toBe(1)
     expect(m.fragmentShader).not.toMatch(/sampler2D atlas/)
     // Const-array lookups in the unrolled tap loops cost ~0.7 s of D3D compile per world program.
     expect(m.fragmentShader).not.toMatch(/AT_POISSON/)

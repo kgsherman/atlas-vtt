@@ -9,7 +9,8 @@
  * Tile layout (T = tile texels per side): a 1-texel guard ring surrounds an interior of S = T − 2
  * texels covering uv ∈ [−1, 1]². Interior texel i ∈ [0, S) has its centre at uv = (i + 0.5)/S·2 − 1;
  * guard texels (i = −1 and i = S) hold the octahedral wrap of the texel across the edge, so a
- * bilinear 2×2 footprint (and the 3×3 box footprint) never leaves the tile.
+ * bilinear 2×2 footprint (and the 3×3 box footprint) never leaves the tile; the 4×4 line-of-sight
+ * footprint (losContour) clamps its outer taps to the guard ring.
  */
 
 export type Dir3 = [number, number, number]
@@ -254,4 +255,88 @@ export function pcfSample(
     for (let i = 0; i < 3; i++) sum += pass(cx + i - 1, cy + j - 1) * wxs[i] * wys[j]
   }
   return sum / 4
+}
+
+/** Cubic B-spline weights of the 4 taps around a point at fraction f between the middle two (atBSpline). */
+export function bSplineWeights(f: number): [number, number, number, number] {
+  const g = 1 - f
+  const f2 = f * f
+  const f3 = f2 * f
+  return [(g * g * g) / 6, (3 * f3 - 6 * f2 + 4) / 6, (-3 * f3 + 3 * f2 + 3 * f + 1) / 6, f3 / 6]
+}
+
+/**
+ * CPU mirror of the viewer line-of-sight filter (`atLosContour` in glsl/common.ts): the binary test
+ * `dist ≤ stored + epsilon` at the 4×4 texels around (u, v), weighted by a cubic B-spline and cut at 0.5
+ * (smoothstep 0.38 … 0.62). An occluder's outline in the map is a staircase of texels; the bilinear 2×2
+ * filter follows it, and where the view grazes the ground past a sill or a ledge each texel step stretches
+ * to a foot or more of ground (teeth along the fog edge). The spline's 0.5 contour is a smooth curve through
+ * the steps instead. When the 2×2 around (u, v) agree the spline is past its cut whatever the outer ring holds
+ * (the inner taps carry ≥ 25/36 of the weight), so the other 12 taps are read at edges only. Outer taps are
+ * clamped to the guard ring.
+ */
+export function losContour(
+  fetch: (ax: number, ay: number) => number,
+  tile: TileRect,
+  u: number,
+  v: number,
+  dist: number,
+  epsilon = DISTANCE_EPSILON
+): number {
+  const s = tileInterior(tile.size)
+  const bx = tile.x + 1
+  const by = tile.y + 1
+  const fx = Math.min(Math.max(((u * 0.5 + 0.5) * s) - 0.5, -0.5), s - 0.5)
+  const fy = Math.min(Math.max(((v * 0.5 + 0.5) * s) - 0.5, -0.5), s - 0.5)
+  const ix = Math.floor(fx)
+  const iy = Math.floor(fy)
+  const clampI = (i: number) => Math.min(Math.max(i, -1), s)
+  const pass = (x: number, y: number): number => (dist <= fetch(bx + clampI(x), by + clampI(y)) + epsilon ? 1 : 0)
+  const inner = pass(ix, iy) + pass(ix + 1, iy) + pass(ix, iy + 1) + pass(ix + 1, iy + 1)
+  if (inner === 0 || inner === 4) return inner / 4
+  const wx = bSplineWeights(fx - ix)
+  const wy = bSplineWeights(fy - iy)
+  let sum = 0
+  for (let j = 0; j < 4; j++) {
+    for (let i = 0; i < 4; i++) sum += pass(ix + i - 1, iy + j - 1) * wx[i] * wy[j]
+  }
+  const t = Math.min(Math.max((sum - 0.38) / 0.24, 0), 1)
+  return t * t * (3 - 2 * t)
+}
+
+/**
+ * CPU mirror of one eye's test in `atViewerLos` (glsl/common.ts). rel = the receiver's test point relative to
+ * the eye (surface offsets applied), n = its normal, footprint = the pixel's size on it (ft). The normal
+ * offset of §4.2 (none for caps), then losContour, averaged across the ray over 4 texels (taps a texel's
+ * angle apart, weights 1 2 2 2 1) where one texel spans more than the footprint along the ray on the surface.
+ */
+export function viewerLosSample(
+  fetch: (ax: number, ay: number) => number,
+  tile: TileRect,
+  rel: Dir3,
+  n: Dir3,
+  footprint: number,
+  cap = false
+): number {
+  const d = Math.hypot(rel[0], rel[1], rel[2])
+  const texAng = SQRT_4PI / tileInterior(tile.size)
+  const lift = cap ? 0 : 1.5 * texAng * d
+  const q: Dir3 = [rel[0] + n[0] * lift, rel[1] + n[1] * lift, rel[2] + n[2] * lift]
+  const inv = 1 / Math.max(d, 1e-4)
+  const dir: Dir3 = [rel[0] * inv, rel[1] * inv, rel[2] * inv]
+  const lat: Dir3 = [dir[1] * n[2] - dir[2] * n[1], dir[2] * n[0] - dir[0] * n[2], dir[0] * n[1] - dir[1] * n[0]]
+  const latLen = Math.hypot(lat[0], lat[1], lat[2])
+  const graze = Math.max(Math.abs(dir[0] * n[0] + dir[1] * n[1] + dir[2] * n[2]), 0.02)
+  const reach = (texAng * d) / graze > footprint && latLen > 0.05 ? 2 : 0
+  const step = (texAng * d) / Math.max(latLen, 1e-4)
+  let sum = 0
+  let weight = 0
+  for (let t = -reach; t <= reach; t++) {
+    const w = Math.abs(t) === 2 ? 1 : 2
+    const qt: Dir3 = [q[0] + lat[0] * step * t, q[1] + lat[1] * step * t, q[2] + lat[2] * step * t]
+    const [u, v] = octEncode(qt[0], qt[1], qt[2])
+    sum += w * losContour(fetch, tile, u, v, Math.hypot(qt[0], qt[1], qt[2]))
+    weight += w
+  }
+  return sum / weight
 }

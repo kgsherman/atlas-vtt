@@ -6,6 +6,7 @@ import {
   capCovered,
   capCoverageProbe,
   DISTANCE_EPSILON,
+  losContour,
   normalOffsetScale,
   octDecode,
   octEncode,
@@ -15,6 +16,7 @@ import {
   receiverOffset,
   reencodeTexel,
   tileTexelDirections,
+  viewerLosSample,
   type Dir3,
   type TileRect,
 } from "./octahedral"
@@ -329,3 +331,106 @@ describe("cap receivers", () => {
     expect(receiverOffset([1, 2, 3], up, [0, 0, 0], T).epsilon).toBe(DISTANCE_EPSILON)
   })
 })
+
+/**
+ * Viewer line of sight past a window sill: the eye at the origin, head height 5.5 ft over the ground
+ * (y = −5.5, a 1 ft slab), and a wall x ∈ [−10.5, −10] up to y = −2.3 (a sill 3.2 ft high) running along z.
+ * The ground beyond it is hidden up to a straight line along z about 23 ft out. At that grazing angle one
+ * texel of the 512 map spans ~0.6 ft of ground: the bilinear filter's edge wanders by about that much along
+ * z, with partly seen tails along the rays (a player's feathered fog edge, zoomed in on a view out of a
+ * window); the shader's test must draw a straight edge.
+ */
+describe("viewer line of sight at a grazing edge", () => {
+  const T = 512
+  const tile: TileRect = { x: 0, y: 0, size: T }
+  const atlas = new Float32Array(T * T)
+  const scene = (d: Dir3): number => {
+    let best = 1e6
+    if (d[1] < 0) best = Math.min(best, -6.5 / d[1])
+    if (d[0] < 0) {
+      const t = 10.5 / -d[0]
+      const y = d[1] * t
+      if (y > -6.5 && y < -2.3) best = Math.min(best, t)
+    }
+    return best
+  }
+  for (let ty = 0; ty < T; ty++) for (let tx = 0; tx < T; tx++) atlas[ty * T + tx] = reencodeTexel(tx, ty, T, scene)
+  const fetch = (ax: number, ay: number) => {
+    if (ax < 0 || ay < 0 || ax >= T || ay >= T) throw new Error(`tap outside tile ${ax},${ay}`)
+    return atlas[ay * T + ax]
+  }
+  type Filter = "bilinear" | "contour" | "shader"
+  // The world shader's ground test: 0.25 ft up, then the normal offset; "shader" = atViewerLos zoomed in
+  // (0.02 ft pixels: taps across the ray).
+  const seen = (x: number, z: number, filter: Filter) => {
+    if (filter === "shader") return viewerLosSample(fetch, tile, [x, -5.25, z], [0, 1, 0], 0.02)
+    const { q, dist } = receiverOffset([x, -5.25, z], [0, 1, 0], [0, 0, 0], T)
+    const [u, v] = octEncode(...q)
+    return filter === "contour" ? losContour(fetch, tile, u, v, dist) : pcfSample(fetch, tile, u, v, dist, false)
+  }
+  const zs = Array.from({ length: 301 }, (_, i) => -3 + i * 0.02)
+  /** Where the edge crosses `level` along x at each z (bisection between hidden and seen ground). */
+  const edge = (filter: Filter, level = 0.5) =>
+    zs.map((z) => {
+      let lo = -40
+      let hi = -18
+      for (let k = 0; k < 40; k++) {
+        const mid = (lo + hi) / 2
+        if (seen(mid, z, filter) >= level) lo = mid
+        else hi = mid
+      }
+      return (lo + hi) / 2
+    })
+  /** How far the line wanders along z: 5th to 95th percentile of its x. */
+  const spread = (xs: number[]) => {
+    const sorted = xs.slice().sort((a, b) => a - b)
+    return sorted[Math.floor(sorted.length * 0.95)] - sorted[Math.floor(sorted.length * 0.05)]
+  }
+  /** Widest ramp from 5 % to 95 % seen, along x. */
+  const ramp = (filter: Filter) => {
+    const inner = edge(filter, 0.95)
+    return Math.max(...edge(filter, 0.05).map((x, i) => x - inner[i]))
+  }
+
+  it("sees the ground well beyond the sill and not below it", () => {
+    for (const filter of ["bilinear", "contour", "shader"] as const) {
+      expect(seen(-32, 0.4, filter)).toBe(1)
+      expect(seen(-20, -1.3, filter)).toBe(0)
+      expect(seen(-5, 2, filter)).toBe(1)
+    }
+  })
+
+  it("draws a straight edge where the bilinear filter draws teeth", () => {
+    // Bilinear: the half-seen line wanders by ~0.5 ft along z, and partly seen tails run well over a foot
+    // out along the rays (the feathers).
+    expect(spread(edge("bilinear"))).toBeGreaterThan(0.45)
+    expect(ramp("bilinear")).toBeGreaterThan(1.2)
+    // The contour alone ends the tails (a short ramp) but still wobbles nearly as far (scallops); averaged
+    // across the ray the edge is straight, a soft ramp about as wide as a texel's span of ground.
+    expect(ramp("contour")).toBeLessThan(0.3)
+    expect(spread(edge("contour"))).toBeGreaterThan(0.35)
+    expect(spread(edge("shader"))).toBeLessThan(0.2)
+    expect(ramp("shader")).toBeLessThan(0.8)
+  })
+
+  it("tests a single tap where a texel is smaller than the pixel", () => {
+    const { q, dist } = receiverOffset([-23.2, -5.25, 0.3], [0, 1, 0], [0, 0, 0], T)
+    const [u, v] = octEncode(...q)
+    expect(viewerLosSample(fetch, tile, [-23.2, -5.25, 0.3], [0, 1, 0], 5)).toBe(losContour(fetch, tile, u, v, dist))
+  })
+
+  it("never taps outside the tile", () => {
+    for (const d of randomDirs(3000, 5)) {
+      const [u, v] = octEncode(...d)
+      for (const dist of [0.5, 5, 30, 1e7]) expect(() => losContour(fetch, tile, u, v, dist)).not.toThrow()
+    }
+    for (const [u, v] of [
+      [1, 1],
+      [-1, -1],
+      [1, -1],
+      [-1, 1],
+    ])
+      expect(() => losContour(fetch, tile, u, v, 20)).not.toThrow()
+  })
+})
+

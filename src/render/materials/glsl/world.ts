@@ -143,7 +143,7 @@ void main() {
       vec2 host = edge ? atHostFields(maskAt, uLevelLayer) : vec2(step(0.5, m.r), step(0.5, m.g));
       perceived = grade > 0.5 ? atFogEdge(m.r, host.x, los ? atBandTrust(p) : 0.0) : 0.0;
       explored = smoothstep(0.38, 0.62, host.y);
-      if (perceived > 0.0) perceived *= atViewerLos(p, n, vSurf);
+      if (perceived > 0.0) perceived *= atViewerLos(p, n, vSurf, fw);
       // Darkvision (grade 2) and blindsight (grade 1) end at their range per pixel (only removes
       // perception): the host's cells and sub-cells drew the range as a staircase. A viewer's own
       // footprint stays perceived by touch.

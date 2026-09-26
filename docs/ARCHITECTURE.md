@@ -400,7 +400,16 @@ Per fragment, in one forward pass:
    - caps (tops of walls, doors, pillars, props with n.y > 0.7): test point `p − n·0.25 + horiz(eye − p)·0.1`
      (0.25 keeps it clear of the top edge at the viewer atlas' texel size), and the host-mask lookup uses
      `p.xz + horiz(eye − p)·0.6` (the cell on the viewer's side);
-   - a fragment passes if `|q − eye| ≤ stored(q) + 0.05` with the normal-offset rule of §4.2.
+   - a fragment passes if `|q − eye| ≤ stored(q) + 0.05` with the normal-offset rule of §4.2, tested at the
+     4 × 4 texels around q's direction and combined by a cubic B-spline cut at 0.5 (`atLosContour`,
+     octahedral.ts `losContour`; only edge pixels read more than the inner 2 × 2). The bilinear 2 × 2 filter
+     followed an occluder's texel staircase, and where the view grazes a surface (ground past a window sill
+     or a ledge) each texel stretches to texAng·d / sin(graze) along the ray: over half a foot of ground
+     20 ft from head height, drawn as long feathered teeth once zoomed in. Along the ray the contour still
+     wobbles by about a texel's span (a line's staircase repeats every few texels, longer than the spline
+     evens out), so where that span exceeds the pixel footprint the test is averaged across the ray over
+     4 texels (taps a texel's angle apart, weights 1 2 2 2 1, `viewerLosSample`): a straight edge, soft over
+     about the span. Across the ray the map is precise to a texel's angle, so thin shadows stay sharp.
    Host-mask lookups for non-walkable fragments use `p.xz + n.xz·0.3` (the cell a face faces).
    Darkvision (grade 2) and blindsight (grade 1) also end at their range per pixel (3D distance from the
    eye, over the last `AT_SENSE_EDGE` = 0.5 ft), where the host's cells and sub-cells draw the range as a
